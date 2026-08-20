@@ -1,0 +1,275 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * Prueba de la fase 1 (núcleo). Ejecutar:  php tests/f1_nucleo.php
+ * No deja nada en disco: borra la base de pruebas al terminar.
+ */
+require_once __DIR__ . '/../engine/bootstrap.php';
+
+use JsonSQLDB\Catalog;
+use JsonSQLDB\JsonSqlDbError;
+use JsonSQLDB\Storage;
+use JsonSQLDB\Types;
+
+$raiz = sys_get_temp_dir() . '/jsonsqldb_test';
+$base = 'pruebas';
+$ok = 0; $ko = 0;
+
+function chk(string $titulo, callable $fn): void {
+    global $ok, $ko;
+    try {
+        $r = $fn();
+        if ($r === true) { $ok++; echo "  OK   $titulo\n"; }
+        else { $ko++; echo "  FALLO $titulo -> " . var_export($r, true) . "\n"; }
+    } catch (Throwable $e) {
+        global $ko; $ko++;
+        echo "  FALLO $titulo -> " . get_class($e) . ': ' . $e->getMessage() . "\n";
+    }
+}
+
+function esperaError(string $titulo, string $estado, callable $fn): void {
+    chk($titulo, static function () use ($estado, $fn) {
+        try { $fn(); } catch (JsonSqlDbError $e) { return $e->sqlState === $estado ?: "estado {$e->sqlState}"; }
+        return 'no lanzó error';
+    });
+}
+
+if (is_dir("$raiz/$base")) { Storage::borrarBase($raiz, $base); }
+@mkdir($raiz, 0775, true);
+
+echo "\n== Tipos ==\n";
+chk('INTEGER desde string', fn() => Types::cast('42', ['name'=>'x','type'=>'INTEGER','length'=>null,'scale'=>null]) === 42);
+chk('DECIMAL redondea a escala', fn() => Types::cast('10.567', ['name'=>'x','type'=>'DECIMAL','length'=>null,'scale'=>2]) === 10.57);
+chk('TEXT respeta longitud', fn() => Types::cast('abc', ['name'=>'x','type'=>'TEXT','length'=>5,'scale'=>null]) === 'abc');
+esperaError('TEXT excede longitud', 'TYPE', fn() => Types::cast('abcdef', ['name'=>'x','type'=>'TEXT','length'=>5,'scale'=>null]));
+chk('fecha solo día', fn() => Types::cast('2026-02-28', ['name'=>'f','type'=>'DATETIME','length'=>null,'scale'=>null]) === '2026-02-28');
+chk('fecha con hora', fn() => Types::cast('2026-02-28 10:05', ['name'=>'f','type'=>'DATETIME','length'=>null,'scale'=>null]) === '2026-02-28 10:05');
+chk('fecha con milisegundos', fn() => Types::cast('2026-02-28T10:05:09.7', ['name'=>'f','type'=>'DATETIME','length'=>null,'scale'=>null]) === '2026-02-28 10:05:09.700');
+esperaError('fecha inexistente', 'TYPE', fn() => Types::cast('2026-02-30', ['name'=>'f','type'=>'DATETIME','length'=>null,'scale'=>null]));
+chk('alias VARCHAR(50)', fn() => Types::parse('VARCHAR(50)') === ['type'=>'TEXT','length'=>50,'scale'=>null]);
+chk('alias DECIMAL(10,3)', fn() => Types::parse('DECIMAL(10,3)') === ['type'=>'DECIMAL','length'=>null,'scale'=>3]);
+chk('DECIMAL sin escala la deja sin fijar', fn() => Types::parse('DECIMAL') === ['type'=>'DECIMAL','length'=>null,'scale'=>null]);
+chk('DECIMAL sin escala toma 2 en la columna', fn() =>
+    Catalog::normalizarColumna(['name'=>'x','type'=>'DECIMAL'])['scale'] === 2);
+chk('la escala guardada sobrevive a releer la estructura', fn() =>
+    Catalog::normalizarColumna(Catalog::normalizarColumna(['name'=>'x','type'=>'DECIMAL(10,3)']))['scale'] === 3);
+esperaError('tipo desconocido', 'TYPE', fn() => Types::parse('GEOMETRY'));
+
+echo "\n== Base de datos ==\n";
+chk('crear base', function () use ($raiz, $base) { Storage::crearBase($raiz, $base); return is_file("$raiz/$base/_database.json"); });
+esperaError('crear base duplicada', 'CONFIG', fn() => Storage::crearBase($raiz, $base));
+esperaError('nombre de base inválido', 'CONFIG', fn() => Storage::crearBase($raiz, '../fuera'));
+chk('listado de bases', fn() => Storage::bases($raiz) === [$base]);
+
+$st  = new Storage($raiz, $base);
+$cat = new Catalog($st);
+
+echo "\n== Estructura ==\n";
+esperaError('escribir sin bloqueo exclusivo', 'LOCK', fn() => $cat->crearTabla('x', ['columns'=>[['name'=>'a','type'=>'INT']]]));
+
+$st->bloquear(true);
+
+chk('crear usuarios', function () use ($cat) {
+    $cat->crearTabla('usuarios', [
+        'columns' => [
+            ['name'=>'id',     'type'=>'INTEGER',      'pk'=>true, 'autoincrement'=>true],
+            ['name'=>'nombre', 'type'=>'VARCHAR(50)',  'notnull'=>true],
+            ['name'=>'email',  'type'=>'VARCHAR(120)', 'unique'=>true],
+            ['name'=>'saldo',  'type'=>'DECIMAL(10,2)','default'=>0],
+            ['name'=>'alta',   'type'=>'DATETIME'],
+        ],
+    ]);
+    return $cat->existe('usuarios');
+});
+
+chk('crear pedidos con FK', function () use ($cat) {
+    $cat->crearTabla('pedidos', [
+        'columns' => [
+            ['name'=>'id',         'type'=>'INTEGER','pk'=>true,'autoincrement'=>true],
+            ['name'=>'usuario_id', 'type'=>'INTEGER','notnull'=>true],
+            ['name'=>'total',      'type'=>'DECIMAL(10,2)','notnull'=>true],
+        ],
+        'foreign_keys' => [
+            ['columns'=>['usuario_id'],'table'=>'usuarios','references'=>['id'],'on_delete'=>'CASCADE'],
+        ],
+    ]);
+    return $cat->meta('pedidos')['foreign_keys'][0]['name'] === 'fk_pedidos_usuario_id';
+});
+
+esperaError('FK a tabla inexistente', 'SCHEMA', fn() => $cat->crearTabla('t1', [
+    'columns'=>[['name'=>'a','type'=>'INT']],
+    'foreign_keys'=>[['columns'=>['a'],'table'=>'nohay','references'=>['id']]],
+]));
+esperaError('AUTOINCREMENT no entero', 'SCHEMA', fn() => $cat->crearTabla('t2', [
+    'columns'=>[['name'=>'a','type'=>'TEXT','autoincrement'=>true]],
+]));
+esperaError('columna duplicada', 'SCHEMA', fn() => $cat->crearTabla('t3', [
+    'columns'=>[['name'=>'a','type'=>'INT'],['name'=>'A','type'=>'INT']],
+]));
+esperaError('borrar tabla referenciada', 'CONSTRAINT', fn() => $cat->borrarTabla('usuarios'));
+
+chk('clave primaria', fn() => Catalog::clavePrimaria($cat->meta('usuarios')) === ['id']);
+chk('conjuntos únicos', fn() => count(Catalog::conjuntosUnicos($cat->meta('usuarios'))) === 2);
+chk('columna autoincremento', fn() => Catalog::columnaAutoincremento($cat->meta('usuarios')) === 'id');
+
+echo "\n== Datos ==\n";
+chk('insertar y releer', function () use ($st, $cat) {
+    $meta  = $cat->meta('usuarios');
+    $filas = [];
+    foreach ([['Ana','ana@x.es',10.555,'2026-01-15 08:30'], ['Luis','luis@x.es',0,null]] as $d) {
+        $fila = ['id' => $cat->siguienteAutoincremento('usuarios')];
+        foreach (['nombre','email','saldo','alta'] as $i => $c) {
+            $fila[$c] = Types::cast($d[$i], Catalog::columna($meta, $c));
+        }
+        $filas[] = $fila;
+    }
+    $st->guardarFilas('usuarios', $filas);
+    $leidas = $st->leerFilas('usuarios');
+    return count($leidas) === 2
+        && $leidas[0]['id'] === 1 && $leidas[1]['id'] === 2
+        && $leidas[0]['saldo'] === 10.56
+        && $leidas[0]['alta'] === '2026-01-15 08:30'
+        && $leidas[1]['alta'] === null;
+});
+
+chk('fichero de datos legible (una fila por línea)', function () use ($raiz, $base) {
+    $txt = (string)file_get_contents("$raiz/$base/usuarios.json");
+    return substr_count($txt, "\n    {") === 2 && str_contains($txt, '"table": "usuarios"');
+});
+
+chk('autoincremento persiste', fn() => $cat->siguienteAutoincremento('usuarios') === 3);
+chk('ajustar autoincremento', function () use ($cat) {
+    $cat->ajustarAutoincremento('usuarios', 50);
+    return $cat->siguienteAutoincremento('usuarios') === 51;
+});
+
+echo "\n== ALTER TABLE ==\n";
+chk('añadir columna', function () use ($cat, $st) {
+    $cat->anadirColumna('usuarios', ['name'=>'ciudad','type'=>'VARCHAR(60)','default'=>'Torrevieja']);
+    $filas = $st->leerFilas('usuarios');
+    return $filas[0]['ciudad'] === 'Torrevieja' && Catalog::columna($cat->meta('usuarios'), 'ciudad') !== null;
+});
+chk('renombrar columna', function () use ($cat, $st) {
+    $cat->renombrarColumna('usuarios', 'ciudad', 'poblacion');
+    return array_key_exists('poblacion', $st->leerFilas('usuarios')[0]);
+});
+chk('borrar columna', function () use ($cat, $st) {
+    $cat->borrarColumna('usuarios', 'poblacion');
+    return !array_key_exists('poblacion', $st->leerFilas('usuarios')[0])
+        && Catalog::columna($cat->meta('usuarios'), 'poblacion') === null;
+});
+esperaError('borrar columna referenciada por FK', 'CONSTRAINT', fn() => $cat->borrarColumna('usuarios', 'id'));
+esperaError('borrar columna de una FK propia', 'CONSTRAINT', fn() => $cat->borrarColumna('pedidos', 'usuario_id'));
+
+echo "\n== Triggers ==\n";
+chk('crear trigger', function () use ($cat) {
+    $cat->crearTrigger('pedidos', [
+        'name'=>'trg_pedidos_ins','timing'=>'AFTER','event'=>'INSERT',
+        'when'=>'NEW.total > 0',
+        'body'=>['UPDATE usuarios SET saldo = saldo + NEW.total WHERE id = NEW.usuario_id'],
+        'sql'=>'CREATE TRIGGER trg_pedidos_ins ...',
+    ]);
+    return count($cat->triggers('pedidos','AFTER','INSERT')) === 1
+        && $cat->triggers('pedidos','BEFORE','INSERT') === [];
+});
+esperaError('trigger duplicado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos', [
+    'name'=>'trg_pedidos_ins','timing'=>'AFTER','event'=>'INSERT','body'=>['DELETE FROM usuarios'],
+]));
+esperaError('evento no soportado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos', [
+    'name'=>'trg_x','timing'=>'AFTER','event'=>'TRUNCATE','body'=>['DELETE FROM usuarios'],
+]));
+chk('borrar trigger', fn() => $cat->borrarTrigger('trg_pedidos_ins') === 'pedidos'
+    && $cat->triggers('pedidos','AFTER','INSERT') === []);
+
+echo "\n== Renombrar tabla ==\n";
+chk('renombrar propaga FK', function () use ($cat) {
+    $cat->renombrarTabla('usuarios', 'clientes');
+    return $cat->existe('clientes') && !$cat->existe('usuarios')
+        && $cat->meta('pedidos')['foreign_keys'][0]['table'] === 'clientes'
+        && $cat->meta('clientes')['autoincrement']['next'] === 52;
+});
+
+echo "\n== Paginación y rendimiento ==\n";
+chk('12.000 filas en 3 partes', function () use ($cat, $st, $raiz, $base) {
+    $cat->crearTabla('log', ['columns'=>[
+        ['name'=>'id','type'=>'INTEGER','pk'=>true],
+        ['name'=>'texto','type'=>'TEXT'],
+        ['name'=>'fecha','type'=>'DATETIME'],
+    ]]);
+    $filas = [];
+    for ($i = 1; $i <= 12000; $i++) {
+        $filas[] = ['id'=>$i, 'texto'=>"línea $i", 'fecha'=>'2026-08-19 12:00:00'];
+    }
+    $t0 = microtime(true);
+    $st->guardarFilas('log', $filas);
+    $tw = microtime(true) - $t0;
+
+    $partes = is_file("$raiz/$base/log.json") && is_file("$raiz/$base/log.part2.json")
+           && is_file("$raiz/$base/log.part3.json") && !is_file("$raiz/$base/log.part4.json");
+
+    $t0 = microtime(true);
+    $leidas = $st->leerFilas('log');   // desde caché
+    $tc = microtime(true) - $t0;
+
+    printf("       escritura %.3fs | lectura cacheada %.4fs | fichero %.1f KB\n",
+        $tw, $tc, filesize("$raiz/$base/log.json") / 1024);
+
+    return $partes && count($leidas) === 12000 && $leidas[11999]['id'] === 12000;
+});
+
+chk('reducir filas elimina partes sobrantes', function () use ($st, $raiz, $base) {
+    $st->guardarFilas('log', array_slice($st->leerFilas('log'), 0, 10));
+    return !is_file("$raiz/$base/log.part2.json") && count($st->leerFilas('log')) === 10;
+});
+
+echo "\n== Caché e invalidación ==\n";
+chk('la caché devuelve datos actualizados tras escribir', function () use ($st) {
+    $antes = count($st->leerFilas('log'));
+    $filas = $st->leerFilas('log');
+    $filas[] = ['id'=>999,'texto'=>'nueva','fecha'=>null];
+    $st->guardarFilas('log', $filas);
+    return count($st->leerFilas('log')) === $antes + 1;
+});
+
+echo "\n== Bloqueo ==\n";
+chk('anidado exclusivo', function () use ($st) {
+    $st->bloquear(true); $st->desbloquear();
+    return $st->enEscritura();
+});
+$st->desbloquear();
+chk('liberado del todo', fn() => $st->enEscritura() === false);
+chk('otra petición ve la escritura (caché invalidada por revisión)', function () use ($raiz, $base) {
+    $st2 = new Storage($raiz, $base);   // instancia nueva = simula otra petición
+    $st2->bloquear(false);
+    $n = count($st2->leerFilas('log'));
+    $st2->desbloquear();
+    return $n === 11;
+});
+chk('lectura simultánea', function () use ($st, $raiz, $base) {
+    $st->bloquear(false);
+    $st2 = new Storage($raiz, $base);
+    $st2->bloquear(false);      // no debe bloquearse
+    $n = count($st2->leerFilas('log'));
+    $st2->desbloquear();
+    $st->desbloquear();
+    return $n === 11;
+});
+esperaError('no se puede escribir dentro de una lectura', 'LOCK', function () use ($st) {
+    $st->bloquear(false);
+    try { $st->bloquear(true); } finally { $st->desbloquear(); }
+});
+
+echo "\n== Limpieza ==\n";
+chk('sin ficheros temporales huérfanos', function () use ($raiz, $base) {
+    return glob("$raiz/$base/*.tmp") === [];
+});
+chk('borrar base', function () use ($raiz, $base) {
+    Storage::borrarBase($raiz, $base);
+    return !is_dir("$raiz/$base");
+});
+@rmdir($raiz);
+
+echo "\n---------------------------------------\n";
+echo "OK: $ok   FALLOS: $ko\n";
+exit($ko === 0 ? 0 : 1);

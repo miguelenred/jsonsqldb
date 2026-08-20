@@ -1,0 +1,15 @@
+# jsonSQLDB - solo se sirve el endpoint de la API
+<IfModule mod_authz_core.c>
+    Require all granted
+</IfModule>
+Options -Indexes
+
+<FilesMatch "_config\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

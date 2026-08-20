@@ -1,0 +1,11 @@
+jsonSQLDB
+
+Author, design and technical direction
+  Miguel Sanchez <miguel@miguelenred.es>
+
+Implementation
+  Claude Opus 5 (Anthropic), under the direction and review of the author.
+
+Third-party components bundled in jsonsqldbadmin/assets/
+  Bootstrap 5.3.3        - MIT License - https://getbootstrap.com
+  Bootstrap Icons 1.11.3 - MIT License - https://icons.getbootstrap.com

@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.0', '8.1', '8.2', '8.3', '8.4']
+
+    name: PHP ${{ matrix.php }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, zip
+          coverage: none
+
+      - name: Create configuration from templates
+        run: |
+          cp api/jsonsqldb_api_config.dist.php api/jsonsqldb_api_config.php
+          cp jsonsqldbadmin/config.dist.php    jsonsqldbadmin/config.php
+
+      - name: Lint every PHP file
+        run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Engine and API
+        run: |
+          php tests/f1_nucleo.php
+          php tests/f2_parser.php
+          php tests/f2_select.php
+          php tests/f3_escrituras.php
+          php tests/f4_api.php
+          php tests/f5_esquema.php
+
+      - name: Admin panel
+        run: php tests/f5_admin.php

@@ -1,0 +1,45 @@
+# ============================================================
+# jsonSQLDB - Protección de la raíz del proyecto (Apache 2.2 y 2.4)
+# Solo se permite el acceso a los .php de la carpeta api/.
+# Todo lo demás (datos, logs, motor, configuración, docs, tests)
+# queda bloqueado desde el navegador.
+# ============================================================
+
+Options -Indexes
+DirectoryIndex index.php
+
+# --- Bloquear por extensión: nada de datos ni documentación servidos ---
+<FilesMatch "\.(json|md|log|lock|cache|tmp|dist|sample|bak|old|inc)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# --- Bloquear la configuración y cualquier fichero oculto ---
+<FilesMatch "^(config\.php|.*_config\.php|\.).*">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# --- Bloquear las carpetas internas aunque falten sus .htaccess ---
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(engine|data|logs|docs|tests)(/|$) - [F,L]
+</IfModule>
+
+# --- Sin firma del servidor en las páginas de error ---
+ServerSignature Off
+
+# --- No listar ni ejecutar nada raro subido a data/ ---
+<IfModule mod_php.c>
+    php_flag engine on
+</IfModule>

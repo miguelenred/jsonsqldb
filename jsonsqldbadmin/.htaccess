@@ -1,0 +1,26 @@
+# ============================================================
+# jsonSQLDBadmin - Protección de la carpeta del panel
+# Solo se sirve index.php y los ficheros de assets/.
+# ============================================================
+
+Options -Indexes
+DirectoryIndex index.php
+
+# --- La configuración y los datos del panel, fuera del alcance del navegador ---
+<FilesMatch "^(config\.php|.*\.json|\.).*">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# --- Las carpetas internas también, aunque falten sus .htaccess ---
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(lib|vistas|datos)(/|$) - [F,L]
+</IfModule>
+
+ServerSignature Off

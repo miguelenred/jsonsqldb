@@ -1,0 +1,37 @@
+# Real configuration files - copy the .dist templates and fill these in
+/api/jsonsqldb_api_config.php
+/jsonsqldbadmin/config.php
+
+# Runtime data: databases, logs, panel users and audit trail
+/data/*
+!/data/.htaccess
+!/data/web.config
+!/data/.gitkeep
+
+/logs/*
+!/logs/.htaccess
+!/logs/web.config
+!/logs/.gitkeep
+
+/jsonsqldbadmin/datos/*
+!/jsonsqldbadmin/datos/.htaccess
+!/jsonsqldbadmin/datos/web.config
+!/jsonsqldbadmin/datos/.gitkeep
+
+# Certificates and keys
+*.crt
+*.pem
+*.key
+*.pfx
+
+# Editors and operating systems
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+
+# Temporary files
+*.tmp
+*.bak
