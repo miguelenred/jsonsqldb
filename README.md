@@ -1,5 +1,7 @@
 # jsonSQLDB
 
+[![Tests](https://github.com/miguelenred/jsonsqldb/actions/workflows/tests.yml/badge.svg)](https://github.com/miguelenred/jsonsqldb/actions/workflows/tests.yml)
+
 A SQL database engine, HTTP API and web admin panel written in plain PHP, storing
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
