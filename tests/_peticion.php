@@ -11,6 +11,7 @@ $raiz = $argv[2] ?? sys_get_temp_dir();
 define('JSONSQLDB_DATA_PATH', $raiz);
 define('JSONSQLDB_LOG_PATH',  $raiz . '/logs');
 define('API_ESTADO_PATH',     $raiz . '/api');
+define('JSONSQLDB_LOG_PARAMS', true);      // la prueba comprueba el log
 define('JSONSQLDB_API_CONFIG', __DIR__ . '/_config_api.php');
 
 $_SERVER['REQUEST_METHOD']  = $post['__metodo'] ?? 'POST';

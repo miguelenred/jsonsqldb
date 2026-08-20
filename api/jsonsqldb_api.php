@@ -244,9 +244,14 @@ if (abs(time() - (int)$timestamp) > RATE_TIMESTAMP_DIFF) {
 }
 
 // --- Firma HMAC ---
+// Cada clave puede tener su propio secreto; si no lo tiene, se usa el global.
+// Con secreto propio, una aplicación comprometida no puede firmar peticiones
+// haciéndose pasar por otra clave, ni siquiera por la de administración.
+$secreto = (string)($cuenta['secreto'] ?? HMAC_SECRET);
+
 // La firma cubre también los parámetros. Sin parámetros, $paramsRaw está vacío
 // y la fórmula es exactamente la de siempre (clientes antiguos siguen valiendo).
-$tokenEsperado = hash_hmac('sha256', '+' . $apiKey . '|' . $timestamp . '|' . $sql . $paramsRaw . '¿', HMAC_SECRET);
+$tokenEsperado = hash_hmac('sha256', '+' . $apiKey . '|' . $timestamp . '|' . $sql . $paramsRaw . '¿', $secreto);
 if (!hash_equals($tokenEsperado, $token)) {
     $store->fallo();
     $store->contar($ip);
@@ -254,7 +259,10 @@ if (!hash_equals($tokenEsperado, $token)) {
 }
 
 // --- Anti-replay ---
-if (!$store->nonce(hash('sha256', $timestamp . '|' . $ip . '|' . $token))) {
+// El nonce es el propio token, que ya es único por petición. Antes entraba la
+// IP, y eso permitía reenviar una petición capturada desde otra dirección: el
+// nonce cambiaba, pero la firma seguía siendo válida porque la IP no la cubre.
+if (!$store->nonce(hash('sha256', $token))) {
     $store->fallo();
     $store->contar($ip);
     salirConError('Token ya utilizado');
@@ -284,7 +292,8 @@ try {
     $autorizar = static function (string $tipo) use ($permiso, &$operacion): void {
         $operacion = strtoupper(str_replace('_', ' ', $tipo));
 
-        $lectura   = ['select', 'show_databases', 'show_tables', 'show_schema', 'show_keys', 'show_triggers'];
+        $lectura   = ['select', 'show_databases', 'show_tables', 'show_views',
+                      'show_schema', 'show_keys', 'show_triggers'];
         $escritura = array_merge($lectura, ['insert', 'update', 'delete']);
 
         if ($permiso === 'lectura' && !in_array($tipo, $lectura, true)) {

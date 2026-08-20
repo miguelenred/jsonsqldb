@@ -17,9 +17,17 @@ navegador  →  jsonsqldbadmin/index.php  →  api/jsonsqldb_api.php  →  engin
 2. Abre `jsonsqldbadmin/config.php` y comprueba que `ADMIN_API_KEY` y
    `ADMIN_HMAC_SECRET` son **los mismos** que en `api/jsonsqldb_api_config.php`.
    Si cambias uno, cambia el otro.
-3. Entra en `https://tuservidor/jsonsqldb/jsonsqldbadmin/`. Como todavía no hay
-   ningún usuario, la primera pantalla pide crear el administrador. No hay
-   ninguna contraseña por defecto.
+3. Entra en `https://tuservidor/jsonsqldb/jsonsqldbadmin/`. **La primera vez que
+   se abre el panel, y solo la primera, pide crear el usuario administrador**:
+   eliges nombre y contraseña ahí mismo. No existe ninguna contraseña por
+   defecto ni ningún usuario de fábrica, así que no hay nada que cambiar después
+   ni riesgo de dejarse el `admin/admin` puesto. La contraseña se guarda con
+   bcrypt y necesita al menos 10 caracteres.
+
+   En cuanto ese usuario existe, la pantalla de alta desaparece y el panel pide
+   usuario y contraseña como cualquier otro. Si algún día pierdes el acceso,
+   borra `jsonsqldbadmin/datos/usuarios.json` y el panel te volverá a pedir el
+   alta del administrador.
 4. Comprueba que `jsonsqldbadmin/datos/` tiene permiso de escritura: ahí se
    guardan los usuarios y la auditoría.
 
@@ -107,6 +115,11 @@ automáticas, numéricas y de fecha la columna no se manda y el motor aplica el
 autoincremento o el `DEFAULT`; en las de texto sí se guarda la cadena vacía.
 Para guardar un nulo se marca la casilla NULL. Para editar o borrar una fila suelta la tabla necesita clave
 primaria; si no la tiene, el panel lo avisa y te manda al editor SQL.
+
+**Vistas** — pantalla propia en el menú: listado con su consulta, creación con
+nombre y `SELECT`, y borrado. Desde el listado se salta al editor SQL con la
+consulta ya escrita. Un usuario de solo lectura las ve pero no puede crearlas ni
+borrarlas.
 
 **SQL** — cualquier sentencia, una por ejecución, con el resultado en tabla y el
 tiempo que ha tardado. Con rol `lectura` solo se admiten `SELECT` y `SHOW`.
@@ -253,7 +266,7 @@ $cli->aceptarAutofirmado();
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 e iconos 1.11.3, en local |
 | `jsonsqldbadmin/assets/panel.js` | habilita los campos de columna según el tipo |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 97 comprobaciones navegando el panel de verdad |
+| `tests/f5_admin.php` | 107 comprobaciones navegando el panel de verdad |
 
 ## 8. Pruebas
 
@@ -264,7 +277,7 @@ claves, triggers, datos, editor SQL, permisos del rol de lectura y auditoría.
 Usa una carpeta temporal, así que no toca tus datos.
 
 ```
-php tests/f5_admin.php     → OK: 97
+php tests/f5_admin.php     → OK: 107
 ```
 
 Necesita la extensión cURL. En Windows con XAMPP, actívala en `php.ini`

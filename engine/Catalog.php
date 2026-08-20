@@ -49,6 +49,92 @@ final class Catalog
 
     public function existe(string $tabla): bool { return $this->st->existe($tabla); }
 
+    // ------------------------------------------------------------------
+    // Vistas
+    // ------------------------------------------------------------------
+
+    /** @return array<string,array> nombre => ['sql' => ..., 'created_at' => ...] */
+    public function vistas(): array
+    {
+        return $this->st->leerVistas();
+    }
+
+    public function esVista(string $nombre): bool
+    {
+        return $this->vista($nombre) !== null;
+    }
+
+    /** Definición de una vista, o null si no existe. */
+    public function vista(string $nombre): ?array
+    {
+        foreach ($this->vistas() as $n => $v) {
+            if (strcasecmp((string)$n, $nombre) === 0) {
+                return ['name' => (string)$n] + (array)$v;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Crea una vista: un SELECT guardado con nombre.
+     *
+     * Se comprueba que la consulta se analiza y que no choca con una tabla.
+     * No se ejecuta: una vista puede apuntar a datos que aún no existen.
+     */
+    /** Corta la operación si ya hay una vista con ese nombre. */
+    public function exigirNombreLibreDeVista(string $nombre): void
+    {
+        if ($this->esVista($nombre)) {
+            throw JsonSqlDbError::schema("Ya existe una vista llamada '$nombre'");
+        }
+    }
+
+    public function crearVista(string $nombre, string $sql, bool $siNoExiste = false): bool
+    {
+        Storage::validarTabla($nombre);
+
+        if ($this->existe($nombre)) {
+            throw JsonSqlDbError::schema("Ya existe una tabla llamada '$nombre'");
+        }
+        if ($this->esVista($nombre)) {
+            if ($siNoExiste) {
+                return false;
+            }
+            throw JsonSqlDbError::schema("La vista '$nombre' ya existe");
+        }
+
+        $vistas = $this->vistas();
+        $vistas[$nombre] = ['sql' => $sql, 'created_at' => date('Y-m-d H:i:s')];
+        $this->st->guardarVistas($vistas);
+        return true;
+    }
+
+    public function borrarVista(string $nombre, bool $siExiste = false): bool
+    {
+        $vistas = $this->vistas();
+        foreach ($vistas as $n => $v) {
+            if (strcasecmp((string)$n, $nombre) === 0) {
+                unset($vistas[$n]);
+                $this->st->guardarVistas($vistas);
+                return true;
+            }
+        }
+        if ($siExiste) {
+            return false;
+        }
+        throw JsonSqlDbError::schema("La vista '$nombre' no existe");
+    }
+
+    /** Corta la operación si el nombre es una vista: no se puede escribir en ellas. */
+    public function exigirQueNoSeaVista(string $nombre, string $operacion): void
+    {
+        if ($this->esVista($nombre)) {
+            throw JsonSqlDbError::schema(
+                "'$nombre' es una vista: no admite $operacion. Las vistas son de solo lectura."
+            );
+        }
+    }
+
     /** Estructura normalizada de una tabla. */
     public function meta(string $tabla): array
     {

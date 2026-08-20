@@ -86,6 +86,12 @@ final class Config
         return $mapa;
     }
 
+    /** ¿Se registran los valores de los parámetros ligados? */
+    public static function logParams(): bool
+    {
+        return defined('JSONSQLDB_LOG_PARAMS') && JSONSQLDB_LOG_PARAMS === true;
+    }
+
     public static function logDias(): int
     {
         return defined('JSONSQLDB_LOG_DIAS') ? max(0, (int)JSONSQLDB_LOG_DIAS) : 90;

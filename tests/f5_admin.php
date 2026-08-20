@@ -55,6 +55,13 @@ file_put_contents($prepend, "<?php\n"
     . "define('ADMIN_DATA_PATH', "     . var_export($raizDatos . '/admin', true) . ");\n"
     . "define('ADMIN_API_URL', "       . var_export("http://127.0.0.1:$puertoApi/api/jsonsqldb_api.php", true) . ");\n"
     . "define('ADMIN_SSL_CA', '');\n"
+    // Las pruebas corren por HTTP en localhost y repiten peticiones desde la
+    // misma IP: se relajan las protecciones que eso dispara.
+    . "define('EXIGIR_HTTPS', false);\n"
+    . "define('ADMIN_EXIGIR_HTTPS', false);\n"
+    . "define('RATE_LIMIT_ACTIVO', false);\n"
+    . "define('ANTI_REPLAY_ACTIVO', false);\n"
+    . "define('DEVOLVER_ERRORES', true);\n"
     // La copia en ZIP lee los ficheros del motor: hay que decirle dónde están,
     // igual que en una instalación donde el panel y el motor comparten máquina.
     . "define('ADMIN_RUTA_DATOS_MOTOR', " . var_export($raizDatos, true) . ");\n");
@@ -356,6 +363,60 @@ chk('un trigger sin cuerpo se rechaza', fn() =>
         'accion' => 'crear_trigger', 'db' => 'tienda', 'tabla' => 'pedidos',
         'nombre' => 'trg_vacio', 'timing' => 'AFTER', 'evento' => 'INSERT', 'cuerpo' => '',
     ]), 'al menos una sentencia'));
+
+echo "\n== Vistas desde el panel ==\n";
+chk('la pantalla de vistas está en el menú y vacía al principio', function () {
+    $html = pedir('p=vistas&db=tienda');
+    return str_contains($html, 'no tiene vistas') && str_contains($html, 'value="crear_vista"');
+});
+chk('la lista de tablas del formulario no se escapa de más', function () {
+    $html = pedir('p=vistas&db=tienda');
+    // El separador entre nombres tiene que ser HTML real, no texto visible
+    return str_contains($html, '<code>clientes</code>')
+        && !str_contains($html, '&lt;code&gt;')
+        && !str_contains($html, '&lt;/code&gt;');
+});
+chk('crear una vista', function () {
+    $html = enviar('p=vistas&db=tienda', [
+        'accion' => 'crear_vista', 'db' => 'tienda', 'nombre' => 'v_con_saldo',
+        'sql' => 'SELECT cod, nombre, saldo FROM clientes WHERE saldo > 0',
+    ]);
+    return str_contains($html, 'v_con_saldo&#039; creada') && str_contains($html, 'v_con_saldo');
+});
+chk('la vista se consulta desde el editor SQL', function () {
+    $r = enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM v_con_saldo']);
+    return str_contains($r, 'fila(s)') && !str_contains($r, 'Error en la consulta');
+});
+chk('una vista sobre otra vista', function () {
+    $html = enviar('p=vistas&db=tienda', [
+        'accion' => 'crear_vista', 'db' => 'tienda', 'nombre' => 'v_encadenada',
+        'sql' => 'SELECT cod FROM v_con_saldo',
+    ]);
+    return str_contains($html, 'v_encadenada&#039; creada');
+});
+chk('una vista que no es SELECT se rechaza', fn() =>
+    str_contains(enviar('p=vistas&db=tienda', [
+        'accion' => 'crear_vista', 'db' => 'tienda', 'nombre' => 'v_mala',
+        'sql' => 'DELETE FROM clientes',
+    ]), 'tiene que ser un SELECT'));
+chk('no se puede escribir en una vista', fn() =>
+    str_contains(enviar('p=sql&db=tienda', ['sql' => "DELETE FROM v_con_saldo"]),
+                 'es una vista'));
+chk('borrar una vista no toca los datos', function () {
+    $antes = enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM clientes']);
+    enviar('p=vistas&db=tienda', ['accion' => 'borrar_vista', 'db' => 'tienda',
+                                  'nombre' => 'v_encadenada']);
+    $despues = enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM clientes']);
+    preg_match('/<td>(\d+)<\/td>/', $antes, $a);
+    preg_match('/<td>(\d+)<\/td>/', $despues, $d);
+    return ($a[1] ?? 'x') === ($d[1] ?? 'y')
+        && !str_contains(pedir('p=vistas&db=tienda'), 'v_encadenada');
+});
+chk('limpiar la vista de prueba', function () {
+    enviar('p=vistas&db=tienda', ['accion' => 'borrar_vista', 'db' => 'tienda',
+                                  'nombre' => 'v_con_saldo']);
+    return str_contains(pedir('p=vistas&db=tienda'), 'no tiene vistas');
+});
 
 echo "\n== Clave primaria desde el panel ==\n";
 chk('una tabla sin clave primaria ofrece crearla', function () {
@@ -749,6 +810,8 @@ chk('el de lectura entra', function () {
 });
 chk('el de lectura no ve los botones de administración', fn() =>
     !str_contains(pedir('p=bases'), 'Nueva base de datos'));
+chk('el de lectura no puede crear vistas', fn() =>
+    !str_contains(pedir('p=vistas&db=tienda'), 'value="crear_vista"'));
 chk('el de lectura no puede crear una base', fn() =>
     str_contains(enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'prohibida'],
                         true, 'p=sql&db=tienda'), 'permiso de administrador'));

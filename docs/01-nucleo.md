@@ -215,7 +215,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 49   FALLOS: 0`.
+Resultado esperado: `OK: 52   FALLOS: 0`.
 
 ---
 
@@ -243,10 +243,16 @@ Resultado esperado: `OK: 49   FALLOS: 0`.
 | `JSONSQLDB_LOG_PATH` | carpeta de los ficheros de log |
 | `JSONSQLDB_LOG_NIVEL` | `todo` / `escrituras` / `errores` |
 | `JSONSQLDB_LOG_MAX_SQL` | longitud máxima de la SQL guardada |
+| `JSONSQLDB_LOG_PARAMS` | ¿guardar también los valores de los `?`? Por defecto **no** |
 | `JSONSQLDB_LOG_MAX_SIZE` | tamaño máximo por fichero antes de rotar |
 | `JSONSQLDB_LOG_DIAS` | días que se conservan los logs (0 = siempre) |
 
 ### Log de consultas
+
+Los **valores** de los parámetros ligados no se guardan salvo que actives
+`JSONSQLDB_LOG_PARAMS`. Por ahí viajan contraseñas, tokens y datos personales, y
+el log se conserva 90 días por defecto: no es sitio para ellos. La SQL sí se
+guarda, con sus `?` sin sustituir.
 
 Un fichero por día: `logs/consultas-2026-08-19.json`, y `-1.json`, `-2.json`… al
 rotar por tamaño. Cada línea es un objeto JSON independiente:

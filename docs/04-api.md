@@ -177,20 +177,18 @@ El permiso se comprueba **después de analizar la SQL y antes de ejecutarla**, a
 que se mira lo que la sentencia hace de verdad, no cómo esté escrita. `bases`
 limita a qué bases de datos puede acceder esa clave; `['*']` son todas.
 
-Las claves y el secreto **no vienen puestos**: `api/jsonsqldb_api_config.dist.php`
-trae marcadores `CHANGE_ME_` que hay que sustituir al instalar. Una instalación
-sin configurar falla ruidosamente en lugar de funcionar con un secreto conocido
-por todo el mundo.
+Las claves y los secretos **no se listan aquí a propósito**: duplicar un secreto
+en la documentación es una forma estupenda de que acabe donde no debe. Están en
+`api/jsonsqldb_api_config.php`, que es su único sitio.
 
-Genera cada valor así, uno distinto por clave:
+Para generar una clave o un secreto nuevos, uno distinto cada vez:
 
 ```
 php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 ```
 
-El `HMAC_SECRET` es del servidor y lo comparten todas las claves; la clave admin
-tiene que ser la misma en `api/jsonsqldb_api_config.php` y en
-`jsonsqldbadmin/config.php`.
+La clave admin y su `secreto` tienen que coincidir con `ADMIN_API_KEY` y
+`ADMIN_HMAC_SECRET` de `jsonsqldbadmin/config.php`.
 
 ## 4. Protecciones
 
@@ -202,10 +200,10 @@ tiene que ser la misma en `api/jsonsqldb_api_config.php` y en
 | Parámetros ligados por petición | `MAX_PARAMS`, `MAX_PARAMS_LENGTH` | 1.000 valores, 100 KB |
 | Desfase máximo del reloj | `RATE_TIMESTAMP_DIFF` | 300 s |
 | Anti-replay (token de un solo uso) | `ANTI_REPLAY_ACTIVO` | desactivado |
-| Límite de peticiones por IP | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | desactivado |
+| Límite de peticiones por IP | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **activado**, 150 / 24 h |
 | Corte por fallos de autenticación | `RATE_LIMIT_GLOBAL_MAX` | 30 |
 | Lista blanca de IPs (IP suelta o CIDR) | `IPS_PERMITIDAS` | vacía (sin filtro) |
-| Exigir HTTPS | `EXIGIR_HTTPS` | `false` |
+| Exigir HTTPS | `EXIGIR_HTTPS` | **`true`** |
 | Cabecera HSTS | `HSTS_ACTIVO` | `false` |
 | Confiar en X-Forwarded-For / -Proto | `CONFIAR_EN_PROXY` | `false` |
 
@@ -216,6 +214,46 @@ entradas caducadas. No hay ninguna base de datos externa por debajo.
 La comparación de tokens usa `hash_equals`, así que no se puede adivinar el
 secreto midiendo tiempos de respuesta.
 
+### Los valores por defecto son los seguros
+
+Desde la 1.1.0, `EXIGIR_HTTPS`, `ANTI_REPLAY_ACTIVO` y `RATE_LIMIT_ACTIVO` vienen
+**activados** y `DEVOLVER_ERRORES` **desactivado**. Una instalación que no se
+configura queda protegida, no expuesta.
+
+La contrapartida: si desarrollas en local por `http://localhost`, la API te
+rechazará las peticiones hasta que pongas `EXIGIR_HTTPS` a `false`. Es una línea
+en la configuración y es un aviso que prefieres recibir en tu máquina antes que
+descubrir el descuido en producción.
+
+`TIME_LIMIT` bajó de 1200 a **60 segundos** y `MEMORY_LIMIT` de 1 GB a **256 MB**.
+Una consulta cara ocupa un worker de PHP todo ese tiempo, y con unos pocos
+workers eso es una denegación de servicio hecha con peticiones legítimas. Súbelos
+solo si tienes consultas o exportaciones que de verdad lo necesiten.
+
+### Un secreto por clave
+
+Cada entrada de `$API_KEYS` admite un campo `secreto`:
+
+```php
+'MI_API_KEY' => [
+    'nombre'  => 'Mi aplicación',
+    'permiso' => 'escritura',
+    'bases'   => ['mibase'],
+    'secreto' => '...',            // generado aparte, distinto por clave
+],
+```
+
+Sin él, la clave firma con `HMAC_SECRET`, que es común a todas. Y ahí está el
+problema: **cualquier aplicación que tenga el secreto compartido puede firmar
+peticiones haciéndose pasar por otra clave, incluida la de administración**. Los
+permisos por clave no valen nada si el secreto es común.
+
+Con secreto propio, una aplicación comprometida solo compromete lo suyo, y se
+revoca cambiando su clave y su secreto sin tocar las demás.
+
+`HMAC_SECRET` sigue existiendo como reserva para las claves que no tengan el
+suyo, de modo que las instalaciones anteriores siguen funcionando.
+
 ### Qué activar en producción
 
 Por orden de eficacia:
@@ -224,14 +262,12 @@ Por orden de eficacia:
    fija, esta es la protección más fuerte: quien no esté en la lista recibe un
    403 antes de que se mire la firma. Admite IP suelta (`10.0.0.7`) y rango
    CIDR (`10.0.0.0/24`, `2001:db8::/32`).
-2. **`EXIGIR_HTTPS`**. La firma HMAC impide manipular la consulta, pero no
-   impide leerla. Sin HTTPS, la SQL y los datos viajan en claro.
-3. **`RATE_LIMIT_ACTIVO`** y **`ANTI_REPLAY_ACTIVO`**. El segundo impide
-   reutilizar un token capturado dentro de la ventana de `RATE_TIMESTAMP_DIFF`.
-4. **`DEVOLVER_ERRORES` a `false`**. Con `true` los errores del motor llegan al
-   cliente, cómodo mientras desarrollas y demasiado hablador después.
-5. **`HSTS_ACTIVO`** solo con un certificado de una CA reconocida. Con uno
+2. **Un `secreto` por clave**, como se explica arriba.
+3. **`HSTS_ACTIVO`**, solo con un certificado de una CA reconocida. Con uno
    autofirmado dejarías el dominio inaccesible durante un año.
+
+`EXIGIR_HTTPS`, `RATE_LIMIT_ACTIVO`, `ANTI_REPLAY_ACTIVO` y `DEVOLVER_ERRORES`
+ya vienen en su valor seguro: no hay que activarlos, solo no desactivarlos.
 
 `CONFIAR_EN_PROXY` merece un aviso aparte: actívalo **solo** si delante hay un
 proxy o balanceador de confianza. Con él puesto, la API cree lo que digan las
@@ -300,7 +336,7 @@ apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
 | `api/cliente_ejemplo.php` | cliente PHP para las aplicaciones |
 | `api/cliente_ejemplo.ps1` | cliente PowerShell, con los mismos parámetros ligados |
 | `engine/ApiStore.php` | estado de la API en JSON: rate limit, fallos, nonces, histórico |
-| `tests/f4_api.php` | 44 comprobaciones lanzando peticiones reales |
+| `tests/f4_api.php` | 48 comprobaciones lanzando peticiones reales |
 
 ## 9. Pruebas
 
@@ -309,7 +345,7 @@ php tests/f1_nucleo.php       → OK: 52
 php tests/f2_parser.php       → OK: 60
 php tests/f2_select.php       → OK: 77
 php tests/f3_escrituras.php   → OK: 56
-php tests/f4_api.php          → OK: 44
-php tests/f5_esquema.php      → OK: 54
-php tests/f5_admin.php        → OK: 97
+php tests/f4_api.php          → OK: 48
+php tests/f5_esquema.php      → OK: 70
+php tests/f5_admin.php        → OK: 107
 ```

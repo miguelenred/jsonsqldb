@@ -17,7 +17,7 @@ $ok = 0; $ko = 0;
 $API_KEYS = [];
 require __DIR__ . '/_config_api.php';
 
-$HMAC          = HMAC_SECRET;
+$HMAC          = HMAC_SECRET;   // secreto de reserva, para las claves que no tengan el suyo
 $CLAVE_LECTURA = 'CLAVE_DE_PRUEBA_SOLO_LECTURA_0000000000000000000000000000000000';
 $CLAVE_ADMIN   = '';
 $CLAVE_APP     = '';
@@ -56,10 +56,16 @@ function peticion(array $post): array
     return is_array($datos) ? $datos : ['error' => 'respuesta no válida: ' . substr((string)$salida, 0, 300)];
 }
 
+/** Secreto con el que firma una clave: el suyo propio, o el global. */
+function secretoDe(string $clave): string
+{
+    return (string)($GLOBALS['API_KEYS'][$clave]['secreto'] ?? HMAC_SECRET);
+}
+
 /** Petición firmada correctamente. */
 function firmada(string $sql, string $clave, string $bd = null, ?string $ts = null, array $params = []): array
 {
-    global $HMAC, $base;
+    global $base;
     $bd ??= $base;
     $ts ??= (string)time();
     $pr = $params === [] ? '' : (string)json_encode($params, JSON_UNESCAPED_UNICODE);
@@ -69,7 +75,7 @@ function firmada(string $sql, string $clave, string $bd = null, ?string $ts = nu
         'sql'       => $sql,
         'params'    => $pr,
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . $pr . '¿', $HMAC),
+        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . $pr . '¿', secretoDe($clave)),
     ]);
 }
 
@@ -98,9 +104,9 @@ chk('token manipulado', function () {
     return str_contains($r['error'] ?? '', 'Token inválido');
 });
 chk('la SQL no puede cambiarse sin rehacer la firma', function () {
-    global $CLAVE_ADMIN, $HMAC, $base;
+    global $CLAVE_ADMIN, $base;
     $ts  = (string)time();
-    $tok = hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|SELECT 1¿', $HMAC);
+    $tok = hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|SELECT 1¿', secretoDe($CLAVE_ADMIN));
     $r = peticion(['api_key' => $CLAVE_ADMIN, 'db' => $base, 'sql' => 'DROP TABLE clientes',
                    'timestamp' => $ts, 'token' => $tok]);
     return str_contains($r['error'] ?? '', 'Token inválido');
@@ -276,7 +282,7 @@ chk('un valor con SQL dentro no inyecta', function () {
     return ($r2[0]['n'] ?? null) === 2 ?: 'la tabla ha cambiado';
 });
 chk('cambiar los parámetros invalida la firma', function () {
-    global $CLAVE_ADMIN, $HMAC, $base;
+    global $CLAVE_ADMIN, $base;
     $sql = 'SELECT COUNT(*) AS n FROM param WHERE nombre = ?';
     $ts  = (string)time();
     $r = peticion([
@@ -285,7 +291,7 @@ chk('cambiar los parámetros invalida la firma', function () {
         'sql'       => $sql,
         'params'    => '["otro"]',                                  // manipulado
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . '["Ana"]¿', $HMAC),
+        'token'     => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . '["Ana"]¿', secretoDe($CLAVE_ADMIN)),
     ]);
     return str_contains($r['error'] ?? '', 'Token inválido');
 });
@@ -295,13 +301,13 @@ chk('número de ? distinto al de parámetros', function () {
     return str_contains($r['error'] ?? '', 'Error en la consulta');
 });
 chk('parámetros que no son una lista JSON', function () {
-    global $CLAVE_ADMIN, $HMAC, $base;
+    global $CLAVE_ADMIN, $base;
     $sql = 'SELECT 1 AS uno';
     $ts  = (string)time();
     $pr  = '{"a":1}';
     $r = peticion([
         'api_key' => $CLAVE_ADMIN, 'db' => $base, 'sql' => $sql, 'params' => $pr, 'timestamp' => $ts,
-        'token'   => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . $pr . '¿', $HMAC),
+        'token'   => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . $pr . '¿', secretoDe($CLAVE_ADMIN)),
     ]);
     return str_contains($r['error'] ?? '', 'lista JSON');
 });
@@ -324,6 +330,40 @@ chk('el log guarda los parámetros', function () {
 chk('borrar la tabla de parámetros', function () {
     global $CLAVE_ADMIN;
     return (firmada('DROP TABLE param', $CLAVE_ADMIN)['success'] ?? false) === true;
+});
+
+echo "\n== Secreto por clave ==\n";
+chk('una clave con secreto propio firma con el suyo', function () {
+    $clave = 'CLAVE_DE_PRUEBA_CON_SECRETO_PROPIO_000000000000000000000000000';
+    $r = firmada('SELECT 1 AS uno', $clave);
+    return ($r[0]['uno'] ?? null) === 1;
+});
+chk('el secreto global no vale para esa clave', function () {
+    $clave = 'CLAVE_DE_PRUEBA_CON_SECRETO_PROPIO_000000000000000000000000000';
+    $sql   = 'SELECT 1 AS uno';
+    $ts    = (string)time();
+    $r = peticion([
+        'api_key'   => $clave,
+        'db'        => $GLOBALS['base'],
+        'sql'       => $sql,
+        'timestamp' => $ts,
+        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . '¿', HMAC_SECRET),
+    ]);
+    return str_contains($r['error'] ?? '', 'Token inválido');
+});
+chk('el secreto de una clave no sirve para firmar por otra', function () {
+    global $CLAVE_ADMIN;
+    $ajeno = 'SECRETO_PROPIO_DE_PRUEBA_00000000000000000000000000000000000000';
+    $sql   = 'DROP DATABASE apibase';
+    $ts    = (string)time();
+    $r = peticion([
+        'api_key'   => $CLAVE_ADMIN,
+        'db'        => '',
+        'sql'       => $sql,
+        'timestamp' => $ts,
+        'token'     => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . '¿', $ajeno),
+    ]);
+    return str_contains($r['error'] ?? '', 'Token inválido');
 });
 
 echo "\n== Filtro por IP ==\n";
@@ -365,10 +405,12 @@ chk('el .ps1 usa exactamente la misma clave', function () {
     $ps1 = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
     return str_contains($ps1, "ApiKey      = '" . JsonSqlDbCliente::EJEMPLO_API_KEY . "'");
 });
-chk('los dos clientes comparten el secreto HMAC', function () {
+chk('los dos clientes usan el secreto de su clave', function () {
+    global $API_KEYS;
     $ps1 = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
+    $suyo = $API_KEYS[JsonSqlDbCliente::EJEMPLO_API_KEY]['secreto'] ?? HMAC_SECRET;
     return str_contains($ps1, "HmacSecret  = '" . JsonSqlDbCliente::EJEMPLO_SECRETO . "'")
-        && JsonSqlDbCliente::EJEMPLO_SECRETO === HMAC_SECRET;
+        && JsonSqlDbCliente::EJEMPLO_SECRETO === $suyo;
 });
 
 echo "\n== Limpieza ==\n";

@@ -40,6 +40,11 @@ defined('JSONSQLDB_LOG_NIVEL') || define('JSONSQLDB_LOG_NIVEL', 'todo');
 // Longitud máxima de la SQL guardada en el log (se trunca, no se parte).
 defined('JSONSQLDB_LOG_MAX_SQL') || define('JSONSQLDB_LOG_MAX_SQL', 2000);
 
+// ¿Se guardan también los valores de los parámetros ligados?
+// A false por defecto: en esos valores viajan contraseñas, tokens y datos
+// personales, y el log se conserva 90 días. Actívalo solo mientras depuras.
+defined('JSONSQLDB_LOG_PARAMS') || define('JSONSQLDB_LOG_PARAMS', false);
+
 // Tamaño máximo de cada fichero de log antes de rotar (bytes).
 defined('JSONSQLDB_LOG_MAX_SIZE') || define('JSONSQLDB_LOG_MAX_SIZE', 5 * 1024 * 1024);
 

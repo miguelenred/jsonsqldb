@@ -1,7 +1,7 @@
 <?php
 // ============================================================
-// PLANTILLA. Copia este fichero a config.php y pon la misma clave admin y el
-// mismo secreto HMAC que hayas puesto en api/jsonsqldb_api_config.php.
+// PLANTILLA. Copia este fichero a config.php. ADMIN_API_KEY y ADMIN_HMAC_SECRET
+// son la clave admin y SU 'secreto' de api/jsonsqldb_api_config.php.
 // ============================================================
 // ============================================================
 // jsonSQLDBadmin - Configuración del panel
@@ -20,8 +20,9 @@ defined('ADMIN_API_URL') || define('ADMIN_API_URL', (string)getenv('ADMIN_API_UR
 // Cámbiala allí y aquí a la vez.
 defined('ADMIN_API_KEY') || define('ADMIN_API_KEY', 'CHANGE_ME_ADMIN_API_KEY');
 
-// El mismo HMAC_SECRET que api/jsonsqldb_api_config.php.
-defined('ADMIN_HMAC_SECRET') || define('ADMIN_HMAC_SECRET', 'CHANGE_ME_HMAC_SECRET');
+// El 'secreto' de esa misma clave en api/jsonsqldb_api_config.php. Si allí la
+// clave no tiene secreto propio, aquí va HMAC_SECRET.
+defined('ADMIN_HMAC_SECRET') || define('ADMIN_HMAC_SECRET', 'CHANGE_ME_ADMIN_SECRET');
 
 // --- Certificado del servidor de la API ---
 // Si la API va por HTTPS con un certificado propio (autofirmado o de una CA
@@ -60,7 +61,7 @@ defined('ADMIN_IPS_PERMITIDAS') || define('ADMIN_IPS_PERMITIDAS', []);
 
 // Exigir HTTPS para entrar al panel. En producción, a true: por aquí viajan
 // contraseñas y datos.
-defined('ADMIN_EXIGIR_HTTPS') || define('ADMIN_EXIGIR_HTTPS', false);
+defined('ADMIN_EXIGIR_HTTPS') || define('ADMIN_EXIGIR_HTTPS', true);
 
 // Confiar en X-Forwarded-For y X-Forwarded-Proto. Solo si delante hay un proxy
 // o balanceador de confianza; si no, cualquiera puede falsear su IP.

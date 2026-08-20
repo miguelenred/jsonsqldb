@@ -38,6 +38,20 @@ final class Writer
      */
     public function ejecutar(array $ast): array
     {
+        // Las vistas son de solo lectura: no se escribe ni se altera sobre ellas
+        // CREATE TABLE se comprueba aparte, con su propio mensaje
+        $destino = $ast['k'] === 'create_table' ? null : ($ast['tabla'] ?? null);
+        if (is_string($destino) && $this->cat->esVista($destino)) {
+            $operacion = [
+                'insert'      => 'INSERT', 'update' => 'UPDATE', 'delete' => 'DELETE',
+                'alter_table' => 'ALTER TABLE', 'drop_table' => 'DROP TABLE',
+            ][$ast['k']] ?? $ast['k'];
+            $extra = $ast['k'] === 'drop_table' ? " Usa DROP VIEW \"$destino\"." : '';
+            throw JsonSqlDbError::schema(
+                "'$destino' es una vista, no una tabla: no admite $operacion.$extra"
+            );
+        }
+
         switch ($ast['k']) {
             case 'insert':
                 $n = $this->insertar($ast);
@@ -64,6 +78,18 @@ final class Writer
                 return $this->crearTrigger($ast);
             case 'drop_trigger':
                 return $this->borrarTrigger($ast);
+
+            case 'create_view':
+                $creada = $this->cat->crearVista($ast['nombre'], $ast['sql'], $ast['si_no_existe']);
+                return ['filas' => 0, 'mensaje' => $creada
+                    ? "Vista '{$ast['nombre']}' creada"
+                    : "La vista '{$ast['nombre']}' ya existía"];
+
+            case 'drop_view':
+                $borrada = $this->cat->borrarVista($ast['nombre'], $ast['si_existe']);
+                return ['filas' => 0, 'mensaje' => $borrada
+                    ? "Vista '{$ast['nombre']}' borrada"
+                    : "La vista '{$ast['nombre']}' no existía"];
         }
         throw JsonSqlDbError::syntax("Sentencia no ejecutable: {$ast['k']}");
     }
@@ -665,6 +691,7 @@ final class Writer
             }
             throw JsonSqlDbError::schema("La tabla '$tabla' ya existe");
         }
+        $this->cat->exigirNombreLibreDeVista($tabla);
 
         $def = $ast['def'];
 

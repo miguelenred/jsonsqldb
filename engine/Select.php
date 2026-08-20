@@ -16,6 +16,12 @@ final class Select
     private Catalog $cat;
     /** @var callable(string):array lector de filas; permite ver cambios aún no volcados a disco */
     private $lector;
+    /** Profundidad máxima de vistas anidadas (una vista que usa otra vista). */
+    private const MAX_VISTAS = 8;
+
+    /** @var int vistas resueltas en la cadena actual, para cortar ciclos */
+    private int $profundidadVista = 0;
+
     /** @var array<int,array> resultado de cada subconsulta ya ejecutada */
     private array $subs = [];
 
@@ -189,6 +195,27 @@ final class Select
         if ($o['tipo'] === 'sub') {
             $r      = $this->correr($o['select']);
             $alias  = $o['alias'];
+            $cols   = $r['cols'];
+            $origen = $r['filas'];
+        } elseif ($this->cat->esVista($o['nombre'])) {
+            // Una vista es un SELECT guardado: se analiza y se ejecuta igual
+            // que una subconsulta del FROM.
+            $vista = $this->cat->vista($o['nombre']);
+
+            if ($this->profundidadVista >= self::MAX_VISTAS) {
+                throw JsonSqlDbError::schema(
+                    "Demasiadas vistas anidadas en '{$o['nombre']}' (máximo " . self::MAX_VISTAS
+                    . '): comprueba que no se referencian entre ellas'
+                );
+            }
+
+            $this->profundidadVista++;
+            try {
+                $r = $this->correr(Parser::analizar((string)$vista['sql']));
+            } finally {
+                $this->profundidadVista--;
+            }
+            $alias  = $o['alias'] ?? $o['nombre'];
             $cols   = $r['cols'];
             $origen = $r['filas'];
         } else {

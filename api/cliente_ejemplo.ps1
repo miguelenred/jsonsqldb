@@ -35,7 +35,7 @@ $Global:JsonSqlDb = @{
     # Es la misma que usa cliente_ejemplo.php. Para tu aplicación, crea una
     # clave propia en api/jsonsqldb_api_config.php.
     ApiKey      = 'CHANGE_ME_EXAMPLE_API_KEY'
-    HmacSecret  = 'CHANGE_ME_HMAC_SECRET'
+    HmacSecret  = 'CHANGE_ME_EXAMPLE_SECRET'
     Base        = 'pruebas'
     TimeoutSec  = 30
     # Certificado propio o autofirmado. Ruta al .crt/.pem para verificarlo,

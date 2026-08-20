@@ -1,0 +1,42 @@
+# Normaliza los finales de línea para que no dependan de la máquina de cada uno.
+# Sin esto, quien clone en Windows verá avisos de "LF will be replaced by CRLF"
+# y, lo que importa de verdad, las fuentes de los iconos podrían corromperse si
+# Git llegara a tratarlas como texto.
+
+# Por defecto: Git decide, y en el repositorio siempre se guarda con LF
+* text=auto
+
+# --- Texto: LF en el repositorio y en la copia de trabajo ---
+*.php       text eol=lf
+*.md        text eol=lf
+*.json      text eol=lf
+*.conf      text eol=lf
+*.yml       text eol=lf
+*.css       text eol=lf
+*.js        text eol=lf
+.htaccess   text eol=lf
+web.config  text eol=lf
+LICENSE     text eol=lf
+NOTICE      text eol=lf
+AUTHORS     text eol=lf
+VERSION     text eol=lf
+
+# --- PowerShell: CRLF, que es lo que espera Windows PowerShell 5.1 ---
+*.ps1       text eol=crlf
+
+# --- Binarios: que Git no los toque ---
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+
+# --- Fuera de las estadísticas de lenguaje y de los diffs ---
+jsonsqldbadmin/assets/** linguist-vendored
+docs/**                  linguist-documentation

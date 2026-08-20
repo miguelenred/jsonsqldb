@@ -77,7 +77,9 @@ final class Logger
             'origen' => self::$origen,
             'sql'    => $max > 0 && strlen($sql) > $max ? substr($sql, 0, $max) . '…' : $sql,
         ];
-        if ($params !== []) {
+        // Los valores solo se registran si se ha pedido expresamente: ahí viajan
+        // contraseñas, tokens y datos personales.
+        if ($params !== [] && Config::logParams()) {
             $entrada['params'] = $params;
         }
         $entrada['error'] = $error;

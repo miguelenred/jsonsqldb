@@ -1,14 +1,10 @@
 # jsonSQLDB
 
-[![Tests](https://github.com/miguelenred/jsonsqldb/actions/workflows/tests.yml/badge.svg)](https://github.com/miguelenred/jsonsqldb/actions/workflows/tests.yml)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![PHP](https://img.shields.io/badge/PHP-8.0%2B-777bb4.svg)](https://www.php.net/)
-
 A SQL database engine, HTTP API and web admin panel written in plain PHP, storing
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.0.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.2.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -25,14 +21,23 @@ plans include a single MySQL database, or cap you at two, or none at all on the
 cheapest tier. Meanwhile you have plenty of disk space and PHP.
 
 That is the hole this fills. If you have that problem, this gives you real SQL —
-joins, aggregates, foreign keys, triggers, transactions — over files you already
-have room for. If you do not have that problem, you probably do not need this.
+joins, aggregates, foreign keys and triggers — over files you already have room
+for. If you do not have that problem, you probably do not need this.
+
+**There are no transactions.** There is no `BEGIN`, `COMMIT` or `ROLLBACK`. Each
+statement is atomic on its own — it either completes or leaves the data as it
+was — but you cannot group several statements into one unit of work that rolls
+back together. If your data needs that, this is not the right tool.
 
 **Be realistic about the limits.** A query result is held in memory, so this is
 built for tables in the thousands to low hundreds of thousands of rows, not
 millions. There is no network protocol and no connection pool: concurrency is
 handled with file locks, which is fine for a handful of simultaneous writers and
-not for hundreds.
+not for hundreds. A write locks the whole database while it runs.
+
+Schema changes are not crash-safe: a `RENAME TABLE` that is interrupted halfway
+by a power cut can leave the table incomplete. Back up before DDL on data you
+care about.
 
 ---
 
@@ -107,8 +112,17 @@ php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 Replace every `CHANGE_ME_` placeholder in both files. The HMAC secret and the
 admin API key must be **the same value** in both.
 
-Then open `jsonsqldbadmin/` in a browser. The first screen asks you to create the
-administrator account — there is no default password.
+Then open `jsonsqldbadmin/` in a browser. **The first time the panel is opened —
+and only the first time — it asks you to create the administrator account**: you
+choose the username and password right there. There is no default password and
+no factory user, so there is nothing to change afterwards and no chance of
+leaving an `admin/admin` behind. The password is stored with bcrypt and must be
+at least 10 characters.
+
+Once that user exists the setup screen disappears and the panel asks for
+credentials like any other. If you ever lose access, delete
+`jsonsqldbadmin/datos/usuarios.json` and the panel will ask you to create the
+administrator again.
 
 If you are on nginx, do [`nginx/`](nginx/) **before** exposing anything.
 
@@ -212,6 +226,7 @@ What it does:
   decimals, `NOT NULL`, `UNIQUE`, `DEFAULT`)
 - Primary keys (including composite ones, added after the fact), unique keys and
   foreign keys with `ON DELETE` / `ON UPDATE`
+- Views: create, list and drop, with a jump to the SQL editor
 - A trigger wizard with a live preview of the generated statement
 - Browse, filter, sort, insert, edit and delete rows
 - A SQL editor for anything else
@@ -234,9 +249,9 @@ external requests.
 |---|---|
 | **Query** | `SELECT` |
 | **Write** | `INSERT`, `UPDATE`, `DELETE` |
-| **Schema** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER` |
+| **Schema** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW` |
 | **Database** | `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` |
-| **Introspection** | `SHOW TABLES`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS` |
+| **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS` |
 
 `SELECT` supports `DISTINCT`, `INNER`/`LEFT`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
 `HAVING`, `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
@@ -301,6 +316,11 @@ SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 `ON UPDATE` `NO ACTION` `CASCADE` `RESTRICT` `SET NULL` `SET DEFAULT` ·
 `BEFORE`/`AFTER` triggers on `INSERT`/`UPDATE`/`DELETE` with `WHEN`, `NEW.`,
 `OLD.` and `RAISE(ABORT, '…')`.
+
+**Views** are stored `SELECT` statements you query like a table. They hold no
+data, are resolved on every query, and are read-only. They can nest up to 8
+levels. They do not make anything faster — with no indexes, a view over a
+three-table join scans all three every time.
 
 Alphabetical ordering in `ORDER BY` is configurable: by default it ignores case
 and accents and puts `ñ` after `n`, and a per-language map handles alphabets
@@ -384,9 +404,9 @@ php tests/f1_nucleo.php       → OK: 52    storage, types, locking
 php tests/f2_parser.php       → OK: 60    parser and bound parameters
 php tests/f2_select.php       → OK: 77    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 45    real requests against the API
-php tests/f5_esquema.php      → OK: 54    SHOW, ALTER and constraints
-php tests/f5_admin.php        → OK: 97    the panel, driven like a user
+php tests/f4_api.php          → OK: 48    real requests against the API
+php tests/f5_esquema.php      → OK: 70    SHOW, ALTER, constraints and views
+php tests/f5_admin.php        → OK: 107   the panel, driven like a user
 ```
 
 `f5_admin.php` needs cURL and starts two PHP built-in servers — one for the panel

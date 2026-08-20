@@ -674,6 +674,27 @@ final class Parser
         if ($this->comer('id', 'TRIGGER')) {
             return $this->createTrigger();
         }
+        if ($this->comer('id', 'VIEW')) {
+            $siNoExiste = false;
+            if ($this->comer('id', 'IF')) {
+                $this->exigir('id', 'NOT');
+                $this->exigir('id', 'EXISTS');
+                $siNoExiste = true;
+            }
+            $nombre = $this->nombreTabla();
+            $this->exigir('id', 'AS');
+
+            // Se guarda el texto del SELECT tal cual lo escribió el usuario:
+            // así la vista se puede leer y editar, y se vuelve a analizar al
+            // usarla en vez de arrastrar un árbol de una versión anterior.
+            $desde = $this->actual()['p'];
+            $ast   = $this->select();
+            $hasta = $this->actual()['p'];
+            $sql   = rtrim(trim(substr($this->sql, $desde, $hasta - $desde)), ';');
+
+            return ['k' => 'create_view', 'nombre' => $nombre, 'sql' => $sql,
+                    'select' => $ast, 'si_no_existe' => $siNoExiste];
+        }
         if ($this->comer('id', 'DATABASE')) {
             $siNoExiste = false;
             if ($this->comer('id', 'IF')) {
@@ -1004,6 +1025,10 @@ final class Parser
             $siExiste = $this->siExiste();
             return ['k' => 'drop_trigger', 'nombre' => $this->nombreSimple('trigger'), 'si_existe' => $siExiste];
         }
+        if ($this->comer('id', 'VIEW')) {
+            $siExiste = $this->siExiste();
+            return ['k' => 'drop_view', 'nombre' => $this->nombreTabla(), 'si_existe' => $siExiste];
+        }
         if ($this->comer('id', 'DATABASE')) {
             $siExiste = $this->siExiste();
             return ['k' => 'drop_database', 'base' => $this->nombreSimple('base de datos'),
@@ -1032,7 +1057,8 @@ final class Parser
         $this->exigir('id', 'SHOW');
         $tk = $this->actual();
         if ($tk['t'] !== 'id') {
-            throw JsonSqlDbError::syntax('SHOW necesita DATABASES, TABLES, SCHEMA, COLUMNS, KEYS o TRIGGERS');
+            throw JsonSqlDbError::syntax(
+                'SHOW necesita DATABASES, TABLES, VIEWS, SCHEMA, COLUMNS, KEYS o TRIGGERS');
         }
         $que = $tk['u'];
         $this->avanzar();
@@ -1042,6 +1068,8 @@ final class Parser
                 return ['k' => 'show_databases'];
             case 'TABLES':
                 return ['k' => 'show_tables'];
+            case 'VIEWS':
+                return ['k' => 'show_views'];
             case 'SCHEMA':
             case 'COLUMNS':
                 $this->comer('id', 'FROM');

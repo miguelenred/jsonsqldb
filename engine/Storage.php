@@ -9,6 +9,7 @@ namespace JsonSQLDB;
  * Estructura en disco:
  *   <raiz>/<base>/_database.json      metadatos de la base
  *   <raiz>/<base>/_revs.json          contador de revisión por tabla (invalida caché)
+ *   <raiz>/<base>/_views.json         vistas: nombre => SELECT guardado
  *   <raiz>/<base>/<tabla>.meta.json   estructura de la tabla
  *   <raiz>/<base>/<tabla>.json        datos (una fila por línea, legible)
  *   <raiz>/<base>/<tabla>.part2.json  siguientes partes (JSONSQLDB_FILAS_POR_PARTE)
@@ -264,6 +265,33 @@ final class Storage
         $this->escribirAtomico($this->ficheroMeta($tabla), json_encode($meta, self::JSON_META) . "\n");
         $rev = $this->subirRev($tabla);
         $this->cacheGuardar($this->claveCache($tabla, 'm', $rev), $meta);
+    }
+
+    // ------------------------------------------------------------------
+    // Vistas
+    // ------------------------------------------------------------------
+
+    /**
+     * Vistas de la base: nombre => ['sql' => ..., 'created_at' => ...].
+     * Una vista es solo un SELECT guardado; no tiene datos propios.
+     *
+     * @return array<string,array>
+     */
+    public function leerVistas(): array
+    {
+        $f = $this->dir . '/_views.json';
+        if (!is_file($f)) {
+            return [];
+        }
+        $v = json_decode((string)@file_get_contents($f), true);
+        return is_array($v) ? $v : [];
+    }
+
+    /** @param array<string,array> $vistas */
+    public function guardarVistas(array $vistas): void
+    {
+        $this->exigirEscritura();
+        $this->escribirAtomico($this->dir . '/_views.json', json_encode($vistas, self::JSON_META) . "\n");
     }
 
     /** Todas las filas de una tabla (concatenando las partes). */

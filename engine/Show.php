@@ -8,6 +8,7 @@ namespace JsonSQLDB;
  * SELECT para que el panel y las aplicaciones las traten igual.
  *
  *   SHOW TABLES
+ *   SHOW VIEWS
  *   SHOW SCHEMA t          (o SHOW COLUMNS FROM t)
  *   SHOW KEYS FROM t       claves únicas y foráneas
  *   SHOW TRIGGERS [FROM t]
@@ -25,6 +26,7 @@ final class Show
     {
         switch ($ast['k']) {
             case 'show_tables':    return $this->tablas();
+            case 'show_views':     return $this->vistas();
             case 'show_schema':    return $this->esquema($ast['tabla']);
             case 'show_keys':      return $this->claves($ast['tabla']);
             case 'show_triggers':  return $this->triggers($ast['tabla']);
@@ -44,6 +46,20 @@ final class Show
                 'creada'   => $meta['created_at'] ?? null,
             ];
         }
+        return $out;
+    }
+
+    private function vistas(): array
+    {
+        $out = [];
+        foreach ($this->cat->vistas() as $nombre => $v) {
+            $out[] = [
+                'vista'  => (string)$nombre,
+                'sql'    => (string)($v['sql'] ?? ''),
+                'creada' => $v['created_at'] ?? null,
+            ];
+        }
+        usort($out, static fn(array $a, array $b): int => strcasecmp($a['vista'], $b['vista']));
         return $out;
     }
 

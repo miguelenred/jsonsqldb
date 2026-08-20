@@ -329,6 +329,80 @@ chk('borrar una clave foránea', function () use ($bd) {
 esperaError('borrar una restricción inexistente', 'SCHEMA',
     fn() => $bd->consultar('ALTER TABLE pedidos DROP CONSTRAINT no_existe'));
 
+echo "\n== Vistas ==\n";
+chk('crear una vista y consultarla', function () use ($bd) {
+    $bd->consultar("CREATE VIEW v_conA AS SELECT cod, nombre FROM clientes WHERE cod LIKE 'A%'");
+    $r = $bd->consultar('SELECT * FROM v_conA');
+    return array_keys($r[0] ?? []) === ['cod', 'nombre'];
+});
+chk('la vista se comporta como una tabla en el FROM', function () use ($bd) {
+    $r = $bd->consultar('SELECT COUNT(*) AS n FROM v_conA WHERE nombre IS NOT NULL');
+    return is_int($r[0]['n']);
+});
+chk('una vista puede usar JOIN y agregados', function () use ($bd) {
+    $bd->consultar('CREATE VIEW v_totales AS
+                    SELECT c.cod AS cod, COUNT(p.id) AS pedidos
+                    FROM clientes c LEFT JOIN pedidos p ON p.cliente_id = c.id
+                    GROUP BY c.cod');
+    $r = $bd->consultar('SELECT * FROM v_totales ORDER BY cod');
+    return isset($r[0]['cod'], $r[0]['pedidos']);
+});
+chk('una vista puede apoyarse en otra vista', function () use ($bd) {
+    $bd->consultar('CREATE VIEW v_sobre_vista AS SELECT cod FROM v_totales WHERE pedidos >= 0');
+    return is_array($bd->consultar('SELECT * FROM v_sobre_vista'));
+});
+chk('SHOW VIEWS las lista con su SQL', function () use ($bd) {
+    $v = [];
+    foreach ($bd->consultar('SHOW VIEWS') as $f) { $v[$f['vista']] = $f['sql']; }
+    return isset($v['v_conA'], $v['v_totales'], $v['v_sobre_vista'])
+        && str_contains($v['v_conA'], 'SELECT cod, nombre FROM clientes');
+});
+chk('la vista refleja los datos actuales', function () use ($bd) {
+    $antes = $bd->consultar('SELECT COUNT(*) AS n FROM v_conA')[0]['n'];
+    $bd->consultar("INSERT INTO clientes (cod, nombre) VALUES ('A9', 'Nuevo')");
+    $despues = $bd->consultar('SELECT COUNT(*) AS n FROM v_conA')[0]['n'];
+    $bd->consultar("DELETE FROM clientes WHERE cod = 'A9'");
+    return $despues === $antes + 1;
+});
+esperaError('no se puede insertar en una vista', 'SCHEMA',
+    fn() => $bd->consultar("INSERT INTO v_conA (cod) VALUES ('Z1')"));
+esperaError('no se puede actualizar una vista', 'SCHEMA',
+    fn() => $bd->consultar("UPDATE v_conA SET nombre = 'X'"));
+esperaError('no se puede borrar en una vista', 'SCHEMA',
+    fn() => $bd->consultar('DELETE FROM v_conA'));
+esperaError('DROP TABLE no vale con una vista', 'SCHEMA',
+    fn() => $bd->consultar('DROP TABLE v_conA'));
+esperaError('una tabla no puede llamarse como una vista', 'SCHEMA',
+    fn() => $bd->consultar('CREATE TABLE v_conA (a INTEGER)'));
+esperaError('una vista no puede llamarse como una tabla', 'SCHEMA',
+    fn() => $bd->consultar('CREATE VIEW clientes AS SELECT 1 AS uno'));
+esperaError('vista repetida', 'SCHEMA',
+    fn() => $bd->consultar('CREATE VIEW v_conA AS SELECT 1 AS uno'));
+chk('IF NOT EXISTS no protesta', function () use ($bd) {
+    $r = $bd->consultar('CREATE VIEW IF NOT EXISTS v_conA AS SELECT 1 AS uno');
+    return $r['success'] === true && str_contains($r['mensaje'], 'ya existía');
+});
+chk('una vista que se referencia a sí misma se corta', function () use ($bd) {
+    $bd->consultar('CREATE VIEW v_ciclo AS SELECT 1 AS uno');
+    // Se sustituye su SQL a mano por una que se llama a sí misma
+    $bd->consultar('DROP VIEW v_ciclo');
+    $bd->consultar('CREATE VIEW v_a AS SELECT * FROM v_conA');
+    try {
+        $bd->consultar('DROP VIEW v_conA');
+        $bd->consultar('CREATE VIEW v_conA AS SELECT * FROM v_a');   // ciclo v_a -> v_conA -> v_a
+        $bd->consultar('SELECT * FROM v_a');
+    } catch (JsonSqlDbError $e) {
+        return str_contains($e->getMessage(), 'anidadas') ?: $e->getMessage();
+    }
+    return 'no cortó el ciclo';
+});
+chk('borrar las vistas', function () use ($bd) {
+    foreach (['v_a', 'v_conA', 'v_totales', 'v_sobre_vista'] as $v) {
+        $bd->consultar('DROP VIEW IF EXISTS ' . $v);
+    }
+    return $bd->consultar('SHOW VIEWS') === [];
+});
+
 echo "\n== Triggers ==\n";
 chk('SHOW TRIGGERS de una tabla y de toda la base', function () use ($bd) {
     $bd->consultar("CREATE TRIGGER trg_pedidos AFTER INSERT ON pedidos

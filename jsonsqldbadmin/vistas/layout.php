@@ -43,6 +43,8 @@ $mensajes = flashes();
         <?php if ($baseAct !== ''): ?>
         <li class="nav-item"><a class="nav-link<?= $vistaActual === 'tablas' ? ' active' : '' ?>"
            href="<?= h(url(['p' => 'tablas', 'db' => $baseAct])) ?>"><i class="bi bi-table"></i> Tablas</a></li>
+        <li class="nav-item"><a class="nav-link<?= $vistaActual === 'vistas' ? ' active' : '' ?>"
+           href="<?= h(url(['p' => 'vistas', 'db' => $baseAct])) ?>"><i class="bi bi-eye"></i> Vistas</a></li>
         <li class="nav-item"><a class="nav-link<?= $vistaActual === 'sql' ? ' active' : '' ?>"
            href="<?= h(url(['p' => 'sql', 'db' => $baseAct])) ?>"><i class="bi bi-terminal"></i> SQL</a></li>
         <?php endif; ?>

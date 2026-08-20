@@ -195,6 +195,27 @@ function ejecutarAccion(string $accion): void
             flash('success', "Restricción '$nombre' eliminada.");
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
+        // ---------------- Vistas ----------------
+        case 'crear_vista':
+            Auth::exigirAdmin();
+            $nombre = identificador(post('nombre'), 'vista');
+            $sql    = trim(post('sql'));
+            if (!preg_match('/^\s*SELECT\b/i', $sql)) {
+                throw new RuntimeException('Una vista tiene que ser un SELECT.');
+            }
+            Api::sql($base, 'CREATE VIEW ' . cita($nombre) . ' AS ' . rtrim($sql, "; \t\n"));
+            Audit::registrar('crear_vista', $nombre, $base);
+            flash('success', "Vista '$nombre' creada.");
+            redirigir(['p' => 'vistas', 'db' => $base]);
+
+        case 'borrar_vista':
+            Auth::exigirAdmin();
+            $nombre = identificador(post('nombre'), 'vista');
+            Api::sql($base, 'DROP VIEW ' . cita($nombre));
+            Audit::registrar('borrar_vista', $nombre, $base);
+            flash('success', "Vista '$nombre' borrada.");
+            redirigir(['p' => 'vistas', 'db' => $base]);
+
         // ---------------- Triggers ----------------
         case 'crear_trigger':
             Auth::exigirAdmin();

@@ -1,5 +1,7 @@
 # jsonSQLDB
 
+Versión **1.2.0** — ver [CHANGELOG.md](../CHANGELOG.md).
+
 Base de datos SQL sobre ficheros JSON, en PHP puro. Sin Composer, sin
 extensiones raras y sin servidor de base de datos: se copia la carpeta y
 funciona.
@@ -73,9 +75,9 @@ php tests/f1_nucleo.php       → OK: 52    almacenamiento, tipos, bloqueos
 php tests/f2_parser.php       → OK: 60    analizador y parámetros ligados
 php tests/f2_select.php       → OK: 77    ejecución de SELECT y orden alfabético
 php tests/f3_escrituras.php   → OK: 56    escrituras, DDL, claves y triggers
-php tests/f4_api.php          → OK: 44    peticiones reales contra la API
-php tests/f5_esquema.php      → OK: 54    SHOW, ALTER y restricciones
-php tests/f5_admin.php        → OK: 97    el panel, navegado como un usuario
+php tests/f4_api.php          → OK: 48    peticiones reales contra la API
+php tests/f5_esquema.php      → OK: 70    SHOW, ALTER y restricciones
+php tests/f5_admin.php        → OK: 107    el panel, navegado como un usuario
 ```
 
 `f5_admin.php` necesita la extensión cURL, y levanta dos servidores propios de

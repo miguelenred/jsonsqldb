@@ -1,7 +1,7 @@
 <?php
 // ============================================================
 // PLANTILLA. Copia este fichero a jsonsqldb_api_config.php y sustituye todos
-// los valores CHANGE_ME_ por valores propios. Genera cada uno con:
+// los valores CHANGE_ME_ por valores propios, uno distinto cada uno:
 //     php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 // ============================================================
 // ============================================================
@@ -16,6 +16,8 @@
 // Cámbialo por uno propio antes de usarlo en producción.
 // Genera uno con: php -r "echo bin2hex(random_bytes(32));"
 // No reutilices el mismo secreto en otros hostings.
+// Secreto de reserva: lo usan las claves que no tengan el suyo propio. Ponle un
+// secreto a cada clave en $API_KEYS y este dejará de intervenir.
 defined('HMAC_SECRET') || define('HMAC_SECRET', 'CHANGE_ME_HMAC_SECRET');
 
 // ------------------------------------------------------------
@@ -27,6 +29,17 @@ defined('HMAC_SECRET') || define('HMAC_SECRET', 'CHANGE_ME_HMAC_SECRET');
 //             'escritura' : SELECT, INSERT, UPDATE, DELETE
 //             'admin'     : todo, incluido CREATE / ALTER / DROP / TRIGGER
 //   bases   → bases de datos a las que puede acceder. ['*'] = todas
+//   secreto → opcional: secreto HMAC propio de esta clave.
+//
+// SOBRE 'secreto': si no lo pones, la clave firma con HMAC_SECRET, que es común
+// a todas. Eso significa que cualquier aplicación que tenga el secreto puede
+// firmar peticiones haciéndose pasar por OTRA clave, incluida la de
+// administración, y los permisos por clave dejan de servir de nada.
+//
+// Dale a cada clave su propio secreto. Genera uno distinto por clave con:
+//     php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
+// Así, si una aplicación se ve comprometida, revocas su clave y su secreto sin
+// tocar las demás.
 $API_KEYS = [
 
     // Clave de jsonSQLDBadmin (el panel de administración usa la API con ella)
@@ -34,6 +47,8 @@ $API_KEYS = [
         'nombre'  => 'jsonSQLDBadmin',
         'permiso' => 'admin',
         'bases'   => ['*'],
+        // El mismo valor tiene que estar en ADMIN_HMAC_SECRET del panel
+        'secreto' => 'CHANGE_ME_ADMIN_SECRET',
     ],
 
     // Ejemplo de clave de aplicación
@@ -41,6 +56,7 @@ $API_KEYS = [
         'nombre'  => 'Mi aplicación',
         'permiso' => 'escritura',
         'bases'   => ['*'],
+        'secreto' => 'CHANGE_ME_APP_SECRET',
     ],
 
     // Clave de los clientes de ejemplo (cliente_ejemplo.php y cliente_ejemplo.ps1)
@@ -48,9 +64,11 @@ $API_KEYS = [
         'nombre'  => 'Clientes de ejemplo',
         'permiso' => 'escritura',
         'bases'   => ['pruebas'],
+        'secreto' => 'CHANGE_ME_EXAMPLE_SECRET',
     ],
 
-    // 'NUEVA_KEY_AQUI' => ['nombre' => '...', 'permiso' => 'lectura', 'bases' => ['mibase']],
+    // 'NUEVA_KEY_AQUI' => ['nombre' => '...', 'permiso' => 'lectura',
+    //                      'bases' => ['mibase'], 'secreto' => '...'],
 ];
 
 // ------------------------------------------------------------
@@ -59,7 +77,9 @@ $API_KEYS = [
 // Exigir HTTPS. La firma HMAC evita que manipulen la consulta, pero no impide
 // que alguien la lea por el camino: en producción, esto a true.
 // Detrás de un balanceador o proxy, mira también CONFIAR_EN_PROXY.
-defined('EXIGIR_HTTPS') || define('EXIGIR_HTTPS', false);
+// En desarrollo local por http://localhost, ponlo a false. En cualquier otro
+// sitio, déjalo como está.
+defined('EXIGIR_HTTPS') || define('EXIGIR_HTTPS', true);
 
 // Cabecera HSTS: obliga al navegador a usar siempre HTTPS con este dominio.
 // Solo con un certificado válido de una CA reconocida; con uno autofirmado
@@ -79,10 +99,10 @@ defined('IPS_PERMITIDAS') || define('IPS_PERMITIDAS', []);
 defined('CONFIAR_EN_PROXY') || define('CONFIAR_EN_PROXY', false);
 
 // Anti-replay: impide que el mismo token se use más de una vez
-defined('ANTI_REPLAY_ACTIVO') || define('ANTI_REPLAY_ACTIVO', false);
+defined('ANTI_REPLAY_ACTIVO') || define('ANTI_REPLAY_ACTIVO', true);
 
 // Rate limiting por IP
-defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     false);  // false para deshabilitarlo
+defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     true);   // false para deshabilitarlo
 defined('RATE_LIMIT_MAX') || define('RATE_LIMIT_MAX',        150);    // máximo de peticiones por IP en la ventana
 defined('RATE_LIMIT_SECONDS') || define('RATE_LIMIT_SECONDS',    86400);  // ventana de tiempo (24 horas)
 defined('RATE_TIMESTAMP_DIFF') || define('RATE_TIMESTAMP_DIFF',   300);    // desfase máximo del timestamp (5 min)
@@ -101,15 +121,20 @@ defined('MAX_PARAMS_LENGTH') || define('MAX_PARAMS_LENGTH', 100000);
 // ------------------------------------------------------------
 // LÍMITES DE EJECUCIÓN
 // ------------------------------------------------------------
-defined('MEMORY_LIMIT') || define('MEMORY_LIMIT', '1G');
-defined('TIME_LIMIT') || define('TIME_LIMIT',   1200);   // segundos (20 minutos)
+defined('MEMORY_LIMIT') || define('MEMORY_LIMIT', '256M');
+defined('TIME_LIMIT') || define('TIME_LIMIT',   60);     // segundos
+// Súbelos solo si tienes consultas o exportaciones que de verdad los necesiten:
+// una consulta cara ocupa un worker de PHP todo ese tiempo, y con unos pocos
+// workers eso es una denegación de servicio hecha con peticiones legítimas.
 
 // ------------------------------------------------------------
 // ERRORES
 // ------------------------------------------------------------
 // true  = devuelve el detalle del error (útil mientras desarrollas)
 // false = devuelve solo un mensaje genérico (recomendado en producción)
-defined('DEVOLVER_ERRORES') || define('DEVOLVER_ERRORES', true);
+// A true, el cliente recibe el error del motor: cómodo mientras desarrollas y
+// demasiado hablador después, porque revela estructura y rutas.
+defined('DEVOLVER_ERRORES') || define('DEVOLVER_ERRORES', false);
 
 // ------------------------------------------------------------
 // ALMACÉN DE LA API (peticiones, fallos y nonces) — en JSON

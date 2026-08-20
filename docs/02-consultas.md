@@ -167,7 +167,7 @@ un resultado silenciosamente incorrecto.
 ## 8. Pruebas
 
 ```
-php tests/f1_nucleo.php     → OK: 49
+php tests/f1_nucleo.php     → OK: 52
 php tests/f2_parser.php     → OK: 60
 php tests/f2_select.php     → OK: 77
 ```

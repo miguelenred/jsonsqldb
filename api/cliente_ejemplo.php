@@ -34,7 +34,7 @@ final class JsonSqlDbCliente
     // propia en api/jsonsqldb_api_config.php.
     public const EJEMPLO_URL     = 'https://example.com/jsonsqldb/api/jsonsqldb_api.php';
     public const EJEMPLO_API_KEY = 'CHANGE_ME_EXAMPLE_API_KEY';
-    public const EJEMPLO_SECRETO = 'CHANGE_ME_HMAC_SECRET';
+    public const EJEMPLO_SECRETO = 'CHANGE_ME_EXAMPLE_SECRET';
     public const EJEMPLO_BASE    = 'pruebas';
 
     /** Cliente ya configurado contra la base 'pruebas'. */
