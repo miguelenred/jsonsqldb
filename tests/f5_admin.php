@@ -10,8 +10,29 @@ declare(strict_types=1);
  */
 $raizProyecto = dirname(__DIR__);
 $raizDatos    = sys_get_temp_dir() . '/jsonsqldb_test_admin';
-$puertoPanel  = 8731 + (getmypid() % 150);
-$puertoApi    = $puertoPanel + 1;
+// Dos puertos libres consecutivos. Elegirlos a partir del PID hacía que dos
+// ejecuciones seguidas pudieran chocar con un puerto aún en TIME_WAIT.
+[$puertoPanel, $puertoApi] = puertosLibres();
+
+/**
+ * Busca dos puertos consecutivos que se puedan abrir ahora mismo.
+ *
+ * @return array{0:int,1:int}
+ */
+function puertosLibres(): array
+{
+    for ($p = 8731; $p < 9500; $p += 2) {
+        $a = @stream_socket_server("tcp://127.0.0.1:$p", $e, $m);
+        if ($a === false) { continue; }
+        $b = @stream_socket_server('tcp://127.0.0.1:' . ($p + 1), $e, $m);
+        fclose($a);
+        if ($b === false) { continue; }
+        fclose($b);
+        return [$p, $p + 1];
+    }
+    echo "No hay puertos libres para levantar los servidores de prueba.\n";
+    exit(1);
+}
 $url          = "http://127.0.0.1:$puertoPanel";
 $cookies      = $raizDatos . '/cookies.txt';
 $ok = 0; $ko = 0;
@@ -33,7 +54,10 @@ file_put_contents($prepend, "<?php\n"
     . "define('API_ESTADO_PATH', "     . var_export($raizDatos . '/api', true) . ");\n"
     . "define('ADMIN_DATA_PATH', "     . var_export($raizDatos . '/admin', true) . ");\n"
     . "define('ADMIN_API_URL', "       . var_export("http://127.0.0.1:$puertoApi/api/jsonsqldb_api.php", true) . ");\n"
-    . "define('ADMIN_SSL_CA', '');\n");
+    . "define('ADMIN_SSL_CA', '');\n"
+    // La copia en ZIP lee los ficheros del motor: hay que decirle dónde están,
+    // igual que en una instalación donde el panel y el motor comparten máquina.
+    . "define('ADMIN_RUTA_DATOS_MOTOR', " . var_export($raizDatos, true) . ");\n");
 
 // --- Servidores ---
 // Dos procesos: uno sirve el panel y otro la API. El servidor propio de PHP
@@ -668,7 +692,10 @@ chk('el volcado recrea la base tal cual', function () {
     return ($ma[1] ?? 'a') === ($mb[1] ?? 'b') ?: ($ma[1] ?? '?') . ' vs ' . ($mb[1] ?? '?');
 });
 chk('la copia en ZIP trae la estructura de carpetas', function () use ($raizDatos) {
-    if (!class_exists('ZipArchive')) { return true; }        // sin extensión zip no aplica
+    if (!class_exists('ZipArchive')) {
+        echo "       (omitida: falta la extensión zip de PHP)\n";
+        return true;
+    }
     $bin = enviar('p=bases', ['accion' => 'exportar_base', 'formato' => 'zip', 'nombre' => 'tienda']);
     $f   = $raizDatos . '/copia.zip';
     file_put_contents($f, $bin);
@@ -683,9 +710,25 @@ chk('la copia en ZIP trae la estructura de carpetas', function () use ($raizDato
         && in_array('tienda/clientes.meta.json', $nombres, true) ?: $nombres;
 });
 chk('el ZIP no deja temporales por el camino', function () {
-    $antes = count((array)glob(sys_get_temp_dir() . '/jsonsqldb_*'));
+    // Se comparan los nombres, no el número: un temporal de una exportación
+    // anterior puede desaparecer por el camino y falsear la cuenta.
+    $temporales = static fn(): array => (array)glob(sys_get_temp_dir() . '/jsonsqldb_*');
+    $antes = $temporales();
+
     enviar('p=bases', ['accion' => 'exportar_base', 'formato' => 'zip', 'nombre' => 'tienda']);
-    return count((array)glob(sys_get_temp_dir() . '/jsonsqldb_*')) === $antes;
+
+    // cURL puede devolver el cuerpo entero antes de que el proceso del servidor
+    // haya terminado su finally, así que se le da un margen: lo que se comprueba
+    // es que no queda huérfano, no que desaparezca al instante.
+    $nuevos = [];
+    for ($i = 0; $i < 40; $i++) {
+        $nuevos = array_values(array_diff($temporales(), $antes));
+        if ($nuevos === []) {
+            return true;
+        }
+        usleep(50000);
+    }
+    return 'quedan sin borrar: ' . implode(', ', $nuevos);
 });
 chk('borrar la base restaurada', function () {
     enviar('p=bases', ['accion' => 'borrar_base', 'nombre' => 'restaurada',
