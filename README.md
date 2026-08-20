@@ -1,6 +1,8 @@
 # jsonSQLDB
 
 [![Tests](https://github.com/miguelenred/jsonsqldb/actions/workflows/tests.yml/badge.svg)](https://github.com/miguelenred/jsonsqldb/actions/workflows/tests.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![PHP](https://img.shields.io/badge/PHP-8.0%2B-777bb4.svg)](https://www.php.net/)
 
 A SQL database engine, HTTP API and web admin panel written in plain PHP, storing
 data in JSON files. No database server, no Composer, no extensions beyond the
