@@ -5,7 +5,12 @@ declare(strict_types=1);
  * jsonSQLDB - Cliente de ejemplo.
  *
  * Copia este fichero en la aplicación que vaya a consumir la API. Solo necesita
- * la URL del endpoint, su API key y el secreto HMAC.
+ * la URL del endpoint, su API key y el secreto con el que firma esa clave.
+ *
+ * EL SECRETO ES EL DE LA CLAVE: el campo 'secreto' de esa misma entrada de
+ * $API_KEYS en api/jsonsqldb_api_config.php. Cada clave tiene el suyo, distinto
+ * del de las demás; si se compartiera, cualquiera que lo tuviera podría firmar
+ * peticiones haciéndose pasar por otra clave.
  *
  *   $cli = JsonSqlDbCliente::pruebas();
  *   $filas = $cli->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Torrevieja']);
@@ -13,7 +18,7 @@ declare(strict_types=1);
  * O montándolo a mano, que es lo que hará tu aplicación de verdad:
  *
  *   $cli = new JsonSqlDbCliente('https://miservidor/jsonsqldb/api/jsonsqldb_api.php',
- *                               'MI_API_KEY', 'MI_HMAC_SECRET', 'mibase');
+ *                               'MI_API_KEY', 'EL_SECRETO_DE_ESA_KEY', 'mibase');
  *
  * Si la API va por HTTPS con certificado propio:
  *   $cli->certificado('C:/xampp/apache/conf/ssl.crt/server.crt');
@@ -23,7 +28,7 @@ final class JsonSqlDbCliente
 {
     private string $url;
     private string $apiKey;
-    private string $secreto;
+    private string $secreto;      // el 'secreto' de esta API key
     private string $base;
     private int    $timeout;
     private string $ca          = '';

@@ -20,8 +20,7 @@ defined('ADMIN_API_URL') || define('ADMIN_API_URL', (string)getenv('ADMIN_API_UR
 // Cámbiala allí y aquí a la vez.
 defined('ADMIN_API_KEY') || define('ADMIN_API_KEY', 'CHANGE_ME_ADMIN_API_KEY');
 
-// El 'secreto' de esa misma clave en api/jsonsqldb_api_config.php. Si allí la
-// clave no tiene secreto propio, aquí va HMAC_SECRET.
+// El 'secreto' de esa misma clave en api/jsonsqldb_api_config.php.
 defined('ADMIN_HMAC_SECRET') || define('ADMIN_HMAC_SECRET', 'CHANGE_ME_ADMIN_SECRET');
 
 // --- Certificado del servidor de la API ---

@@ -21,8 +21,12 @@ Fichero: `api/jsonsqldb_api.php` — Configuración: `api/jsonsqldb_api_config.p
 La firma se calcula así:
 
 ```php
-$token = hash_hmac('sha256', "+" . $apiKey . "|" . $timestamp . "|" . $sql . $params . "¿", HMAC_SECRET);
+$token = hash_hmac('sha256', "+" . $apiKey . "|" . $timestamp . "|" . $sql . $params . "¿", $secreto);
 ```
+
+Donde `$secreto` es el campo `secreto` de esa API key en
+`api/jsonsqldb_api_config.php`. **Cada clave tiene el suyo**, distinto del de las
+demás.
 
 `$params` es el JSON tal cual se envía, o cadena vacía si no hay parámetros (en
 ese caso la fórmula es exactamente la de siempre y los clientes antiguos siguen
@@ -46,6 +50,22 @@ Una consulta no puede cruzar dos bases: son carpetas separadas.
 
 `db` solo puede ir **vacío** para `SHOW DATABASES`, `CREATE DATABASE` y
 `DROP DATABASE`, y únicamente si la API key tiene `'bases' => ['*']`.
+
+### El secreto que usa un cliente
+
+Los dos clientes reciben el secreto como parámetro: es el tercer argumento del
+constructor en PHP y `-HmacSecret` en PowerShell.
+
+Ese valor es el campo **`secreto` de esa misma API key** en
+`api/jsonsqldb_api_config.php`. No hay ningún secreto global: cada clave tiene el
+suyo.
+
+```php
+$cli = new JsonSqlDbCliente($url, 'MI_API_KEY', 'EL_SECRETO_DE_ESA_KEY', 'mibase');
+```
+
+Firmar con el secreto equivocado devuelve `Token inválido`, sin más detalle: la
+API no distingue entre una firma mal calculada y una clave que no existe.
 
 ### Clave de los ejemplos
 
@@ -232,27 +252,27 @@ solo si tienes consultas o exportaciones que de verdad lo necesiten.
 
 ### Un secreto por clave
 
-Cada entrada de `$API_KEYS` admite un campo `secreto`:
+Cada entrada de `$API_KEYS` lleva un campo `secreto`, **obligatorio**:
 
 ```php
 'MI_API_KEY' => [
     'nombre'  => 'Mi aplicación',
     'permiso' => 'escritura',
     'bases'   => ['mibase'],
-    'secreto' => '...',            // generado aparte, distinto por clave
+    'secreto' => '...',            // uno distinto por clave
 ],
 ```
 
-Sin él, la clave firma con `HMAC_SECRET`, que es común a todas. Y ahí está el
-problema: **cualquier aplicación que tenga el secreto compartido puede firmar
-peticiones haciéndose pasar por otra clave, incluida la de administración**. Los
-permisos por clave no valen nada si el secreto es común.
+No hay ningún secreto global. Si varias claves compartieran secreto, **cualquier
+aplicación que lo tuviera podría firmar peticiones haciéndose pasar por otra
+clave, incluida la de administración**, y los permisos por clave dejarían de
+servir de nada.
 
-Con secreto propio, una aplicación comprometida solo compromete lo suyo, y se
-revoca cambiando su clave y su secreto sin tocar las demás.
+Con un secreto por clave, una aplicación comprometida solo compromete lo suyo, y
+se revoca cambiando su clave y su secreto sin tocar las demás.
 
-`HMAC_SECRET` sigue existiendo como reserva para las claves que no tengan el
-suyo, de modo que las instalaciones anteriores siguen funcionando.
+Una clave sin `secreto` no puede firmar nada: la API responde *«Configuración
+incompleta»* diciendo qué clave es y qué le falta.
 
 ### Qué activar en producción
 
@@ -298,7 +318,7 @@ require 'cliente_ejemplo.php';
 $cli = new JsonSqlDbCliente(
     'https://miservidor/jsonsqldb/api/jsonsqldb_api.php',
     'MI_API_KEY',
-    'MI_HMAC_SECRET',
+    'EL_SECRETO_DE_ESA_KEY',
     'mibase'
 );
 
@@ -317,7 +337,7 @@ Con certificado autofirmado hay que poner `CURLOPT_SSL_VERIFYPEER` y
 1. Sube la carpeta al servidor. Lo ideal es dejar accesible por web solo `api/`.
 2. En `config.php` ajusta `JSONSQLDB_DATA_PATH` y `JSONSQLDB_LOG_PATH`; si puedes,
    apúntalos a carpetas **fuera del webroot**.
-3. En `api/jsonsqldb_api_config.php` cambia `HMAC_SECRET` y las API keys.
+3. En `api/jsonsqldb_api_config.php` cambia las API keys y el `secreto` de cada una.
 4. Comprueba que la carpeta de datos y la de logs tienen permiso de escritura.
 5. Lanza las pruebas para validar el entorno: `php tests/f4_api.php`.
 
@@ -336,7 +356,7 @@ apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
 | `api/cliente_ejemplo.php` | cliente PHP para las aplicaciones |
 | `api/cliente_ejemplo.ps1` | cliente PowerShell, con los mismos parámetros ligados |
 | `engine/ApiStore.php` | estado de la API en JSON: rate limit, fallos, nonces, histórico |
-| `tests/f4_api.php` | 48 comprobaciones lanzando peticiones reales |
+| `tests/f4_api.php` | 49 comprobaciones lanzando peticiones reales |
 
 ## 9. Pruebas
 
@@ -345,7 +365,7 @@ php tests/f1_nucleo.php       → OK: 52
 php tests/f2_parser.php       → OK: 60
 php tests/f2_select.php       → OK: 77
 php tests/f3_escrituras.php   → OK: 56
-php tests/f4_api.php          → OK: 48
+php tests/f4_api.php          → OK: 49
 php tests/f5_esquema.php      → OK: 70
 php tests/f5_admin.php        → OK: 107
 ```

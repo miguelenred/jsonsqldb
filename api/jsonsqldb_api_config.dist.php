@@ -16,10 +16,6 @@
 // Cámbialo por uno propio antes de usarlo en producción.
 // Genera uno con: php -r "echo bin2hex(random_bytes(32));"
 // No reutilices el mismo secreto en otros hostings.
-// Secreto de reserva: lo usan las claves que no tengan el suyo propio. Ponle un
-// secreto a cada clave en $API_KEYS y este dejará de intervenir.
-defined('HMAC_SECRET') || define('HMAC_SECRET', 'CHANGE_ME_HMAC_SECRET');
-
 // ------------------------------------------------------------
 // API KEYS
 // ------------------------------------------------------------
@@ -29,17 +25,17 @@ defined('HMAC_SECRET') || define('HMAC_SECRET', 'CHANGE_ME_HMAC_SECRET');
 //             'escritura' : SELECT, INSERT, UPDATE, DELETE
 //             'admin'     : todo, incluido CREATE / ALTER / DROP / TRIGGER
 //   bases   → bases de datos a las que puede acceder. ['*'] = todas
-//   secreto → opcional: secreto HMAC propio de esta clave.
+//   secreto → secreto HMAC con el que firma esta clave. OBLIGATORIO.
 //
-// SOBRE 'secreto': si no lo pones, la clave firma con HMAC_SECRET, que es común
-// a todas. Eso significa que cualquier aplicación que tenga el secreto puede
-// firmar peticiones haciéndose pasar por OTRA clave, incluida la de
-// administración, y los permisos por clave dejan de servir de nada.
+// SOBRE 'secreto': uno distinto por clave, siempre. Si varias claves compartieran
+// secreto, cualquier aplicación que lo tuviera podría firmar peticiones
+// haciéndose pasar por otra clave, incluida la de administración, y los permisos
+// por clave dejarían de servir de nada.
 //
-// Dale a cada clave su propio secreto. Genera uno distinto por clave con:
+// Genera cada uno con:
 //     php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
-// Así, si una aplicación se ve comprometida, revocas su clave y su secreto sin
-// tocar las demás.
+// Si una aplicación se ve comprometida, revocas su clave y su secreto sin tocar
+// las demás.
 $API_KEYS = [
 
     // Clave de jsonSQLDBadmin (el panel de administración usa la API con ella)
@@ -77,8 +73,7 @@ $API_KEYS = [
 // Exigir HTTPS. La firma HMAC evita que manipulen la consulta, pero no impide
 // que alguien la lea por el camino: en producción, esto a true.
 // Detrás de un balanceador o proxy, mira también CONFIAR_EN_PROXY.
-// En desarrollo local por http://localhost, ponlo a false. En cualquier otro
-// sitio, déjalo como está.
+// En desarrollo local por http://localhost, ponlo a false.
 defined('EXIGIR_HTTPS') || define('EXIGIR_HTTPS', true);
 
 // Cabecera HSTS: obliga al navegador a usar siempre HTTPS con este dominio.
@@ -123,8 +118,7 @@ defined('MAX_PARAMS_LENGTH') || define('MAX_PARAMS_LENGTH', 100000);
 // ------------------------------------------------------------
 defined('MEMORY_LIMIT') || define('MEMORY_LIMIT', '256M');
 defined('TIME_LIMIT') || define('TIME_LIMIT',   60);     // segundos
-// Súbelos solo si tienes consultas o exportaciones que de verdad los necesiten:
-// una consulta cara ocupa un worker de PHP todo ese tiempo, y con unos pocos
+// Una consulta cara ocupa un worker de PHP todo ese tiempo, y con unos pocos
 // workers eso es una denegación de servicio hecha con peticiones legítimas.
 
 // ------------------------------------------------------------
@@ -133,7 +127,7 @@ defined('TIME_LIMIT') || define('TIME_LIMIT',   60);     // segundos
 // true  = devuelve el detalle del error (útil mientras desarrollas)
 // false = devuelve solo un mensaje genérico (recomendado en producción)
 // A true, el cliente recibe el error del motor: cómodo mientras desarrollas y
-// demasiado hablador después, porque revela estructura y rutas.
+// demasiado hablador después. Local: true.
 defined('DEVOLVER_ERRORES') || define('DEVOLVER_ERRORES', false);
 
 // ------------------------------------------------------------

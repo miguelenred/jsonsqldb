@@ -17,12 +17,12 @@ $API_KEYS['CLAVE_DE_PRUEBA_SOLO_LECTURA_0000000000000000000000000000000000'] = [
     'nombre'  => 'Panel de solo lectura',
     'permiso' => 'lectura',
     'bases'   => ['apibase'],
+    'secreto' => 'SECRETO_DE_PRUEBA_SOLO_LECTURA_000000000000000000000000000000',
 ];
 
-// Clave con secreto propio, para comprobar que no vale el secreto global
-$API_KEYS['CLAVE_DE_PRUEBA_CON_SECRETO_PROPIO_000000000000000000000000000'] = [
-    'nombre'  => 'Clave con secreto propio',
-    'permiso' => 'escritura',
+// Clave sin 'secreto': tiene que rechazarse con un mensaje claro
+$API_KEYS['CLAVE_DE_PRUEBA_SIN_SECRETO_00000000000000000000000000000000'] = [
+    'nombre'  => 'Clave sin secreto',
+    'permiso' => 'lectura',
     'bases'   => ['*'],
-    'secreto' => 'SECRETO_PROPIO_DE_PRUEBA_00000000000000000000000000000000000000',
 ];

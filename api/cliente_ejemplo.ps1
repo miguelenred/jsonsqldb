@@ -5,6 +5,9 @@
 
     Diferencias con los clientes de tus otras APIs:
 
+      0. El secreto es EL DE LA API KEY: el campo 'secreto' de esa entrada de
+         $API_KEYS en api/jsonsqldb_api_config.php. Cada clave tiene el suyo.
+
       1. La firma lleva los parámetros:
              '+' + apiKey + '|' + timestamp + '|' + sql + params + '¿'
          Sin parámetros, params es cadena vacía y la fórmula queda igual que
@@ -35,6 +38,7 @@ $Global:JsonSqlDb = @{
     # Es la misma que usa cliente_ejemplo.php. Para tu aplicación, crea una
     # clave propia en api/jsonsqldb_api_config.php.
     ApiKey      = 'CHANGE_ME_EXAMPLE_API_KEY'
+    # El 'secreto' de la API key de arriba
     HmacSecret  = 'CHANGE_ME_EXAMPLE_SECRET'
     Base        = 'pruebas'
     TimeoutSec  = 30

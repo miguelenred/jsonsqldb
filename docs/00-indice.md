@@ -33,7 +33,7 @@ data/             una carpeta por base, un .json por tabla
 `data/` queda accesible desde el navegador y cualquiera puede descargarse tus
 tablas.
 
-**Instalar**: sube la carpeta al servidor, cambia `HMAC_SECRET` y las API keys
+**Instalar**: sube la carpeta al servidor, cambia las API keys y sus secretos
 en `api/jsonsqldb_api_config.php`, replica la clave admin y el secreto en
 `jsonsqldbadmin/config.php`, y entra en `jsonsqldbadmin/`. La primera pantalla
 te pide crear el administrador. Detalle en [05-admin.md §1](05-admin.md).
@@ -75,7 +75,7 @@ php tests/f1_nucleo.php       → OK: 52    almacenamiento, tipos, bloqueos
 php tests/f2_parser.php       → OK: 60    analizador y parámetros ligados
 php tests/f2_select.php       → OK: 77    ejecución de SELECT y orden alfabético
 php tests/f3_escrituras.php   → OK: 56    escrituras, DDL, claves y triggers
-php tests/f4_api.php          → OK: 48    peticiones reales contra la API
+php tests/f4_api.php          → OK: 49    peticiones reales contra la API
 php tests/f5_esquema.php      → OK: 70    SHOW, ALTER y restricciones
 php tests/f5_admin.php        → OK: 107    el panel, navegado como un usuario
 ```

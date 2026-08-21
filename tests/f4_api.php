@@ -17,7 +17,6 @@ $ok = 0; $ko = 0;
 $API_KEYS = [];
 require __DIR__ . '/_config_api.php';
 
-$HMAC          = HMAC_SECRET;   // secreto de reserva, para las claves que no tengan el suyo
 $CLAVE_LECTURA = 'CLAVE_DE_PRUEBA_SOLO_LECTURA_0000000000000000000000000000000000';
 $CLAVE_ADMIN   = '';
 $CLAVE_APP     = '';
@@ -59,7 +58,7 @@ function peticion(array $post): array
 /** Secreto con el que firma una clave: el suyo propio, o el global. */
 function secretoDe(string $clave): string
 {
-    return (string)($GLOBALS['API_KEYS'][$clave]['secreto'] ?? HMAC_SECRET);
+    return (string)($GLOBALS['API_KEYS'][$clave]['secreto'] ?? '');
 }
 
 /** Petición firmada correctamente. */
@@ -333,13 +332,14 @@ chk('borrar la tabla de parámetros', function () {
 });
 
 echo "\n== Secreto por clave ==\n";
-chk('una clave con secreto propio firma con el suyo', function () {
-    $clave = 'CLAVE_DE_PRUEBA_CON_SECRETO_PROPIO_000000000000000000000000000';
-    $r = firmada('SELECT 1 AS uno', $clave);
-    return ($r[0]['uno'] ?? null) === 1;
+chk('cada clave firma con el suyo', function () {
+    global $CLAVE_ADMIN, $CLAVE_APP;
+    return secretoDe($CLAVE_ADMIN) !== '' && secretoDe($CLAVE_APP) !== ''
+        && secretoDe($CLAVE_ADMIN) !== secretoDe($CLAVE_APP)
+        && ($firmada = firmada('SELECT 1 AS uno', $CLAVE_APP)) && ($firmada[0]['uno'] ?? null) === 1;
 });
-chk('el secreto global no vale para esa clave', function () {
-    $clave = 'CLAVE_DE_PRUEBA_CON_SECRETO_PROPIO_000000000000000000000000000';
+chk('una clave sin secreto se rechaza con un mensaje claro', function () {
+    $clave = 'CLAVE_DE_PRUEBA_SIN_SECRETO_00000000000000000000000000000000';
     $sql   = 'SELECT 1 AS uno';
     $ts    = (string)time();
     $r = peticion([
@@ -347,13 +347,13 @@ chk('el secreto global no vale para esa clave', function () {
         'db'        => $GLOBALS['base'],
         'sql'       => $sql,
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . '¿', HMAC_SECRET),
+        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . '¿', 'lo-que-sea'),
     ]);
-    return str_contains($r['error'] ?? '', 'Token inválido');
+    return str_contains($r['error'] ?? '', 'Configuración incompleta');
 });
 chk('el secreto de una clave no sirve para firmar por otra', function () {
     global $CLAVE_ADMIN;
-    $ajeno = 'SECRETO_PROPIO_DE_PRUEBA_00000000000000000000000000000000000000';
+    $ajeno = secretoDe($GLOBALS['CLAVE_APP']);
     $sql   = 'DROP DATABASE apibase';
     $ts    = (string)time();
     $r = peticion([
@@ -408,7 +408,7 @@ chk('el .ps1 usa exactamente la misma clave', function () {
 chk('los dos clientes usan el secreto de su clave', function () {
     global $API_KEYS;
     $ps1 = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
-    $suyo = $API_KEYS[JsonSqlDbCliente::EJEMPLO_API_KEY]['secreto'] ?? HMAC_SECRET;
+    $suyo = $API_KEYS[JsonSqlDbCliente::EJEMPLO_API_KEY]['secreto'] ?? '';
     return str_contains($ps1, "HmacSecret  = '" . JsonSqlDbCliente::EJEMPLO_SECRETO . "'")
         && JsonSqlDbCliente::EJEMPLO_SECRETO === $suyo;
 });

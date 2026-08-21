@@ -11,7 +11,7 @@ declare(strict_types=1);
 //   db         nombre de la base de datos
 //   sql        sentencia a ejecutar (puede ser multilínea)
 //   timestamp  hora UNIX actual (10 dígitos)
-//   token      hash_hmac('sha256', "+".$apiKey."|".$timestamp."|".$sql."¿", HMAC_SECRET)
+//   token      hash_hmac('sha256', "+".$apiKey."|".$timestamp."|".$sql.$params."¿", $secretoDeLaKey)
 //
 // Respuesta:
 //   SELECT  → [ {...}, {...} ]
@@ -244,10 +244,13 @@ if (abs(time() - (int)$timestamp) > RATE_TIMESTAMP_DIFF) {
 }
 
 // --- Firma HMAC ---
-// Cada clave puede tener su propio secreto; si no lo tiene, se usa el global.
-// Con secreto propio, una aplicación comprometida no puede firmar peticiones
-// haciéndose pasar por otra clave, ni siquiera por la de administración.
-$secreto = (string)($cuenta['secreto'] ?? HMAC_SECRET);
+// Cada clave firma con SU secreto. Así, una aplicación comprometida no puede
+// firmar peticiones haciéndose pasar por otra clave, ni por la de administración.
+$secreto = (string)($cuenta['secreto'] ?? '');
+if ($secreto === '') {
+    salirConError('Configuración incompleta',
+        "La API key '" . $cuenta['nombre'] . "' no tiene 'secreto' en api/jsonsqldb_api_config.php");
+}
 
 // La firma cubre también los parámetros. Sin parámetros, $paramsRaw está vacío
 // y la fórmula es exactamente la de siempre (clientes antiguos siguen valiendo).

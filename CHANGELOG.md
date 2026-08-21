@@ -49,11 +49,12 @@ configuration becomes stricter. See "Upgrading" below.
   HMAC signature, a captured request replayed from a different IP produced a
   different nonce and passed the check while the signature stayed valid. The
   nonce is now `SHA256(token)`, and the token is already unique per request.
-- **Each API key can now have its own HMAC secret**, via a `secreto` field in
-  `$API_KEYS`. With a single shared secret, any application holding it could sign
-  requests impersonating another key — including the admin key — which made
-  per-key permissions meaningless. `HMAC_SECRET` remains as a fallback for keys
-  without one, so existing installations keep working.
+- **Every API key now has its own HMAC secret**, via a mandatory `secreto` field
+  in `$API_KEYS`, and the global `HMAC_SECRET` is gone. With a single shared
+  secret, any application holding it could sign requests impersonating another
+  key — including the admin key — which made per-key permissions meaningless. A
+  key without `secreto` cannot sign anything: the API answers "Configuración
+  incompleta" naming the key and what it is missing.
 - **Bound parameter values are no longer written to the query log** unless
   `JSONSQLDB_LOG_PARAMS` is enabled. Passwords, tokens and personal data travel
   in those values and the log is kept for 90 days.
@@ -84,8 +85,9 @@ workers, 20 minutes was a denial of service built out of legitimate requests.
 
 1. If you develop locally over `http://localhost`, set `EXIGIR_HTTPS` and
    `ADMIN_EXIGIR_HTTPS` to `false` in your configuration.
-2. Give each API key its own `secreto` and update the matching client. For the
-   admin key, the same value goes in `ADMIN_HMAC_SECRET` in the panel config.
+2. Give each API key its own `secreto`, remove the `HMAC_SECRET` line, and update
+   each client with its key's secret. For the admin key, the same value goes in
+   `ADMIN_HMAC_SECRET` in the panel config.
 3. If any query or export legitimately takes longer than 60 seconds, raise
    `TIME_LIMIT` for your case rather than leaving it at the old value.
 
