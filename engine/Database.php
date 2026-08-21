@@ -79,7 +79,10 @@ final class Database
             if ($autorizar !== null) {
                 $autorizar($ast['k']);          // permite comprobar permisos antes de ejecutar
             }
-            $escritura = $ast['k'] !== 'select' && strncmp($ast['k'], 'show_', 5) !== 0;
+            // CHECK KEYS solo lee; REPAIR KEYS puede escribir
+            $escritura = $ast['k'] !== 'select'
+                      && $ast['k'] !== 'check_keys'
+                      && strncmp($ast['k'], 'show_', 5) !== 0;
 
             $this->st->bloquear($escritura);
             try {
@@ -87,6 +90,8 @@ final class Database
                     $res = (new Writer($this->cat))->ejecutar($ast);
                 } elseif ($ast['k'] === 'select') {
                     $filas = (new Select($this->cat))->ejecutar($ast);
+                } elseif ($ast['k'] === 'check_keys') {
+                    $filas = (new Integrity($this->cat))->claves($ast['tabla'], false);
                 } else {
                     $filas = (new Show($this->cat))->ejecutar($ast);
                 }

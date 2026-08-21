@@ -116,6 +116,12 @@ autoincremento o el `DEFAULT`; en las de texto sí se guarda la cadena vacía.
 Para guardar un nulo se marca la casilla NULL. Para editar o borrar una fila suelta la tabla necesita clave
 primaria; si no la tiene, el panel lo avisa y te manda al editor SQL.
 
+**Integridad** — pantalla propia que comprueba que ninguna fila apunte a un valor
+inexistente en su tabla destino, y un botón para corregir poniendo a `NULL` lo
+que se pueda. Nunca borra filas. Un usuario de solo lectura ve el informe pero no
+el botón. Útil cuando alguien ha editado un `.json` a mano o restaurado la copia
+de una tabla sin la otra.
+
 **Vistas** — pantalla propia en el menú: listado con su consulta, creación con
 nombre y `SELECT`, y borrado. Desde el listado se salta al editor SQL con la
 consulta ya escrita. Un usuario de solo lectura las ve pero no puede crearlas ni
@@ -266,7 +272,7 @@ $cli->aceptarAutofirmado();
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 e iconos 1.11.3, en local |
 | `jsonsqldbadmin/assets/panel.js` | habilita los campos de columna según el tipo |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 107 comprobaciones navegando el panel de verdad |
+| `tests/f5_admin.php` | 111 comprobaciones navegando el panel de verdad |
 
 ## 8. Pruebas
 
@@ -277,7 +283,7 @@ claves, triggers, datos, editor SQL, permisos del rol de lectura y auditoría.
 Usa una carpeta temporal, así que no toca tus datos.
 
 ```
-php tests/f5_admin.php     → OK: 107
+php tests/f5_admin.php     → OK: 111
 ```
 
 Necesita la extensión cURL. En Windows con XAMPP, actívala en `php.ini`

@@ -9,6 +9,57 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.3.0] - 2026-08-20
+
+### Added
+
+- **Referential integrity check and repair.** `CHECK KEYS [FROM table]` reports
+  rows whose foreign key points at a value that no longer exists in the parent
+  table; `REPAIR KEYS [FROM table]` additionally sets those keys to `NULL` where
+  the column allows it. The engine enforces foreign keys on every write, so this
+  cannot happen through SQL — it happens when someone edits a `.json` by hand or
+  restores one table's backup without the other.
+  - **Never deletes rows.** A key in a `NOT NULL` or primary key column is
+    reported and left alone: what to do with that row is your decision.
+  - Reads straight from disk, bypassing the cache. The cache is invalidated by a
+    revision counter that only moves when the engine writes, so a hand edit would
+    otherwise stay hidden.
+  - jsonSQLDBadmin has an **Integridad** screen with the report and a repair
+    button. `CHECK` needs read permission, `REPAIR` needs write.
+
+- **Crash-safe schema changes.** `CREATE TABLE`, `DROP TABLE` and every
+  `ALTER TABLE` now run under a journal: the files they are about to touch are
+  copied to `data/<database>/.tx/` first, along with a manifest. On success the
+  directory is removed; if the process dies mid-operation the directory survives,
+  and its presence is the signal that something did not finish — the next time
+  the database is opened, the copies are restored and everything is back as it
+  was.
+  - The manifest is marked `COMMITTED` before the directory is deleted, so a
+    crash in that last instant does not undo an operation that actually finished.
+  - Checking for a pending journal costs one `stat` (half a microsecond), once
+    per request, when the lock is taken.
+  - Not covered: data writes spanning several tables, such as a `DELETE` with
+    `ON DELETE CASCADE`.
+
+### Changed
+
+- **API keys are configured differently.** Entries in `$API_KEYS` are now keyed
+  by account name, with the key itself in a `key` field, and the secret field was
+  renamed from `secreto` to `hmac_secret`:
+
+  ```php
+  'My application' => [
+      'key'         => '...',
+      'permiso'     => 'escritura',
+      'bases'       => ['mydb'],
+      'hmac_secret' => '...',
+  ],
+  ```
+
+  The old shape (keyed by the API key, with `nombre` and `secreto`) is **not**
+  supported: rewrite the entries. Nothing else changes — the request format, the
+  signature and the clients are the same.
+
 ## [1.2.0] - 2026-08-20
 
 ### Added
@@ -157,6 +208,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.3.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.3.0
 [1.2.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.2.0
 [1.1.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.1.0
 [1.0.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.0.0

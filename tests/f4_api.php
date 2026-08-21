@@ -20,7 +20,8 @@ require __DIR__ . '/_config_api.php';
 $CLAVE_LECTURA = 'CLAVE_DE_PRUEBA_SOLO_LECTURA_0000000000000000000000000000000000';
 $CLAVE_ADMIN   = '';
 $CLAVE_APP     = '';
-foreach ($API_KEYS as $clave => $cuenta) {
+foreach ($API_KEYS as $cuenta) {
+    $clave = (string)($cuenta['key'] ?? '');
     if ($CLAVE_ADMIN === '' && ($cuenta['permiso'] ?? '') === 'admin')     { $CLAVE_ADMIN = $clave; }
     if ($CLAVE_APP   === '' && ($cuenta['permiso'] ?? '') === 'escritura'
         && ($cuenta['bases'] ?? []) === ['*'])                             { $CLAVE_APP   = $clave; }
@@ -55,10 +56,21 @@ function peticion(array $post): array
     return is_array($datos) ? $datos : ['error' => 'respuesta no válida: ' . substr((string)$salida, 0, 300)];
 }
 
-/** Secreto con el que firma una clave: el suyo propio, o el global. */
+/** Cuenta que corresponde a una API key, buscada por su campo 'key'. */
+function cuentaDe(string $clave): ?array
+{
+    foreach ($GLOBALS['API_KEYS'] as $nombre => $cuenta) {
+        if ((string)($cuenta['key'] ?? '') === $clave) {
+            return ['nombre' => (string)$nombre] + $cuenta;
+        }
+    }
+    return null;
+}
+
+/** Secreto con el que firma una clave. */
 function secretoDe(string $clave): string
 {
-    return (string)($GLOBALS['API_KEYS'][$clave]['secreto'] ?? '');
+    return (string)(cuentaDe($clave)['hmac_secret'] ?? '');
 }
 
 /** Petición firmada correctamente. */
@@ -338,7 +350,7 @@ chk('cada clave firma con el suyo', function () {
         && secretoDe($CLAVE_ADMIN) !== secretoDe($CLAVE_APP)
         && ($firmada = firmada('SELECT 1 AS uno', $CLAVE_APP)) && ($firmada[0]['uno'] ?? null) === 1;
 });
-chk('una clave sin secreto se rechaza con un mensaje claro', function () {
+chk('una clave sin hmac_secret se rechaza con un mensaje claro', function () {
     $clave = 'CLAVE_DE_PRUEBA_SIN_SECRETO_00000000000000000000000000000000';
     $sql   = 'SELECT 1 AS uno';
     $ts    = (string)time();
@@ -396,9 +408,7 @@ chk('IP suelta, rango CIDR, IPv6 y lista vacía', function () {
 echo "\n== Clave de los clientes de ejemplo ==\n";
 chk('está registrada con escritura sobre pruebas', function () {
     require_once __DIR__ . '/../api/cliente_ejemplo.php';
-    $API_KEYS = [];
-    require __DIR__ . '/../api/jsonsqldb_api_config.php';
-    $c = $API_KEYS[JsonSqlDbCliente::EJEMPLO_API_KEY] ?? null;
+    $c = cuentaDe(JsonSqlDbCliente::EJEMPLO_API_KEY);
     return is_array($c) && $c['permiso'] === 'escritura' && $c['bases'] === ['pruebas'];
 });
 chk('el .ps1 usa exactamente la misma clave', function () {
@@ -406,9 +416,8 @@ chk('el .ps1 usa exactamente la misma clave', function () {
     return str_contains($ps1, "ApiKey      = '" . JsonSqlDbCliente::EJEMPLO_API_KEY . "'");
 });
 chk('los dos clientes usan el secreto de su clave', function () {
-    global $API_KEYS;
-    $ps1 = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
-    $suyo = $API_KEYS[JsonSqlDbCliente::EJEMPLO_API_KEY]['secreto'] ?? '';
+    $ps1  = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
+    $suyo = secretoDe(JsonSqlDbCliente::EJEMPLO_API_KEY);
     return str_contains($ps1, "HmacSecret  = '" . JsonSqlDbCliente::EJEMPLO_SECRETO . "'")
         && JsonSqlDbCliente::EJEMPLO_SECRETO === $suyo;
 });

@@ -24,9 +24,8 @@ La firma se calcula así:
 $token = hash_hmac('sha256', "+" . $apiKey . "|" . $timestamp . "|" . $sql . $params . "¿", $secreto);
 ```
 
-Donde `$secreto` es el campo `secreto` de esa API key en
-`api/jsonsqldb_api_config.php`. **Cada clave tiene el suyo**, distinto del de las
-demás.
+Donde `$secreto` es el campo `hmac_secret` de esa cuenta en
+`api/jsonsqldb_api_config.php`. **Cada cuenta tiene el suyo**, distinto del de las demás.
 
 `$params` es el JSON tal cual se envía, o cadena vacía si no hay parámetros (en
 ese caso la fórmula es exactamente la de siempre y los clientes antiguos siguen
@@ -56,7 +55,7 @@ Una consulta no puede cruzar dos bases: son carpetas separadas.
 Los dos clientes reciben el secreto como parámetro: es el tercer argumento del
 constructor en PHP y `-HmacSecret` en PowerShell.
 
-Ese valor es el campo **`secreto` de esa misma API key** en
+Ese valor es el campo **`hmac_secret` de esa misma cuenta** en
 `api/jsonsqldb_api_config.php`. No hay ningún secreto global: cada clave tiene el
 suyo.
 
@@ -207,7 +206,7 @@ Para generar una clave o un secreto nuevos, uno distinto cada vez:
 php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 ```
 
-La clave admin y su `secreto` tienen que coincidir con `ADMIN_API_KEY` y
+La clave admin y su `hmac_secret` tienen que coincidir con `ADMIN_API_KEY` y
 `ADMIN_HMAC_SECRET` de `jsonsqldbadmin/config.php`.
 
 ## 4. Protecciones
@@ -252,14 +251,15 @@ solo si tienes consultas o exportaciones que de verdad lo necesiten.
 
 ### Un secreto por clave
 
-Cada entrada de `$API_KEYS` lleva un campo `secreto`, **obligatorio**:
+Cada entrada de `$API_KEYS` va **indexada por el nombre de la cuenta**, y lleva
+la clave en `key` y su secreto en `hmac_secret`, ambos obligatorios:
 
 ```php
-'MI_API_KEY' => [
-    'nombre'  => 'Mi aplicación',
-    'permiso' => 'escritura',
-    'bases'   => ['mibase'],
-    'secreto' => '...',            // uno distinto por clave
+'Mi aplicación' => [
+    'key'         => 'MI_API_KEY',
+    'permiso'     => 'escritura',
+    'bases'       => ['mibase'],
+    'hmac_secret' => '...',        // uno distinto por cuenta
 ],
 ```
 
@@ -271,7 +271,7 @@ servir de nada.
 Con un secreto por clave, una aplicación comprometida solo compromete lo suyo, y
 se revoca cambiando su clave y su secreto sin tocar las demás.
 
-Una clave sin `secreto` no puede firmar nada: la API responde *«Configuración
+Una cuenta sin `hmac_secret` no puede firmar nada: la API responde *«Configuración
 incompleta»* diciendo qué clave es y qué le falta.
 
 ### Qué activar en producción
@@ -282,7 +282,7 @@ Por orden de eficacia:
    fija, esta es la protección más fuerte: quien no esté en la lista recibe un
    403 antes de que se mire la firma. Admite IP suelta (`10.0.0.7`) y rango
    CIDR (`10.0.0.0/24`, `2001:db8::/32`).
-2. **Un `secreto` por clave**, como se explica arriba.
+2. **Un `hmac_secret` por cuenta**, como se explica arriba.
 3. **`HSTS_ACTIVO`**, solo con un certificado de una CA reconocida. Con uno
    autofirmado dejarías el dominio inaccesible durante un año.
 
@@ -337,7 +337,7 @@ Con certificado autofirmado hay que poner `CURLOPT_SSL_VERIFYPEER` y
 1. Sube la carpeta al servidor. Lo ideal es dejar accesible por web solo `api/`.
 2. En `config.php` ajusta `JSONSQLDB_DATA_PATH` y `JSONSQLDB_LOG_PATH`; si puedes,
    apúntalos a carpetas **fuera del webroot**.
-3. En `api/jsonsqldb_api_config.php` cambia las API keys y el `secreto` de cada una.
+3. En `api/jsonsqldb_api_config.php` cambia las API keys y el `hmac_secret` de cada una.
 4. Comprueba que la carpeta de datos y la de logs tienen permiso de escritura.
 5. Lanza las pruebas para validar el entorno: `php tests/f4_api.php`.
 
@@ -366,6 +366,6 @@ php tests/f2_parser.php       → OK: 60
 php tests/f2_select.php       → OK: 77
 php tests/f3_escrituras.php   → OK: 56
 php tests/f4_api.php          → OK: 49
-php tests/f5_esquema.php      → OK: 70
-php tests/f5_admin.php        → OK: 107
+php tests/f5_esquema.php      → OK: 82
+php tests/f5_admin.php        → OK: 111
 ```

@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.2.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.3.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -35,9 +35,10 @@ millions. There is no network protocol and no connection pool: concurrency is
 handled with file locks, which is fine for a handful of simultaneous writers and
 not for hundreds. A write locks the whole database while it runs.
 
-Schema changes are not crash-safe: a `RENAME TABLE` that is interrupted halfway
-by a power cut can leave the table incomplete. Back up before DDL on data you
-care about.
+Schema changes are crash-safe: `CREATE TABLE`, `DROP TABLE` and `ALTER TABLE`
+run under a journal, so an operation interrupted by a power cut is undone the
+next time the database is opened. Data writes spanning several tables — a
+`DELETE` with `ON DELETE CASCADE`, for instance — are not covered yet.
 
 ---
 
@@ -227,6 +228,7 @@ What it does:
 - Primary keys (including composite ones, added after the fact), unique keys and
   foreign keys with `ON DELETE` / `ON UPDATE`
 - Views: create, list and drop, with a jump to the SQL editor
+- Referential integrity check and repair
 - A trigger wizard with a live preview of the generated statement
 - Browse, filter, sort, insert, edit and delete rows
 - A SQL editor for anything else
@@ -252,6 +254,7 @@ external requests.
 | **Schema** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW` |
 | **Database** | `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` |
 | **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS` |
+| **Maintenance** | `CHECK KEYS`, `REPAIR KEYS` |
 
 `SELECT` supports `DISTINCT`, `INNER`/`LEFT`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
 `HAVING`, `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
@@ -316,6 +319,13 @@ SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 `ON UPDATE` `NO ACTION` `CASCADE` `RESTRICT` `SET NULL` `SET DEFAULT` ·
 `BEFORE`/`AFTER` triggers on `INSERT`/`UPDATE`/`DELETE` with `WHEN`, `NEW.`,
 `OLD.` and `RAISE(ABORT, '…')`.
+
+`CHECK KEYS` reports rows whose foreign key points at a value that no longer
+exists in the parent table, and `REPAIR KEYS` sets those keys to `NULL` where the
+column allows it — it never deletes rows. The engine enforces foreign keys on
+every write, so this only happens when someone edits a `.json` by hand or
+restores one table's backup without the other. The check reads straight from
+disk, bypassing the cache, which is the only way a hand edit would show up.
 
 **Views** are stored `SELECT` statements you query like a table. They hold no
 data, are resolved on every query, and are read-only. They can nest up to 8
@@ -405,8 +415,8 @@ php tests/f2_parser.php       → OK: 60    parser and bound parameters
 php tests/f2_select.php       → OK: 77    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 48    real requests against the API
-php tests/f5_esquema.php      → OK: 70    SHOW, ALTER, constraints and views
-php tests/f5_admin.php        → OK: 107   the panel, driven like a user
+php tests/f5_esquema.php      → OK: 82    SHOW, ALTER, constraints, views, integrity
+php tests/f5_admin.php        → OK: 111   the panel, driven like a user
 ```
 
 `f5_admin.php` needs cURL and starts two PHP built-in servers — one for the panel

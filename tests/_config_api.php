@@ -13,16 +13,16 @@ define('DEVOLVER_ERRORES',   true);    // las pruebas comprueban los mensajes
 
 require __DIR__ . '/../api/jsonsqldb_api_config.php';
 
-$API_KEYS['CLAVE_DE_PRUEBA_SOLO_LECTURA_0000000000000000000000000000000000'] = [
-    'nombre'  => 'Panel de solo lectura',
+$API_KEYS['Panel de solo lectura'] = [
+    'key'     => 'CLAVE_DE_PRUEBA_SOLO_LECTURA_0000000000000000000000000000000000',
     'permiso' => 'lectura',
     'bases'   => ['apibase'],
-    'secreto' => 'SECRETO_DE_PRUEBA_SOLO_LECTURA_000000000000000000000000000000',
+    'hmac_secret' => 'SECRETO_DE_PRUEBA_SOLO_LECTURA_000000000000000000000000000000',
 ];
 
-// Clave sin 'secreto': tiene que rechazarse con un mensaje claro
-$API_KEYS['CLAVE_DE_PRUEBA_SIN_SECRETO_00000000000000000000000000000000'] = [
-    'nombre'  => 'Clave sin secreto',
+// Clave sin 'hmac_secret': tiene que rechazarse con un mensaje claro
+$API_KEYS['Clave sin secreto'] = [
+    'key'     => 'CLAVE_DE_PRUEBA_SIN_SECRETO_00000000000000000000000000000000',
     'permiso' => 'lectura',
     'bases'   => ['*'],
 ];

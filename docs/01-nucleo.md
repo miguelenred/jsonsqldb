@@ -247,6 +247,31 @@ Resultado esperado: `OK: 52   FALLOS: 0`.
 | `JSONSQLDB_LOG_MAX_SIZE` | tamaño máximo por fichero antes de rotar |
 | `JSONSQLDB_LOG_DIAS` | días que se conservan los logs (0 = siempre) |
 
+### Operaciones de estructura a prueba de cortes
+
+Cada escritura suelta es atómica: se escribe un temporal y se hace `rename`, que
+el sistema de ficheros garantiza indivisible. Pero un `ALTER TABLE` o un
+`DROP TABLE` tocan **varios** ficheros, y el conjunto no lo es: si el proceso
+muere entre dos escrituras, la base queda a medias.
+
+Para eso está el journal. Antes de empezar, la operación copia en
+`data/<base>/.tx/` los ficheros que va a tocar, junto con un manifiesto que dice
+qué va a hacer. Si todo va bien, `.tx/` se borra. Si el proceso muere, `.tx/` se
+queda, y **su sola presencia es la señal** de que algo no terminó: la siguiente
+vez que se abre la base se restauran las copias y todo vuelve a como estaba.
+
+Un detalle que evita el caso raro: antes de borrar `.tx/` el manifiesto se marca
+como `COMMITTED`. Si el corte ocurre justo entre marcarlo y borrarlo, al
+recuperar se ve que la operación sí había terminado y no se deshace nada.
+
+Comprobar si hay un journal pendiente cuesta un `stat` (medio microsegundo) y se
+hace una sola vez por petición, al coger el bloqueo. Medido: un `SELECT` con
+apertura de base incluida tarda 0,6 ms, así que el journal es el 0,1 % de eso.
+
+Lo que **no** cubre: las escrituras de datos que tocan varias tablas, como un
+`DELETE` con `ON DELETE CASCADE`. Ahí cada tabla se escribe de forma atómica,
+pero un corte entre las dos puede dejar el borrado a medias.
+
 ### Log de consultas
 
 Los **valores** de los parámetros ligados no se guardan salvo que actives

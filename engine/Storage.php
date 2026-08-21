@@ -14,6 +14,8 @@ namespace JsonSQLDB;
  *   <raiz>/<base>/<tabla>.json        datos (una fila por línea, legible)
  *   <raiz>/<base>/<tabla>.part2.json  siguientes partes (JSONSQLDB_FILAS_POR_PARTE)
  *   <raiz>/<base>/.cache/             caché serializada (regenerable, borrable)
+ *   <raiz>/<base>/.tx/                copia de seguridad de una operación de
+ *                                     estructura en curso (ver el journal)
  *   <raiz>/<base>/.lock               fichero de bloqueo lectura/escritura
  *
  * Concurrencia: un único bloqueo por base de datos.
@@ -30,6 +32,7 @@ final class Storage
 
     private string $dir;
     private string $dirCache;
+    private string $dirTx;
     private string $base;
 
     /** @var resource|null */
@@ -55,6 +58,7 @@ final class Storage
         $this->dir      = $dir;
         $this->base     = $base;
         $this->dirCache = $dir . '/.cache';
+        $this->dirTx    = $dir . '/.tx';
         $this->cache    = Config::cacheActiva();
         $this->apcu     = function_exists('apcu_fetch') && ini_get('apc.enabled') !== '0';
         $this->prefijo  = 'jsq:' . substr(md5($dir), 0, 12) . ':';
@@ -172,6 +176,165 @@ final class Storage
         $this->lockNivel     = 1;
         $this->lockExclusivo = $exclusivo;
         $this->revs          = null;   // releer revisiones dentro del bloqueo
+
+        $this->recuperarTx($exclusivo);
+    }
+
+    // ------------------------------------------------------------------
+    // Journal de operaciones de estructura
+    //
+    // Un ALTER TABLE o un DROP tocan varios ficheros. Cada escritura suelta es
+    // atómica (temporal + rename), pero el conjunto no: si el proceso muere
+    // entre dos de ellas, la base queda a medias.
+    //
+    // Antes de empezar se copia lo que se va a tocar en .tx/ junto con un
+    // manifiesto. Si todo va bien, .tx/ se borra. Si el proceso muere, .tx/ se
+    // queda ahí, y su sola presencia es la señal de que algo no terminó: la
+    // siguiente vez que se abre la base se deshace y todo vuelve a como estaba.
+    // ------------------------------------------------------------------
+
+    /**
+     * ¿Quedó una operación a medias? Comprobarlo cuesta un stat (medio
+     * microsegundo) y se hace una vez por petición, al coger el bloqueo.
+     */
+    private function recuperarTx(bool $yaExclusivo): void
+    {
+        if (!is_dir($this->dirTx)) {
+            return;                                   // el caso normal, y es gratis
+        }
+        // Deshacer exige exclusividad. Si estábamos leyendo, se sube el bloqueo
+        // un momento y se vuelve a bajar.
+        if (!$yaExclusivo && !@flock($this->lock, LOCK_EX)) {
+            return;                                   // ya lo está haciendo otro
+        }
+        clearstatcache(true, $this->dirTx);
+        if (is_dir($this->dirTx)) {                   // por si otro se adelantó
+            $this->deshacerTx();
+        }
+        if (!$yaExclusivo) {
+            @flock($this->lock, LOCK_SH);
+        }
+    }
+
+    /**
+     * Abre el journal: copia los ficheros de las tablas indicadas.
+     * Solo con bloqueo exclusivo.
+     *
+     * @param string[] $tablas
+     */
+    public function txIniciar(string $operacion, array $tablas): void
+    {
+        $this->exigirEscritura();
+        $this->deshacerTx();                          // por si acaso quedó uno
+
+        if (!@mkdir($this->dirTx, 0775, true) && !is_dir($this->dirTx)) {
+            throw JsonSqlDbError::io('No se puede crear la carpeta del journal');
+        }
+
+        $copiados = [];
+        foreach ($this->ficherosDe($tablas) as $f) {
+            $destino = $this->dirTx . '/' . basename($f);
+            if (!@copy($f, $destino)) {
+                $this->deshacerTx();
+                throw JsonSqlDbError::io('No se puede copiar ' . basename($f) . ' al journal');
+            }
+            $copiados[] = basename($f);
+        }
+
+        $this->escribirAtomico($this->dirTx . '/manifiesto.json', json_encode([
+            'estado'    => 'ACTIVA',
+            'operacion' => $operacion,
+            'tablas'    => array_values($tablas),
+            'ficheros'  => $copiados,
+            'ts'        => date('Y-m-d H:i:s'),
+        ], self::JSON_META) . "\n");
+    }
+
+    /** Cierra el journal: la operación terminó bien y la copia sobra. */
+    public function txConfirmar(): void
+    {
+        if (!is_dir($this->dirTx)) {
+            return;
+        }
+        // Se marca COMMITTED antes de borrar: si el corte ocurre entre las dos
+        // cosas, al recuperar se ve que ya había terminado y no se deshace nada.
+        $this->escribirAtomico($this->dirTx . '/manifiesto.json', json_encode([
+            'estado' => 'COMMITTED',
+            'ts'     => date('Y-m-d H:i:s'),
+        ], self::JSON_META) . "\n");
+
+        $this->borrarDirTx();
+    }
+
+    /** Deshace lo que hubiera empezado y no terminado. */
+    private function deshacerTx(): void
+    {
+        if (!is_dir($this->dirTx)) {
+            return;
+        }
+        $manifiesto = json_decode((string)@file_get_contents($this->dirTx . '/manifiesto.json'), true);
+
+        // COMMITTED = terminó bien y solo faltaba limpiar. No se toca nada.
+        if (is_array($manifiesto) && ($manifiesto['estado'] ?? '') === 'COMMITTED') {
+            $this->borrarDirTx();
+            return;
+        }
+
+        // Sin manifiesto legible no se sabe qué tablas había: se restaura lo
+        // que haya copiado, que siempre es anterior a cualquier cambio.
+        $tablas = is_array($manifiesto) ? (array)($manifiesto['tablas'] ?? []) : [];
+
+        foreach ($this->ficherosDe($tablas) as $f) {
+            @unlink($f);                              // fuera lo que dejó a medias
+        }
+        foreach ((array)glob($this->dirTx . '/*') as $copia) {
+            if (basename((string)$copia) === 'manifiesto.json') {
+                continue;
+            }
+            @copy((string)$copia, $this->dir . '/' . basename((string)$copia));
+        }
+        foreach ($tablas as $t) {
+            if (is_string($t)) {
+                $this->limpiarCache($t);              // la caché apuntaba a lo deshecho
+            }
+        }
+        $this->revs = null;
+        $this->borrarDirTx();
+    }
+
+    /**
+     * Ficheros en disco de unas tablas: datos, sus partes y metadatos, más los
+     * ficheros de base que cualquier operación de estructura puede tocar.
+     *
+     * @param string[] $tablas
+     * @return string[]
+     */
+    private function ficherosDe(array $tablas): array
+    {
+        $out = [];
+        foreach ($tablas as $t) {
+            if (!is_string($t) || $t === '') {
+                continue;
+            }
+            foreach ((array)glob($this->dir . '/' . $t . '.json') as $f)        { $out[] = (string)$f; }
+            foreach ((array)glob($this->dir . '/' . $t . '.part*.json') as $f)  { $out[] = (string)$f; }
+            foreach ((array)glob($this->dir . '/' . $t . '.meta.json') as $f)   { $out[] = (string)$f; }
+        }
+        foreach (['_revs.json', '_views.json', '_database.json'] as $f) {
+            if (is_file($this->dir . '/' . $f)) {
+                $out[] = $this->dir . '/' . $f;
+            }
+        }
+        return array_values(array_unique($out));
+    }
+
+    private function borrarDirTx(): void
+    {
+        foreach ((array)glob($this->dirTx . '/*') as $f) {
+            @unlink((string)$f);
+        }
+        @rmdir($this->dirTx);
+        clearstatcache(true, $this->dirTx);
     }
 
     /** Libera el bloqueo (solo cuando se cierra el último nivel). */
@@ -294,12 +457,19 @@ final class Storage
         $this->escribirAtomico($this->dir . '/_views.json', json_encode($vistas, self::JSON_META) . "\n");
     }
 
-    /** Todas las filas de una tabla (concatenando las partes). */
-    public function leerFilas(string $tabla): array
+    /**
+     * Todas las filas de una tabla (concatenando las partes).
+     *
+     * $sinCache fuerza leer del disco. La caché se invalida por el contador de
+     * revisión, que solo sube cuando escribe el motor: si alguien edita el JSON
+     * a mano, la caché sigue devolviendo lo viejo. La comprobación de integridad
+     * necesita ver lo que hay de verdad en el fichero.
+     */
+    public function leerFilas(string $tabla, bool $sinCache = false): array
     {
         self::validarTabla($tabla);
         $clave = $this->claveCache($tabla, 'd');
-        $filas = $this->cacheLeer($clave);
+        $filas = $sinCache ? null : $this->cacheLeer($clave);
         if ($filas !== null) {
             return $filas;
         }

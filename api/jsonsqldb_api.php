@@ -216,14 +216,24 @@ if ($store->bloqueoGlobal()) {
 }
 
 // --- API key ---
-if (!isset($API_KEYS[$apiKey]) || !is_array($API_KEYS[$apiKey])) {
+// Las cuentas van indexadas por nombre y la clave es el campo 'key', así que se
+// busca recorriéndolas. hash_equals compara en tiempo constante: una comparación
+// normal permitiría deducir la clave carácter a carácter midiendo tiempos.
+$cuenta = null;
+$origen = 'sin nombre';
+foreach ($API_KEYS as $nombreCuenta => $datos) {
+    if (is_array($datos) && isset($datos['key']) && hash_equals((string)$datos['key'], $apiKey)) {
+        $cuenta = $datos;
+        $origen = (string)$nombreCuenta;
+        break;
+    }
+}
+if ($cuenta === null) {
     $store->fallo();
     $store->contar($ip);
     salirConError('API key no válida');
 }
-$cuenta  = $API_KEYS[$apiKey];
 $permiso = strtolower((string)($cuenta['permiso'] ?? ''));
-$origen  = (string)($cuenta['nombre'] ?? 'sin nombre');
 
 if (!in_array($permiso, ['lectura', 'escritura', 'admin'], true)) {
     salirConError('La API key no tiene un permiso válido asignado');
@@ -246,10 +256,10 @@ if (abs(time() - (int)$timestamp) > RATE_TIMESTAMP_DIFF) {
 // --- Firma HMAC ---
 // Cada clave firma con SU secreto. Así, una aplicación comprometida no puede
 // firmar peticiones haciéndose pasar por otra clave, ni por la de administración.
-$secreto = (string)($cuenta['secreto'] ?? '');
+$secreto = (string)($cuenta['hmac_secret'] ?? '');
 if ($secreto === '') {
     salirConError('Configuración incompleta',
-        "La API key '" . $cuenta['nombre'] . "' no tiene 'secreto' en api/jsonsqldb_api_config.php");
+        "La API key '$origen' no tiene 'hmac_secret' en api/jsonsqldb_api_config.php");
 }
 
 // La firma cubre también los parámetros. Sin parámetros, $paramsRaw está vacío
@@ -296,8 +306,8 @@ try {
         $operacion = strtoupper(str_replace('_', ' ', $tipo));
 
         $lectura   = ['select', 'show_databases', 'show_tables', 'show_views',
-                      'show_schema', 'show_keys', 'show_triggers'];
-        $escritura = array_merge($lectura, ['insert', 'update', 'delete']);
+                      'show_schema', 'show_keys', 'show_triggers', 'check_keys'];
+        $escritura = array_merge($lectura, ['insert', 'update', 'delete', 'repair_keys']);
 
         if ($permiso === 'lectura' && !in_array($tipo, $lectura, true)) {
             throw JsonSqlDbError::permission('La API key solo tiene permiso de lectura');

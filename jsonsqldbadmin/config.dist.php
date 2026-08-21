@@ -1,7 +1,8 @@
 <?php
 // ============================================================
 // PLANTILLA. Copia este fichero a config.php. ADMIN_API_KEY y ADMIN_HMAC_SECRET
-// son la clave admin y SU 'secreto' de api/jsonsqldb_api_config.php.
+// son la 'key' y el 'hmac_secret' de la cuenta admin en
+// api/jsonsqldb_api_config.php.
 // ============================================================
 // ============================================================
 // jsonSQLDBadmin - Configuración del panel
@@ -20,7 +21,7 @@ defined('ADMIN_API_URL') || define('ADMIN_API_URL', (string)getenv('ADMIN_API_UR
 // Cámbiala allí y aquí a la vez.
 defined('ADMIN_API_KEY') || define('ADMIN_API_KEY', 'CHANGE_ME_ADMIN_API_KEY');
 
-// El 'secreto' de esa misma clave en api/jsonsqldb_api_config.php.
+// El 'hmac_secret' de esa misma cuenta en api/jsonsqldb_api_config.php.
 defined('ADMIN_HMAC_SECRET') || define('ADMIN_HMAC_SECRET', 'CHANGE_ME_ADMIN_SECRET');
 
 // --- Certificado del servidor de la API ---

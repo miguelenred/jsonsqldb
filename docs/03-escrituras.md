@@ -235,6 +235,35 @@ Si te encuentras una tabla de una versión anterior con un `autoincrement`
 huérfano en su `.meta.json`, el motor lo ignora al leerla y lo quita la próxima
 vez que se guarde la estructura. No hay que tocar el fichero a mano.
 
+### Comprobar la integridad referencial
+
+El motor respeta las claves foráneas en cada `INSERT`, `UPDATE` y `DELETE`, así
+que trabajando por SQL no pueden romperse. Pero los datos son ficheros JSON en
+disco: alguien puede editarlos a mano, restaurar la copia de una tabla sin la
+otra, o mezclar bases.
+
+```sql
+CHECK KEYS;                   -- revisa toda la base y solo informa
+CHECK KEYS FROM pedidos;      -- solo esa tabla
+REPAIR KEYS;                  -- además corrige lo que se puede corregir solo
+```
+
+`CHECK KEYS` devuelve una fila por problema, con la tabla, la restricción, el
+valor huérfano, a qué apunta y si se puede corregir solo. Si no hay problemas,
+devuelve cero filas.
+
+`REPAIR KEYS` pone a `NULL` las claves huérfanas cuya columna lo admita. **Nunca
+borra filas**: si la columna es `NOT NULL` o forma parte de la clave primaria, lo
+informa y lo deja como está, porque qué hacer con ese dato es una decisión tuya.
+
+Un detalle importante: la comprobación **lee del disco saltándose la caché**. La
+caché se invalida por un contador de revisión que solo sube cuando escribe el
+motor, así que una edición a mano seguiría oculta si se leyera de la caché.
+
+Desde el panel está en la pestaña **Integridad**, con el listado de problemas y
+un botón para corregir. `CHECK` vale con permiso de lectura; `REPAIR` necesita
+escritura.
+
 ### Vistas
 
 Una vista es un `SELECT` guardado con nombre. Se consulta como si fuera una

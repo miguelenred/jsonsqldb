@@ -104,13 +104,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && post('accion') !== '') {
 // ----------------------------------------------------------------------
 // Páginas
 // ----------------------------------------------------------------------
-$paginas = ['bases', 'tablas', 'vistas', 'crear_tabla', 'estructura', 'datos', 'fila', 'sql',
-            'auditoria', 'usuarios'];
+$paginas = ['bases', 'tablas', 'vistas', 'integridad', 'crear_tabla', 'estructura', 'datos',
+            'fila', 'sql', 'auditoria', 'usuarios'];
 if (!in_array($pagina, $paginas, true)) {
     $pagina = 'bases';
 }
-if (in_array($pagina, ['tablas', 'vistas', 'crear_tabla', 'estructura', 'datos', 'fila', 'sql'], true)
-    && $base === '') {
+if (in_array($pagina, ['tablas', 'vistas', 'integridad', 'crear_tabla', 'estructura', 'datos',
+                       'fila', 'sql'], true) && $base === '') {
     flash('warning', 'Elige primero una base de datos.');
     redirigir(['p' => 'bases']);
 }

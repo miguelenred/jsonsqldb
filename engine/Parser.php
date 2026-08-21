@@ -100,6 +100,8 @@ final class Parser
         if ($this->es('id', 'DROP'))   { return $this->drop(); }
         if ($this->es('id', 'ALTER'))  { return $this->alter(); }
         if ($this->es('id', 'SHOW'))   { return $this->show(); }
+        if ($this->es('id', 'CHECK'))  { return $this->check(false); }
+        if ($this->es('id', 'REPAIR')) { return $this->check(true); }
 
         $tk = $this->actual();
         throw JsonSqlDbError::syntax("Sentencia no soportada: '" . ($tk['v'] === '' ? 'vacía' : $tk['v']) . "'");
@@ -1046,6 +1048,19 @@ final class Parser
             return true;
         }
         return false;
+    }
+
+    /**
+     * CHECK KEYS [FROM t]   revisa las claves foráneas y solo informa
+     * REPAIR KEYS [FROM t]  además corrige lo que se puede corregir solo
+     */
+    private function check(bool $corregir): array
+    {
+        $this->exigir('id', $corregir ? 'REPAIR' : 'CHECK');
+        $this->exigir('id', 'KEYS');
+        $tabla = $this->comer('id', 'FROM') ? $this->nombreTabla() : null;
+
+        return ['k' => $corregir ? 'repair_keys' : 'check_keys', 'tabla' => $tabla];
     }
 
     /**

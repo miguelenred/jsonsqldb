@@ -329,6 +329,101 @@ chk('borrar una clave foránea', function () use ($bd) {
 esperaError('borrar una restricción inexistente', 'SCHEMA',
     fn() => $bd->consultar('ALTER TABLE pedidos DROP CONSTRAINT no_existe'));
 
+echo "\n== Journal de las operaciones de estructura ==\n";
+chk('una operación normal no deja rastro', function () use ($bd, $raiz) {
+    $bd->consultar('CREATE TABLE diario (id INTEGER PRIMARY KEY AUTOINCREMENT, a VARCHAR(10))');
+    $bd->consultar("INSERT INTO diario (a) VALUES ('uno'),('dos')");
+    $bd->consultar('ALTER TABLE diario RENAME TO diario2');
+    return !is_dir("$raiz/tienda/.tx");
+});
+chk('un corte a mitad se deshace al volver a abrir', function () use ($raiz) {
+    // Se simula el corte: se abre el journal a mano, se destroza la tabla y se
+    // deja el .tx sin confirmar, como si el proceso hubiera muerto ahí.
+    $st = new Storage($raiz, 'tienda');
+    $st->bloquear(true);
+    $st->txIniciar('ALTER TABLE', ['diario2']);
+    @unlink("$raiz/tienda/diario2.json");            // la operación a medias
+    file_put_contents("$raiz/tienda/diario2.meta.json", '{"roto":true}');
+    $st->desbloquear();
+    unset($st);
+
+    // Al abrir de nuevo, el motor encuentra el .tx y deshace
+    $bd2 = new Database('tienda', $raiz);
+    $filas = $bd2->consultar('SELECT * FROM diario2 ORDER BY id');
+    return !is_dir("$raiz/tienda/.tx") && count($filas) === 2 && $filas[0]['a'] === 'uno';
+});
+chk('un journal ya confirmado no deshace nada', function () use ($raiz) {
+    $st = new Storage($raiz, 'tienda');
+    $st->bloquear(true);
+    $st->txIniciar('ALTER TABLE', ['diario2']);
+    $st->desbloquear();
+
+    // La operación terminó: se marca COMMITTED pero no da tiempo a borrar
+    file_put_contents("$raiz/tienda/.tx/manifiesto.json", '{"estado":"COMMITTED"}');
+    $antes = (string)file_get_contents("$raiz/tienda/diario2.json");
+
+    $bd2 = new Database('tienda', $raiz);
+    $bd2->consultar('SELECT 1 AS uno');              // basta con abrir la base
+    return !is_dir("$raiz/tienda/.tx")
+        && (string)file_get_contents("$raiz/tienda/diario2.json") === $antes;
+});
+chk('el DROP de una tabla también va con journal', function () use ($raiz) {
+    $bd2 = new Database('tienda', $raiz);
+    $bd2->consultar('DROP TABLE diario2');
+    return !is_dir("$raiz/tienda/.tx")
+        && !in_array('diario2', $bd2->consultar('SHOW TABLES') === [] ? []
+             : array_column($bd2->consultar('SHOW TABLES'), 'tabla'), true);
+});
+
+echo "\n== Integridad de claves foráneas ==\n";
+chk('con los datos sanos no encuentra nada', fn() => $bd->consultar('CHECK KEYS') === []);
+chk('detecta una fila huérfana metida a mano en el JSON', function () use ($bd, $raiz) {
+    $bd->consultar('CREATE TABLE padres (id INTEGER PRIMARY KEY AUTOINCREMENT, nom VARCHAR(20))');
+    $bd->consultar('CREATE TABLE hijas (id INTEGER PRIMARY KEY AUTOINCREMENT, padre_id INTEGER,
+                                        obliga INTEGER NOT NULL DEFAULT 1)');
+    $bd->consultar('ALTER TABLE hijas ADD CONSTRAINT fk_hijas FOREIGN KEY (padre_id) REFERENCES padres(id)');
+    $bd->consultar("INSERT INTO padres (nom) VALUES ('uno')");
+    $bd->consultar('INSERT INTO hijas (padre_id) VALUES (1)');
+
+    // Edición a mano, como haría una persona con un editor de texto
+    $f = "$raiz/tienda/hijas.json";
+    file_put_contents($f, str_replace('"padre_id":1', '"padre_id":404', (string)file_get_contents($f)));
+
+    $p = $bd->consultar('CHECK KEYS FROM hijas');
+    return count($p) === 1 && $p[0]['tabla'] === 'hijas'
+        && str_contains($p[0]['valor'], '404') && (int)$p[0]['corregible'] === 1;
+});
+chk('la caché no oculta la edición a mano', function () use ($bd) {
+    // La caché solo se invalida cuando escribe el motor: CHECK KEYS lee del disco
+    return count($bd->consultar('CHECK KEYS')) === 1;
+});
+chk('REPAIR pone a NULL lo que puede', function () use ($bd) {
+    $r = $bd->consultar('REPAIR KEYS FROM hijas');
+    return $r['filas'] === 1 && $bd->consultar('CHECK KEYS') === [];
+});
+chk('una columna NOT NULL no se corrige sola', function () use ($bd, $raiz) {
+    $bd->consultar('ALTER TABLE hijas ADD CONSTRAINT fk_obliga FOREIGN KEY (obliga) REFERENCES padres(id)');
+    $f = "$raiz/tienda/hijas.json";
+    file_put_contents($f, str_replace('"obliga":1', '"obliga":505', (string)file_get_contents($f)));
+
+    $p = $bd->consultar('CHECK KEYS FROM hijas');
+    if (count($p) !== 1 || (int)$p[0]['corregible'] !== 0) { return $p; }
+
+    $r = $bd->consultar('REPAIR KEYS FROM hijas');
+    return $r['filas'] === 0 && str_contains($r['mensaje'], 'sin corregir')
+        && count($bd->consultar('CHECK KEYS')) === 1;
+});
+chk('REPAIR nunca borra filas', function () use ($bd) {
+    return $bd->consultar('SELECT COUNT(*) AS n FROM hijas')[0]['n'] === 1;
+});
+esperaError('CHECK KEYS sobre una tabla inexistente', 'SCHEMA',
+    fn() => $bd->consultar('CHECK KEYS FROM fantasma'));
+chk('limpiar las tablas de integridad', function () use ($bd) {
+    $bd->consultar('DROP TABLE hijas');
+    $bd->consultar('DROP TABLE padres');
+    return true;
+});
+
 echo "\n== Vistas ==\n";
 chk('crear una vista y consultarla', function () use ($bd) {
     $bd->consultar("CREATE VIEW v_conA AS SELECT cod, nombre FROM clientes WHERE cod LIKE 'A%'");

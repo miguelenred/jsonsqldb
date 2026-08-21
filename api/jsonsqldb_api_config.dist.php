@@ -25,9 +25,9 @@
 //             'escritura' : SELECT, INSERT, UPDATE, DELETE
 //             'admin'     : todo, incluido CREATE / ALTER / DROP / TRIGGER
 //   bases   → bases de datos a las que puede acceder. ['*'] = todas
-//   secreto → secreto HMAC con el que firma esta clave. OBLIGATORIO.
+//   hmac_secret → secreto con el que firma esta clave. OBLIGATORIO.
 //
-// SOBRE 'secreto': uno distinto por clave, siempre. Si varias claves compartieran
+// SOBRE 'hmac_secret': uno distinto por clave, siempre. Si varias claves compartieran
 // secreto, cualquier aplicación que lo tuviera podría firmar peticiones
 // haciéndose pasar por otra clave, incluida la de administración, y los permisos
 // por clave dejarían de servir de nada.
@@ -39,32 +39,32 @@
 $API_KEYS = [
 
     // Clave de jsonSQLDBadmin (el panel de administración usa la API con ella)
-    'CHANGE_ME_ADMIN_API_KEY' => [
-        'nombre'  => 'jsonSQLDBadmin',
-        'permiso' => 'admin',
-        'bases'   => ['*'],
+    'jsonSQLDBadmin' => [
+        'key'         => 'CHANGE_ME_ADMIN_API_KEY',
+        'permiso'     => 'admin',
+        'bases'       => ['*'],
         // El mismo valor tiene que estar en ADMIN_HMAC_SECRET del panel
-        'secreto' => 'CHANGE_ME_ADMIN_SECRET',
+        'hmac_secret' => 'CHANGE_ME_ADMIN_SECRET',
     ],
 
     // Ejemplo de clave de aplicación
-    'CHANGE_ME_APP_API_KEY' => [
-        'nombre'  => 'Mi aplicación',
-        'permiso' => 'escritura',
-        'bases'   => ['*'],
-        'secreto' => 'CHANGE_ME_APP_SECRET',
+    'Mi aplicación' => [
+        'key'         => 'CHANGE_ME_APP_API_KEY',
+        'permiso'     => 'escritura',
+        'bases'       => ['*'],
+        'hmac_secret' => 'CHANGE_ME_APP_SECRET',
     ],
 
     // Clave de los clientes de ejemplo (cliente_ejemplo.php y cliente_ejemplo.ps1)
-    'CHANGE_ME_EXAMPLE_API_KEY' => [
-        'nombre'  => 'Clientes de ejemplo',
-        'permiso' => 'escritura',
-        'bases'   => ['pruebas'],
-        'secreto' => 'CHANGE_ME_EXAMPLE_SECRET',
+    'Clientes de ejemplo' => [
+        'key'         => 'CHANGE_ME_EXAMPLE_API_KEY',
+        'permiso'     => 'escritura',
+        'bases'       => ['pruebas'],
+        'hmac_secret' => 'CHANGE_ME_EXAMPLE_SECRET',
     ],
 
-    // 'NUEVA_KEY_AQUI' => ['nombre' => '...', 'permiso' => 'lectura',
-    //                      'bases' => ['mibase'], 'secreto' => '...'],
+    // 'Nombre de la aplicación' => ['key' => '...', 'permiso' => 'lectura',
+    //                                'bases' => ['mibase'], 'hmac_secret' => '...'],
 ];
 
 // ------------------------------------------------------------
@@ -97,7 +97,7 @@ defined('CONFIAR_EN_PROXY') || define('CONFIAR_EN_PROXY', false);
 defined('ANTI_REPLAY_ACTIVO') || define('ANTI_REPLAY_ACTIVO', true);
 
 // Rate limiting por IP
-defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     true);   // false para deshabilitarlo
+defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     true);  // local: desactivado
 defined('RATE_LIMIT_MAX') || define('RATE_LIMIT_MAX',        150);    // máximo de peticiones por IP en la ventana
 defined('RATE_LIMIT_SECONDS') || define('RATE_LIMIT_SECONDS',    86400);  // ventana de tiempo (24 horas)
 defined('RATE_TIMESTAMP_DIFF') || define('RATE_TIMESTAMP_DIFF',   300);    // desfase máximo del timestamp (5 min)

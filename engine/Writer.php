@@ -52,6 +52,47 @@ final class Writer
             );
         }
 
+        // Las operaciones de estructura tocan varios ficheros: van con journal,
+        // para que un corte a mitad no deje la base a medias.
+        $tablasTx = self::tablasDelDdl($ast);
+        if ($tablasTx !== []) {
+            $st = $this->cat->storage();
+            $st->txIniciar(Database::operacion($ast), $tablasTx);
+            try {
+                $r = $this->despachar($ast);
+            } catch (\Throwable $e) {
+                throw $e;                 // el journal se deshará al abrir la base
+            }
+            $st->txConfirmar();
+            return $r;
+        }
+        return $this->despachar($ast);
+    }
+
+    /**
+     * Tablas que toca una operación de estructura, o [] si no lo es.
+     *
+     * @return string[]
+     */
+    private static function tablasDelDdl(array $ast): array
+    {
+        $tabla = (string)($ast['tabla'] ?? '');
+        if ($tabla === '') {
+            return [];
+        }
+        switch ($ast['k']) {
+            case 'create_table':
+            case 'drop_table':
+                return [$tabla];
+            case 'alter_table':
+                // El renombrado escribe con el nombre nuevo: hay que copiar los dos
+                return $ast['accion'] === 'rename' ? [$tabla, (string)$ast['nuevo']] : [$tabla];
+        }
+        return [];
+    }
+
+    private function despachar(array $ast): array
+    {
         switch ($ast['k']) {
             case 'insert':
                 $n = $this->insertar($ast);
@@ -78,6 +119,19 @@ final class Writer
                 return $this->crearTrigger($ast);
             case 'drop_trigger':
                 return $this->borrarTrigger($ast);
+
+            case 'repair_keys':
+                $problemas = (new Integrity($this->cat))->claves($ast['tabla'], true);
+                $arreglados = 0;
+                foreach ($problemas as $p) {
+                    if ($p['accion'] === 'puesta a NULL') { $arreglados++; }
+                }
+                $quedan = count($problemas) - $arreglados;
+                return ['filas' => $arreglados, 'mensaje' =>
+                    $problemas === []
+                        ? 'Las claves foráneas están bien: no hay filas huérfanas'
+                        : "$arreglados fila(s) corregida(s)" .
+                          ($quedan > 0 ? ", $quedan sin corregir (la columna no admite NULL)" : '')];
 
             case 'create_view':
                 $creada = $this->cat->crearVista($ast['nombre'], $ast['sql'], $ast['si_no_existe']);

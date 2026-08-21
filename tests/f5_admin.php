@@ -364,6 +364,34 @@ chk('un trigger sin cuerpo se rechaza', fn() =>
         'nombre' => 'trg_vacio', 'timing' => 'AFTER', 'evento' => 'INSERT', 'cuerpo' => '',
     ]), 'al menos una sentencia'));
 
+echo "\n== Integridad desde el panel ==\n";
+chk('la pantalla dice que todo está bien', function () {
+    $html = pedir('p=integridad&db=tienda');
+    return str_contains($html, 'Todo correcto');
+});
+chk('detecta y corrige una fila huérfana', function () use ($raizDatos) {
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE TABLE padres_i (id INTEGER PRIMARY KEY AUTOINCREMENT)']);
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE TABLE hijas_i (id INTEGER PRIMARY KEY AUTOINCREMENT, padre_id INTEGER)']);
+    enviar('p=sql&db=tienda', ['sql' => 'ALTER TABLE hijas_i ADD CONSTRAINT fk_i FOREIGN KEY (padre_id) REFERENCES padres_i(id)']);
+    enviar('p=sql&db=tienda', ['sql' => 'INSERT INTO padres_i (id) VALUES (1)']);
+    enviar('p=sql&db=tienda', ['sql' => 'INSERT INTO hijas_i (padre_id) VALUES (1)']);
+
+    $f = $raizDatos . '/tienda/hijas_i.json';
+    file_put_contents($f, str_replace('"padre_id":1', '"padre_id":404', (string)file_get_contents($f)));
+
+    $html = pedir('p=integridad&db=tienda');
+    if (!str_contains($html, 'huérfana') || !str_contains($html, '404')) {
+        return 'no detectó la fila huérfana';
+    }
+    $tras = enviar('p=integridad&db=tienda', ['corregir' => '1']);
+    return str_contains($tras, 'fila(s) corregida(s)') && str_contains($tras, 'Todo correcto');
+});
+chk('limpiar las tablas de integridad', function () {
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE hijas_i']);
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE padres_i']);
+    return true;
+});
+
 echo "\n== Vistas desde el panel ==\n";
 chk('la pantalla de vistas está en el menú y vacía al principio', function () {
     $html = pedir('p=vistas&db=tienda');
@@ -812,6 +840,10 @@ chk('el de lectura no ve los botones de administración', fn() =>
     !str_contains(pedir('p=bases'), 'Nueva base de datos'));
 chk('el de lectura no puede crear vistas', fn() =>
     !str_contains(pedir('p=vistas&db=tienda'), 'value="crear_vista"'));
+chk('el de lectura puede comprobar la integridad pero no corregirla', function () {
+    $html = pedir('p=integridad&db=tienda');
+    return str_contains($html, 'Integridad') && !str_contains($html, 'name="corregir"');
+});
 chk('el de lectura no puede crear una base', fn() =>
     str_contains(enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'prohibida'],
                         true, 'p=sql&db=tienda'), 'permiso de administrador'));

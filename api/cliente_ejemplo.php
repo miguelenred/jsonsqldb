@@ -7,7 +7,7 @@ declare(strict_types=1);
  * Copia este fichero en la aplicación que vaya a consumir la API. Solo necesita
  * la URL del endpoint, su API key y el secreto con el que firma esa clave.
  *
- * EL SECRETO ES EL DE LA CLAVE: el campo 'secreto' de esa misma entrada de
+ * EL SECRETO ES EL DE LA CLAVE: el campo 'hmac_secret' de esa misma entrada de
  * $API_KEYS en api/jsonsqldb_api_config.php. Cada clave tiene el suyo, distinto
  * del de las demás; si se compartiera, cualquiera que lo tuviera podría firmar
  * peticiones haciéndose pasar por otra clave.
@@ -28,7 +28,7 @@ final class JsonSqlDbCliente
 {
     private string $url;
     private string $apiKey;
-    private string $secreto;      // el 'secreto' de esta API key
+    private string $secreto;      // el 'hmac_secret' de esta API key
     private string $base;
     private int    $timeout;
     private string $ca          = '';
