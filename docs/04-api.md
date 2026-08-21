@@ -68,8 +68,8 @@ API no distingue entre una firma mal calculada y una clave que no existe.
 
 ### Clave de los ejemplos
 
-`cliente_ejemplo.php` y `cliente_ejemplo.ps1` vienen con una API key propia,
-**la misma en los dos**, con permiso `escritura` sobre la base `pruebas` y sobre
+`cliente_ejemplo.php`, `cliente_ejemplo.ps1` y `cliente_ejemplo.py` vienen con
+una API key propia, **la misma en los tres**, con permiso `escritura` sobre la base `pruebas` y sobre
 ninguna más. Está dada de alta en `api/jsonsqldb_api_config.php` como
 «Clientes de ejemplo».
 
@@ -80,6 +80,38 @@ una clave `admin`.
 En PHP el atajo es `JsonSqlDbCliente::pruebas()`; en PowerShell ya viene puesta
 en `$Global:JsonSqlDb`. Para tu aplicación, crea una clave propia limitada a sus
 bases en lugar de reutilizar esta.
+
+### Desde Python
+
+`api/cliente_ejemplo.py` hace lo mismo desde Python, solo con la biblioteca
+estándar: sin `pip`, sin `requests`. Requiere Python 3.7 o superior.
+
+```python
+from cliente_ejemplo import JsonSqlDbCliente
+
+cli = JsonSqlDbCliente("https://miservidor/jsonsqldb/api/jsonsqldb_api.php",
+                       "MI_API_KEY", "EL_HMAC_SECRET_DE_ESA_KEY", "mibase")
+
+filas = cli.consultar("SELECT * FROM clientes WHERE ciudad = ?", ["Madrid"])
+cli.consultar("INSERT INTO clientes (nombre, saldo) VALUES (?, ?)", ["O'Donnell", 10.55])
+print(cli.valor("SELECT COUNT(*) FROM clientes"))
+```
+
+Devuelve listas de diccionarios en `SELECT` y `SHOW`, y un diccionario
+`{'success': True, ...}` en las escrituras. Los errores llegan como excepción
+`JsonSqlDbError`, no como valor de retorno.
+
+Certificado propio o autofirmado, igual que los otros:
+
+```python
+cli.certificado("C:/xampp/apache/conf/ssl.crt/server.crt")
+cli.aceptar_autofirmado()
+```
+
+Un detalle de implementación: el JSON de los parámetros se genera con
+`separators=(",", ":")`, sin espacios. El servidor firma el texto **exacto** que
+recibe, así que lo que se firma y lo que se envía tienen que ser idénticos byte a
+byte.
 
 ### Desde PowerShell
 
@@ -355,8 +387,9 @@ apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
 | `api/jsonsqldb_api_config.php` | secreto HMAC, API keys con permisos y límites |
 | `api/cliente_ejemplo.php` | cliente PHP para las aplicaciones |
 | `api/cliente_ejemplo.ps1` | cliente PowerShell, con los mismos parámetros ligados |
+| `api/cliente_ejemplo.py` | cliente Python, solo con la biblioteca estándar |
 | `engine/ApiStore.php` | estado de la API en JSON: rate limit, fallos, nonces, histórico |
-| `tests/f4_api.php` | 49 comprobaciones lanzando peticiones reales |
+| `tests/f4_api.php` | 50 comprobaciones lanzando peticiones reales |
 
 ## 9. Pruebas
 
@@ -365,7 +398,7 @@ php tests/f1_nucleo.php       → OK: 52
 php tests/f2_parser.php       → OK: 60
 php tests/f2_select.php       → OK: 77
 php tests/f3_escrituras.php   → OK: 56
-php tests/f4_api.php          → OK: 49
-php tests/f5_esquema.php      → OK: 82
+php tests/f4_api.php          → OK: 50
+php tests/f5_esquema.php      → OK: 87
 php tests/f5_admin.php        → OK: 111
 ```

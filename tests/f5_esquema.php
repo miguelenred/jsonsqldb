@@ -375,6 +375,56 @@ chk('el DROP de una tabla también va con journal', function () use ($raiz) {
              : array_column($bd2->consultar('SHOW TABLES'), 'tabla'), true);
 });
 
+echo "\n== Journal en escrituras de varias tablas ==\n";
+chk('un CASCADE que toca dos tablas se journaliza', function () use ($bd, $raiz) {
+    $bd->consultar('CREATE TABLE jpadres (id INTEGER PRIMARY KEY AUTOINCREMENT, n VARCHAR(10))');
+    $bd->consultar('CREATE TABLE jhijas (id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER)');
+    $bd->consultar('ALTER TABLE jhijas ADD CONSTRAINT fk_j FOREIGN KEY (pid)
+                    REFERENCES jpadres(id) ON DELETE CASCADE');
+    $bd->consultar("INSERT INTO jpadres (n) VALUES ('uno'),('dos')");
+    $bd->consultar('INSERT INTO jhijas (pid) VALUES (1),(1),(2)');
+
+    $bd->consultar('DELETE FROM jpadres WHERE id = 1');
+    return $bd->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 1
+        && !is_dir("$raiz/tienda/.tx");
+});
+chk('un corte a mitad de un CASCADE se deshace entero', function () use ($raiz) {
+    $st = new Storage($raiz, 'tienda');
+    $st->bloquear(true);
+    $st->txIniciar('ESCRITURA', ['jpadres', 'jhijas']);
+    // El borrado se aplicó en la tabla padre pero no llegó a la hija
+    file_put_contents("$raiz/tienda/jpadres.json",
+        '{"table":"jpadres","rows":[]}' . "\n");
+    $st->desbloquear();
+    unset($st);
+
+    $bd2 = new Database('tienda', $raiz);
+    return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 1
+        && $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 1
+        && !is_dir("$raiz/tienda/.tx");
+});
+chk('una escritura de una sola tabla no paga el journal', function () use ($raiz) {
+    // Sin journal, el .tx no llega a crearse en ningún momento
+    $bd2 = new Database('tienda', $raiz);
+    $bd2->consultar("INSERT INTO jpadres (n) VALUES ('tres')");
+    return !is_dir("$raiz/tienda/.tx");
+});
+chk('un trigger que escribe en otra tabla también se journaliza', function () use ($raiz) {
+    $bd2 = new Database('tienda', $raiz);
+    $bd2->consultar("CREATE TRIGGER trg_j AFTER INSERT ON jhijas
+                     BEGIN UPDATE jpadres SET n = 'tocado' WHERE id = NEW.pid; END");
+    $bd2->consultar('INSERT INTO jhijas (pid) VALUES (2)');
+    return $bd2->consultar('SELECT n FROM jpadres WHERE id = 2')[0]['n'] === 'tocado'
+        && !is_dir("$raiz/tienda/.tx");
+});
+chk('limpiar las tablas del journal', function () use ($raiz) {
+    $bd2 = new Database('tienda', $raiz);
+    $bd2->consultar('DROP TRIGGER trg_j');
+    $bd2->consultar('DROP TABLE jhijas');
+    $bd2->consultar('DROP TABLE jpadres');
+    return true;
+});
+
 echo "\n== Integridad de claves foráneas ==\n";
 chk('con los datos sanos no encuentra nada', fn() => $bd->consultar('CHECK KEYS') === []);
 chk('detecta una fila huérfana metida a mano en el JSON', function () use ($bd, $raiz) {

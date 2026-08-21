@@ -92,6 +92,12 @@ final class Config
         return defined('JSONSQLDB_LOG_PARAMS') && JSONSQLDB_LOG_PARAMS === true;
     }
 
+    /** ¿Journal también en las escrituras que tocan varias tablas? */
+    public static function journalDatos(): bool
+    {
+        return !defined('JSONSQLDB_JOURNAL_DATOS') || JSONSQLDB_JOURNAL_DATOS === true;
+    }
+
     public static function logDias(): int
     {
         return defined('JSONSQLDB_LOG_DIAS') ? max(0, (int)JSONSQLDB_LOG_DIAS) : 90;

@@ -64,6 +64,21 @@ defined('JSONSQLDB_LOG_MAX_SIZE') || define('JSONSQLDB_LOG_MAX_SIZE', 5 * 1024 *
 defined('JSONSQLDB_LOG_DIAS') || define('JSONSQLDB_LOG_DIAS', 90);
 
 // ------------------------------------------------------------
+// SEGURIDAD ANTE CORTES
+// ------------------------------------------------------------
+// Las operaciones de estructura (CREATE, ALTER, DROP) siempre van con journal:
+// si el proceso muere a mitad, al abrir la base se deshacen.
+//
+// Esto añade lo mismo a las escrituras de datos que tocan MÁS DE UNA TABLA: un
+// DELETE con ON DELETE CASCADE, o un trigger que escribe en otra tabla. Con una
+// sola tabla no se journaliza nunca, porque sería copiar el fichero entero en
+// cada INSERT y el coste no compensa.
+//
+// Ponlo a false solo si haces borrados en cascada enormes y prefieres velocidad
+// a que un corte de luz no te deje el borrado a medias.
+defined('JSONSQLDB_JOURNAL_DATOS') || define('JSONSQLDB_JOURNAL_DATOS', true);
+
+// ------------------------------------------------------------
 // ORDEN ALFABÉTICO (solo afecta a ORDER BY)
 // ------------------------------------------------------------
 //

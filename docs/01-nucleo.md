@@ -268,9 +268,22 @@ Comprobar si hay un journal pendiente cuesta un `stat` (medio microsegundo) y se
 hace una sola vez por petición, al coger el bloqueo. Medido: un `SELECT` con
 apertura de base incluida tarda 0,6 ms, así que el journal es el 0,1 % de eso.
 
-Lo que **no** cubre: las escrituras de datos que tocan varias tablas, como un
-`DELETE` con `ON DELETE CASCADE`. Ahí cada tabla se escribe de forma atómica,
-pero un corte entre las dos puede dejar el borrado a medias.
+El journal cubre también las **escrituras de datos que tocan más de una tabla**:
+un `DELETE` con `ON DELETE CASCADE`, un `UPDATE` con `ON UPDATE SET NULL`, o un
+trigger que escribe en otra tabla. El motor acumula los cambios en memoria y los
+vuelca al final, así que en ese momento sabe exactamente qué tablas toca y abre
+el journal solo si son dos o más.
+
+Con **una sola tabla no se journaliza**: sería copiar el fichero de datos entero
+en cada `INSERT`, y el coste no compensa. Ahí basta con el `rename` atómico de la
+escritura. Se controla con `JSONSQLDB_JOURNAL_DATOS`, a `true` por defecto.
+
+Medido: un `DELETE` en cascada que recorre 2.500 filas de dos tablas tarda 3,3 ms
+con el journal puesto.
+
+Lo que **no** cubre: agrupar varias sentencias en una unidad de trabajo. No hay
+`BEGIN`/`COMMIT`: cada sentencia es atómica por su cuenta, con sus cascadas y sus
+triggers dentro, pero dos sentencias seguidas no se deshacen juntas.
 
 ### Log de consultas
 

@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.3.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.4.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -35,10 +35,12 @@ millions. There is no network protocol and no connection pool: concurrency is
 handled with file locks, which is fine for a handful of simultaneous writers and
 not for hundreds. A write locks the whole database while it runs.
 
-Schema changes are crash-safe: `CREATE TABLE`, `DROP TABLE` and `ALTER TABLE`
-run under a journal, so an operation interrupted by a power cut is undone the
-next time the database is opened. Data writes spanning several tables — a
-`DELETE` with `ON DELETE CASCADE`, for instance — are not covered yet.
+Schema changes and multi-table data writes are crash-safe: `CREATE TABLE`,
+`DROP TABLE`, `ALTER TABLE`, and any write touching more than one table (a
+`DELETE` with `ON DELETE CASCADE`, a trigger writing elsewhere) run under a
+journal, so an operation interrupted by a power cut is undone the next time the
+database is opened. What is still not covered is grouping several statements
+into one unit of work — there is no `BEGIN`/`COMMIT`.
 
 ---
 
@@ -172,6 +174,7 @@ application; neither has dependencies.
 |---|---|
 | [`api/cliente_ejemplo.php`](api/cliente_ejemplo.php) | PHP applications |
 | [`api/cliente_ejemplo.ps1`](api/cliente_ejemplo.ps1) | PowerShell scripts |
+| [`api/cliente_ejemplo.py`](api/cliente_ejemplo.py) | Python 3.7+, standard library only |
 
 They handle the signature, the bound parameters and the TLS certificate
 (including self-signed ones) for you.
@@ -186,6 +189,15 @@ $db = new JsonSqlDbCliente(
 
 $rows = $db->consultar('SELECT * FROM customers WHERE city = ?', ['Madrid']);
 $db->consultar('INSERT INTO customers (name, balance) VALUES (?, ?)', ["O'Donnell", 10.55]);
+```
+
+```python
+from cliente_ejemplo import JsonSqlDbCliente
+
+db = JsonSqlDbCliente("https://yourserver/jsonsqldb/api/jsonsqldb_api.php",
+                      "YOUR_API_KEY", "THAT_KEY_S_HMAC_SECRET", "mydatabase")
+
+rows = db.consultar("SELECT * FROM customers WHERE city = ?", ["Madrid"])
 ```
 
 ```powershell
@@ -414,8 +426,8 @@ php tests/f1_nucleo.php       → OK: 52    storage, types, locking
 php tests/f2_parser.php       → OK: 60    parser and bound parameters
 php tests/f2_select.php       → OK: 77    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 48    real requests against the API
-php tests/f5_esquema.php      → OK: 82    SHOW, ALTER, constraints, views, integrity
+php tests/f4_api.php          → OK: 50    real requests against the API
+php tests/f5_esquema.php      → OK: 87    SHOW, ALTER, constraints, views, integrity
 php tests/f5_admin.php        → OK: 111   the panel, driven like a user
 ```
 

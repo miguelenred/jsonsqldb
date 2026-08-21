@@ -9,6 +9,44 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.4.0] - 2026-08-21
+
+### Added
+
+- **The journal now covers data writes that touch more than one table**: a
+  `DELETE` with `ON DELETE CASCADE`, an `UPDATE` with `ON UPDATE SET NULL`, or a
+  trigger writing into another table. This closes the gap left open in 1.3.0.
+  - Changes are accumulated in memory and flushed at the end, so at that point
+    the engine knows exactly which tables are involved and opens the journal only
+    when there are two or more.
+  - Single-table writes are **not** journalled: that would mean copying the whole
+    data file on every `INSERT`, and the atomic rename already covers them.
+    Controlled by `JSONSQLDB_JOURNAL_DATOS`, `true` by default.
+  - Measured: a cascading `DELETE` across 2,500 rows in two tables takes 3.3 ms
+    with the journal in place.
+  - Still not covered: grouping several statements into one unit of work. There
+    is no `BEGIN`/`COMMIT`.
+
+- **Python example client** (`api/cliente_ejemplo.py`), standard library only —
+  no `pip`, no `requests`. Same bound parameters, same signature and the same
+  certificate options as the PHP and PowerShell clients. Requires Python 3.7+.
+  A test checks that Python and PHP compute the same token for an identical
+  request, so the two can never drift apart.
+
+### Changed
+
+- **The global `HMAC_SECRET` is gone.** `hmac_secret` is now mandatory on every
+  entry of `$API_KEYS`. In 1.3.0 it was optional, with `HMAC_SECRET` acting as a
+  fallback; keeping both meant explaining a precedence rule in three places for
+  no benefit. An account without `hmac_secret` cannot sign anything: the API
+  answers "Configuración incompleta" naming the account and what it is missing.
+
+### Upgrading from 1.3.0
+
+Give every entry in `$API_KEYS` its own `hmac_secret`, remove the `HMAC_SECRET`
+line, and make sure each client carries its account's secret. Nothing else
+changes.
+
 ## [1.3.0] - 2026-08-20
 
 ### Added
@@ -100,12 +138,11 @@ configuration becomes stricter. See "Upgrading" below.
   HMAC signature, a captured request replayed from a different IP produced a
   different nonce and passed the check while the signature stayed valid. The
   nonce is now `SHA256(token)`, and the token is already unique per request.
-- **Every API key now has its own HMAC secret**, via a mandatory `secreto` field
-  in `$API_KEYS`, and the global `HMAC_SECRET` is gone. With a single shared
-  secret, any application holding it could sign requests impersonating another
-  key — including the admin key — which made per-key permissions meaningless. A
-  key without `secreto` cannot sign anything: the API answers "Configuración
-  incompleta" naming the key and what it is missing.
+- **Each API key can now have its own HMAC secret**, via a `secreto` field in
+  `$API_KEYS`. With a single shared secret, any application holding it could sign
+  requests impersonating another key — including the admin key — which made
+  per-key permissions meaningless. `HMAC_SECRET` remains as a fallback for keys
+  without one, so existing installations keep working.
 - **Bound parameter values are no longer written to the query log** unless
   `JSONSQLDB_LOG_PARAMS` is enabled. Passwords, tokens and personal data travel
   in those values and the log is kept for 90 days.
@@ -136,9 +173,8 @@ workers, 20 minutes was a denial of service built out of legitimate requests.
 
 1. If you develop locally over `http://localhost`, set `EXIGIR_HTTPS` and
    `ADMIN_EXIGIR_HTTPS` to `false` in your configuration.
-2. Give each API key its own `secreto`, remove the `HMAC_SECRET` line, and update
-   each client with its key's secret. For the admin key, the same value goes in
-   `ADMIN_HMAC_SECRET` in the panel config.
+2. Give each API key its own `secreto` and update the matching client. For the
+   admin key, the same value goes in `ADMIN_HMAC_SECRET` in the panel config.
 3. If any query or export legitimately takes longer than 60 seconds, raise
    `TIME_LIMIT` for your case rather than leaving it at the old value.
 
@@ -208,6 +244,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.4.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.4.0
 [1.3.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.3.0
 [1.2.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.2.0
 [1.1.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.1.0

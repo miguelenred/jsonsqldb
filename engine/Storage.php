@@ -216,6 +216,12 @@ final class Storage
         }
     }
 
+    /** ¿Hay ya un journal abierto? Evita anidar uno dentro de otro. */
+    public function txAbierta(): bool
+    {
+        return is_dir($this->dirTx);
+    }
+
     /**
      * Abre el journal: copia los ficheros de las tablas indicadas.
      * Solo con bloqueo exclusivo.

@@ -196,15 +196,42 @@ final class Writer
         $this->sucioMeta[$tabla] = true;
     }
 
-    /** Vuelca a disco todo lo modificado. */
+    /**
+     * Vuelca a disco todo lo modificado.
+     *
+     * Cuando la escritura toca más de una tabla —un DELETE con ON DELETE
+     * CASCADE, un trigger que escribe en otra tabla— cada fichero se guarda de
+     * forma atómica, pero el conjunto no: un corte entre dos deja el cambio a
+     * medias. En ese caso se abre el journal, igual que en las operaciones de
+     * estructura.
+     *
+     * Con una sola tabla no se journaliza: sería copiar el fichero de datos
+     * entero en cada INSERT, y el coste no compensa. Ahí basta con el rename
+     * atómico de cada escritura.
+     */
     private function volcar(): void
     {
+        $st     = $this->cat->storage();
+        $tablas = array_keys($this->sucioDatos + $this->sucioMeta);
+
+        // txAbierta(): si venimos de una operación de estructura, el journal ya
+        // está abierto y no hay que anidar otro
+        $conJournal = count($tablas) > 1 && Config::journalDatos() && !$st->txAbierta();
+        if ($conJournal) {
+            $st->txIniciar('ESCRITURA', $tablas);
+        }
+
         foreach (array_keys($this->sucioDatos) as $tabla) {
-            $this->cat->storage()->guardarFilas($tabla, $this->datos[$tabla]);
+            $st->guardarFilas($tabla, $this->datos[$tabla]);
         }
         foreach (array_keys($this->sucioMeta) as $tabla) {
-            $this->cat->storage()->guardarMeta($tabla, Catalog::compactar($this->metas[$tabla]));
+            $st->guardarMeta($tabla, Catalog::compactar($this->metas[$tabla]));
         }
+
+        if ($conJournal) {
+            $st->txConfirmar();
+        }
+
         $this->sucioDatos = [];
         $this->sucioMeta  = [];
         $this->cat->olvidar();

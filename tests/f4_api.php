@@ -415,6 +415,44 @@ chk('el .ps1 usa exactamente la misma clave', function () {
     $ps1 = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
     return str_contains($ps1, "ApiKey      = '" . JsonSqlDbCliente::EJEMPLO_API_KEY . "'");
 });
+chk('el cliente Python usa la misma clave y secreto', function () {
+    $py = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.py');
+    return str_contains($py, '"' . JsonSqlDbCliente::EJEMPLO_API_KEY . '"')
+        && str_contains($py, '"' . JsonSqlDbCliente::EJEMPLO_SECRETO . '"');
+});
+chk('el cliente Python firma igual que el de PHP', function () {
+    if (trim((string)shell_exec('command -v python3')) === '') {
+        echo "       (omitida: no hay python3)\n";
+        return true;
+    }
+    // Se le pide a Python que calcule el token de una petición concreta y se
+    // compara con el que calcula PHP: si no coincidieran, la API los rechazaría
+    $sql    = "SELECT * FROM clientes WHERE nombre = ?";
+    $valor  = "O'Donnell";
+    $clave  = 'K';
+    $secre  = 'S';
+    $ts     = '1700000000';
+
+    $codigo = <<<'PY'
+import sys, json, hmac, hashlib
+sql, valor, clave, secre, ts = sys.argv[1:6]
+params = json.dumps([valor], ensure_ascii=False, separators=(",", ":"))
+msg = f"+{clave}|{ts}|{sql}{params}¿"
+print(params)
+print(hmac.new(secre.encode(), msg.encode(), hashlib.sha256).hexdigest())
+PY;
+    $tmp = sys_get_temp_dir() . '/firma_' . getmypid() . '.py';
+    file_put_contents($tmp, $codigo);
+    $salida = (string)shell_exec('python3 ' . escapeshellarg($tmp) . ' '
+        . escapeshellarg($sql) . ' ' . escapeshellarg($valor) . ' '
+        . escapeshellarg($clave) . ' ' . escapeshellarg($secre) . ' ' . escapeshellarg($ts) . ' 2>&1');
+    @unlink($tmp);
+
+    [$paramsPy, $tokenPy] = array_pad(explode("\n", trim($salida)), 2, '');
+    $tokenPhp = hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . $paramsPy . '¿', $secre);
+
+    return $tokenPy === $tokenPhp ?: "python: $tokenPy / php: $tokenPhp";
+});
 chk('los dos clientes usan el secreto de su clave', function () {
     $ps1  = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
     $suyo = secretoDe(JsonSqlDbCliente::EJEMPLO_API_KEY);
