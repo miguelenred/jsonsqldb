@@ -66,6 +66,11 @@ el nombre exacto de la base. Hay dos formas de exportar:
   carpetas. Se descomprime dentro de `data/` y la base queda restaurada, con sus
   metadatos y revisiones. Es la copia fiel.
 
+El botón de la copia ZIP **solo aparece si el panel y la API se sirven desde la
+misma máquina**. El panel compara el host de `ADMIN_API_URL` con el suyo; si no
+coinciden, oculta el botón y explica por qué, en vez de dejarte copiar los
+ficheros de otra instalación que casualmente estuviera en el disco local.
+
 La copia ZIP es lo único del panel que lee los ficheros del motor directamente,
 y solo en lectura: un ZIP fiel necesita los `.json` tal cual, y la API devuelve
 datos, no ficheros. La ruta sale de `ADMIN_RUTA_DATOS_MOTOR`, o de `../data` si
@@ -272,7 +277,7 @@ $cli->aceptarAutofirmado();
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 e iconos 1.11.3, en local |
 | `jsonsqldbadmin/assets/panel.js` | habilita los campos de columna según el tipo |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 111 comprobaciones navegando el panel de verdad |
+| `tests/f5_admin.php` | 113 comprobaciones navegando el panel de verdad |
 
 ## 8. Pruebas
 
@@ -283,7 +288,7 @@ claves, triggers, datos, editor SQL, permisos del rol de lectura y auditoría.
 Usa una carpeta temporal, así que no toca tus datos.
 
 ```
-php tests/f5_admin.php     → OK: 111
+php tests/f5_admin.php     → OK: 113
 ```
 
 Necesita la extensión cURL. En Windows con XAMPP, actívala en `php.ini`

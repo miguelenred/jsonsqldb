@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.5.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.6.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -365,7 +365,9 @@ What it does:
 - Browse, filter, sort, insert, edit and delete rows
 - A SQL editor for anything else
 - Export a table or a query result to **CSV** or to **INSERT statements**;
-  export a whole database as a **SQL dump** or a **ZIP** of its files
+  export a whole database as a **SQL dump** or a **ZIP** of its files (the ZIP
+  reads the engine's files from disk, so it is only offered when the panel and
+  the API share a host)
 - Its own users with `admin` / `read-only` roles, bcrypt passwords, session
   expiry, per-IP lockout after failed logins, CSRF tokens on every form, and a
   daily audit trail
@@ -548,7 +550,8 @@ php tests/f2_select.php       → OK: 77    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 50    real requests against the API
 php tests/f5_esquema.php      → OK: 87    SHOW, ALTER, constraints, views, integrity
-php tests/f5_admin.php        → OK: 111   the panel, driven like a user
+php tests/f5_admin.php        → OK: 113   the panel, driven like a user
+php tests/f6_cortes.php       → OK: 5     crash recovery, killing real processes
 ```
 
 `f5_admin.php` needs cURL and starts two PHP built-in servers — one for the panel

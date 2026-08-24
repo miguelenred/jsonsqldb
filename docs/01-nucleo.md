@@ -295,6 +295,12 @@ qué va a hacer. Si todo va bien, `.tx/` se borra. Si el proceso muere, `.tx/` s
 queda, y **su sola presencia es la señal** de que algo no terminó: la siguiente
 vez que se abre la base se restauran las copias y todo vuelve a como estaba.
 
+`tests/f6_cortes.php` lo comprueba matando procesos de verdad: lanza un `DELETE`
+en cascada, lo mata con `SIGKILL` a mitad, y exige que al reabrir la base esté
+entera o sin tocar, nunca a medias. Informa de cuántas muertes cayeron dentro de
+la ventana de escritura, para que una ejecución que no llegó a probarlo lo diga
+en vez de pasar en silencio.
+
 Un detalle que evita el caso raro: antes de borrar `.tx/` el manifiesto se marca
 como `COMMITTED`. Si el corte ocurre justo entre marcarlo y borrarlo, al
 recuperar se ve que la operación sí había terminado y no se deshace nada.

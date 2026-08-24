@@ -780,6 +780,39 @@ chk('el volcado recrea la base tal cual', function () {
     preg_match('/<td>(\d+)<\/td>/', $b, $mb);
     return ($ma[1] ?? 'a') === ($mb[1] ?? 'b') ?: ($ma[1] ?? '?') . ' vs ' . ($mb[1] ?? '?');
 });
+chk('con la API en otra máquina, el ZIP se desactiva y se explica', function () use ($raizDatos, $puertoApi) {
+    // Se pide el listado de bases haciendo creer al panel que la API está fuera
+    $conf = $raizDatos . '/_otrohost.php';
+    file_put_contents($conf, "<?php\n"
+        . "define('ADMIN_API_URL', 'https://otra-maquina.example/api/jsonsqldb_api.php');\n");
+
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg(
+        "\$_SERVER['HTTP_HOST'] = 'panel.example';"
+        . "require " . var_export($conf, true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/config.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Api.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ";"
+        . "var_export(mismoHostQueLaApi());"
+        . "try { rutaDeLaBase('tienda'); echo '|sin aviso'; }"
+        . "catch (Throwable \$e) { echo '|', \$e->getMessage(); }"
+    ) . ' 2>&1');
+    @unlink($conf);
+
+    return str_starts_with($salida, 'false')
+        && str_contains($salida, 'misma máquina')
+        && str_contains($salida, 'otra-maquina.example') ?: $salida;
+});
+chk('con el mismo host sí está disponible', function () use ($raizDatos, $puertoApi) {
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg(
+        "\$_SERVER['HTTP_HOST'] = '127.0.0.1:$puertoApi';"
+        . "define('ADMIN_API_URL', 'http://127.0.0.1:$puertoApi/api/jsonsqldb_api.php');"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/config.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Api.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ";"
+        . "var_export(mismoHostQueLaApi());"
+    ) . ' 2>&1');
+    return trim($salida) === 'true' ?: $salida;
+});
 chk('la copia en ZIP trae la estructura de carpetas', function () use ($raizDatos) {
     if (!class_exists('ZipArchive')) {
         echo "       (omitida: falta la extensión zip de PHP)\n";

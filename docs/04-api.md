@@ -400,5 +400,5 @@ php tests/f2_select.php       → OK: 77
 php tests/f3_escrituras.php   → OK: 56
 php tests/f4_api.php          → OK: 50
 php tests/f5_esquema.php      → OK: 87
-php tests/f5_admin.php        → OK: 111
+php tests/f5_admin.php        → OK: 113
 ```

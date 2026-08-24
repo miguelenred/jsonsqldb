@@ -234,6 +234,20 @@ function condicionFiltro(array $columnas, string $filtro): array
  */
 function rutaDeLaBase(string $base): string
 {
+    // Antes de mirar el disco: si la API está en otra máquina, los ficheros del
+    // motor no están aquí y cualquier ruta local que encontremos sería de otra
+    // instalación distinta. Vale más decirlo que copiar la base equivocada.
+    $mismoHost = mismoHostQueLaApi();
+    if ($mismoHost === false) {
+        throw new RuntimeException(
+            'La copia en ZIP necesita que el panel y el motor estén en la misma máquina, '
+            . 'porque lee los ficheros directamente del disco. La API está en '
+            . h(parse_url(Api::url(), PHP_URL_HOST) ?: '?') . ' y el panel se está sirviendo desde '
+            . h((string)($_SERVER['HTTP_HOST'] ?? '?')) . '. Usa el volcado en SQL, que va por la API '
+            . 'y funciona entre máquinas distintas.'
+        );
+    }
+
     $raiz = trim((string)ADMIN_RUTA_DATOS_MOTOR);
     if ($raiz === '') {
         $raiz = dirname(__DIR__, 2) . '/data';          // instalación normal
@@ -242,12 +256,41 @@ function rutaDeLaBase(string $base): string
 
     if (!is_dir($ruta)) {
         throw new RuntimeException(
-            "No se encuentra la carpeta de la base '$base'. Si el panel está en otra máquina "
-            . 'que el motor, la copia en ZIP no está disponible: usa el volcado en SQL. '
-            . 'Si están en la misma, indica la ruta en ADMIN_RUTA_DATOS_MOTOR.'
+            "No se encuentra la carpeta de la base '$base' en $raiz. Indica la ruta de la "
+            . 'carpeta data/ del motor en ADMIN_RUTA_DATOS_MOTOR, o usa el volcado en SQL, '
+            . 'que va por la API y no necesita acceso al disco.'
         );
     }
     return $ruta;
+}
+
+/**
+ * ¿El panel y la API se sirven desde la misma máquina?
+ *
+ * Devuelve null cuando no se puede saber: la URL de la API es relativa al propio
+ * panel, o no hay HTTP_HOST (línea de comandos). En ese caso no se bloquea nada.
+ */
+function mismoHostQueLaApi(): ?bool
+{
+    $hostApi = parse_url(Api::url(), PHP_URL_HOST);
+    $hostAqui = (string)($_SERVER['HTTP_HOST'] ?? '');
+
+    if (!is_string($hostApi) || $hostApi === '' || $hostAqui === '') {
+        return null;
+    }
+    // HTTP_HOST puede traer el puerto; el host de la URL no
+    $hostAqui = strtolower(explode(':', $hostAqui)[0]);
+    $hostApi  = strtolower($hostApi);
+
+    if ($hostApi === $hostAqui) {
+        return true;
+    }
+    // Distintos nombres para la misma máquina: localhost, 127.0.0.1, ::1
+    $locales = ['localhost', '127.0.0.1', '::1', '[::1]'];
+    if (in_array($hostApi, $locales, true) && in_array($hostAqui, $locales, true)) {
+        return true;
+    }
+    return false;
 }
 
 /** Nombre de tabla o columna citado para meterlo en la SQL. */

@@ -1,6 +1,9 @@
 <?php
 $bases = Api::bases();
 sort($bases);
+
+// La copia en ZIP lee el disco: solo tiene sentido si el motor está aquí
+$zipDisponible = mismoHostQueLaApi() !== false;
 ?>
 <div class="row g-3">
   <div class="col-lg-7">
@@ -23,8 +26,12 @@ sort($bases);
                   <div class="d-inline-flex gap-2 align-items-center">
                     <a class="btn btn-sm btn-outline-secondary"
                        href="<?= h(url(['p' => 'sql', 'db' => $b])) ?>"><i class="bi bi-terminal"></i> SQL</a>
-                    <?php foreach (['sql' => ['Volcado SQL', 'filetype-sql'],
-                                    'zip' => ['Copia ZIP', 'file-zip']] as $f => $bt): ?>
+                    <?php
+                    $formatos = ['sql' => ['Volcado SQL', 'filetype-sql']];
+                    if ($zipDisponible) {
+                        $formatos['zip'] = ['Copia ZIP', 'file-zip'];
+                    }
+                    foreach ($formatos as $f => $bt): ?>
                       <form method="post">
                         <?= csrf() ?>
                         <input type="hidden" name="accion" value="exportar_base">
@@ -49,9 +56,19 @@ sort($bases);
       </div>
       <div class="card-footer small text-body-secondary">
         <i class="bi bi-filetype-sql"></i> volcado en SQL: estructura y datos, legible y
-        reejecutable. <i class="bi bi-file-zip"></i> copia en ZIP: los ficheros JSON tal cual,
-        con su estructura de carpetas; se descomprime dentro de <code>data/</code> y la base
-        queda restaurada.
+        reejecutable.
+        <?php if ($zipDisponible): ?>
+          <i class="bi bi-file-zip"></i> copia en ZIP: los ficheros JSON tal cual, con su
+          estructura de carpetas; se descomprime dentro de <code>data/</code> y la base queda
+          restaurada.
+        <?php else: ?>
+          <br>
+          <i class="bi bi-info-circle"></i> La <strong>copia en ZIP no está disponible</strong>:
+          lee los ficheros del disco y la API está en otra máquina
+          (<code><?= h(parse_url(Api::url(), PHP_URL_HOST) ?: '?') ?></code>, y el panel se sirve
+          desde <code><?= h(explode(':', (string)($_SERVER['HTTP_HOST'] ?? '?'))[0]) ?></code>).
+          El volcado en SQL va por la API y funciona igual entre máquinas distintas.
+        <?php endif; ?>
       </div>
     </div>
   </div>

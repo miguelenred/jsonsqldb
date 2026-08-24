@@ -9,6 +9,28 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.6.0] - 2026-08-24
+
+### Added
+
+- **Crash recovery test with real process kills** (`tests/f6_cortes.php`). The
+  existing journal tests build the `.tx` directory by hand and check that undoing
+  works; this one kills a child process with `SIGKILL` while it is running a
+  cascading `DELETE`, then reopens the database and requires it to be in one of
+  the two valid states — the delete fully applied or fully undone. Anything in
+  between is corruption. It reports how many kills landed inside the write
+  window, so a run that never hit it says so instead of quietly passing.
+
+### Fixed
+
+- **The panel's ZIP backup no longer offers itself when the engine is on another
+  machine.** It reads the engine's files straight from disk, so it only works
+  when the panel and the API share a host. The panel now compares the host of
+  `ADMIN_API_URL` with its own: if they differ, the button is hidden and the
+  reason is explained, instead of silently copying whatever happened to be in the
+  local `data/` directory. The SQL dump goes through the API and works between
+  machines, as before.
+
 ## [1.5.0] - 2026-08-21
 
 ### Added
@@ -281,6 +303,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.6.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.6.0
 [1.5.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.5.0
 [1.4.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.4.0
 [1.3.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.3.0

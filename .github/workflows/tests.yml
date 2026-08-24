@@ -46,3 +46,6 @@ jobs:
 
       - name: Admin panel
         run: php tests/f5_admin.php
+
+      - name: Crash recovery
+        run: php tests/f6_cortes.php
