@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.6.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.7.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -424,6 +424,23 @@ There is no `CONCAT()` — use the `||` operator, as in SQLite:
 SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 ```
 
+### What is not supported
+
+The rule: **if a statement is accepted, it does exactly what it promises;
+otherwise it is rejected with a clear error.** Nothing is accepted and silently
+ignored.
+
+These exist in SQLite and raise an error here: `INSERT OR IGNORE` / `OR REPLACE`
+(no upsert — do a `SELECT` and pick), `CREATE TEMP`/`TEMPORARY TABLE` (no
+temporary tables), `WITHOUT ROWID` (there is no rowid), `BEGIN`/`COMMIT`/
+`ROLLBACK` (no multi-statement transactions), `CHECK` constraints (use a `BEFORE`
+trigger with `RAISE(ABORT, …)`), `CREATE INDEX` (no indexes), and window
+functions, CTEs and `UNION`.
+
+Behavioural differences worth knowing: `DECIMAL` is a rounded float, `ORDER BY`
+uses a configurable collation rather than binary order, and `LIKE` is
+case-insensitive but accent-sensitive.
+
 ### Data types
 
 | Type | Aliases | Notes |
@@ -545,8 +562,8 @@ your data.
 
 ```
 php tests/f1_nucleo.php       → OK: 56    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 60    parser and bound parameters
-php tests/f2_select.php       → OK: 77    SELECT execution and collation
+php tests/f2_parser.php       → OK: 67    parser and bound parameters
+php tests/f2_select.php       → OK: 78    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 50    real requests against the API
 php tests/f5_esquema.php      → OK: 87    SHOW, ALTER, constraints, views, integrity

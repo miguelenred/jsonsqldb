@@ -436,6 +436,20 @@ chk('borrar la tabla de orden', function () use ($bd) {
     return true;
 });
 
+echo "\n== RANDOM ==\n";
+chk('devuelve enteros de 64 bits, como SQLite', function () use ($bd) {
+    $grande = false;
+    $negativo = false;
+    for ($i = 0; $i < 60; $i++) {
+        $v = $bd->consultar('SELECT RANDOM() AS r')[0]['r'];
+        if (!is_int($v)) { return 'no es entero: ' . var_export($v, true); }
+        if (abs($v) > 2 ** 40) { $grande = true; }
+        if ($v < 0)           { $negativo = true; }
+    }
+    // Con 32 bits nunca se pasaría de 2^40; y tiene que dar negativos
+    return ($grande && $negativo) ?: "grande=$grande negativo=$negativo";
+});
+
 echo "\n== Errores ==\n";
 error('tabla inexistente', 'SCHEMA', 'SELECT * FROM noexiste');
 error('columna inexistente', 'SCHEMA', 'SELECT nocolumna FROM usuarios');

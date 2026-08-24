@@ -305,6 +305,32 @@ chk('parámetro no simple', function () {
     return 'no lanzó error';
 });
 
+echo "\n== Lo que no se soporta se rechaza, no se ignora ==\n";
+foreach ([
+    'INSERT OR IGNORE'  => "INSERT OR IGNORE INTO t (a) VALUES (1)",
+    'INSERT OR REPLACE' => "INSERT OR REPLACE INTO t (a) VALUES (1)",
+    'CREATE TEMP'       => 'CREATE TEMP TABLE t (a INTEGER)',
+    'CREATE TEMPORARY'  => 'CREATE TEMPORARY TABLE t (a INTEGER)',
+    'WITHOUT ROWID'     => 'CREATE TABLE t (a INTEGER PRIMARY KEY) WITHOUT ROWID',
+] as $titulo => $sql) {
+    chk("$titulo se rechaza", function () use ($sql) {
+        try { Parser::analizar($sql); }
+        catch (JsonSqlDbError $e) {
+            return $e->sqlState === 'SYNTAX' && str_contains($e->getMessage(), 'no está soportado')
+                ?: $e->sqlState . ': ' . $e->getMessage();
+        }
+        return 'se aceptó en silencio';
+    });
+}
+chk('el INSERT normal sigue funcionando', function () {
+    $a = Parser::analizar("INSERT INTO t (a) VALUES (1)");
+    return $a['k'] === 'insert' && $a['tabla'] === 't';
+});
+chk('el CREATE TABLE normal sigue funcionando', function () {
+    $a = Parser::analizar('CREATE TABLE t (a INTEGER PRIMARY KEY)');
+    return $a['k'] === 'create_table';
+});
+
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";
 exit($ko === 0 ? 0 : 1);

@@ -582,9 +582,16 @@ final class Parser
     private function insert(): array
     {
         $this->exigir('id', 'INSERT');
-        $this->comer('id', 'OR');            // INSERT OR REPLACE/IGNORE: se ignora el modificador
-        $this->comer('id', 'REPLACE');
-        $this->comer('id', 'IGNORE');
+
+        // Antes se aceptaban y se ignoraban, y eso es peor que no admitirlos: la
+        // sentencia parecía correcta y se comportaba como un INSERT normal.
+        if ($this->comer('id', 'OR')) {
+            $modo = strtoupper((string)$this->actual()['v']);
+            throw JsonSqlDbError::syntax(
+                "INSERT OR $modo no está soportado. Para un upsert, comprueba antes con un "
+                . 'SELECT y lanza el INSERT o el UPDATE que corresponda.'
+            );
+        }
         $this->exigir('id', 'INTO');
 
         $ins = ['k' => 'insert', 'tabla' => $this->nombreTabla(), 'cols' => null,
@@ -707,8 +714,14 @@ final class Parser
             return ['k' => 'create_database', 'base' => $this->nombreSimple('base de datos'),
                     'si_no_existe' => $siNoExiste];
         }
-        $this->comer('id', 'TEMP');
-        $this->comer('id', 'TEMPORARY');
+        // Aceptarlos e ignorarlos era lo más peligroso de todo: creabas una tabla
+        // permanente creyendo que era temporal.
+        if ($this->es('id', 'TEMP') || $this->es('id', 'TEMPORARY')) {
+            throw JsonSqlDbError::syntax(
+                'CREATE TEMP/TEMPORARY TABLE no está soportado: no hay tablas temporales. '
+                . 'Crea una tabla normal y bórrala con DROP TABLE cuando termines.'
+            );
+        }
         $this->exigir('id', 'TABLE');
         return $this->createTable();
     }
@@ -738,8 +751,12 @@ final class Parser
         } while ($this->comer('punc', ','));
 
         $this->exigir('punc', ')');
-        $this->comer('id', 'WITHOUT');                    // WITHOUT ROWID: se ignora
-        $this->comer('id', 'ROWID');
+        if ($this->es('id', 'WITHOUT')) {
+            throw JsonSqlDbError::syntax(
+                'WITHOUT ROWID no está soportado. Aquí no hay rowid: las filas se guardan '
+                . 'como objetos JSON y la clave primaria es la que declares.'
+            );
+        }
 
         return ['k' => 'create_table', 'tabla' => $tabla, 'si_no_existe' => $siNoExiste, 'def' => $def];
     }

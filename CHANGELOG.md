@@ -9,6 +9,34 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.7.0] - 2026-08-24
+
+### Fixed
+
+- **Unsupported SQL is now rejected instead of silently ignored.** These were
+  parsed, accepted and then quietly dropped, so the statement looked correct and
+  behaved as something else entirely:
+  - `INSERT OR IGNORE` and `INSERT OR REPLACE` behaved as a plain `INSERT`, with
+    no conflict handling at all.
+  - `CREATE TEMP TABLE` and `CREATE TEMPORARY TABLE` created a **permanent**
+    table. This was the dangerous one: data you believed was temporary stayed on
+    disk.
+  - `WITHOUT ROWID` was accepted and ignored.
+
+  All four now raise a `SYNTAX` error explaining what to do instead. The rule
+  from here on: **if a statement is accepted, it does exactly what it promises;
+  otherwise it is rejected with a clear error.**
+
+- **`RANDOM()` now returns a signed 64-bit integer**, like SQLite's `random()`.
+  It was returning a roughly 32-bit range.
+
+### Documentation
+
+- New section in `docs/02-consultas.md` listing **what is not supported** and the
+  behavioural differences from SQLite (`DECIMAL` as a rounded float, collation in
+  `ORDER BY`, accent-sensitive `LIKE`), so the supported subset is stated rather
+  than discovered.
+
 ## [1.6.0] - 2026-08-24
 
 ### Added
@@ -303,6 +331,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.7.0
 [1.6.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.6.0
 [1.5.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.5.0
 [1.4.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.4.0

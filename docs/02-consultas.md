@@ -32,6 +32,33 @@ El segundo argumento son los valores de los `?`: se insertan en el árbol de la
 sentencia ya analizados, nunca en el texto SQL, así que un valor no puede
 alterar la consulta. Ver `docs/04-api.md` §1.1.
 
+## 1.1. Qué NO se soporta
+
+La regla del proyecto es simple: **si una sentencia se acepta, hace exactamente lo
+que promete. Si no se puede hacer, se rechaza con un error claro.** Nunca se
+acepta algo y se ignora en silencio, porque eso deja al programador creyendo que
+tiene una garantía que no tiene.
+
+Estas construcciones existen en SQLite y aquí **dan error**:
+
+| Construcción | Por qué y qué hacer |
+|---|---|
+| `INSERT OR IGNORE` / `OR REPLACE` | No hay upsert. Haz un `SELECT` y decide entre `INSERT` y `UPDATE` |
+| `CREATE TEMP TABLE` / `TEMPORARY` | No hay tablas temporales. Crea una normal y bórrala con `DROP TABLE` |
+| `WITHOUT ROWID` | No hay `rowid`: las filas son objetos JSON y la clave es la que declares |
+| `BEGIN` / `COMMIT` / `ROLLBACK` | No hay transacciones de varias sentencias. Cada sentencia es atómica por su cuenta |
+| `CHECK (...)` | Usa un trigger `BEFORE` con `RAISE(ABORT, '...')` |
+| `CREATE INDEX` | No hay índices. Las búsquedas recorren la tabla |
+| Funciones de ventana, CTE (`WITH`), `UNION` | Fuera del alcance del proyecto |
+| `ALTER TABLE` sobre la clave primaria | Se gestiona con `ADD`/`DROP PRIMARY KEY`, y el `AUTOINCREMENT` solo al crear |
+
+Y estas diferencias de comportamiento conviene tenerlas presentes:
+
+- `DECIMAL` es coma flotante redondeada, no decimal exacto.
+- `ORDER BY` usa la colación configurada, no el orden binario, salvo que lo
+  cambies.
+- `LIKE` no distingue mayúsculas, pero **sí** distingue acentos.
+
 ## 2. Sintaxis soportada
 
 | Cláusula | Detalle |
@@ -161,13 +188,13 @@ un resultado silenciosamente incorrecto.
 | `engine/Database.php` | fachada: analiza, bloquea, ejecuta y registra el log |
 | `engine/Config.php` | lectura de `config.php` con valores por defecto |
 | `engine/Logger.php` | log de consultas |
-| `tests/f2_parser.php` | 60 comprobaciones del analizador |
-| `tests/f2_select.php` | 77 comprobaciones del ejecutor, con datos reales |
+| `tests/f2_parser.php` | 67 comprobaciones del analizador |
+| `tests/f2_select.php` | 78 comprobaciones del ejecutor, con datos reales |
 
 ## 8. Pruebas
 
 ```
 php tests/f1_nucleo.php     → OK: 56
-php tests/f2_parser.php     → OK: 60
-php tests/f2_select.php     → OK: 77
+php tests/f2_parser.php     → OK: 67
+php tests/f2_select.php     → OK: 78
 ```

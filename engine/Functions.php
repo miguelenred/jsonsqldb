@@ -70,7 +70,9 @@ final class Functions
                 return round((float)Valor::aNumero($args[0]), $dec);
             case 'RANDOM':
                 self::exige($nombre, $args, 0);
-                return mt_rand(PHP_INT_MIN >> 32, PHP_INT_MAX >> 32);
+                // Entero de 64 bits con signo, como el random() de SQLite. Antes
+                // se devolvía un rango de 32 bits, que no es lo mismo.
+                return random_int(PHP_INT_MIN, PHP_INT_MAX);
 
             // ---------- Nulos ----------
             case 'COALESCE':
