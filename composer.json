@@ -1,0 +1,63 @@
+{
+    "name": "miguelenred/jsonsqldb",
+    "description": "SQL database engine, HTTP API and web admin panel in plain PHP over JSON files. No database server, no external dependencies.",
+    "type": "library",
+    "keywords": [
+        "database",
+        "sql",
+        "json",
+        "sql-engine",
+        "no-dependencies",
+        "shared-hosting",
+        "admin-panel"
+    ],
+    "homepage": "https://github.com/miguelenred/jsonsqldb",
+    "license": "Apache-2.0",
+    "authors": [
+        {
+            "name": "Miguel Sanchez",
+            "email": "miguel@miguelenred.es",
+            "homepage": "https://github.com/miguelenred",
+            "role": "Author, design and technical direction"
+        },
+        {
+            "name": "Claude Opus 5 (Anthropic)",
+            "role": "Implementation, under the author's direction and review"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/miguelenred/jsonsqldb/issues",
+        "source": "https://github.com/miguelenred/jsonsqldb",
+        "docs": "https://github.com/miguelenred/jsonsqldb/tree/main/docs"
+    },
+    "require": {
+        "php": ">=8.0"
+    },
+    "suggest": {
+        "ext-curl": "Only for jsonSQLDBadmin and the test suite, which talk to the API over HTTP",
+        "ext-zip": "Only for the admin panel's ZIP backup button",
+        "ext-apcu": "Optional shared cache; without it the engine caches on disk"
+    },
+    "autoload": {
+        "psr-4": {
+            "JsonSQLDB\\": "engine/"
+        }
+    },
+    "scripts": {
+        "test": [
+            "php tests/f1_nucleo.php",
+            "php tests/f2_parser.php",
+            "php tests/f2_select.php",
+            "php tests/f3_escrituras.php",
+            "php tests/f4_api.php",
+            "php tests/f5_esquema.php",
+            "php tests/f5_admin.php"
+        ]
+    },
+    "scripts-descriptions": {
+        "test": "Runs the seven test suites. Copy the two .dist config files first."
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

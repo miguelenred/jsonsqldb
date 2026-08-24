@@ -64,6 +64,43 @@ defined('JSONSQLDB_LOG_MAX_SIZE') || define('JSONSQLDB_LOG_MAX_SIZE', 5 * 1024 *
 defined('JSONSQLDB_LOG_DIAS') || define('JSONSQLDB_LOG_DIAS', 90);
 
 // ------------------------------------------------------------
+// CONEXIÓN DIRECTA AL MOTOR (SIN API)
+// ------------------------------------------------------------
+// Por defecto el motor SOLO se puede usar a través de la API
+// (api/jsonsqldb_api.php). A true, el código PHP del mismo servidor puede
+// instanciar JsonSQLDB\Database y consultar sin pasar por HTTP.
+//
+//     defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', true);
+//
+//     require 'config.php';
+//     require 'engine/bootstrap.php';
+//     $bd = new JsonSQLDB\Database('mibase');
+//     $filas = $bd->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Madrid']);
+//
+// SOLO PARA PROGRAMADORES CON EXPERIENCIA. Lee esto antes de activarlo:
+//
+//   * NO HAY PERMISOS. La conexión directa equivale siempre a una clave 'admin':
+//     puede leer, escribir, alterar la estructura y BORRAR BASES DE DATOS
+//     enteras. No hay forma de limitarla a una base ni a solo lectura.
+//
+//   * NO HAY API KEY NI FIRMA. Se salta la autenticación HMAC, el límite de
+//     peticiones, el anti-replay y la lista de IPs. Toda la seguridad pasa a
+//     depender de tu código: si una variable sin validar acaba en una consulta,
+//     no hay nada detrás que lo pare.
+//
+//   * SÍ SE REGISTRA. Cada consulta va al log igual que por la API, con el
+//     campo 'ip' a "local", porque no hay petición HTTP de la que sacarla.
+//
+//   * SIGUE HABIENDO PARÁMETROS LIGADOS. Úsalos: consultar($sql, $params) con
+//     ? en la SQL. Es lo único que te protege de una inyección, y aquí no hay
+//     API que te obligue a hacerlo bien.
+//
+// Cuándo tiene sentido: un script de mantenimiento, una migración, un proceso
+// por cron, o una aplicación tuya en el mismo servidor donde el salto por HTTP
+// solo añade latencia. Para cualquier cosa expuesta a terceros, usa la API.
+defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', false);
+
+// ------------------------------------------------------------
 // SEGURIDAD ANTE CORTES
 // ------------------------------------------------------------
 // Las operaciones de estructura (CREATE, ALTER, DROP) siempre van con journal:

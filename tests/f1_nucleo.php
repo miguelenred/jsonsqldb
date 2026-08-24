@@ -270,6 +270,51 @@ chk('borrar base', function () use ($raiz, $base) {
 });
 @rmdir($raiz);
 
+echo "\n== Conexión directa al motor ==\n";
+chk('bloqueada por defecto', function () use ($raiz) {
+    // En otro proceso, sin activar el parámetro
+    $codigo = 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$r = ' . var_export($raiz . '/directa', true) . ';'
+            . '@mkdir($r, 0777, true);'
+            . 'try { JsonSQLDB\\Database::crear("d", $r);'
+            . '      (new JsonSQLDB\\Database("d", $r))->consultar("CREATE TABLE t (a INTEGER)");'
+            . '      echo "permitida"; }'
+            . 'catch (Throwable $e) { echo $e->getMessage(); }';
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    return str_contains($salida, 'conexión directa al motor está desactivada') ?: $salida;
+});
+chk('permitida con el parámetro a true, y con permisos de admin', function () use ($raiz) {
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'define("JSONSQLDB_LOG_ACTIVO", true);'
+            . 'define("JSONSQLDB_LOG_PATH", ' . var_export($raiz . '/logs', true) . ');'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$r = ' . var_export($raiz . '/directa', true) . ';'
+            . 'JsonSQLDB\\Database::crear("d2", $r);'
+            . '$bd = new JsonSQLDB\\Database("d2", $r);'
+            . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n VARCHAR(10))");'
+            . '$bd->consultar("INSERT INTO t (n) VALUES (?)", ["uno"]);'
+            . 'echo count($bd->consultar("SELECT * FROM t"));';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $GLOBALS['logDirecta'] = $raiz . '/logs';
+    return $salida === '1' ?: $salida;
+});
+chk('el log de una conexión directa pone ip = local', function () {
+    foreach ((array)glob($GLOBALS['logDirecta'] . '/consultas-*.json') as $f) {
+        foreach ((array)file((string)$f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $linea) {
+            $e = json_decode($linea, true);
+            if (is_array($e) && ($e['ip'] ?? '') === 'local') {
+                return true;
+            }
+        }
+    }
+    return 'ninguna entrada con ip=local: ' . implode(',', array_map('basename',
+        (array)glob($GLOBALS['logDirecta'] . '/*')));
+});
+chk('limpiar la base de la conexión directa', function () use ($raiz) {
+    exec('rm -rf ' . escapeshellarg($raiz . '/directa') . ' ' . escapeshellarg($raiz . '/logs'));
+    return true;
+});
+
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";
 exit($ko === 0 ? 0 : 1);

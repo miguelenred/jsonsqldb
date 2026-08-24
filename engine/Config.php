@@ -93,6 +93,17 @@ final class Config
     }
 
     /** ¿Journal también en las escrituras que tocan varias tablas? */
+    /**
+     * ¿Se permite usar el motor directamente, sin pasar por la API?
+     *
+     * La API define JSONSQLDB_VIA_API, así que esto solo afecta al código que
+     * instancia Database por su cuenta.
+     */
+    public static function conexionDirecta(): bool
+    {
+        return defined('JSONSQLDB_CONEXION_DIRECTA') && JSONSQLDB_CONEXION_DIRECTA === true;
+    }
+
     public static function journalDatos(): bool
     {
         return !defined('JSONSQLDB_JOURNAL_DATOS') || JSONSQLDB_JOURNAL_DATOS === true;

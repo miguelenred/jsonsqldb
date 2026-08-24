@@ -5,6 +5,9 @@ declare(strict_types=1);
  * Prueba de las sentencias SHOW y de las restricciones añadidas sobre tablas
  * ya creadas. Ejecutar: php tests/f5_esquema.php
  */
+// Las pruebas usan el motor directamente, sin pasar por la API
+define('JSONSQLDB_CONEXION_DIRECTA', true);
+
 require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Database;

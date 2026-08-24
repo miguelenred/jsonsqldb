@@ -137,6 +137,10 @@ final class Logger
         if (self::$ip !== null) {
             return self::$ip;
         }
+        // Conexión directa: no hay petición HTTP a la API de la que sacar la IP
+        if (!defined('JSONSQLDB_VIA_API')) {
+            return 'local';
+        }
         return (string)($_SERVER['REMOTE_ADDR'] ?? (PHP_SAPI === 'cli' ? 'cli' : 'desconocida'));
     }
 }

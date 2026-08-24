@@ -18,6 +18,11 @@
 !/jsonsqldbadmin/datos/web.config
 !/jsonsqldbadmin/datos/.gitkeep
 
+# Composer: the lock file is not committed because there are no dependencies
+# to lock, and vendor/ is generated
+/vendor/
+/composer.lock
+
 # Certificates and keys
 *.crt
 *.pem

@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.4.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.5.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -53,7 +53,7 @@ into one unit of work — there is no `BEGIN`/`COMMIT`.
 | **cURL** | Required by **jsonSQLDBadmin** and by the test suite, because the panel talks to the API over HTTP. Not needed by the engine itself |
 | **zip** | Optional. Only for the panel's "ZIP backup" button |
 | **Web server** | Apache, IIS or nginx — see below |
-| **Composer** | Not used |
+| **Composer** | Optional. Only to install this project; it pulls in nothing else |
 
 ### Web server compatibility
 
@@ -131,11 +131,36 @@ If you are on nginx, do [`nginx/`](nginx/) **before** exposing anything.
 
 ---
 
+## No external dependencies
+
+This matters enough to be explicit about it: **jsonSQLDB uses no third-party
+libraries at all.** Not one. The engine, the API and the admin panel are written
+against the PHP standard library, and the only bundled third-party code is
+Bootstrap and Bootstrap Icons for the panel's appearance, served from local files
+with no CDN.
+
+There is a `composer.json`, and it might look like a contradiction. It is not:
+it exists so you can install jsonSQLDB *with* Composer if that is how you manage
+your project. Its `require` section contains PHP itself and nothing else, so
+`composer install` downloads no dependencies — because there are none to
+download.
+
+```bash
+composer require miguelenred/jsonsqldb
+```
+
+That gives you PSR-4 autoloading for the `JsonSQLDB\` namespace, so you do not
+even need to require `engine/bootstrap.php`. You can equally ignore Composer
+entirely, copy the folder to your server, and require `engine/bootstrap.php`
+yourself. Both routes are supported and neither is preferred.
+
 ## How you connect
 
-**The only way in is the API.** There is no driver, no socket, no direct file
-access from your application. Every read and every write goes through a single
-signed HTTP endpoint:
+By default, **the only way in is the API**: a single signed HTTP endpoint. There
+is no driver and no socket. Direct engine access exists but is switched off until
+you turn it on — see [Direct connection](#direct-connection-no-api) below.
+
+Every read and every write goes through:
 
 ```
 POST /jsonsqldb/api/jsonsqldb_api.php
@@ -222,6 +247,101 @@ $db->consultar('SELECT * FROM customers WHERE name = ?', [$name]);
 ```
 
 ---
+
+## Direct connection (no API)
+
+PHP code running on the same server can use the engine without going through
+HTTP. It is **disabled by default**. To enable it, in `config.php`:
+
+```php
+defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', true);
+```
+
+> **For experienced developers only.** With direct access, security is entirely
+> your responsibility. Read what follows before turning it on.
+
+- **There are no permissions.** A direct connection is always equivalent to an
+  `admin` API key: it can read, write, alter the schema and drop whole databases.
+  There is no way to restrict it to one database or to read-only.
+- **There is no API key and no signature.** It bypasses HMAC authentication, the
+  rate limit, replay protection and the IP allow-list. Nothing stands between an
+  unvalidated variable in your code and the data.
+- **It is still logged.** Every query goes to the log exactly as it would through
+  the API, with the `ip` field set to `"local"`, since there is no HTTP request
+  to take an address from.
+- **Bound parameters still work, and you should still use them.** They are the
+  only thing protecting you from injection here, and there is no API forcing you
+  to get it right.
+
+When it makes sense: a maintenance script, a migration, a cron job, or your own
+application on the same server where the HTTP hop only adds latency. For
+anything exposed to third parties, use the API.
+
+### Examples
+
+With Composer's autoloader:
+
+```php
+require 'vendor/autoload.php';
+
+define('JSONSQLDB_CONEXION_DIRECTA', true);
+define('JSONSQLDB_DATA_PATH', __DIR__ . '/data');
+
+$db = new JsonSQLDB\Database('mydatabase');
+
+$rows = $db->consultar('SELECT * FROM customers WHERE city = ?', ['Madrid']);
+$db->consultar('INSERT INTO customers (name, balance) VALUES (?, ?)', ["O'Donnell", 10.55]);
+```
+
+Without Composer, requiring the project's own bootstrap:
+
+```php
+require 'config.php';                    // your settings, with direct access on
+require 'engine/bootstrap.php';
+
+$db = new JsonSQLDB\Database('mydatabase');
+
+// Reads
+$rows  = $db->consultar('SELECT id, name FROM customers WHERE balance > ?', [100]);
+$total = $db->consultar('SELECT COUNT(*) AS n FROM customers')[0]['n'];
+
+// Writes: returns ['success' => true, 'filas' => n, 'mensaje' => '...']
+$r = $db->consultar('UPDATE customers SET balance = balance + ? WHERE id = ?', [25.40, 7]);
+echo $r['filas'], " row(s) updated\n";
+
+// Schema and maintenance — a direct connection is always admin
+$db->consultar('ALTER TABLE customers ADD COLUMN notes VARCHAR(200)');
+$db->consultar('CHECK KEYS');
+
+// Databases: these are static, they do not belong to one database
+JsonSQLDB\Database::crear('another');
+print_r(JsonSQLDB\Database::bases());
+```
+
+A migration script, which is the case this is really for:
+
+```php
+require 'config.php';
+require 'engine/bootstrap.php';
+
+$db = new JsonSQLDB\Database('mydatabase');
+
+foreach ($db->consultar('SELECT id, email FROM customers WHERE email IS NOT NULL') as $row) {
+    $db->consultar('UPDATE customers SET email = ? WHERE id = ?',
+                   [strtolower(trim($row['email'])), $row['id']]);
+}
+```
+
+Errors arrive as `JsonSQLDB\JsonSqlDbError`, which carries a `sqlState` telling
+you what kind of problem it was:
+
+```php
+try {
+    $db->consultar('INSERT INTO customers (code) VALUES (?)', ['A1']);
+} catch (JsonSQLDB\JsonSqlDbError $e) {
+    echo $e->sqlState, ': ', $e->getMessage();   // CONSTRAINT: ... already exists
+}
+```
 
 ## jsonSQLDBadmin
 
@@ -422,7 +542,7 @@ Seven suites, no dependencies, all using temporary directories — they never to
 your data.
 
 ```
-php tests/f1_nucleo.php       → OK: 52    storage, types, locking
+php tests/f1_nucleo.php       → OK: 56    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 60    parser and bound parameters
 php tests/f2_select.php       → OK: 77    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers

@@ -215,7 +215,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 52   FALLOS: 0`.
+Resultado esperado: `OK: 56   FALLOS: 0`.
 
 ---
 
@@ -246,6 +246,41 @@ Resultado esperado: `OK: 52   FALLOS: 0`.
 | `JSONSQLDB_LOG_PARAMS` | ¿guardar también los valores de los `?`? Por defecto **no** |
 | `JSONSQLDB_LOG_MAX_SIZE` | tamaño máximo por fichero antes de rotar |
 | `JSONSQLDB_LOG_DIAS` | días que se conservan los logs (0 = siempre) |
+
+### Conexión directa al motor
+
+Por defecto el motor **solo** se puede usar a través de la API. Cualquier intento
+de instanciar `Database` desde otro sitio se rechaza con un mensaje explícito.
+
+Para permitirlo, en `config.php`:
+
+```php
+defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', true);
+```
+
+**Solo para programadores con experiencia.** Con la conexión directa:
+
+- **No hay permisos.** Equivale siempre a una clave `admin`: puede leer,
+  escribir, alterar la estructura y borrar bases enteras. No se puede limitar a
+  una base ni a solo lectura.
+- **No hay API key ni firma.** Se salta el HMAC, el límite de peticiones, el
+  anti-replay y la lista de IPs. Toda la seguridad depende de tu código.
+- **Sí se registra.** Cada consulta va al log igual que por la API, con el campo
+  `ip` a `"local"`, porque no hay petición HTTP de la que sacarla.
+- **Siguen valiendo los parámetros ligados**, y son lo único que te protege de
+  una inyección: `consultar($sql, $params)` con `?` en la SQL.
+
+```php
+require 'config.php';
+require 'engine/bootstrap.php';
+
+$bd    = new JsonSQLDB\Database('mibase');
+$filas = $bd->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Torrevieja']);
+```
+
+Tiene sentido en un script de mantenimiento, una migración o un proceso por cron,
+donde el salto por HTTP solo añade latencia. Para cualquier cosa expuesta a
+terceros, la API.
 
 ### Operaciones de estructura a prueba de cortes
 

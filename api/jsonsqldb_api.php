@@ -26,6 +26,10 @@ ini_set('display_errors', '0');
 // fuera del webroot) definiendo JSONSQLDB_API_CONFIG y JSONSQLDB_CONFIG.
 require_once defined('JSONSQLDB_API_CONFIG') ? JSONSQLDB_API_CONFIG : __DIR__ . '/jsonsqldb_api_config.php';
 require_once defined('JSONSQLDB_CONFIG')     ? JSONSQLDB_CONFIG     : __DIR__ . '/../config.php';
+// Marca que el motor se está usando a través de la API. Sin esta constante, el
+// motor solo acepta consultas si JSONSQLDB_CONEXION_DIRECTA está activada.
+define('JSONSQLDB_VIA_API', true);
+
 require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\ApiStore;

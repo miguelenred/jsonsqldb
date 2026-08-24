@@ -67,6 +67,8 @@ final class Database
      */
     public function consultar(string $sql, array $params = [], ?callable $autorizar = null)
     {
+        self::exigirAcceso();
+
         $t0 = microtime(true);
         $op = 'DESCONOCIDA';
 
@@ -123,6 +125,8 @@ final class Database
      */
     public static function consultarGlobal(string $sql, array $params = [], ?callable $autorizar = null, ?string $raiz = null)
     {
+        self::exigirAcceso();
+
         $t0   = microtime(true);
         $raiz = $raiz ?? Config::datos();
         $op   = 'DESCONOCIDA';
@@ -173,6 +177,23 @@ final class Database
                 $e->sqlState . ': ' . $e->getMessage(), $params);
             throw $e;
         }
+    }
+
+    /**
+     * Corta la ejecución si se está usando el motor directamente y la conexión
+     * directa no está permitida.
+     *
+     * La API define JSONSQLDB_VIA_API, así que sus peticiones pasan siempre.
+     */
+    private static function exigirAcceso(): void
+    {
+        if (defined('JSONSQLDB_VIA_API') || Config::conexionDirecta()) {
+            return;
+        }
+        throw JsonSqlDbError::permission(
+            'La conexión directa al motor está desactivada. Usa la API '
+            . '(api/jsonsqldb_api.php) o pon JSONSQLDB_CONEXION_DIRECTA a true en config.php'
+        );
     }
 
     /** Tipo de operación tal y como se guarda en el log. */

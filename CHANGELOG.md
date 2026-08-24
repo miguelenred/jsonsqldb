@@ -9,6 +9,43 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.5.0] - 2026-08-21
+
+### Added
+
+- **Direct engine access, off by default.** PHP code on the same server can use
+  the engine without going through HTTP, once
+  `JSONSQLDB_CONEXION_DIRECTA` is set to `true` in `config.php`. Until then, any
+  attempt to instantiate `Database` outside the API is rejected with an explicit
+  message.
+  - **For experienced developers only**, and both `config.php` and the README say
+    so plainly. A direct connection is always equivalent to an `admin` key —
+    there is no way to restrict it to one database or to read-only — and it
+    bypasses HMAC authentication, the rate limit, replay protection and the IP
+    allow-list. Security becomes entirely the developer's responsibility.
+  - Queries are still logged, exactly as through the API, with the `ip` field set
+    to `"local"` since there is no HTTP request to take an address from.
+  - Bound parameters still work and are still the only protection against
+    injection.
+
+- **`composer.json`,** so the project can be installed from Packagist:
+
+  ```bash
+  composer require miguelenred/jsonsqldb
+  ```
+
+  It gives PSR-4 autoloading for the `JsonSQLDB\` namespace, so
+  `engine/bootstrap.php` is not needed. Its `require` section contains PHP itself
+  and nothing else: **there are no dependencies to download**. Copying the folder
+  and requiring `engine/bootstrap.php` by hand remains equally supported.
+
+### Documentation
+
+- The README no longer says "Composer is not used", which was accurate but
+  confusing next to a `composer.json`. It now states the actual point: the
+  project uses **no third-party libraries at all**, and Composer is merely an
+  optional way to install it.
+
 ## [1.4.0] - 2026-08-21
 
 ### Added
@@ -244,6 +281,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.5.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.5.0
 [1.4.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.4.0
 [1.3.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.3.0
 [1.2.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.2.0

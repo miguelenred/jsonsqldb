@@ -168,7 +168,7 @@ al final aunque la sentencia toque miles de filas.
 ## 7. Pruebas
 
 ```
-php tests/f1_nucleo.php       → OK: 52
+php tests/f1_nucleo.php       → OK: 56
 php tests/f2_parser.php       → OK: 60
 php tests/f2_select.php       → OK: 77
 php tests/f3_escrituras.php   → OK: 56

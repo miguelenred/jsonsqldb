@@ -5,6 +5,9 @@ declare(strict_types=1);
  * Prueba del ejecutor de SELECT. Ejecutar: php tests/f2_select.php
  * Crea una base temporal con datos y la borra al terminar.
  */
+// Las pruebas usan el motor directamente, sin pasar por la API
+define('JSONSQLDB_CONEXION_DIRECTA', true);
+
 require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Catalog;

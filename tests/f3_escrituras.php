@@ -5,6 +5,9 @@ declare(strict_types=1);
  * Prueba de escrituras y DDL. Ejecutar: php tests/f3_escrituras.php
  * Crea una base temporal y la borra al terminar.
  */
+// Las pruebas usan el motor directamente, sin pasar por la API
+define('JSONSQLDB_CONEXION_DIRECTA', true);
+
 require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Database;
