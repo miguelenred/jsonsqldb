@@ -204,7 +204,26 @@ chk('subconsulta en FROM', function () {
 });
 malaSintaxis('subconsulta en FROM sin alias', 'SELECT * FROM (SELECT 1)');
 malaSintaxis('JOIN sin ON', 'SELECT * FROM a JOIN b');
-malaSintaxis('FULL JOIN no soportado', 'SELECT * FROM a FULL JOIN b ON a.id=b.a');
+chk('FULL JOIN se analiza', function () {
+    $a = Parser::analizar('SELECT * FROM a FULL JOIN b ON a.id = b.a');
+    return $a['from'][1]['join'] === 'FULL' ?: json_encode($a['from'][1]['join'] ?? null);
+});
+chk('FULL OUTER JOIN también', function () {
+    $a = Parser::analizar('SELECT * FROM a FULL OUTER JOIN b ON a.id = b.a');
+    return $a['from'][1]['join'] === 'FULL';
+});
+chk('REGEXP y RLIKE se analizan', function () {
+    $a = Parser::analizar("SELECT * FROM t WHERE m REGEXP 'x'");
+    $b = Parser::analizar("SELECT * FROM t WHERE m NOT RLIKE 'x'");
+    return $a['where']['k'] === 'regexp' && $a['where']['not'] === false
+        && $b['where']['k'] === 'regexp' && $b['where']['not'] === true;
+});
+chk('CAST se analiza, con y sin longitud', function () {
+    $a = Parser::analizar('SELECT CAST(x AS INTEGER) AS v FROM t');
+    $b = Parser::analizar('SELECT CAST(x AS DECIMAL(10,2)) AS v FROM t');
+    return $a['cols'][0]['expr']['k'] === 'cast' && $a['cols'][0]['expr']['tipo'] === 'INTEGER'
+        && $b['cols'][0]['expr']['tipo'] === 'DECIMAL';
+});
 
 echo "\n== GROUP BY, HAVING, ORDER BY, LIMIT ==\n";
 chk('GROUP BY con HAVING', function () {

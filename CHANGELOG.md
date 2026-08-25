@@ -9,6 +9,114 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.8.0] - 2026-08-25
+
+### Added
+
+- **`UNION` and `UNION ALL`.** All parts must return the same number of columns;
+  the result takes its column names from the first part and the others contribute
+  by position. A trailing `ORDER BY` and `LIMIT` apply to the whole union, not to
+  the last part — at that point the source tables are gone, so the `ORDER BY`
+  accepts result column names or positions (`ORDER BY 1`). Each part keeps its
+  own `WHERE`, `GROUP BY` and joins.
+
+- **`GROUP_CONCAT(col)` and `GROUP_CONCAT(col, separator)`.** Honours `DISTINCT`
+  and skips `NULL`s like the other aggregates. Unlike SQLite, the concatenation
+  order is defined: it follows the rows of the group.
+
+- **`CONCAT(a, b, ...)`.** Does not exist in SQLite, where `||` does the job; it
+  is here for people coming from MySQL, with MySQL's semantics — if any argument
+  is `NULL`, the result is `NULL`.
+
+- **`FULL JOIN` / `FULL OUTER JOIN`.** Brings the unmatched rows from both
+  sides, padded with `NULL`s. Neither SQLite nor MySQL 5 have it.
+
+- **`REGEXP` and `RLIKE`** (MySQL's operator; in SQLite `REGEXP` exists but has
+  to be supplied by the host program). `NOT REGEXP` works too, `NULL` propagates
+  as `NULL`, and it is **case-sensitive** — use `(?i)` at the start of the
+  pattern for the opposite. An invalid pattern, or one so expensive that the
+  regex engine gives up on a long text, produces a clear error instead of a
+  hung process.
+
+- **`CAST(expr AS type)`.** Accepts the same type names as `CREATE TABLE`,
+  aliases included, and tolerates a length that it ignores
+  (`CAST(x AS VARCHAR(10))`). `NULL` stays `NULL`, `INTEGER` truncates towards
+  zero rather than rounding, and `DATETIME` validates the date instead of
+  inventing one.
+
+- **`EXISTS` and `NOT EXISTS`** are now implemented. The README listed them among
+  the supported operators, but the parser did not know them: any query using
+  `EXISTS` failed with a syntax error. They work with non-correlated subqueries.
+
+### Fixed
+
+- **`DATE(NULL)`, `TIME(NULL)` and `DATETIME(NULL)` returned the current date
+  and time** instead of `NULL`. A `?? 'now'` was treating "no argument" and "a
+  `NULL` argument" as the same thing. `DATE()` with no arguments still returns
+  now, as it should.
+
+- **Impossible dates were being silently corrected.** `DATE('2026-02-30')`
+  returned the 2nd of March, `DATE('2026-13-40')` jumped to 2027, and
+  `'0000-00-00'` produced a year -1. The check only validated the format with a
+  regular expression and PHP then normalised the overflow. Dates are now checked
+  against the calendar, so those are rejected — including when writing to a
+  `DATETIME` column, which accepted them before.
+
+- **The Actions workflow now declares `permissions: contents: read`.** Without an
+  explicit block the `GITHUB_TOKEN` inherits the repository's permissions, which
+  on older repositories means write access. Reported by CodeQL.
+
+- **Static analysis clean.** The whole engine, API and panel now pass PHPStan at
+  level 6 with no real findings. Fixing them turned up:
+  - `Valor::aNumero()` added `0` to a string extracted by a regular expression.
+    It always held digits in practice, but under PHP 8 a non-numeric string in
+    that position raises a `TypeError`; the conversion is now explicit.
+  - `Database::consultar()` used two variables that only one branch initialised.
+    A new branch that set neither would have produced a PHP warning and a wrong
+    log entry.
+  - The API did not check that `$API_KEYS` exists before using it; an incomplete
+    configuration produced a fatal error instead of a message.
+  - One dead public method removed (`Catalog::exigirQueNoSeaVista()`): the same
+    protection ended up implemented in `Writer::ejecutar()` and this one was never
+    called from anywhere. Static analysis does not flag unused public methods, so
+    it took a separate pass over the call graph to find it.
+  - Three provably dead checks removed (`is_array` on a constant already tested
+    with `defined`, `is_string` on a typed parameter, `array_values` on a list),
+    and two impossible comparisons in date parsing.
+
+- **Correlated subqueries now say so.** They were failing with
+  `Columna desconocida: 'u.id'`, which sent you looking for a typo. The message
+  now explains that correlated subqueries are not supported and suggests a
+  `JOIN`. They are also listed in the "what is not supported" table.
+
+### Documentation
+
+- New section explaining **where each construct comes from**. The dialect is
+  mainly SQLite's, but `CONCAT`, `REGEXP`/`RLIKE` and `LIMIT n, m` come from
+  MySQL, and `CAST` and `FULL JOIN` are standard SQL. Anything not listed
+  behaves as in SQLite.
+
+- The Python client documents why its `HMAC-SHA256` is not the weak-password-
+  hashing problem CodeQL reports: it signs a message with a shared key, which is
+  exactly what HMAC is for. Panel passwords use bcrypt, which is the right tool
+  for that job.
+
+- `RIGHT JOIN` was listed as unsupported in an earlier draft of the docs. It has
+  always worked; the table of unsupported features has been corrected. `FULL
+  JOIN` is the one that is genuinely missing.
+
+### Changed
+
+- Tokens carry a precise type declaration (`@phpstan-type`), and the parser's
+  state-dependent helpers are marked `@phpstan-impure`. This is what makes the
+  static analysis able to follow the parser instead of guessing, so future
+  analysis findings are real ones.
+- The PHPStan configuration is **not** committed: it is a development tool and
+  the project must need nothing beyond PHP itself. What does stay in the source
+  are the `@phpstan-type` and `@phpstan-impure` annotations, which are ordinary
+  PHPDoc, cost nothing at runtime, and are what makes such an analysis able to
+  follow the parser instead of guessing.
+
 ## [1.7.0] - 2026-08-24
 
 ### Fixed
@@ -331,6 +439,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.8.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.8.0
 [1.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.7.0
 [1.6.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.6.0
 [1.5.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.5.0

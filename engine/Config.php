@@ -74,7 +74,7 @@ final class Config
      */
     public static function colacionMapa(): array
     {
-        if (!defined('JSONSQLDB_COLACION_MAPA') || !is_array(JSONSQLDB_COLACION_MAPA)) {
+        if (!defined('JSONSQLDB_COLACION_MAPA')) {
             return [];
         }
         $mapa = [];

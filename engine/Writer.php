@@ -701,7 +701,7 @@ final class Writer
                 }
                 foreach ($trg['body'] as $sql) {
                     $ast = $this->sustituir($this->analizar($sql), $new, $old);
-                    if ($ast['k'] === 'select') {
+                    if ($ast['k'] === 'select' || $ast['k'] === 'union') {
                         $this->seleccionar($ast);
                     } else {
                         $this->ejecutarSinVolcar($ast, $trg['name']);

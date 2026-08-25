@@ -32,6 +32,48 @@ El segundo argumento son los valores de los `?`: se insertan en el árbol de la
 sentencia ya analizados, nunca en el texto SQL, así que un valor no puede
 alterar la consulta. Ver `docs/04-api.md` §1.1.
 
+### UNION
+
+```sql
+SELECT nombre FROM clientes
+UNION
+SELECT razon_social FROM empresas
+ORDER BY 1;
+```
+
+`UNION` quita las filas repetidas; `UNION ALL` las conserva y es más rápido
+porque no compara nada.
+
+- Todas las partes tienen que devolver **el mismo número de columnas**; si no,
+  se rechaza diciendo cuántas devuelve cada una.
+- Los **nombres de las columnas salen de la primera parte**. Las demás aportan
+  sus valores por posición, aunque sus columnas se llamen de otra forma.
+- El `ORDER BY` y el `LIMIT` finales son **del conjunto**, no de la última
+  parte. En ese punto las tablas de origen ya no existen, así que el `ORDER BY`
+  solo admite nombres de columna del resultado o su posición (`ORDER BY 1`).
+- Cada parte conserva su propio `WHERE`, `GROUP BY` y `JOIN`.
+
+### De dónde viene cada cosa
+
+El dialecto es **principalmente el de SQLite**, que es el motor ligero al que se
+parece este proyecto. Pero unas cuantas construcciones vienen de otros sitios,
+porque son las que la gente espera encontrar:
+
+| Construcción | Origen | Nota |
+|---|---|---|
+| `\|\|` para concatenar | SQLite, estándar | La forma nativa aquí |
+| `CONCAT(...)` | MySQL, SQL Server | No existe en SQLite. Si algún argumento es `NULL`, el resultado es `NULL` |
+| `GROUP_CONCAT(col, sep)` | SQLite y MySQL | En MySQL se escribe `SEPARATOR sep`; aquí es el segundo argumento, como en SQLite |
+| `REGEXP` / `RLIKE` | MySQL | En SQLite `REGEXP` existe pero hay que programarlo aparte. Aquí funciona sin más |
+| `LIMIT n, m` | MySQL | También vale `LIMIT n OFFSET m`, de SQLite |
+| `IFNULL` | SQLite y MySQL | `COALESCE` es el estándar y también está |
+| `CAST(x AS tipo)` | Estándar | Admite los tipos de `CREATE TABLE` y sus alias |
+| `FULL JOIN` | Estándar | No existe en SQLite ni en MySQL 5 |
+| `AUTOINCREMENT` | SQLite | En MySQL es `AUTO_INCREMENT`, que también se acepta |
+
+Si algo no aparece en esta lista ni en la tabla siguiente, asume el
+comportamiento de SQLite.
+
 ## 1.1. Qué NO se soporta
 
 La regla del proyecto es simple: **si una sentencia se acepta, hace exactamente lo
@@ -49,7 +91,8 @@ Estas construcciones existen en SQLite y aquí **dan error**:
 | `BEGIN` / `COMMIT` / `ROLLBACK` | No hay transacciones de varias sentencias. Cada sentencia es atómica por su cuenta |
 | `CHECK (...)` | Usa un trigger `BEFORE` con `RAISE(ABORT, '...')` |
 | `CREATE INDEX` | No hay índices. Las búsquedas recorren la tabla |
-| Funciones de ventana, CTE (`WITH`), `UNION` | Fuera del alcance del proyecto |
+| Funciones de ventana, CTE (`WITH`), `INTERSECT`, `EXCEPT` | Fuera del alcance del proyecto |
+| Subconsultas **correlacionadas** | La subconsulta no ve las columnas de la consulta exterior. Reescríbela con un `JOIN` |
 | `ALTER TABLE` sobre la clave primaria | Se gestiona con `ADD`/`DROP PRIMARY KEY`, y el `AUTOINCREMENT` solo al crear |
 
 Y estas diferencias de comportamiento conviene tenerlas presentes:
@@ -163,13 +206,10 @@ Decisiones que lo hacen posible:
 
 | No soportado | Alternativa |
 |---|---|
-| `INSERT`, `UPDATE`, `DELETE`, DDL por SQL | fase 3 |
 | Subconsultas correlacionadas (que usan columnas de la consulta externa) | reescribir con `JOIN` |
-| `UNION`, `INTERSECT`, `EXCEPT` | — |
-| `FULL OUTER JOIN` | `LEFT JOIN` + `RIGHT JOIN` |
-| `EXISTS` | `IN (SELECT ...)` |
+| `INTERSECT`, `EXCEPT` | `UNION` sí está |
 | Funciones de ventana (`OVER`) | — |
-| `CAST`, `GLOB`, `REGEXP` | — |
+| `GLOB` | Usa `LIKE` o `REGEXP` |
 
 Cualquier cosa no soportada devuelve un error claro con el número de línea, nunca
 un resultado silenciosamente incorrecto.
@@ -188,13 +228,13 @@ un resultado silenciosamente incorrecto.
 | `engine/Database.php` | fachada: analiza, bloquea, ejecuta y registra el log |
 | `engine/Config.php` | lectura de `config.php` con valores por defecto |
 | `engine/Logger.php` | log de consultas |
-| `tests/f2_parser.php` | 67 comprobaciones del analizador |
-| `tests/f2_select.php` | 78 comprobaciones del ejecutor, con datos reales |
+| `tests/f2_parser.php` | 70 comprobaciones del analizador |
+| `tests/f2_select.php` | 119 comprobaciones del ejecutor, con datos reales |
 
 ## 8. Pruebas
 
 ```
 php tests/f1_nucleo.php     → OK: 56
-php tests/f2_parser.php     → OK: 67
-php tests/f2_select.php     → OK: 78
+php tests/f2_parser.php     → OK: 70
+php tests/f2_select.php     → OK: 119
 ```

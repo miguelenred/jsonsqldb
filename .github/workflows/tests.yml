@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Mínimo imprescindible: el workflow solo lee el código y ejecuta pruebas.
+# Sin esto, el GITHUB_TOKEN hereda los permisos del repositorio, que en
+# repositorios antiguos son de escritura.
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: ubuntu-latest

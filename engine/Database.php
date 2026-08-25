@@ -83,14 +83,20 @@ final class Database
             }
             // CHECK KEYS solo lee; REPAIR KEYS puede escribir
             $escritura = $ast['k'] !== 'select'
+                      && $ast['k'] !== 'union'
                       && $ast['k'] !== 'check_keys'
                       && strncmp($ast['k'], 'show_', 5) !== 0;
+
+            // Solo se llena una de las dos, según $escritura. Se inicializan para
+            // que una rama nueva mal escrita no dé un aviso de PHP y un log falso.
+            $filas = [];
+            $res   = ['filas' => 0, 'mensaje' => ''];
 
             $this->st->bloquear($escritura);
             try {
                 if ($escritura) {
                     $res = (new Writer($this->cat))->ejecutar($ast);
-                } elseif ($ast['k'] === 'select') {
+                } elseif ($ast['k'] === 'select' || $ast['k'] === 'union') {
                     $filas = (new Select($this->cat))->ejecutar($ast);
                 } elseif ($ast['k'] === 'check_keys') {
                     $filas = (new Integrity($this->cat))->claves($ast['tabla'], false);

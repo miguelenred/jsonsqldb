@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.7.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.8.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
 
 ---
 
@@ -390,7 +390,7 @@ external requests.
 | **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS` |
 | **Maintenance** | `CHECK KEYS`, `REPAIR KEYS` |
 
-`SELECT` supports `DISTINCT`, `INNER`/`LEFT`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
+`SELECT` supports `DISTINCT`, `UNION` / `UNION ALL`, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
 `HAVING`, `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
 subqueries in `WHERE` and in `FROM`, and `CASE WHEN`.
 
@@ -402,14 +402,14 @@ subqueries in `WHERE` and in `FROM`, and `CASE WHEN`.
 
 `=` `<>` `!=` `<` `<=` `>` `>=` · `AND` `OR` `NOT` · `IS NULL` `IS NOT NULL` ·
 `IN` `NOT IN` · `BETWEEN` `NOT BETWEEN` · `LIKE` `NOT LIKE` (with `%` and `_`,
-case-insensitive) · `EXISTS` `NOT EXISTS` · `||` (string concatenation) ·
+case-insensitive) · `EXISTS` `NOT EXISTS` · `REGEXP` `RLIKE` (and `NOT`) · `||` (string concatenation) ·
 `+` `-` `*` `/` `%`
 
 ### Functions
 
-**Aggregate** — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
+**Aggregate** — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`
 
-**Text** — `UPPER`, `LOWER`, `LENGTH`, `TRIM`, `LTRIM`, `RTRIM`, `REPLACE`,
+**Text** — `CONCAT`, `UPPER`, `LOWER`, `LENGTH`, `TRIM`, `LTRIM`, `RTRIM`, `REPLACE`,
 `SUBSTR`, `SUBSTRING`, `INSTR`
 
 **Numeric** — `ABS`, `ROUND`, `RANDOM`
@@ -418,11 +418,23 @@ case-insensitive) · `EXISTS` `NOT EXISTS` · `||` (string concatenation) ·
 
 **Null handling** — `COALESCE`, `IFNULL`, `NULLIF`
 
-There is no `CONCAT()` — use the `||` operator, as in SQLite:
+**Conversion** — `CAST(expr AS type)`, accepting the same type names as
+`CREATE TABLE`
+
+`CONCAT()` is available for people coming from MySQL, but `||` is the native
+operator, as in SQLite:
 
 ```sql
 SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 ```
+
+### Dialect
+
+Mostly SQLite's, with a few borrowings where they are what people expect:
+`CONCAT`, `REGEXP`/`RLIKE` and `LIMIT n, m` come from MySQL, `CAST` and
+`FULL JOIN` are standard SQL, and `AUTO_INCREMENT` is accepted alongside
+`AUTOINCREMENT`. Anything not mentioned behaves as in SQLite. See
+[`docs/02-consultas.md`](docs/02-consultas.md) for the full table.
 
 ### What is not supported
 
@@ -434,8 +446,9 @@ These exist in SQLite and raise an error here: `INSERT OR IGNORE` / `OR REPLACE`
 (no upsert — do a `SELECT` and pick), `CREATE TEMP`/`TEMPORARY TABLE` (no
 temporary tables), `WITHOUT ROWID` (there is no rowid), `BEGIN`/`COMMIT`/
 `ROLLBACK` (no multi-statement transactions), `CHECK` constraints (use a `BEFORE`
-trigger with `RAISE(ABORT, …)`), `CREATE INDEX` (no indexes), and window
-functions, CTEs and `UNION`.
+trigger with `RAISE(ABORT, …)`), `CREATE INDEX` (no indexes), window
+functions, CTEs, `INTERSECT`/`EXCEPT`, `GLOB`, and **correlated subqueries** (the subquery cannot
+see the outer query's columns — rewrite with a `JOIN`).
 
 Behavioural differences worth knowing: `DECIMAL` is a rounded float, `ORDER BY`
 uses a configurable collation rather than binary order, and `LIKE` is
@@ -562,14 +575,19 @@ your data.
 
 ```
 php tests/f1_nucleo.php       → OK: 56    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 67    parser and bound parameters
-php tests/f2_select.php       → OK: 78    SELECT execution and collation
+php tests/f2_parser.php       → OK: 70    parser and bound parameters
+php tests/f2_select.php       → OK: 119    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 50    real requests against the API
 php tests/f5_esquema.php      → OK: 87    SHOW, ALTER, constraints, views, integrity
 php tests/f5_admin.php        → OK: 113   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 5     crash recovery, killing real processes
 ```
+
+The engine, the API and the panel pass PHPStan at level 5 with no warnings. The
+configuration is not committed — it is a development tool and the project needs
+nothing beyond PHP itself — but the source carries the `@phpstan-type` and
+`@phpstan-impure` annotations that make such an analysis meaningful.
 
 `f5_admin.php` needs cURL and starts two PHP built-in servers — one for the panel
 and one for the API, because the built-in server handles one request at a time

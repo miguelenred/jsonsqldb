@@ -11,11 +11,11 @@ namespace JsonSQLDB;
  * Fecha:     DATE TIME DATETIME STRFTIME  (acepta 'now')
  * Nulos:     COALESCE NULLIF IFNULL
  * Varios:    MIN MAX con 2 o más argumentos (con 1 son de agregación)
- * Agregados: COUNT SUM AVG MIN MAX  (admiten DISTINCT)
+ * Agregados: COUNT SUM AVG MIN MAX GROUP_CONCAT  (admiten DISTINCT)
  */
 final class Functions
 {
-    public const AGREGADOS = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'];
+    public const AGREGADOS = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'GROUP_CONCAT'];
 
     /** Ejecuta una función escalar con los argumentos ya evaluados. */
     public static function escalar(string $nombre, array $args)
@@ -23,6 +23,20 @@ final class Functions
         switch ($nombre) {
 
             // ---------- Texto ----------
+            case 'CONCAT':
+                // No existe en SQLite, donde se usa ||. Se admite por comodidad
+                // para quien viene de MySQL, y con su misma semántica: si algún
+                // argumento es NULL, el resultado es NULL.
+                if (count($args) < 2) {
+                    throw JsonSqlDbError::syntax('CONCAT() necesita al menos 2 argumentos');
+                }
+                $partes = '';
+                foreach ($args as $a) {
+                    if ($a === null) { return null; }
+                    $partes .= Valor::aTexto($a);
+                }
+                return $partes;
+
             case 'UPPER':
                 self::exige($nombre, $args, 1);
                 return $args[0] === null ? null : self::mayus(Valor::aTexto($args[0]));
@@ -124,8 +138,13 @@ final class Functions
      * Función de agregación sobre los valores ya evaluados de un grupo.
      * COUNT(*) llega con $valores = null y $filas = nº de filas del grupo.
      */
-    public static function agregado(string $nombre, ?array $valores, int $filas, bool $distinct)
-    {
+    public static function agregado(
+        string $nombre,
+        ?array $valores,
+        int $filas,
+        bool $distinct,
+        string $separador = ','
+    ) {
         if ($nombre === 'COUNT' && $valores === null) {
             return $filas;                       // COUNT(*)
         }
@@ -159,6 +178,13 @@ final class Functions
                 $s = 0;
                 foreach ($limpios as $v) { $s += Valor::aNumero($v); }
                 return $s / count($limpios);
+            case 'GROUP_CONCAT':
+                if ($limpios === []) { return null; }
+                // El orden es el de las filas del grupo. SQLite no lo garantiza;
+                // aquí sí, que es más útil y no cuesta nada.
+                return implode($separador, array_map(
+                    static fn($v): string => Valor::aTexto($v), $limpios));
+
             case 'MIN':
             case 'MAX':
                 $res = null;
@@ -256,7 +282,10 @@ final class Functions
     /** DATE/TIME/DATETIME: sin argumentos equivale a 'now'. */
     private static function fecha(array $args, string $formato): ?string
     {
-        $d = self::aFecha($args[0] ?? 'now');
+        // Sin argumentos, la fecha de ahora. CON argumento NULL, el resultado es
+        // NULL: un ?? aquí confundía las dos cosas y DATE(NULL) devolvía hoy.
+        $v = $args === [] ? 'now' : $args[0];
+        $d = self::aFecha($v);
         return $d === null ? null : $d->format($formato);
     }
 

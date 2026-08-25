@@ -33,7 +33,9 @@ final class Valor
             }
             // Prefijo numérico, como hace SQLite: '12abc' -> 12
             if (preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/', $t, $m)) {
-                return $m[0] + 0;
+                // Conversión explícita: '12' da int y '1.5' o '1e3' dan float,
+                // igual que haría "+ 0", pero sin depender de la coerción
+                return (strpbrk($m[0], '.eE') === false) ? (int)$m[0] : (float)$m[0];
             }
         }
         return 0;

@@ -17,6 +17,15 @@ namespace JsonSQLDB;
  *
  * Se ignoran los comentarios -- hasta fin de línea y los bloques.
  */
+/**
+ * Un token es siempre una de estas formas. Tenerlas separadas, en vez de un
+ * array suelto, es lo que permite al análisis estático seguir el parser.
+ *
+ * @phpstan-type TokenId    array{t: 'id', v: string, u: string, q: bool, l: int, p: int}
+ * @phpstan-type TokenOtro  array{t: 'str'|'op'|'punc'|'param'|'eof', v: string, l: int, p: int}
+ * @phpstan-type TokenNum   array{t: 'num', v: int|float, l: int, p: int}
+ * @phpstan-type Token      TokenId|TokenOtro|TokenNum
+ */
 final class Lexer
 {
     private const OPS2 = ['<>', '!=', '<=', '>=', '||'];
@@ -24,6 +33,7 @@ final class Lexer
     private const PUNC = ['(', ')', ',', '.', ';'];
 
     /** @return array<int,array> */
+    /** @return list<Token> */
     public static function tokens(string $sql): array
     {
         $tokens = [];

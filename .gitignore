@@ -37,6 +37,11 @@ Desktop.ini
 .DS_Store
 *.swp
 
+# Static analysis: config and cache, if you run it locally
+/phpstan.neon
+/phpstan-bootstrap.php
+/.phpstan-cache/
+
 # Temporary files
 *.tmp
 *.bak

@@ -169,8 +169,8 @@ al final aunque la sentencia toque miles de filas.
 
 ```
 php tests/f1_nucleo.php       → OK: 56
-php tests/f2_parser.php       → OK: 67
-php tests/f2_select.php       → OK: 78
+php tests/f2_parser.php       → OK: 70
+php tests/f2_select.php       → OK: 119
 php tests/f3_escrituras.php   → OK: 56
 ```
 

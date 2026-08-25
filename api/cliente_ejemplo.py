@@ -106,7 +106,12 @@ class JsonSqlDbCliente:
 
         timestamp = str(int(time.time()))
         mensaje = f"+{self.api_key}|{timestamp}|{sql}{params}\u00bf"
-        token = hmac.new(
+        # HMAC-SHA256 sobre el mensaje. Los analizadores estáticos a veces marcan
+        # esto como "hash débil para contraseñas": no lo es. Aquí no se almacena
+        # ninguna contraseña; se firma un mensaje con una clave compartida, que es
+        # justo para lo que sirve HMAC-SHA256 y lo que recomienda el estándar.
+        # Las contraseñas del panel sí usan bcrypt, que es lo que corresponde.
+        token = hmac.new(  # noqa: S324  (no es hashing de contraseñas)
             self.hmac_secret.encode("utf-8"),
             mensaje.encode("utf-8"),
             hashlib.sha256,

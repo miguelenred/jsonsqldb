@@ -101,12 +101,21 @@ final class Evaluator
                 }
                 return $n;
 
+            case 'regexp':
+                $n['e']      = self::resolver($n['e'], $mapa, $alias);
+                $n['patron'] = self::resolver($n['patron'], $mapa, $alias);
+                return $n;
+
+            case 'cast':
+                $n['e'] = self::resolver($n['e'], $mapa, $alias);
+                return $n;
+
             case 'null':
                 $n['e'] = self::resolver($n['e'], $mapa, $alias);
                 return $n;
         }
 
-        if ($n['k'] === 'sub' && !isset($n['sid'])) {
+        if (($n['k'] === 'sub' || $n['k'] === 'exists') && !isset($n['sid'])) {
             $n['sid'] = ++self::$sid;
         }
         return $n;                                // 'lit' no necesita resolución
@@ -132,7 +141,9 @@ final class Evaluator
         if (!in_array($n['nombre'], Functions::AGREGADOS, true)) {
             return false;
         }
-        return $n['star'] || count($n['args']) === 1;
+        // GROUP_CONCAT admite un segundo argumento con el separador
+        $maximo = $n['nombre'] === 'GROUP_CONCAT' ? 2 : 1;
+        return $n['star'] || (count($n['args']) >= 1 && count($n['args']) <= $maximo);
     }
 
     /** @return array<int,array> subexpresiones directas (sin entrar en subconsultas) */
@@ -145,6 +156,8 @@ final class Evaluator
             case 'fn':      return $n['args'];
             case 'between': return [$n['e'], $n['min'], $n['max']];
             case 'like':    return $n['escape'] === null ? [$n['e'], $n['patron']] : [$n['e'], $n['patron'], $n['escape']];
+            case 'regexp':  return [$n['e'], $n['patron']];
+            case 'cast':    return [$n['e']];
             case 'in':      return array_merge([$n['e']], $n['lista'] ?? []);
             case 'case':
                 $h = $n['base'] === null ? [] : [$n['base']];
@@ -214,11 +227,21 @@ final class Evaluator
             case 'like':
                 return self::like($n, $ctx);
 
+            case 'regexp':
+                return self::regexp($n, $ctx);
+
+            case 'cast':
+                return Types::convertirCast(self::evaluar($n['e'], $ctx), $n['tipo']);
+
             case 'in':
                 return self::in($n, $ctx);
 
             case 'raise':
                 throw JsonSqlDbError::constraint($n['mensaje'] ?? 'Operación abortada por un trigger');
+
+            case 'exists':
+                // No hace falta el valor: basta con saber si hay alguna fila
+                return ($ctx['sub'])($n['select'], $n['sid']) === [] ? 0 : 1;
 
             case 'sub':
                 $filas = ($ctx['sub'])($n['select'], $n['sid']);
@@ -297,7 +320,17 @@ final class Evaluator
             foreach ($ctx['grupo'] as $fila) {
                 $valores[] = self::evaluar($arg, ['fila' => $fila] + $ctx);
             }
-            return Functions::agregado($n['nombre'], $valores, count($ctx['grupo']), $n['distinct']);
+
+            // El separador de GROUP_CONCAT se evalúa una vez, no por fila
+            $separador = ',';
+            if (isset($n['args'][1])) {
+                $primera   = $ctx['grupo'][array_key_first($ctx['grupo'])] ?? [];
+                $sep       = self::evaluar($n['args'][1], ['fila' => $primera] + $ctx);
+                $separador = $sep === null ? '' : Valor::aTexto($sep);
+            }
+
+            return Functions::agregado($n['nombre'], $valores, count($ctx['grupo']),
+                                       $n['distinct'], $separador);
         }
 
         if (self::esAgregado($n)) {
@@ -312,6 +345,43 @@ final class Evaluator
             $args[] = self::evaluar($a, $ctx);
         }
         return Functions::escalar($n['nombre'], $args);
+    }
+
+    /**
+     * x REGEXP patron  (RLIKE es un alias, como en MySQL)
+     *
+     * El patrón lo escribe quien consulta, así que se valida antes de usarlo y
+     * se controla el desbordamiento del motor de expresiones regulares: una
+     * expresión mal construida sobre un texto largo puede tardar una eternidad,
+     * y es preferible un error claro a un proceso colgado.
+     */
+    private static function regexp(array $n, array $ctx)
+    {
+        $v = self::evaluar($n['e'], $ctx);
+        $p = self::evaluar($n['patron'], $ctx);
+        if ($v === null || $p === null) {
+            return null;
+        }
+
+        $patron = Valor::aTexto($p);
+        $regex  = '/' . str_replace('/', '\\/', $patron) . '/u';
+
+        $anterior = set_error_handler(static fn(): bool => true);   // silencia el aviso de PCRE
+        $r = preg_match($regex, Valor::aTexto($v));
+        set_error_handler($anterior);
+
+        if ($r === false) {
+            $error = preg_last_error();
+            if ($error === PREG_BACKTRACK_LIMIT_ERROR || $error === PREG_RECURSION_LIMIT_ERROR) {
+                throw JsonSqlDbError::syntax(
+                    "La expresión regular '$patron' es demasiado costosa para este texto: "
+                    . 'simplifícala o acota antes las filas con un WHERE'
+                );
+            }
+            throw JsonSqlDbError::syntax("Expresión regular no válida: '$patron'");
+        }
+
+        return (($r === 1) !== $n['not']) ? 1 : 0;
     }
 
     private static function like(array $n, array $ctx)

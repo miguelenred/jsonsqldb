@@ -319,7 +319,7 @@ final class Storage
     {
         $out = [];
         foreach ($tablas as $t) {
-            if (!is_string($t) || $t === '') {
+            if ($t === '') {
                 continue;
             }
             foreach ((array)glob($this->dir . '/' . $t . '.json') as $f)        { $out[] = (string)$f; }

@@ -146,12 +146,14 @@ final class Types
                 throw JsonSqlDbError::type("Hora inválida para '$columna': '$valor'");
             }
             $out .= " $m[4]:$m[5]";
-            if (isset($m[6]) && $m[6] !== '') {
+            // Los grupos opcionales no aparecen si no coinciden, así que basta
+            // con isset(): nunca llegan como cadena vacía
+            if (isset($m[6])) {
                 if ((int)$m[6] > 59) {
                     throw JsonSqlDbError::type("Segundos inválidos para '$columna': '$valor'");
                 }
                 $out .= ":$m[6]";
-                if (isset($m[7]) && $m[7] !== '') {
+                if (isset($m[7])) {
                     $out .= '.' . str_pad($m[7], 3, '0');
                 }
             }
@@ -160,9 +162,61 @@ final class Types
     }
 
     /** ¿La cadena tiene forma de fecha jsonSQLDB? (usado por funciones de fecha) */
+    /**
+     * CAST(expr AS tipo).
+     *
+     * Los nombres de tipo son los mismos que admite CREATE TABLE, con sus alias,
+     * más los de SQLite. NULL se queda en NULL, como en cualquier motor.
+     *
+     * @param mixed $v
+     * @return mixed
+     */
+    public static function convertirCast($v, string $tipo)
+    {
+        if ($v === null) {
+            return null;
+        }
+        $decl = self::parse($tipo);
+        $base = $decl['type'];
+
+        switch ($base) {
+            case 'INTEGER':
+                // Se trunca hacia cero, no se redondea: CAST(1.9 AS INTEGER) = 1
+                return (int)Valor::aNumero($v);
+
+            case 'DOUBLE':
+                return (float)Valor::aNumero($v);
+
+            case 'DECIMAL':
+                return round((float)Valor::aNumero($v), (int)($decl['scale'] ?? 2));
+
+            case 'TEXT':
+                return Valor::aTexto($v);
+
+            case 'BOOLEAN':
+                return Valor::verdadero($v) === true ? 1 : 0;
+
+            case 'DATETIME':
+                $t = trim(Valor::aTexto($v));
+                if (!self::esFecha($t)) {
+                    throw JsonSqlDbError::type(
+                        "CAST a $base: '$t' no es una fecha con formato AAAA-MM-DD"
+                    );
+                }
+                return $t;
+        }
+
+        throw JsonSqlDbError::syntax("CAST a un tipo desconocido: '$tipo'");
+    }
+
     public static function esFecha(string $valor): bool
     {
-        return (bool)preg_match(self::RE_FECHA, trim($valor));
+        if (!preg_match(self::RE_FECHA, trim($valor), $m)) {
+            return false;
+        }
+        // El formato no basta: '2026-02-30' lo cumple y no existe. Sin esta
+        // comprobación PHP lo "arregla" solo y lo convierte en el 2 de marzo.
+        return checkdate((int)$m[2], (int)$m[3], (int)$m[1]) && (int)$m[1] > 0;
     }
 
     /** Longitud en caracteres UTF-8 sin depender de mbstring (hostings limitados). */

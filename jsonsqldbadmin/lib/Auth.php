@@ -156,7 +156,7 @@ final class Auth
         if ($admins === 0) {
             throw new RuntimeException('Tiene que quedar al menos un administrador');
         }
-        Store::guardar(self::USUARIOS, array_values($quedan));
+        Store::guardar(self::USUARIOS, $quedan);
     }
 
     private static function validarClave(string $clave): void

@@ -24,18 +24,24 @@ namespace JsonSQLDB;
  *  ['k'=>'in','e'=>AST,'lista'=>?AST[],'select'=>?AST,'not'=>bool]
  *  ['k'=>'between','e'=>AST,'min'=>AST,'max'=>AST,'not'=>bool]
  *  ['k'=>'like','e'=>AST,'patron'=>AST,'escape'=>?AST,'not'=>bool]
+ *  ['k'=>'regexp','e'=>AST,'patron'=>AST,'not'=>bool]
+ *  ['k'=>'cast','e'=>AST,'tipo'=>string]
  *  ['k'=>'null','e'=>AST,'not'=>bool]           IS NULL / IS NOT NULL
  *  ['k'=>'sub','select'=>AST]                   subconsulta escalar
+ */
+/**
+ * @phpstan-import-type Token from Lexer
  */
 final class Parser
 {
     /** Palabras que nunca se toman como alias sin AS */
     private const RESERVADAS = [
-        'FROM','WHERE','GROUP','ORDER','HAVING','LIMIT','OFFSET','JOIN','INNER','LEFT','RIGHT',
-        'FULL','CROSS','OUTER','ON','AS','AND','OR','NOT','IN','IS','LIKE','BETWEEN','CASE','WHEN',
+        'FROM','WHERE','GROUP','ORDER','HAVING','LIMIT','OFFSET','JOIN','INNER','LEFT','RIGHT','UNION',
+        'FULL','CROSS','OUTER','ON','AS','AND','OR','NOT','IN','IS','LIKE','REGEXP','RLIKE','BETWEEN','CASE','CAST','WHEN',
         'THEN','ELSE','END','SELECT','DISTINCT','ALL','ASC','DESC','BY','NULL','UNION','VALUES','SET',
     ];
 
+    /** @var list<Token> */
     private array  $t;
     private int    $i = 0;
     private string $sql;
@@ -111,7 +117,45 @@ final class Parser
     // SELECT
     // ==================================================================
 
+    /**
+     * Un SELECT, o varios unidos con UNION.
+     *
+     * En  A UNION B ORDER BY x LIMIT n  el ORDER BY y el LIMIT son del conjunto,
+     * no de B. Como selectSimple() ya los ha consumido al analizar la última
+     * parte, se le quitan y se suben al nodo de la unión.
+     */
     private function select(): array
+    {
+        $primera = $this->selectSimple();
+        if (!$this->es('id', 'UNION')) {
+            return $primera;
+        }
+
+        $partes = [$primera];
+        $todas  = [];                       // un flag por operador: UNION ALL o no
+        while ($this->comer('id', 'UNION')) {
+            $todas[]  = $this->comer('id', 'ALL');
+            $partes[] = $this->selectSimple();
+        }
+
+        $ultima = $partes[count($partes) - 1];
+        $union  = [
+            'k'      => 'union',
+            'partes' => $partes,
+            'todas'  => $todas,
+            'order'  => $ultima['order'],
+            'limit'  => $ultima['limit'],
+            'offset' => $ultima['offset'],
+        ];
+        $partes[count($partes) - 1]['order']  = [];
+        $partes[count($partes) - 1]['limit']  = null;
+        $partes[count($partes) - 1]['offset'] = null;
+        $union['partes'] = $partes;
+
+        return $union;
+    }
+
+    private function selectSimple(): array
     {
         $this->exigir('id', 'SELECT');
 
@@ -197,10 +241,7 @@ final class Parser
             $cols[] = ['star' => false, 'expr' => $expr, 'alias' => $alias];
         } while ($this->comer('punc', ','));
 
-        if ($cols === []) {
-            throw JsonSqlDbError::syntax('SELECT sin columnas');
-        }
-        return $cols;
+        return $cols;   // el do-while garantiza al menos una columna
     }
 
     private function from(): array
@@ -217,7 +258,7 @@ final class Parser
             elseif ($this->es('id', 'RIGHT'))  { $this->avanzar(); $this->comer('id', 'OUTER'); $tipo = 'RIGHT'; }
             elseif ($this->es('id', 'CROSS'))  { $this->avanzar(); $tipo = 'CROSS'; }
             elseif ($this->es('id', 'FULL'))   {
-                throw JsonSqlDbError::syntax('FULL JOIN no está soportado');
+                $this->avanzar(); $this->comer('id', 'OUTER'); $tipo = 'FULL';
             }
             elseif ($this->es('id', 'JOIN'))   { $tipo = 'INNER'; }
 
@@ -357,7 +398,8 @@ final class Parser
             $not = false;
             if ($this->es('id', 'NOT')
                 && ($this->esSiguiente('id', 'IN') || $this->esSiguiente('id', 'LIKE')
-                    || $this->esSiguiente('id', 'BETWEEN'))) {
+                    || $this->esSiguiente('id', 'BETWEEN') || $this->esSiguiente('id', 'REGEXP')
+                    || $this->esSiguiente('id', 'RLIKE'))) {
                 $this->avanzar();
                 $not = true;
             }
@@ -376,6 +418,11 @@ final class Parser
                     $e = ['k' => 'in', 'e' => $e, 'lista' => $lista, 'select' => null, 'not' => $not];
                 }
                 $this->exigir('punc', ')');
+                continue;
+            }
+
+            if ($this->comer('id', 'REGEXP') || $this->comer('id', 'RLIKE')) {
+                $e = ['k' => 'regexp', 'e' => $e, 'patron' => $this->exprConcat(), 'not' => $not];
                 continue;
             }
 
@@ -489,6 +536,32 @@ final class Parser
             if (!$tk['q']) {
                 if ($tk['u'] === 'NULL')  { $this->avanzar(); return ['k' => 'lit', 'v' => null]; }
                 if ($tk['u'] === 'CASE')  { return $this->exprCase(); }
+
+                // CAST(expr AS tipo)
+                if ($tk['u'] === 'CAST' && $this->esSiguiente('punc', '(')) {
+                    $this->avanzar();
+                    $this->exigir('punc', '(');
+                    $e = $this->expr();
+                    $this->exigir('id', 'AS');
+                    $tipo = strtoupper((string)$this->avanzar()['v']);
+                    // Se admite y se ignora la longitud: CAST(x AS VARCHAR(10))
+                    if ($this->comer('punc', '(')) {
+                        $this->enteroPositivo('CAST');
+                        $this->comer('punc', ',') && $this->enteroPositivo('CAST');
+                        $this->exigir('punc', ')');
+                    }
+                    $this->exigir('punc', ')');
+                    return ['k' => 'cast', 'e' => $e, 'tipo' => $tipo];
+                }
+
+                // EXISTS (SELECT ...): cierto si la subconsulta devuelve alguna fila
+                if ($tk['u'] === 'EXISTS' && $this->esSiguiente('punc', '(')) {
+                    $this->avanzar();
+                    $this->exigir('punc', '(');
+                    $sub = ['k' => 'exists', 'select' => $this->select()];
+                    $this->exigir('punc', ')');
+                    return $sub;
+                }
                 if ($tk['u'] === 'TRUE')  { $this->avanzar(); return ['k' => 'lit', 'v' => 1]; }
                 if ($tk['u'] === 'FALSE') { $this->avanzar(); return ['k' => 'lit', 'v' => 0]; }
             }
@@ -876,6 +949,7 @@ final class Parser
         return $col;
     }
 
+    /** @phpstan-impure */
     private function esRestriccionDeColumna(): bool
     {
         foreach (['PRIMARY','NOT','NULL','UNIQUE','DEFAULT','REFERENCES','CHECK','COLLATE',
@@ -1208,11 +1282,16 @@ final class Parser
     // Utilidades sobre el flujo de tokens
     // ==================================================================
 
+    /** @return Token */
     private function actual(): array
     {
         return $this->t[$this->i];
     }
 
+    /**
+     * @phpstan-impure
+     * @return Token
+     */
     private function avanzar(): array
     {
         return $this->t[$this->i++];
@@ -1239,6 +1318,7 @@ final class Parser
         return $tipo === 'id' ? (!$tk['q'] && $tk['u'] === $valor) : $tk['v'] === $valor;
     }
 
+    /** @phpstan-impure consume el token si coincide */
     private function comer(string $tipo, string $valor): bool
     {
         if ($this->es($tipo, $valor)) {

@@ -223,6 +223,11 @@ if ($store->bloqueoGlobal()) {
 // Las cuentas van indexadas por nombre y la clave es el campo 'key', así que se
 // busca recorriéndolas. hash_equals compara en tiempo constante: una comparación
 // normal permitiría deducir la clave carácter a carácter midiendo tiempos.
+if (!isset($API_KEYS) || !is_array($API_KEYS)) {
+    salirConError('Configuración incompleta',
+        'Falta $API_KEYS en api/jsonsqldb_api_config.php');
+}
+
 $cuenta = null;
 $origen = 'sin nombre';
 foreach ($API_KEYS as $nombreCuenta => $datos) {
@@ -309,7 +314,7 @@ try {
     $autorizar = static function (string $tipo) use ($permiso, &$operacion): void {
         $operacion = strtoupper(str_replace('_', ' ', $tipo));
 
-        $lectura   = ['select', 'show_databases', 'show_tables', 'show_views',
+        $lectura   = ['select', 'union', 'show_databases', 'show_tables', 'show_views',
                       'show_schema', 'show_keys', 'show_triggers', 'check_keys'];
         $escritura = array_merge($lectura, ['insert', 'update', 'delete', 'repair_keys']);
 

@@ -436,6 +436,199 @@ chk('borrar la tabla de orden', function () use ($bd) {
     return true;
 });
 
+echo "\n== Fechas: NULL y fechas imposibles ==\n";
+chk('DATE/TIME/DATETIME sobre NULL dan NULL, no la fecha de hoy', function () use ($bd) {
+    $r = $bd->consultar('SELECT DATE(NULL) AS a, TIME(NULL) AS b, DATETIME(NULL) AS c')[0];
+    return $r === ['a' => null, 'b' => null, 'c' => null] ?: json_encode($r);
+});
+chk('sin argumentos siguen dando la fecha de ahora', function () use ($bd) {
+    $r = $bd->consultar('SELECT DATE() AS a')[0]['a'];
+    return is_string($r) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $r) === 1 ?: $r;
+});
+chk('una fecha imposible no se "arregla" sola', function () use ($bd) {
+    $r = $bd->consultar("SELECT DATE('2026-02-30') AS a, DATE('2026-13-40') AS b,
+                                DATE('0000-00-00') AS c")[0];
+    return $r === ['a' => null, 'b' => null, 'c' => null] ?: json_encode($r);
+});
+chk('el 29 de febrero de un bisiesto sí vale', function () use ($bd) {
+    return $bd->consultar("SELECT DATE('2028-02-29') AS a")[0]['a'] === '2028-02-29';
+});
+chk('una columna DATETIME rechaza una fecha imposible', function () use ($bd) {
+    $bd->consultar('CREATE TABLE fx (f DATETIME)');
+    $ok = false;
+    try { $bd->consultar('INSERT INTO fx (f) VALUES (?)', ['2026-02-30']); }
+    catch (JsonSqlDbError $e) { $ok = $e->sqlState === 'TYPE'; }
+    $bd->consultar('DROP TABLE fx');
+    return $ok ?: 'aceptó el 30 de febrero';
+});
+
+echo "\n== FULL JOIN, REGEXP y CAST ==\n";
+chk('FULL JOIN trae las huérfanas de los dos lados', function () use ($bd) {
+    $bd->consultar('CREATE TABLE fc (id INTEGER PRIMARY KEY AUTOINCREMENT, n VARCHAR(10))');
+    $bd->consultar('CREATE TABLE fp (id INTEGER PRIMARY KEY AUTOINCREMENT, cid INTEGER, ref VARCHAR(10))');
+    $bd->consultar("INSERT INTO fc (n) VALUES ('Ana'),('Luis')");
+    $bd->consultar("INSERT INTO fp (cid, ref) VALUES (1,'R1'),(99,'HUERFANA')");
+
+    $r = $bd->consultar('SELECT fc.n AS n, fp.ref AS ref FROM fc FULL JOIN fp ON fp.cid = fc.id');
+    $pares = [];
+    foreach ($r as $f) { $pares[] = ($f['n'] ?? '-') . '/' . ($f['ref'] ?? '-'); }
+    sort($pares);
+    return $pares === ['-/HUERFANA', 'Ana/R1', 'Luis/-'] ?: $pares;
+});
+chk('FULL OUTER JOIN es lo mismo', function () use ($bd) {
+    $a = $bd->consultar('SELECT fc.n AS n FROM fc FULL JOIN fp ON fp.cid = fc.id');
+    $b = $bd->consultar('SELECT fc.n AS n FROM fc FULL OUTER JOIN fp ON fp.cid = fc.id');
+    return count($a) === count($b) && count($a) === 3;
+});
+chk('los otros JOIN siguen igual', function () use ($bd) {
+    return count($bd->consultar('SELECT fc.n AS n FROM fc INNER JOIN fp ON fp.cid = fc.id')) === 1
+        && count($bd->consultar('SELECT fc.n AS n FROM fc LEFT JOIN fp ON fp.cid = fc.id')) === 2
+        && count($bd->consultar('SELECT fc.n AS n FROM fc RIGHT JOIN fp ON fp.cid = fc.id')) === 2;
+});
+chk('REGEXP filtra con expresión regular', function () use ($bd) {
+    $bd->consultar('CREATE TABLE rx (m VARCHAR(40))');
+    $bd->consultar("INSERT INTO rx (m) VALUES ('ana@test.com'),('no-es-correo'),('LUIS@X.ES')");
+    $r = $bd->consultar('SELECT m FROM rx WHERE m REGEXP ?', ['^[^@]+@[^@]+\\.[a-z]+$']);
+    return count($r) === 1 && $r[0]['m'] === 'ana@test.com' ?: json_encode($r);
+});
+chk('NOT REGEXP invierte y RLIKE es su alias', function () use ($bd) {
+    $n = $bd->consultar('SELECT COUNT(*) AS n FROM rx WHERE m NOT REGEXP ?', ['@'])[0]['n'];
+    $a = $bd->consultar('SELECT COUNT(*) AS n FROM rx WHERE m RLIKE ?', ['^ana'])[0]['n'];
+    return $n === 1 && $a === 1 ?: "not=$n rlike=$a";
+});
+chk('REGEXP distingue mayúsculas salvo que se pida lo contrario', function () use ($bd) {
+    $s = $bd->consultar('SELECT COUNT(*) AS n FROM rx WHERE m REGEXP ?', ['^luis'])[0]['n'];
+    $i = $bd->consultar('SELECT COUNT(*) AS n FROM rx WHERE m REGEXP ?', ['(?i)^luis'])[0]['n'];
+    return $s === 0 && $i === 1 ?: "sensible=$s insensible=$i";
+});
+chk('REGEXP sobre NULL da NULL', function () use ($bd) {
+    return $bd->consultar('SELECT NULL REGEXP ? AS x', ['a'])[0]['x'] === null;
+});
+chk('una expresión regular no válida se explica', function () use ($bd) {
+    try { $bd->consultar('SELECT m FROM rx WHERE m REGEXP ?', ['[']); }
+    catch (JsonSqlDbError $e) { return str_contains($e->getMessage(), 'no válida'); }
+    return 'no lanzó error';
+});
+chk('CAST convierte entre tipos', function () use ($bd) {
+    $r = $bd->consultar("SELECT CAST('42' AS INTEGER) AS a, CAST(1.9 AS INTEGER) AS b,
+                                CAST(7 AS TEXT) AS c, CAST('3.14159' AS DECIMAL(10,2)) AS d,
+                                CAST(NULL AS INTEGER) AS e")[0];
+    return $r === ['a' => 42, 'b' => 1, 'c' => '7', 'd' => 3.14, 'e' => null] ?: json_encode($r);
+});
+chk('CAST trunca hacia cero, no redondea', function () use ($bd) {
+    $r = $bd->consultar('SELECT CAST(-1.9 AS INTEGER) AS a, CAST(1.9 AS INTEGER) AS b')[0];
+    return $r['a'] === -1 && $r['b'] === 1 ?: json_encode($r);
+});
+chk('CAST admite la longitud y la ignora', function () use ($bd) {
+    return $bd->consultar("SELECT CAST(7 AS VARCHAR(10)) AS x")[0]['x'] === '7';
+});
+chk('CAST a DATETIME valida la fecha', function () use ($bd) {
+    try { $bd->consultar("SELECT CAST('no' AS DATETIME) AS x"); }
+    catch (JsonSqlDbError $e) { return $e->sqlState === 'TYPE'; }
+    return 'no lanzó error';
+});
+error('CAST a un tipo inexistente', 'TYPE', 'SELECT CAST(1 AS FANTASMA) AS x');
+chk('limpiar las tablas', function () use ($bd) {
+    foreach (['fc', 'fp', 'rx'] as $t) { $bd->consultar("DROP TABLE $t"); }
+    return true;
+});
+
+echo "\n== UNION ==\n";
+chk('UNION quita duplicados', function () use ($bd) {
+    $bd->consultar('CREATE TABLE ua (n VARCHAR(10))');
+    $bd->consultar('CREATE TABLE ub (m VARCHAR(10))');
+    $bd->consultar("INSERT INTO ua (n) VALUES ('uno'),('dos')");
+    $bd->consultar("INSERT INTO ub (m) VALUES ('dos'),('tres')");
+    $r = array_column($bd->consultar('SELECT n FROM ua UNION SELECT m FROM ub'), 'n');
+    return $r === ['uno', 'dos', 'tres'] ?: $r;
+});
+chk('UNION ALL los conserva', function () use ($bd) {
+    $r = array_column($bd->consultar('SELECT n FROM ua UNION ALL SELECT m FROM ub'), 'n');
+    return $r === ['uno', 'dos', 'dos', 'tres'] ?: $r;
+});
+chk('las columnas se toman de la primera parte', function () use ($bd) {
+    $r = $bd->consultar('SELECT n FROM ua UNION SELECT m FROM ub');
+    return array_keys($r[0]) === ['n'] ?: array_keys($r[0]);
+});
+chk('ORDER BY se aplica al conjunto', function () use ($bd) {
+    $r = array_column($bd->consultar('SELECT n FROM ua UNION SELECT m FROM ub ORDER BY n'), 'n');
+    return $r === ['dos', 'tres', 'uno'] ?: $r;
+});
+chk('ORDER BY por posición', function () use ($bd) {
+    $r = array_column($bd->consultar('SELECT n FROM ua UNION SELECT m FROM ub ORDER BY 1 DESC'), 'n');
+    return $r === ['uno', 'tres', 'dos'] ?: $r;
+});
+chk('LIMIT se aplica al conjunto, no a la última parte', function () use ($bd) {
+    $r = array_column($bd->consultar('SELECT n FROM ua UNION SELECT m FROM ub ORDER BY n LIMIT 2'), 'n');
+    return $r === ['dos', 'tres'] ?: $r;
+});
+chk('tres partes encadenadas', function () use ($bd) {
+    $r = array_column($bd->consultar("SELECT n FROM ua UNION SELECT m FROM ub UNION SELECT 'cuatro' AS x"), 'n');
+    return count($r) === 4 && in_array('cuatro', $r, true) ?: $r;
+});
+chk('cada parte conserva su propio WHERE', function () use ($bd) {
+    $r = array_column($bd->consultar("SELECT n FROM ua WHERE n = 'uno' UNION SELECT m FROM ub WHERE m = 'tres'"), 'n');
+    return $r === ['uno', 'tres'] ?: $r;
+});
+error('distinto número de columnas', 'SYNTAX', 'SELECT n, n FROM ua UNION SELECT m FROM ub');
+error('ORDER BY con una expresión no permitida', 'SYNTAX',
+      'SELECT n FROM ua UNION SELECT m FROM ub ORDER BY UPPER(n)');
+chk('limpiar las tablas del UNION', function () use ($bd) {
+    $bd->consultar('DROP TABLE ua');
+    $bd->consultar('DROP TABLE ub');
+    return true;
+});
+
+echo "\n== CONCAT y GROUP_CONCAT ==\n";
+chk('CONCAT junta varios argumentos', function () use ($bd) {
+    return $bd->consultar("SELECT CONCAT('a', '-', 'b') AS x")[0]['x'] === 'a-b';
+});
+chk('CONCAT devuelve NULL si alguno lo es', function () use ($bd) {
+    return $bd->consultar("SELECT CONCAT('a', NULL, 'b') AS x")[0]['x'] === null;
+});
+error('CONCAT con un solo argumento', 'SYNTAX', "SELECT CONCAT('a') AS x");
+chk('GROUP_CONCAT agrupa con coma', function () use ($bd) {
+    $r = $bd->consultar('SELECT ciudad, GROUP_CONCAT(nombre) AS ns FROM usuarios GROUP BY ciudad ORDER BY ciudad');
+    return is_string($r[0]['ns']) && str_contains($r[0]['ns'], ',') ?: json_encode($r);
+});
+chk('GROUP_CONCAT con separador propio', function () use ($bd) {
+    $r = $bd->consultar("SELECT GROUP_CONCAT(nombre, ' | ') AS ns FROM usuarios");
+    return str_contains((string)$r[0]['ns'], ' | ');
+});
+chk('GROUP_CONCAT con DISTINCT', function () use ($bd) {
+    $r = $bd->consultar('SELECT GROUP_CONCAT(DISTINCT ciudad) AS cs FROM usuarios');
+    $partes = explode(',', (string)$r[0]['cs']);
+    return count($partes) === count(array_unique($partes));
+});
+chk('GROUP_CONCAT ignora los NULL', function () use ($bd) {
+    $bd->consultar('CREATE TABLE gc (a VARCHAR(10))');
+    $bd->consultar("INSERT INTO gc (a) VALUES ('x'), (NULL), ('y')");
+    $r = $bd->consultar('SELECT GROUP_CONCAT(a) AS s FROM gc');
+    $bd->consultar('DROP TABLE gc');
+    return $r[0]['s'] === 'x,y' ?: $r[0]['s'];
+});
+
+echo "\n== EXISTS ==\n";
+chk('EXISTS es cierto si la subconsulta devuelve filas', function () use ($bd) {
+    return $bd->consultar('SELECT COUNT(*) AS n FROM usuarios WHERE EXISTS (SELECT 1 FROM usuarios)')[0]['n'] > 0;
+});
+chk('EXISTS es falso si no devuelve ninguna', function () use ($bd) {
+    return $bd->consultar("SELECT COUNT(*) AS n FROM usuarios WHERE EXISTS (SELECT 1 FROM usuarios WHERE edad > 999)")[0]['n'] === 0;
+});
+chk('NOT EXISTS invierte', function () use ($bd) {
+    $todas = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios')[0]['n'];
+    $r = $bd->consultar("SELECT COUNT(*) AS n FROM usuarios WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE edad > 999)");
+    return $r[0]['n'] === $todas;
+});
+chk('una subconsulta correlacionada lo dice claramente', function () use ($bd) {
+    try {
+        $bd->consultar('SELECT nombre FROM usuarios u WHERE EXISTS (SELECT 1 FROM usuarios v WHERE v.edad = u.edad)');
+    } catch (JsonSqlDbError $e) {
+        return str_contains($e->getMessage(), 'correlacionadas') ?: $e->getMessage();
+    }
+    return 'no lanzó error';
+});
+
 echo "\n== RANDOM ==\n";
 chk('devuelve enteros de 64 bits, como SQLite', function () use ($bd) {
     $grande = false;

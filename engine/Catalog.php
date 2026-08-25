@@ -125,16 +125,6 @@ final class Catalog
         throw JsonSqlDbError::schema("La vista '$nombre' no existe");
     }
 
-    /** Corta la operación si el nombre es una vista: no se puede escribir en ellas. */
-    public function exigirQueNoSeaVista(string $nombre, string $operacion): void
-    {
-        if ($this->esVista($nombre)) {
-            throw JsonSqlDbError::schema(
-                "'$nombre' es una vista: no admite $operacion. Las vistas son de solo lectura."
-            );
-        }
-    }
-
     /** Estructura normalizada de una tabla. */
     public function meta(string $tabla): array
     {

@@ -40,10 +40,31 @@ final class Select
     /** @return array{cols: string[], filas: array} */
     private function correr(array $ast): array
     {
+        if ($ast['k'] === 'union') {
+            return $this->correrUnion($ast);
+        }
+
         [$filas, $claves] = $this->origenes($ast['from']);
         $mapa = $this->mapaColumnas($claves);
         $sub  = function (array $sel, int $sid): array {
-            return $this->subs[$sid] ??= $this->correr($sel)['filas'];
+            if (isset($this->subs[$sid])) {
+                return $this->subs[$sid];
+            }
+            try {
+                return $this->subs[$sid] = $this->correr($sel)['filas'];
+            } catch (JsonSqlDbError $e) {
+                // Si la subconsulta usa una columna de la consulta exterior, el
+                // resolvedor no la encuentra. Es una limitación conocida y merece
+                // decirlo, en vez de un críptico "columna desconocida".
+                if ($e->sqlState === 'SCHEMA' && str_contains($e->getMessage(), 'Columna desconocida')) {
+                    throw JsonSqlDbError::schema(
+                        $e->getMessage() . '. Las subconsultas correlacionadas (las que usan '
+                        . 'columnas de la consulta exterior) no están soportadas: reescríbela '
+                        . 'con un JOIN'
+                    );
+                }
+                throw $e;
+            }
         };
 
         // WHERE
@@ -166,6 +187,120 @@ final class Select
         return ['cols' => $cols, 'filas' => $resultado];
     }
 
+    /**
+     * Ejecuta las partes de un UNION y las junta.
+     *
+     * Las columnas de salida son las de la primera parte: las demás aportan sus
+     * valores en el mismo orden, aunque sus columnas se llamen distinto, que es
+     * lo que hace SQL.
+     *
+     * @return array{cols: string[], filas: array}
+     */
+    private function correrUnion(array $ast): array
+    {
+        $cols  = [];
+        $filas = [];
+
+        foreach ($ast['partes'] as $i => $parte) {
+            $r = $this->correr($parte);
+
+            if ($i === 0) {
+                $cols = $r['cols'];
+            } elseif (count($r['cols']) !== count($cols)) {
+                throw JsonSqlDbError::syntax(
+                    'Todas las partes de un UNION tienen que devolver el mismo número de '
+                    . 'columnas: la primera devuelve ' . count($cols) . ' y otra devuelve '
+                    . count($r['cols'])
+                );
+            }
+
+            // Las columnas se toman por posición y se renombran a las de la
+            // primera parte, aunque en su SELECT se llamen de otra forma
+            foreach ($r['filas'] as $fila) {
+                $valores = array_values($fila);
+                $nueva   = [];
+                foreach ($cols as $j => $nombre) {
+                    $nueva[$nombre] = $valores[$j] ?? null;
+                }
+                $filas[] = $nueva;
+            }
+
+            // UNION quita duplicados, UNION ALL los conserva. El flag es del
+            // operador que precede a esta parte.
+            if ($i > 0 && ($ast['todas'][$i - 1] ?? false) === false) {
+                $vistos = [];
+                $unicas = [];
+                foreach ($filas as $fila) {
+                    $clave = '';
+                    foreach ($fila as $v) {
+                        $clave .= Valor::clave($v) . "\0";
+                    }
+                    if (isset($vistos[$clave])) {
+                        continue;
+                    }
+                    $vistos[$clave] = true;
+                    $unicas[] = $fila;
+                }
+                $filas = $unicas;
+            }
+        }
+
+        $filas = $this->ordenarUnion($filas, $cols, $ast['order']);
+
+        if ($ast['limit'] !== null || $ast['offset'] !== null) {
+            $filas = array_slice($filas, $ast['offset'] ?? 0, $ast['limit']);
+        }
+
+        return ['cols' => $cols, 'filas' => array_values($filas)];
+    }
+
+    /**
+     * ORDER BY de un UNION. Solo admite nombres de columna del resultado o su
+     * posición (1, 2...): en ese punto las tablas de origen ya no existen.
+     *
+     * @param string[] $cols
+     */
+    private function ordenarUnion(array $filas, array $cols, array $orden): array
+    {
+        if ($orden === [] || $filas === []) {
+            return $filas;
+        }
+
+        $claves = [];
+        foreach ($orden as $o) {
+            $e = $o['expr'];
+            if ($e['k'] === 'col' && $e['tabla'] === null && in_array($e['nombre'], $cols, true)) {
+                $claves[] = $e['nombre'];
+                continue;
+            }
+            if ($e['k'] === 'lit' && is_int($e['v']) && isset($cols[$e['v'] - 1])) {
+                $claves[] = $cols[$e['v'] - 1];
+                continue;
+            }
+            throw JsonSqlDbError::syntax(
+                'El ORDER BY de un UNION solo admite nombres de columna del resultado o su '
+                . 'posición (1, 2...)'
+            );
+        }
+
+        $indices = array_keys($filas);
+        usort($indices, static function (int $a, int $b) use ($filas, $claves, $orden): int {
+            foreach ($claves as $i => $col) {
+                $c = Valor::compararOrden($filas[$a][$col] ?? null, $filas[$b][$col] ?? null);
+                if ($c !== 0) {
+                    return $orden[$i]['dir'] === 'DESC' ? -$c : $c;
+                }
+            }
+            return $a <=> $b;                        // orden estable
+        });
+
+        $out = [];
+        foreach ($indices as $i) {
+            $out[] = $filas[$i];
+        }
+        return $out;
+    }
+
     // ==================================================================
     // Orígenes de datos y JOIN
     // ==================================================================
@@ -283,40 +418,62 @@ final class Select
             return $this->subs[$sid] ??= $this->correr($sel)['filas'];
         };
 
-        // Índice hash del lado interno
+        // Índice hash del lado interno. Guarda posiciones, no filas, para poder
+        // saber después cuáles quedaron sin pareja (lo necesita FULL JOIN).
         $indice = null;
         if ($clavesInt !== []) {
             $indice = [];
-            foreach ($internas as $fila) {
+            foreach ($internas as $i => $fila) {
                 $clave = $this->claveHash($fila, $clavesInt);
                 if ($clave !== null) {
-                    $indice[$clave][] = $fila;
+                    $indice[$clave][] = $i;
                 }
             }
         }
 
+        $completo = $tipo === 'FULL';
+        $casadas  = [];                     // posiciones internas que sí casaron
+
         $salida = [];
         foreach ($externas as $ext) {
-            $candidatas = $internas;
+            $candidatas = array_keys($internas);
             if ($indice !== null) {
+                // Una sola llamada: claveHash() recorre la fila y no es gratis
                 $clave      = $this->claveHash($ext, $clavesExt);
                 $candidatas = $clave === null ? [] : ($indice[$clave] ?? []);
             }
 
             $encontrada = false;
-            foreach ($candidatas as $int) {
-                $fila = $ext + $int;
+            foreach ($candidatas as $i) {
+                $fila = $ext + $internas[$i];
                 if ($resto !== null
                     && Valor::verdadero(Evaluator::evaluar($resto, ['fila' => $fila, 'sub' => $sub])) !== true) {
                     continue;
                 }
                 $salida[]   = $fila;
                 $encontrada = true;
+                if ($completo) {
+                    $casadas[$i] = true;
+                }
             }
             if (!$encontrada && $tipo !== 'INNER') {
                 $salida[] = $ext + $nulos;
             }
         }
+
+        // FULL JOIN: además, las filas internas que no casaron con ninguna,
+        // rellenando con nulos el lado externo
+        if ($completo) {
+            // En un FULL el lado externo es siempre el izquierdo, así que los
+            // nulos que faltan son los de sus columnas
+            $nulosExt = array_fill_keys($clavesIzq, null);
+            foreach ($internas as $i => $int) {
+                if (!isset($casadas[$i])) {
+                    $salida[] = $int + $nulosExt;
+                }
+            }
+        }
+
         return $salida;
     }
 
