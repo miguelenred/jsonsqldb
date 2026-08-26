@@ -72,6 +72,8 @@ final class Database
         $t0 = microtime(true);
         $op = 'DESCONOCIDA';
 
+        Memoria::iniciar();
+
         try {
             $ast = Parser::analizar($sql, $params);
             $op  = self::operacion($ast);

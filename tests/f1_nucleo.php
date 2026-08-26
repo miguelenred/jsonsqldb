@@ -270,6 +270,51 @@ chk('borrar base', function () use ($raiz, $base) {
 });
 @rmdir($raiz);
 
+echo "\n== Vigilancia de memoria ==\n";
+chk('una consulta que no cabe en memoria se corta con un error, no con un fatal', function () use ($raiz) {
+    // En otro proceso, con poca memoria y una tabla que no cabe multiplicada
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$r = ' . var_export($raiz . '/mem', true) . ';'
+            . '@mkdir($r, 0777, true);'
+            . 'JsonSQLDB\\Database::crear("m", $r);'
+            . '$bd = new JsonSQLDB\\Database("m", $r);'
+            . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(200))");'
+            . 'for ($i = 0; $i < 1500; $i++) { $bd->consultar("INSERT INTO t (v) VALUES (?)", [str_repeat("x", 180)]); }'
+            . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
+            . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState, "|", $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]; }';
+
+    $salida = trim((string)shell_exec(
+        escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r ' . escapeshellarg($codigo) . ' 2>&1'));
+
+    // MEMORIA = cortó bien; y después sigue respondiendo, así que el proceso vivía
+    return $salida === 'MEMORIA|1500' ?: $salida;
+});
+chk('sin vigilancia, la misma consulta muere con un fatal de PHP', function () use ($raiz) {
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'define("JSONSQLDB_MEMORIA_VIGILAR", false);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$bd = new JsonSQLDB\\Database("m", ' . var_export($raiz . '/mem', true) . ');'
+            . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
+            . 'catch (Throwable $e) { echo "capturado"; }';
+
+    $salida = (string)shell_exec(
+        escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r ' . escapeshellarg($codigo) . ' 2>&1');
+
+    // Se comprueba que el interruptor sirve de algo: sin él, fatal incapturable
+    return str_contains($salida, 'Allowed memory size') ?: trim($salida);
+});
+chk('los datos siguen intactos tras el corte', function () use ($raiz) {
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$bd = new JsonSQLDB\\Database("m", ' . var_export($raiz . '/mem', true) . ');'
+            . '$bd->consultar("INSERT INTO t (v) VALUES (?)", ["despues"]);'
+            . 'echo $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"];';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    exec('rm -rf ' . escapeshellarg($raiz . '/mem'));
+    return $salida === '1501' ?: $salida;
+});
+
 echo "\n== Conexión directa al motor ==\n";
 chk('bloqueada por defecto', function () use ($raiz) {
     // En otro proceso, sin activar el parámetro

@@ -78,6 +78,49 @@ Si algo no aparece en esta lista ni en la tabla siguiente, lo más probable es q
 se comporte como en SQLite, pero **la referencia es esta documentación**, no la de
 SQLite: donde las dos digan cosas distintas, manda esta.
 
+### Cómo escribir consultas que vayan rápidas
+
+No hay índices: toda búsqueda recorre la tabla. Pero el motor tiene dos atajos
+que se activan solos, y merece la pena escribir pensando en ellos.
+
+**Comparaciones simples.** Un `WHERE columna = valor` —y lo mismo con `<>`, `<`,
+`<=`, `>`, `>=`— se resuelve sin pasar por el evaluador general de expresiones.
+Medido sobre 2.000 filas, una consulta por clave primaria pasa de 2,9 ms a
+1,7 ms. Envolver la comparación en algo más complicado (`OR`, funciones,
+paréntesis con otras condiciones) desactiva el atajo.
+
+**Corte temprano por `LIMIT`.** Si la consulta lleva `LIMIT` y **no** lleva
+`ORDER BY`, `GROUP BY`, `DISTINCT` ni agregados, el motor deja de recorrer en
+cuanto tiene las filas que le has pedido. Sobre 2.000 filas, un
+`WHERE ... LIMIT 10` pasa de 4,0 ms a 1,4 ms. Con `ORDER BY` no se puede cortar,
+porque la última fila de la tabla podría ser la primera del resultado.
+
+**Y lo que más diferencia marca de todo: agrupa los `INSERT`.** Cada sentencia de
+escritura reescribe el fichero de la tabla, así que dos mil `INSERT` sueltos
+reescriben dos mil veces. La misma carga en una sola sentencia con varios
+`VALUES` es **180 veces más rápida**, medido:
+
+```sql
+-- 2.000 sentencias: unos 5 segundos
+INSERT INTO clientes (nombre) VALUES ('Ana');
+INSERT INTO clientes (nombre) VALUES ('Luis');
+...
+
+-- una sentencia: unos 30 milisegundos
+INSERT INTO clientes (nombre) VALUES ('Ana'), ('Luis'), ...;
+```
+
+Con parámetros ligados desde PHP:
+
+```php
+$vals = []; $params = [];
+foreach ($filas as $f) { $vals[] = '(?, ?)'; $params[] = $f['nombre']; $params[] = $f['ciudad']; }
+$cli->consultar('INSERT INTO clientes (nombre, ciudad) VALUES ' . implode(',', $vals), $params);
+```
+
+Ten en cuenta el límite de la API: `MAX_PARAMS` son 1.000 parámetros por
+petición, así que para cargas grandes ve por lotes de unos cientos de filas.
+
 ## 1.1. Qué NO se soporta
 
 La regla del proyecto es simple: **si una sentencia se acepta, hace exactamente lo
@@ -245,12 +288,12 @@ un resultado silenciosamente incorrecto.
 | `engine/Config.php` | lectura de `config.php` con valores por defecto |
 | `engine/Logger.php` | log de consultas |
 | `tests/f2_parser.php` | 70 comprobaciones del analizador |
-| `tests/f2_select.php` | 131 comprobaciones del ejecutor, con datos reales |
+| `tests/f2_select.php` | 138 comprobaciones del ejecutor, con datos reales |
 
 ## 8. Pruebas
 
 ```
-php tests/f1_nucleo.php     → OK: 56
+php tests/f1_nucleo.php     → OK: 59
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 131
+php tests/f2_select.php     → OK: 138
 ```

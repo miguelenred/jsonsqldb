@@ -25,6 +25,12 @@ final class JsonSqlDbError extends \RuntimeException
     public static function constraint(string $m): self { return new self('CONSTRAINT', $m); }
     public static function syntax(string $m): self     { return new self('SYNTAX', $m); }
     public static function io(string $m): self         { return new self('IO', $m); }
+
+    /** Se ha cortado la consulta para no agotar la memoria de PHP. */
+    public static function memoria(string $m): self
+    {
+        return new self('MEMORIA', $m);
+    }
     public static function lock(string $m): self       { return new self('LOCK', $m); }
     public static function permission(string $m): self { return new self('PERMISSION', $m); }
 }

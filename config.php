@@ -101,6 +101,24 @@ defined('JSONSQLDB_LOG_DIAS') || define('JSONSQLDB_LOG_DIAS', 90);
 defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', false);
 
 // ------------------------------------------------------------
+// MEMORIA
+// ------------------------------------------------------------
+// El resultado de una consulta vive entero en memoria. Si se pide más de la que
+// PHP tiene asignada, PHP corta con un error FATAL: no es una excepción, no se
+// puede capturar y el cliente recibe una respuesta rota en lugar de un mensaje.
+//
+// Con esto activado, el motor vigila cuánta memoria lleva consumida y corta él
+// mismo antes de llegar al techo, con un error normal que explica qué pasó y
+// qué hacer. La consulta falla igual —no se puede completar lo que no cabe—,
+// pero falla de forma entendible y el proceso sigue vivo.
+defined('JSONSQLDB_MEMORIA_VIGILAR') || define('JSONSQLDB_MEMORIA_VIGILAR', true);
+
+// A partir de qué fracción de memory_limit se corta. 0.85 = al 85 %.
+// Más bajo corta antes y desperdicia memoria; más alto arriesga llegar al fatal
+// entre dos comprobaciones. Solo se admiten valores entre 0.5 y 1.
+defined('JSONSQLDB_MEMORIA_MARGEN') || define('JSONSQLDB_MEMORIA_MARGEN', 0.85);
+
+// ------------------------------------------------------------
 // SEGURIDAD ANTE CORTES
 // ------------------------------------------------------------
 // Las operaciones de estructura (CREATE, ALTER, DROP) siempre van con journal:

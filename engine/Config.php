@@ -109,6 +109,19 @@ final class Config
         return !defined('JSONSQLDB_JOURNAL_DATOS') || JSONSQLDB_JOURNAL_DATOS === true;
     }
 
+    /** ¿Se corta la consulta al acercarse al límite de memoria de PHP? */
+    public static function limiteMemoriaActivo(): bool
+    {
+        return !defined('JSONSQLDB_MEMORIA_VIGILAR') || JSONSQLDB_MEMORIA_VIGILAR === true;
+    }
+
+    /** Fracción de memory_limit a partir de la cual se corta (0.85 = al 85 %). */
+    public static function margenMemoria(): float
+    {
+        $v = defined('JSONSQLDB_MEMORIA_MARGEN') ? (float)JSONSQLDB_MEMORIA_MARGEN : 0.85;
+        return ($v > 0.5 && $v < 1.0) ? $v : 0.85;
+    }
+
     public static function logDias(): int
     {
         return defined('JSONSQLDB_LOG_DIAS') ? max(0, (int)JSONSQLDB_LOG_DIAS) : 90;

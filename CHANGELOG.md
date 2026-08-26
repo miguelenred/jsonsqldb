@@ -9,6 +9,45 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.10.0] - 2026-08-26
+
+### Added
+
+- **Memory guard.** A query whose result does not fit in `memory_limit` used to
+  die with PHP's fatal error: not catchable, no `finally`, and the client got a
+  broken response instead of a message. The engine now checks every 512 rows and
+  stops at 85 % of the limit with an ordinary error (`sqlState` `MEMORIA`)
+  explaining what happened and what to do. The query still fails — what does not
+  fit does not fit — but the process stays alive and the API answers properly.
+  Controlled by `JSONSQLDB_MEMORIA_VIGILAR` and `JSONSQLDB_MEMORIA_MARGEN`.
+  - The engine deliberately does **not** raise `memory_limit` by itself. That
+    limit exists so one request cannot take down the others; raising it silently
+    would take a decision that belongs to whoever runs the server.
+
+- **Faster reads.** Two optimisations that need no change to the storage format
+  and no configuration:
+  - **Fast path for simple comparisons.** A `WHERE column = value` (and `<>`,
+    `<`, `<=`, `>`, `>=`) is now resolved without going through the general
+    expression evaluator on every row. Measured over 2,000 rows: a primary-key
+    lookup drops from 2.9 ms to 1.7 ms. `UPDATE` and `DELETE` use the same path.
+  - **Early stop on `LIMIT`.** When a query has `LIMIT` and no `ORDER BY`,
+    `GROUP BY`, `DISTINCT` or aggregates, scanning stops as soon as enough rows
+    are found. `WHERE ... LIMIT 10` over 2,000 rows drops from 4.0 ms to 1.4 ms.
+    With `ORDER BY` it cannot stop early, because the last row of the table might
+    be the first of the result.
+
+  Multi-row `INSERT` already existed and is by far the biggest lever: 2,000 rows
+  in one statement take ~30 ms against ~5,000 ms as 2,000 separate statements,
+  **180× faster**. It is now documented prominently, because a benchmark that
+  inserts row by row measures the wrong thing.
+
+### Fixed
+
+- **`$externa` was used outside its scope** in two places added by the correlated
+  subquery work in 1.9.0: the extra `ON` condition of a join and the `GROUP BY`
+  grouping. It produced a PHP warning on every query that joined and grouped at
+  the same time.
+
 ## [1.9.0] - 2026-08-26
 
 ### Added
@@ -530,6 +569,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.10.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.10.0
 [1.9.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.9.0
 [1.8.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.8.0
 [1.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.7.0

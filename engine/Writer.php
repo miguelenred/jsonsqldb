@@ -329,7 +329,8 @@ final class Writer
         $meta  = $this->meta($tabla);
         $mapa  = $this->mapaColumnas($tabla, $meta);
 
-        $where = $ast['where'] === null ? null : Evaluator::resolver($ast['where'], $mapa);
+        $where  = $ast['where'] === null ? null : Evaluator::resolver($ast['where'], $mapa);
+        $simple = $where === null ? null : Select::comparacionSimple($where);
         $sets  = [];
         foreach ($ast['set'] as $s) {
             $col = Catalog::columna($meta, $s['col']);
@@ -348,7 +349,7 @@ final class Writer
 
         foreach ($filas as $vieja) {
             $ctx = ['fila' => $vieja, 'sub' => $sub];
-            if ($where !== null && Valor::verdadero(Evaluator::evaluar($where, $ctx)) !== true) {
+            if ($where !== null && !self::cumple($where, $simple, $vieja, $ctx)) {
                 continue;
             }
 
@@ -391,13 +392,14 @@ final class Writer
         $tabla = $ast['tabla'];
         $meta  = $this->meta($tabla);
         $mapa  = $this->mapaColumnas($tabla, $meta);
-        $where = $ast['where'] === null ? null : Evaluator::resolver($ast['where'], $mapa);
+        $where  = $ast['where'] === null ? null : Evaluator::resolver($ast['where'], $mapa);
+        $simple = $where === null ? null : Select::comparacionSimple($where);
         $sub   = fn(array $s, int $sid): array => $this->seleccionar($s);
 
         $objetivo = [];
         foreach ($this->filas($tabla) as $fila) {
             if ($where === null
-                || Valor::verdadero(Evaluator::evaluar($where, ['fila' => $fila, 'sub' => $sub])) === true) {
+                || self::cumple($where, $simple, $fila, ['fila' => $fila, 'sub' => $sub])) {
                 $objetivo[] = $fila;
             }
         }
@@ -925,5 +927,20 @@ final class Writer
             $mapa[strtolower($tabla . '.' . $c['name'])] = $c['name'];
         }
         return $mapa;
+    }
+
+    /**
+     * ¿La fila cumple el WHERE? Con una comparación simple se resuelve sin pasar
+     * por el evaluador general, que es lo que domina el coste en tablas grandes.
+     *
+     * @param array{clave: string, op: string, valor: mixed}|null $simple
+     */
+    private static function cumple(array $where, ?array $simple, array $fila, array $ctx): bool
+    {
+        if ($simple !== null) {
+            $v = $fila[$simple['clave']] ?? null;
+            return $v !== null && Select::compara($simple['op'], $v, $simple['valor']);
+        }
+        return Valor::verdadero(Evaluator::evaluar($where, $ctx)) === true;
     }
 }

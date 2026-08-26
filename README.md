@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.9.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 1.10.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -28,6 +28,19 @@ for. If you do not have that problem, you probably do not need this.
 statement is atomic on its own — it either completes or leaves the data as it
 was — but you cannot group several statements into one unit of work that rolls
 back together. If your data needs that, this is not the right tool.
+
+**If a query does not fit in memory**, the engine stops it at 85 % of PHP's
+`memory_limit` with an ordinary error explaining what happened, instead of dying
+with PHP's uncatchable fatal. The query still fails, but the process survives and
+the API answers properly. Data is never corrupted by it: reads write nothing,
+writes are buffered and flushed at the end, every file is written atomically, and
+multi-table operations are undone by the journal.
+
+**Writing rows one at a time is the slowest thing you can do**, because every
+statement rewrites the table's file. Two thousand rows inserted as one statement
+with many `VALUES` take about 30 ms; the same rows as two thousand separate
+statements take about 5 seconds. Batch your inserts. Reads have a fast path for
+simple comparisons and stop early on `LIMIT` when the query allows it.
 
 **Be realistic about the limits.** A query result is held in memory, so this is
 built for tables in the thousands to low hundreds of thousands of rows, not
@@ -585,9 +598,9 @@ Seven suites, no dependencies, all using temporary directories — they never to
 your data.
 
 ```
-php tests/f1_nucleo.php       → OK: 56    storage, types, locking, direct access
+php tests/f1_nucleo.php       → OK: 59    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 131    SELECT execution and collation
+php tests/f2_select.php       → OK: 138    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 50    real requests against the API
 php tests/f5_esquema.php      → OK: 87    SHOW, ALTER, constraints, views, integrity

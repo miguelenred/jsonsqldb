@@ -105,16 +105,39 @@ final class Select
             return $filas;
         };
 
+        // ¿Se puede dejar de recorrer en cuanto haya suficientes filas?
+        // Solo si el resultado no depende de las filas que vendrían después:
+        // sin ORDER BY, sin agrupar, sin agregados y sin DISTINCT.
+        $tope = $this->topeTemprano($ast);
+
         // WHERE
         if ($ast['where'] !== null) {
             $where = Evaluator::resolver($ast['where'], $mapa, [], $this->externo['mapa'] ?? []);
+
+            // Camino rápido para  columna = valor  y demás comparaciones simples:
+            // evita pasar por el evaluador general en cada una de las filas.
+            $simple = self::comparacionSimple($where);
+
             $filtradas = [];
             foreach ($filas as $fila) {
-                if (Valor::verdadero(Evaluator::evaluar($where, ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa])) === true) {
+                if ($simple !== null) {
+                    $v    = $fila[$simple['clave']] ?? null;
+                    $vale = $v === null ? false : self::compara($simple['op'], $v, $simple['valor']);
+                } else {
+                    $vale = Valor::verdadero(Evaluator::evaluar(
+                        $where, ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa])) === true;
+                }
+                if ($vale) {
+                    Memoria::comprobar('el filtrado del WHERE');
                     $filtradas[] = $fila;
+                    if ($tope !== null && count($filtradas) >= $tope) {
+                        break;                      // ya no hacen falta más
+                    }
                 }
             }
             $filas = $filtradas;
+        } elseif ($tope !== null && count($filas) > $tope) {
+            $filas = array_slice($filas, 0, $tope);
         }
 
         // Columnas de salida (expandiendo * )
@@ -306,6 +329,73 @@ final class Select
         return ['cols' => $cols, 'filas' => array_values($filas)];
     }
 
+    /**
+     * Cuántas filas hacen falta como mucho, o null si hay que recorrerlo todo.
+     *
+     * Con ORDER BY, GROUP BY, agregados o DISTINCT, la fila número 5.000 puede
+     * cambiar el resultado, así que no se puede cortar antes de tiempo.
+     */
+    private function topeTemprano(array $ast): ?int
+    {
+        if ($ast['limit'] === null || $ast['order'] !== [] || $ast['distinct']) {
+            return null;
+        }
+        if (($ast['group'] ?? []) !== [] || ($ast['having'] ?? null) !== null) {
+            return null;
+        }
+        foreach ($ast['cols'] as $c) {
+            if (($c['star'] ?? false) === false && Evaluator::tieneAgregado($c['expr'])) {
+                return null;
+            }
+        }
+        return (int)$ast['limit'] + (int)($ast['offset'] ?? 0);
+    }
+
+    /**
+     * Si el WHERE es  columna <op> literal , devuelve las piezas para comparar
+     * directamente. Si no, null y se usa el evaluador general.
+     *
+     * @return array{clave: string, op: string, valor: mixed}|null
+     */
+    public static function comparacionSimple(array $n): ?array
+    {
+        if ($n['k'] !== 'bin' || !in_array($n['op'], ['=', '<>', '!=', '<', '<=', '>', '>='], true)) {
+            return null;
+        }
+        // La columna a un lado y un literal al otro, en cualquier orden
+        [$col, $lit, $op] = [$n['i'], $n['d'], $n['op']];
+        if ($col['k'] !== 'col' || $lit['k'] !== 'lit') {
+            [$col, $lit] = [$n['d'], $n['i']];
+            if ($col['k'] !== 'col' || $lit['k'] !== 'lit') {
+                return null;
+            }
+            $op = ['<' => '>', '>' => '<', '<=' => '>=', '>=' => '<='][$op] ?? $op;
+        }
+        if (!isset($col['clave']) || $lit['v'] === null) {
+            return null;                            // alias o NULL: al camino general
+        }
+        return ['clave' => $col['clave'], 'op' => $op, 'valor' => $lit['v']];
+    }
+
+    /** @param mixed $a @param mixed $b */
+    public static function compara(string $op, $a, $b): bool
+    {
+        $c = Valor::comparar($a, $b);
+        if ($c === null) {
+            return false;                           // incomparables: no cumple
+        }
+        switch ($op) {
+            case '=':  return $c === 0;
+            case '<>':
+            case '!=': return $c !== 0;
+            case '<':  return $c < 0;
+            case '<=': return $c <= 0;
+            case '>':  return $c > 0;
+            case '>=': return $c >= 0;
+        }
+        return false;
+    }
+
     /** Clave comparable de una fila completa, para deduplicar y cruzar. */
     private static function claveFila(array $fila): string
     {
@@ -486,6 +576,7 @@ final class Select
             $salida = [];
             foreach ($izq as $a) {
                 foreach ($der['filas'] as $b) {
+                    Memoria::comprobar('el producto cartesiano');
                     $salida[] = $a + $b;
                 }
             }
@@ -540,9 +631,11 @@ final class Select
             foreach ($candidatas as $i) {
                 $fila = $ext + $internas[$i];
                 if ($resto !== null
-                    && Valor::verdadero(Evaluator::evaluar($resto, ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa])) !== true) {
+                    && Valor::verdadero(Evaluator::evaluar($resto, ['fila' => $fila, 'sub' => $sub,
+                        'filaExterna' => $this->externo['fila'] ?? []])) !== true) {
                     continue;
                 }
+                Memoria::comprobar('el JOIN');
                 $salida[]   = $fila;
                 $encontrada = true;
                 if ($completo) {
@@ -712,7 +805,8 @@ final class Select
         }
         $grupos = [];
         foreach ($filas as $fila) {
-            $ctx   = ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa];
+            $ctx   = ['fila' => $fila, 'sub' => $sub,
+                      'filaExterna' => $this->externo['fila'] ?? []];
             $clave = '';
             foreach ($exprs as $e) {
                 $clave .= Valor::clave(Evaluator::evaluar($e, $ctx)) . "\0";

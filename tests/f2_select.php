@@ -436,6 +436,52 @@ chk('borrar la tabla de orden', function () use ($bd) {
     return true;
 });
 
+echo "\n== Camino rápido del WHERE y corte por LIMIT ==\n";
+chk('el camino rápido da lo mismo que el general', function () use ($bd) {
+    // Comparaciones simples: van por el atajo. El resultado tiene que coincidir
+    // con el de una expresión equivalente que obliga a usar el evaluador.
+    foreach ([['edad', '>', 30], ['edad', '=', 30], ['nombre', '<>', 'Ana']] as [$c, $op, $v]) {
+        $lit = is_string($v) ? "'$v'" : $v;
+        $rapido  = $bd->consultar("SELECT COUNT(*) AS n FROM usuarios WHERE $c $op $lit")[0]['n'];
+        $general = $bd->consultar("SELECT COUNT(*) AS n FROM usuarios WHERE ($c $op $lit) OR 1 = 0")[0]['n'];
+        if ($rapido !== $general) {
+            return "$c $op $lit: rápido=$rapido general=$general";
+        }
+    }
+    return true;
+});
+chk('el valor al revés también entra por el atajo', function () use ($bd) {
+    $a = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios WHERE edad > 30')[0]['n'];
+    $b = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios WHERE 30 < edad')[0]['n'];
+    return $a === $b ?: "a=$a b=$b";
+});
+chk('los NULL no cuelan por el atajo', function () use ($bd) {
+    // Una columna NULL no cumple ninguna comparación, ni siquiera <>
+    $n = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios WHERE ciudad <> ?', ['Madrid'])[0]['n'];
+    $t = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios WHERE ciudad IS NOT NULL
+                         AND ciudad <> ?', ['Madrid'])[0]['n'];
+    return $n === $t ?: "sin filtro=$n con filtro=$t";
+});
+chk('LIMIT corta antes de recorrerlo todo, y devuelve lo mismo', function () use ($bd) {
+    $r = $bd->consultar('SELECT nombre FROM usuarios LIMIT 2');
+    return count($r) === 2 ?: count($r);
+});
+chk('con ORDER BY no se puede cortar antes: el resultado manda', function () use ($bd) {
+    $todos = array_column($bd->consultar('SELECT nombre FROM usuarios ORDER BY nombre'), 'nombre');
+    $dos   = array_column($bd->consultar('SELECT nombre FROM usuarios ORDER BY nombre LIMIT 2'), 'nombre');
+    return $dos === array_slice($todos, 0, 2) ?: json_encode([$dos, $todos]);
+});
+chk('con OFFSET tampoco se pierde ninguna', function () use ($bd) {
+    $todos = array_column($bd->consultar('SELECT nombre FROM usuarios'), 'nombre');
+    $dos   = array_column($bd->consultar('SELECT nombre FROM usuarios LIMIT 2 OFFSET 1'), 'nombre');
+    return $dos === array_slice($todos, 1, 2) ?: json_encode([$dos, $todos]);
+});
+chk('con un agregado no se corta antes de tiempo', function () use ($bd) {
+    $a = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios')[0]['n'];
+    $b = $bd->consultar('SELECT COUNT(*) AS n FROM usuarios LIMIT 1')[0]['n'];
+    return $a === $b ?: "sin limit=$a con limit=$b";
+});
+
 echo "\n== Casos límite de operadores y funciones ==\n";
 chk('el módulo con un divisor que se vuelve cero al truncar da NULL', function () use ($bd) {
     // 0.4 no es cero, pero (int)0.4 sí: antes reventaba con DivisionByZeroError

@@ -535,6 +535,7 @@ final class Storage
                 throw JsonSqlDbError::io("Datos ilegibles en " . basename($fichero));
             }
             foreach ($json['rows'] as $fila) {
+                Memoria::comprobar('la lectura de la tabla');
                 $filas[] = $fila;
             }
         }

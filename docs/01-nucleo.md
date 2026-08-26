@@ -215,7 +215,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 56   FALLOS: 0`.
+Resultado esperado: `OK: 59   FALLOS: 0`.
 
 ---
 
@@ -281,6 +281,43 @@ $filas = $bd->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Torrevieja'
 Tiene sentido en un script de mantenimiento, una migración o un proceso por cron,
 donde el salto por HTTP solo añade latencia. Para cualquier cosa expuesta a
 terceros, la API.
+
+### Qué pasa si se llena la memoria
+
+El resultado de una consulta vive entero en memoria. Si se pide más de la que PHP
+tiene asignada en `memory_limit`, PHP corta con un **error fatal**: no es una
+excepción, no se puede capturar, no se ejecuta ningún `finally`, y el cliente
+recibe una respuesta rota en vez de un mensaje.
+
+Los datos **no se corrompen**, y eso es por cómo está construido el motor: una
+lectura no escribe nada; una escritura acumula los cambios en memoria y los
+vuelca al final, de modo que quedarse sin memoria mientras se calcula no ha
+tocado el disco todavía; cada fichero se escribe con temporal más `rename`, que
+es indivisible; y si la operación toca varias tablas, el journal la deshace al
+volver a abrir la base. Los bloqueos también se sueltan solos, porque `flock`
+está atado al proceso y el sistema operativo lo libera al matarlo.
+
+Lo que sí se puede evitar es la **forma** de fallar. Con
+`JSONSQLDB_MEMORIA_VIGILAR` activado —lo está por defecto— el motor mira cada 512
+filas cuánta memoria lleva y corta él mismo al llegar al 85 % del límite
+(`JSONSQLDB_MEMORIA_MARGEN`), lanzando un error normal con `sqlState` `MEMORIA`:
+
+```
+Se ha cortado el producto cartesiano: lleva 56 MB de los 64 MB que PHP tiene
+asignados. Acota la consulta con WHERE o LIMIT, o sube memory_limit si de
+verdad necesitas ese volumen de una vez.
+```
+
+El proceso sigue vivo, la API responde con su JSON de error y el cliente sabe qué
+ha pasado. **La consulta falla igual**: lo que no cabe no cabe. Lo que cambia es
+que falla de forma entendible en vez de reventar.
+
+Sobre subir el límite automáticamente: se puede leer con `ini_get('memory_limit')`
+y en muchos servidores se puede cambiar con `ini_set()`, pero **el motor no lo
+hace**, a propósito. Ese límite existe para que una petición no se lleve por
+delante a las demás; subirlo sola sería quitarle al administrador una decisión
+que es suya, y en hosting compartido suele estar bloqueado de todas formas. Si de
+verdad necesitas más, súbelo tú en `php.ini`.
 
 ### Bloqueos: dos niveles
 
