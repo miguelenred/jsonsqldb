@@ -215,21 +215,28 @@ final class Functions
         $largo = Types::longitud($s);
         $ini   = (int)Valor::aNumero($args[1]);
 
-        if ($ini < 0) {
-            $ini = max(0, $largo + $ini);
-        } elseif ($ini > 0) {
-            $ini--;                       // SQL empieza en 1
-        }
+        // Índice base 0 interno. En SQL la primera posición es la 1, y la 0 se
+        // refiere al hueco anterior al primer carácter: SUBSTR('abcdef',0,3)
+        // abarca las posiciones 0, 1 y 2, de las que solo existen dos, así que
+        // devuelve 'ab' y no 'abc'. Restar siempre 1 conserva ese desfase.
+        $ini = $ini < 0 ? max(0, $largo + $ini) : $ini - 1;
+
         if (!isset($args[2])) {
-            return self::corte($s, $ini, null);
+            return self::corte($s, max(0, $ini), null);
         }
         $len = (int)Valor::aNumero($args[2]);
-        if ($len < 0) {
-            $nuevoIni = max(0, $ini + $len);
-            $len      = $ini - $nuevoIni;
-            $ini      = $nuevoIni;
-        }
-        return self::corte($s, $ini, $len);
+
+        // La ventana pedida es [ini, ini+len) con longitud positiva, y
+        // [ini+len, ini) con longitud negativa: en ese caso son los caracteres
+        // ANTERIORES a la posición dada. Se recorta a lo que existe de verdad,
+        // una sola vez, para no descontar dos veces lo que cae fuera.
+        $desde = $len < 0 ? $ini + $len : $ini;
+        $hasta = $len < 0 ? $ini        : $ini + $len;
+
+        $desde = max(0, $desde);
+        $hasta = max(0, $hasta);
+
+        return self::corte($s, $desde, max(0, $hasta - $desde));
     }
 
     private static function corte(string $s, int $ini, ?int $len): string

@@ -195,6 +195,36 @@ function ejecutarAccion(string $accion): void
             flash('success', "Restricción '$nombre' eliminada.");
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
+        // ---------------- Restaurar desde ZIP ----------------
+        case 'importar_zip':
+            Auth::exigirAdmin();
+            $nombre = identificador(post('nombre'), 'base de datos');
+
+            if (mismoHostQueLaApi() === false) {
+                throw new RuntimeException(
+                    'Restaurar desde ZIP necesita que el panel y el motor estén en la misma '
+                    . 'máquina, porque escribe los ficheros directamente. Usa un volcado en SQL, '
+                    . 'que va por la API y funciona entre máquinas distintas.'
+                );
+            }
+            $subido = $_FILES['zip'] ?? null;
+            if (!is_array($subido) || ($subido['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+                throw new RuntimeException(
+                    'No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP '
+                    . '(upload_max_filesize y post_max_size).'
+                );
+            }
+            if (!is_uploaded_file((string)$subido['tmp_name'])) {
+                throw new RuntimeException('El fichero recibido no es una subida válida.');
+            }
+
+            // rutaDeLaBase() ya comprueba que la carpeta existe y que el motor
+            // está en esta máquina, y explica el motivo si no es así
+            $resumen = Importar::zip((string)$subido['tmp_name'], $nombre, rutaDeLaBase($nombre));
+            Audit::registrar('importar_zip', $resumen, $nombre);
+            flash('success', "Base '$nombre' restaurada. $resumen");
+            redirigir(['p' => 'bases']);
+
         // ---------------- Vistas ----------------
         case 'crear_vista':
             Auth::exigirAdmin();

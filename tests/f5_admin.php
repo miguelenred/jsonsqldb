@@ -140,6 +140,33 @@ function enviar(string $query, array $campos, bool $conCsrf = true, ?string $ori
     return peticion($query, $campos);
 }
 
+/** POST que devuelve un fichero (CSV, ZIP...). Igual que enviar(), sin tocar el cuerpo. */
+function descargar(string $query, array $campos): string {
+    $campos['csrf'] = csrfActual($query);
+    return peticion($query, $campos);
+}
+
+/** POST con un fichero adjunto, como haría un formulario con enctype multipart. */
+function subir(string $query, array $campos, string $campoFichero, string $ruta): string {
+    global $url, $cookies;
+    $campos['csrf'] = csrfActual($query);
+    $campos[$campoFichero] = new CURLFile($ruta, 'application/zip', basename($ruta));
+
+    $ch = curl_init($url . '/jsonsqldbadmin/index.php?' . $query);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $campos,      // array => multipart/form-data
+        CURLOPT_COOKIEJAR      => $cookies,
+        CURLOPT_COOKIEFILE     => $cookies,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT        => 60,
+    ]);
+    $r = curl_exec($ch);
+    curl_close($ch);
+    return is_string($r) ? $r : '';
+}
+
 /** Token CSRF leído de la página indicada. */
 function csrfActual(string $query): string {
     if (preg_match('/name="csrf" value="([a-f0-9]{64})"/', pedir($query), $m)) {
@@ -856,6 +883,72 @@ chk('borrar la base restaurada', function () {
     enviar('p=bases', ['accion' => 'borrar_base', 'nombre' => 'restaurada',
                        'confirmacion' => 'restaurada']);
     return !str_contains(pedir('p=bases'), 'db=restaurada');
+});
+
+echo "\n== Restaurar desde ZIP ==\n";
+chk('exportar y volver a restaurar deja la base igual', function () use ($raizDatos) {
+    if (!class_exists('ZipArchive')) {
+        echo "       (omitida: falta la extensión zip)\n";
+        return true;
+    }
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE TABLE restaurable (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(20))']);
+    enviar('p=sql&db=tienda', ['sql' => "INSERT INTO restaurable (v) VALUES ('uno'),('dos')"]);
+
+    $zip = descargar('p=bases', ['accion' => 'exportar_base', 'formato' => 'zip', 'nombre' => 'tienda']);
+    $f   = sys_get_temp_dir() . '/prueba_restaurar_' . getmypid() . '.zip';
+    file_put_contents($f, $zip);
+
+    // Se destroza la tabla y se restaura
+    enviar('p=sql&db=tienda', ['sql' => 'DELETE FROM restaurable']);
+    $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
+    @unlink($f);
+
+    if (!str_contains($html, 'restaurada')) {
+        return 'no restauró: ' . substr(strip_tags($html), 0, 160);
+    }
+    $r = enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM restaurable']);
+    return str_contains($r, '<td>2</td>') ?: 'las filas no volvieron';
+});
+chk('un ZIP con rutas hacia arriba se rechaza sin tocar nada', function () use ($raizDatos) {
+    if (!class_exists('ZipArchive')) { return true; }
+    $f = sys_get_temp_dir() . '/malicioso_' . getmypid() . '.zip';
+    $z = new ZipArchive();
+    $z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $z->addFromString('tienda/../../fuera.json', '{"rows":[]}');
+    $z->close();
+
+    $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
+    @unlink($f);
+    return str_contains($html, 'sale de la carpeta') && !is_file(dirname($raizDatos) . '/fuera.json')
+        ?: substr(strip_tags($html), 0, 200);
+});
+chk('un ZIP con un .json que no es del motor se rechaza', function () {
+    if (!class_exists('ZipArchive')) { return true; }
+    $f = sys_get_temp_dir() . '/roto_' . getmypid() . '.zip';
+    $z = new ZipArchive();
+    $z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $z->addFromString('tienda/clientes.json', 'esto no es JSON');
+    $z->close();
+
+    $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
+    @unlink($f);
+    return str_contains($html, 'no es un JSON válido') ?: substr(strip_tags($html), 0, 160);
+});
+chk('un ZIP sin tablas se rechaza', function () {
+    if (!class_exists('ZipArchive')) { return true; }
+    $f = sys_get_temp_dir() . '/vacio_' . getmypid() . '.zip';
+    $z = new ZipArchive();
+    $z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $z->addFromString('tienda/leeme.txt', 'nada');
+    $z->close();
+
+    $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
+    @unlink($f);
+    return str_contains($html, 'ninguna tabla') ?: substr(strip_tags($html), 0, 160);
+});
+chk('limpiar la tabla restaurable', function () {
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE restaurable']);
+    return true;
 });
 
 echo "\n== Usuarios y permisos ==\n";

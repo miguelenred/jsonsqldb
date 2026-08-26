@@ -26,6 +26,11 @@ $zipDisponible = mismoHostQueLaApi() !== false;
                   <div class="d-inline-flex gap-2 align-items-center">
                     <a class="btn btn-sm btn-outline-secondary"
                        href="<?= h(url(['p' => 'sql', 'db' => $b])) ?>"><i class="bi bi-terminal"></i> SQL</a>
+                    <?php if ($zipDisponible && Auth::esAdmin()): ?>
+                      <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal"
+                              data-bs-target="#imp<?= h(md5($b)) ?>" title="Restaurar desde una copia ZIP">
+                        <i class="bi bi-upload"></i></button>
+                    <?php endif; ?>
                     <?php
                     $formatos = ['sql' => ['Volcado SQL', 'filetype-sql']];
                     if ($zipDisponible) {
@@ -59,8 +64,9 @@ $zipDisponible = mismoHostQueLaApi() !== false;
         reejecutable.
         <?php if ($zipDisponible): ?>
           <i class="bi bi-file-zip"></i> copia en ZIP: los ficheros JSON tal cual, con su
-          estructura de carpetas; se descomprime dentro de <code>data/</code> y la base queda
-          restaurada.
+          estructura de carpetas.
+          <i class="bi bi-upload"></i> restaura esa copia sobre la base, sustituyendo lo que
+          haya.
         <?php else: ?>
           <br>
           <i class="bi bi-info-circle"></i> La <strong>copia en ZIP no está disponible</strong>:
@@ -118,3 +124,43 @@ $zipDisponible = mismoHostQueLaApi() !== false;
   </div></div>
 </div>
 <?php endforeach; endif; ?>
+
+<?php if ($zipDisponible && Auth::esAdmin()): ?>
+<?php foreach ($bases as $b): ?>
+<div class="modal fade" id="imp<?= h(md5($b)) ?>" tabindex="-1">
+  <div class="modal-dialog"><div class="modal-content">
+    <form method="post" enctype="multipart/form-data">
+      <?= csrf() ?>
+      <input type="hidden" name="accion" value="importar_zip">
+      <input type="hidden" name="nombre" value="<?= h($b) ?>">
+      <div class="modal-header">
+        <h5 class="modal-title">Restaurar «<?= h($b) ?>» desde un ZIP</h5>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning py-2 small">
+          <strong>Se sustituye todo el contenido actual de la base.</strong> Antes de escribir
+          nada se aparta una copia de lo que hay, y si la restauración falla a medias se deja
+          como estaba.
+        </div>
+        <div class="mb-2">
+          <label class="form-label" for="zip<?= h(md5($b)) ?>">Fichero ZIP</label>
+          <input class="form-control form-control-sm" type="file" name="zip" accept=".zip"
+                 id="zip<?= h(md5($b)) ?>" required>
+        </div>
+        <div class="form-text">
+          Tiene que ser una copia generada por este panel. Solo se restauran los ficheros
+          <code>.json</code>; cualquier otra cosa que venga dentro se ignora, y si el ZIP trae
+          rutas que salgan de la carpeta de destino se rechaza entero sin tocar nada.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-warning"
+                onclick="return confirm('¿Sustituir el contenido de <?= h($b) ?>?');">
+          <i class="bi bi-upload"></i> Restaurar</button>
+      </div>
+    </form>
+  </div></div>
+</div>
+<?php endforeach; ?>
+<?php endif; ?>

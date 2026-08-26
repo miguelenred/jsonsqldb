@@ -14,6 +14,7 @@ require_once __DIR__ . '/lib/Auth.php';
 require_once __DIR__ . '/lib/Audit.php';
 require_once __DIR__ . '/lib/Api.php';
 require_once __DIR__ . '/lib/Exportar.php';
+require_once __DIR__ . '/lib/Importar.php';
 require_once __DIR__ . '/lib/util.php';
 require_once __DIR__ . '/lib/acciones.php';
 

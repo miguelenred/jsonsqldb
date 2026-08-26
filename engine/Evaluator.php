@@ -26,7 +26,14 @@ final class Evaluator
      * @param array $mapa  'alias.col' => 'alias.col' y 'col' => 'alias.col' | false si es ambigua
      * @param array $alias nombres de salida del SELECT admitidos (ORDER BY / GROUP BY por alias)
      */
-    public static function resolver(array $n, array $mapa, array $alias = []): array
+    /**
+     * Se pone a true cuando una columna se resuelve contra la consulta exterior.
+     * Es lo que permite saber si una subconsulta está correlacionada y, por
+     * tanto, si su resultado se puede cachear o hay que recalcularlo por fila.
+     */
+    public static bool $correlacionada = false;
+
+    public static function resolver(array $n, array $mapa, array $alias = [], array $externo = []): array
     {
         switch ($n['k']) {
             case 'col':
@@ -45,41 +52,49 @@ final class Evaluator
                     $n['alias'] = $alias[$buscado];      // se resolverá con la fila ya proyectada
                     return $n;
                 }
+                // Subconsulta correlacionada: la columna es de la consulta de
+                // fuera. Se marca para leerla de la fila exterior al evaluar.
+                if (isset($externo[$buscado]) && $externo[$buscado] !== false) {
+                    $n['externa']       = true;
+                    $n['claveExterna']  = $externo[$buscado];
+                    self::$correlacionada = true;
+                    return $n;
+                }
                 $completo = $n['tabla'] === null ? $n['nombre'] : $n['tabla'] . '.' . $n['nombre'];
                 throw JsonSqlDbError::schema("Columna desconocida: '$completo'");
 
             case 'bin':
-                $n['i'] = self::resolver($n['i'], $mapa, $alias);
-                $n['d'] = self::resolver($n['d'], $mapa, $alias);
+                $n['i'] = self::resolver($n['i'], $mapa, $alias, $externo);
+                $n['d'] = self::resolver($n['d'], $mapa, $alias, $externo);
                 return $n;
 
             case 'un':
-                $n['e'] = self::resolver($n['e'], $mapa, $alias);
+                $n['e'] = self::resolver($n['e'], $mapa, $alias, $externo);
                 return $n;
 
             case 'fn':
                 foreach ($n['args'] as $i => $a) {
-                    $n['args'][$i] = self::resolver($a, $mapa, $alias);
+                    $n['args'][$i] = self::resolver($a, $mapa, $alias, $externo);
                 }
                 return $n;
 
             case 'case':
                 if ($n['base'] !== null) {
-                    $n['base'] = self::resolver($n['base'], $mapa, $alias);
+                    $n['base'] = self::resolver($n['base'], $mapa, $alias, $externo);
                 }
                 foreach ($n['when'] as $i => [$cond, $res]) {
-                    $n['when'][$i] = [self::resolver($cond, $mapa, $alias), self::resolver($res, $mapa, $alias)];
+                    $n['when'][$i] = [self::resolver($cond, $mapa, $alias, $externo), self::resolver($res, $mapa, $alias, $externo)];
                 }
                 if ($n['else'] !== null) {
-                    $n['else'] = self::resolver($n['else'], $mapa, $alias);
+                    $n['else'] = self::resolver($n['else'], $mapa, $alias, $externo);
                 }
                 return $n;
 
             case 'in':
-                $n['e'] = self::resolver($n['e'], $mapa, $alias);
+                $n['e'] = self::resolver($n['e'], $mapa, $alias, $externo);
                 if ($n['lista'] !== null) {
                     foreach ($n['lista'] as $i => $a) {
-                        $n['lista'][$i] = self::resolver($a, $mapa, $alias);
+                        $n['lista'][$i] = self::resolver($a, $mapa, $alias, $externo);
                     }
                 }
                 if ($n['select'] !== null && !isset($n['sid'])) {
@@ -88,30 +103,30 @@ final class Evaluator
                 return $n;                       // la subconsulta se resuelve al ejecutarse
 
             case 'between':
-                $n['e']   = self::resolver($n['e'], $mapa, $alias);
-                $n['min'] = self::resolver($n['min'], $mapa, $alias);
-                $n['max'] = self::resolver($n['max'], $mapa, $alias);
+                $n['e']   = self::resolver($n['e'], $mapa, $alias, $externo);
+                $n['min'] = self::resolver($n['min'], $mapa, $alias, $externo);
+                $n['max'] = self::resolver($n['max'], $mapa, $alias, $externo);
                 return $n;
 
             case 'like':
-                $n['e']      = self::resolver($n['e'], $mapa, $alias);
-                $n['patron'] = self::resolver($n['patron'], $mapa, $alias);
+                $n['e']      = self::resolver($n['e'], $mapa, $alias, $externo);
+                $n['patron'] = self::resolver($n['patron'], $mapa, $alias, $externo);
                 if ($n['escape'] !== null) {
-                    $n['escape'] = self::resolver($n['escape'], $mapa, $alias);
+                    $n['escape'] = self::resolver($n['escape'], $mapa, $alias, $externo);
                 }
                 return $n;
 
             case 'regexp':
-                $n['e']      = self::resolver($n['e'], $mapa, $alias);
-                $n['patron'] = self::resolver($n['patron'], $mapa, $alias);
+                $n['e']      = self::resolver($n['e'], $mapa, $alias, $externo);
+                $n['patron'] = self::resolver($n['patron'], $mapa, $alias, $externo);
                 return $n;
 
             case 'cast':
-                $n['e'] = self::resolver($n['e'], $mapa, $alias);
+                $n['e'] = self::resolver($n['e'], $mapa, $alias, $externo);
                 return $n;
 
             case 'null':
-                $n['e'] = self::resolver($n['e'], $mapa, $alias);
+                $n['e'] = self::resolver($n['e'], $mapa, $alias, $externo);
                 return $n;
         }
 
@@ -180,6 +195,9 @@ final class Evaluator
                 return $n['v'];
 
             case 'col':
+                if (isset($n['externa'])) {
+                    return $ctx['filaExterna'][$n['claveExterna']] ?? null;
+                }
                 if (isset($n['clave'])) {
                     return $ctx['fila'][$n['clave']] ?? null;
                 }
@@ -241,10 +259,10 @@ final class Evaluator
 
             case 'exists':
                 // No hace falta el valor: basta con saber si hay alguna fila
-                return ($ctx['sub'])($n['select'], $n['sid']) === [] ? 0 : 1;
+                return ($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []) === [] ? 0 : 1;
 
             case 'sub':
-                $filas = ($ctx['sub'])($n['select'], $n['sid']);
+                $filas = ($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []);
                 if ($filas === []) {
                     return null;
                 }
@@ -303,7 +321,12 @@ final class Evaluator
             case '-': return $x - $y;
             case '*': return $x * $y;
             case '/': return $y == 0 ? null : $x / $y;      // división por cero -> NULL, como SQLite
-            case '%': return $y == 0 ? null : (int)$x % (int)$y;
+            case '%':
+                // El módulo trabaja con enteros, como en SQLite. Comprobar el
+                // cero ANTES de convertir dejaba pasar 0.4, que al convertirse
+                // se vuelve 0 y provocaba un DivisionByZeroError de PHP.
+                $di = (int)$y;
+                return $di === 0 ? null : (int)$x % $di;
         }
 
         throw JsonSqlDbError::syntax("Operador no soportado: $op");
@@ -433,7 +456,7 @@ final class Evaluator
 
         if ($n['select'] !== null) {
             $valores = [];
-            foreach (($ctx['sub'])($n['select'], $n['sid']) as $fila) {
+            foreach (($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []) as $fila) {
                 $valores[] = reset($fila);
             }
         } else {

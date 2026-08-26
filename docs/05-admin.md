@@ -66,6 +66,17 @@ el nombre exacto de la base. Hay dos formas de exportar:
   carpetas. Se descomprime dentro de `data/` y la base queda restaurada, con sus
   metadatos y revisiones. Es la copia fiel.
 
+Junto al de exportar hay un botón para **restaurar desde una copia ZIP**, con las
+mismas condiciones: escribe en el disco del motor, así que necesita que el panel
+y la API estén en la misma máquina. Antes de tocar nada aparta lo que hay, y si
+la restauración falla a medias lo devuelve a su sitio.
+
+Del ZIP solo se restauran los `.json`, más el `.htaccess` y el `web.config`;
+cualquier otra cosa se ignora. Los nombres de tabla se validan, el contenido se
+comprueba que sea JSON con la forma que espera el motor, y **si alguna ruta del
+ZIP sale de la carpeta de destino se rechaza el fichero entero sin tocar nada**:
+es el ataque clásico contra los ZIP.
+
 El botón de la copia ZIP **solo aparece si el panel y la API se sirven desde la
 misma máquina**. El panel compara el host de `ADMIN_API_URL` con el suyo; si no
 coinciden, oculta el botón y explica por qué, en vez de dejarte copiar los
@@ -120,6 +131,13 @@ automáticas, numéricas y de fecha la columna no se manda y el motor aplica el
 autoincremento o el `DEFAULT`; en las de texto sí se guarda la cadena vacía.
 Para guardar un nulo se marca la casilla NULL. Para editar o borrar una fila suelta la tabla necesita clave
 primaria; si no la tiene, el panel lo avisa y te manda al editor SQL.
+
+**Clave de solo lectura** — si configuras `ADMIN_API_KEY_LECTURA` con una clave
+de permiso `lectura`, el panel firma con ella cuando quien ha entrado no es
+administrador. Así el motor se convierte en la segunda barrera: aunque un fallo
+del panel dejara pasar un `DELETE`, la API lo rechazaría. Sin configurarla, todos
+los usuarios firman con la clave admin y la única barrera es la comprobación del
+propio panel.
 
 **Integridad** — pantalla propia que comprueba que ninguna fila apunte a un valor
 inexistente en su tabla destino, y un botón para corregir poniendo a `NULL` lo
@@ -246,6 +264,8 @@ $cli->aceptarAutofirmado();
 | `ADMIN_SSL_AUTOFIRMADO` | `false` | aceptar el certificado sin comprobarlo |
 | `ADMIN_TIMEOUT` | `60` | segundos de espera de la llamada |
 | `ADMIN_DATA_PATH` | `datos/` | usuarios y auditoría |
+| `ADMIN_API_KEY_LECTURA` | vacío | clave de la API para los usuarios de solo lectura |
+| `ADMIN_HMAC_SECRET_LECTURA` | vacío | su secreto |
 | `ADMIN_IPS_PERMITIDAS` | vacío | IPs o rangos CIDR que pueden abrir el panel |
 | `ADMIN_EXIGIR_HTTPS` | `false` | rechazar el acceso por HTTP |
 | `ADMIN_CONFIAR_EN_PROXY` | `false` | fiarse de X-Forwarded-For / -Proto |
@@ -277,7 +297,7 @@ $cli->aceptarAutofirmado();
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 e iconos 1.11.3, en local |
 | `jsonsqldbadmin/assets/panel.js` | habilita los campos de columna según el tipo |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 113 comprobaciones navegando el panel de verdad |
+| `tests/f5_admin.php` | 118 comprobaciones navegando el panel de verdad |
 
 ## 8. Pruebas
 
@@ -288,7 +308,7 @@ claves, triggers, datos, editor SQL, permisos del rol de lectura y auditoría.
 Usa una carpeta temporal, así que no toca tus datos.
 
 ```
-php tests/f5_admin.php     → OK: 113
+php tests/f5_admin.php     → OK: 118
 ```
 
 Necesita la extensión cURL. En Windows con XAMPP, actívala en `php.ini`

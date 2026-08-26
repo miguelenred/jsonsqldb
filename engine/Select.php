@@ -22,6 +22,15 @@ final class Select
     /** @var int vistas resueltas en la cadena actual, para cortar ciclos */
     private int $profundidadVista = 0;
 
+    /** @var array<string,array> consultas con nombre del WITH en curso */
+    private array $con = [];
+
+    /** @var array{mapa: array, fila: array}|null consulta exterior, si estamos dentro de una subconsulta */
+    private ?array $externo = null;
+
+    /** @var array<int,array<string,array>> resultados de subconsultas correlacionadas, por fila exterior */
+    private array $subsCorr = [];
+
     /** @var array<int,array> resultado de cada subconsulta ya ejecutada */
     private array $subs = [];
 
@@ -40,39 +49,68 @@ final class Select
     /** @return array{cols: string[], filas: array} */
     private function correr(array $ast): array
     {
-        if ($ast['k'] === 'union') {
-            return $this->correrUnion($ast);
+        // Las CTE del WITH quedan disponibles mientras se ejecuta esta consulta
+        // y las de dentro. Se apilan para que un WITH anidado no pise al de
+        // fuera y para restaurarlo todo al salir.
+        $conAnterior = $this->con;
+        if (isset($ast['with'])) {
+            $this->con = $ast['with'] + $this->con;
         }
+
+        try {
+            return $ast['k'] === 'union'
+                ? $this->correrUnion($ast)
+                : $this->correrSimple($ast);
+        } finally {
+            $this->con = $conAnterior;
+        }
+    }
+
+    private function correrSimple(array $ast): array
+    {
 
         [$filas, $claves] = $this->origenes($ast['from']);
         $mapa = $this->mapaColumnas($claves);
-        $sub  = function (array $sel, int $sid): array {
+        $externa = $this->externo['fila'] ?? [];
+        $sub  = function (array $sel, int $sid, array $filaExterna = []) use ($mapa): array {
+            // Una subconsulta que no mira hacia fuera da siempre lo mismo: se
+            // ejecuta una vez. Si está correlacionada, su resultado depende de
+            // la fila de fuera, así que se guarda por fila.
             if (isset($this->subs[$sid])) {
                 return $this->subs[$sid];
             }
-            try {
-                return $this->subs[$sid] = $this->correr($sel)['filas'];
-            } catch (JsonSqlDbError $e) {
-                // Si la subconsulta usa una columna de la consulta exterior, el
-                // resolvedor no la encuentra. Es una limitación conocida y merece
-                // decirlo, en vez de un críptico "columna desconocida".
-                if ($e->sqlState === 'SCHEMA' && str_contains($e->getMessage(), 'Columna desconocida')) {
-                    throw JsonSqlDbError::schema(
-                        $e->getMessage() . '. Las subconsultas correlacionadas (las que usan '
-                        . 'columnas de la consulta exterior) no están soportadas: reescríbela '
-                        . 'con un JOIN'
-                    );
-                }
-                throw $e;
+            $claveFila = $filaExterna === [] ? '' : self::claveFila($filaExterna);
+            if (isset($this->subsCorr[$sid][$claveFila])) {
+                return $this->subsCorr[$sid][$claveFila];
             }
+
+            $externoPrevio = $this->externo;
+            $marcaPrevia   = Evaluator::$correlacionada;
+            Evaluator::$correlacionada = false;
+            $this->externo = ['mapa' => $mapa, 'fila' => $filaExterna];
+
+            try {
+                $filas = $this->correr($sel)['filas'];
+                $usoFuera = Evaluator::$correlacionada;
+            } finally {
+                $this->externo             = $externoPrevio;
+                Evaluator::$correlacionada = $marcaPrevia;
+            }
+
+            if ($usoFuera) {
+                $this->subsCorr[$sid][$claveFila] = $filas;
+            } else {
+                $this->subs[$sid] = $filas;
+            }
+            return $filas;
         };
 
         // WHERE
         if ($ast['where'] !== null) {
-            $where = Evaluator::resolver($ast['where'], $mapa);
+            $where = Evaluator::resolver($ast['where'], $mapa, [], $this->externo['mapa'] ?? []);
             $filtradas = [];
             foreach ($filas as $fila) {
-                if (Valor::verdadero(Evaluator::evaluar($where, ['fila' => $fila, 'sub' => $sub])) === true) {
+                if (Valor::verdadero(Evaluator::evaluar($where, ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa])) === true) {
                     $filtradas[] = $fila;
                 }
             }
@@ -86,12 +124,12 @@ final class Select
         $grupoExprs = [];
         if ($ast['group'] !== null) {
             foreach ($ast['group'] as $e) {
-                $grupoExprs[] = Evaluator::resolver($e, $mapa);
+                $grupoExprs[] = Evaluator::resolver($e, $mapa, [], $this->externo['mapa'] ?? []);
             }
         }
         $agrupar = $grupoExprs !== [] || $ast['having'] !== null || $this->hayAgregados($salida, $ast);
 
-        $having = $ast['having'] === null ? null : Evaluator::resolver($ast['having'], $mapa);
+        $having = $ast['having'] === null ? null : Evaluator::resolver($ast['having'], $mapa, [], $this->externo['mapa'] ?? []);
 
         // Alias de salida utilizables en ORDER BY
         $aliasSalida = [];
@@ -100,7 +138,7 @@ final class Select
         }
         $orden = [];
         foreach ($ast['order'] as $o) {
-            $orden[] = ['expr' => Evaluator::resolver($o['expr'], $mapa, $aliasSalida), 'dir' => $o['dir']];
+            $orden[] = ['expr' => Evaluator::resolver($o['expr'], $mapa, $aliasSalida, $this->externo['mapa'] ?? []), 'dir' => $o['dir']];
         }
 
         // Grupos: cada elemento es [fila representativa, filas del grupo|null]
@@ -112,7 +150,8 @@ final class Select
 
         if ($bloques !== null) {
             foreach ($bloques as $grupo) {
-                $ctx = ['fila' => $grupo[0] ?? [], 'grupo' => $grupo, 'sub' => $sub];
+                $ctx = ['fila' => $grupo[0] ?? [], 'grupo' => $grupo, 'sub' => $sub,
+                        'filaExterna' => $externa];
                 if ($having !== null && Valor::verdadero(Evaluator::evaluar($having, $ctx)) !== true) {
                     continue;
                 }
@@ -125,7 +164,7 @@ final class Select
             }
         } else {
             foreach ($filas as $f) {
-                $ctx  = ['fila' => $f, 'sub' => $sub];
+                $ctx  = ['fila' => $f, 'sub' => $sub, 'filaExterna' => $externa];
                 $fila = [];
                 foreach ($salida as $c) {
                     $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
@@ -216,32 +255,45 @@ final class Select
 
             // Las columnas se toman por posición y se renombran a las de la
             // primera parte, aunque en su SELECT se llamen de otra forma
+            $nuevas = [];
             foreach ($r['filas'] as $fila) {
                 $valores = array_values($fila);
-                $nueva   = [];
+                $n       = [];
                 foreach ($cols as $j => $nombre) {
-                    $nueva[$nombre] = $valores[$j] ?? null;
+                    $n[$nombre] = $valores[$j] ?? null;
                 }
-                $filas[] = $nueva;
+                $nuevas[] = $n;
             }
 
-            // UNION quita duplicados, UNION ALL los conserva. El flag es del
-            // operador que precede a esta parte.
-            if ($i > 0 && ($ast['todas'][$i - 1] ?? false) === false) {
-                $vistos = [];
-                $unicas = [];
-                foreach ($filas as $fila) {
-                    $clave = '';
-                    foreach ($fila as $v) {
-                        $clave .= Valor::clave($v) . "\0";
-                    }
-                    if (isset($vistos[$clave])) {
-                        continue;
-                    }
-                    $vistos[$clave] = true;
-                    $unicas[] = $fila;
-                }
-                $filas = $unicas;
+            if ($i === 0) {
+                $filas = $nuevas;
+                continue;
+            }
+
+            switch ($ast['ops'][$i - 1] ?? 'UNION') {
+                case 'UNION ALL':                 // se conserva todo, repetidos incluidos
+                    $filas = array_merge($filas, $nuevas);
+                    break;
+
+                case 'UNION':                     // lo de A o lo de B, sin repetir
+                    $filas = self::sinRepetidos(array_merge($filas, $nuevas));
+                    break;
+
+                case 'INTERSECT':                 // solo lo que está en las dos
+                    $deB   = self::indice($nuevas);
+                    $filas = self::sinRepetidos(array_filter(
+                        $filas,
+                        static fn(array $f): bool => isset($deB[self::claveFila($f)])
+                    ));
+                    break;
+
+                case 'EXCEPT':                    // lo de A que no está en B
+                    $deB   = self::indice($nuevas);
+                    $filas = self::sinRepetidos(array_filter(
+                        $filas,
+                        static fn(array $f): bool => !isset($deB[self::claveFila($f)])
+                    ));
+                    break;
             }
         }
 
@@ -252,6 +304,41 @@ final class Select
         }
 
         return ['cols' => $cols, 'filas' => array_values($filas)];
+    }
+
+    /** Clave comparable de una fila completa, para deduplicar y cruzar. */
+    private static function claveFila(array $fila): string
+    {
+        $k = '';
+        foreach ($fila as $v) {
+            $k .= Valor::clave($v) . "\0";
+        }
+        return $k;
+    }
+
+    /** @return array<string,true> */
+    private static function indice(array $filas): array
+    {
+        $out = [];
+        foreach ($filas as $f) {
+            $out[self::claveFila($f)] = true;
+        }
+        return $out;
+    }
+
+    private static function sinRepetidos(array $filas): array
+    {
+        $vistos = [];
+        $out    = [];
+        foreach ($filas as $f) {
+            $k = self::claveFila($f);
+            if (isset($vistos[$k])) {
+                continue;
+            }
+            $vistos[$k] = true;
+            $out[]      = $f;
+        }
+        return $out;
     }
 
     /**
@@ -332,6 +419,12 @@ final class Select
             $alias  = $o['alias'];
             $cols   = $r['cols'];
             $origen = $r['filas'];
+        } elseif (isset($this->con[$o['nombre']])) {
+            // Una consulta con nombre del WITH: se ejecuta como una subconsulta
+            $r      = $this->correr($this->con[$o['nombre']]);
+            $alias  = $o['alias'] ?? $o['nombre'];
+            $cols   = $r['cols'];
+            $origen = $r['filas'];
         } elseif ($this->cat->esVista($o['nombre'])) {
             // Una vista es un SELECT guardado: se analiza y se ejecuta igual
             // que una subconsulta del FROM.
@@ -400,7 +493,7 @@ final class Select
         }
 
         $mapa = $this->mapaColumnas(array_merge($clavesIzq, $der['claves']));
-        $on   = Evaluator::resolver($o['on'], $mapa);
+        $on   = Evaluator::resolver($o['on'], $mapa, [], $this->externo['mapa'] ?? []);
         [$pares, $resto] = $this->igualdades($on, array_flip($der['claves']));
 
         // RIGHT JOIN = mismo algoritmo con los papeles cambiados
@@ -447,7 +540,7 @@ final class Select
             foreach ($candidatas as $i) {
                 $fila = $ext + $internas[$i];
                 if ($resto !== null
-                    && Valor::verdadero(Evaluator::evaluar($resto, ['fila' => $fila, 'sub' => $sub])) !== true) {
+                    && Valor::verdadero(Evaluator::evaluar($resto, ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa])) !== true) {
                     continue;
                 }
                 $salida[]   = $fila;
@@ -586,7 +679,7 @@ final class Select
                 }
                 continue;
             }
-            $expr = Evaluator::resolver($c['expr'], $mapa);
+            $expr = Evaluator::resolver($c['expr'], $mapa, [], $this->externo['mapa'] ?? []);
             $anadir($c['alias'] ?? self::etiqueta($c['expr']), $expr);
         }
 
@@ -619,7 +712,7 @@ final class Select
         }
         $grupos = [];
         foreach ($filas as $fila) {
-            $ctx   = ['fila' => $fila, 'sub' => $sub];
+            $ctx   = ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa];
             $clave = '';
             foreach ($exprs as $e) {
                 $clave .= Valor::clave(Evaluator::evaluar($e, $ctx)) . "\0";

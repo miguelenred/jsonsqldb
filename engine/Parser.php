@@ -36,7 +36,7 @@ final class Parser
 {
     /** Palabras que nunca se toman como alias sin AS */
     private const RESERVADAS = [
-        'FROM','WHERE','GROUP','ORDER','HAVING','LIMIT','OFFSET','JOIN','INNER','LEFT','RIGHT','UNION',
+        'FROM','WHERE','GROUP','ORDER','HAVING','LIMIT','OFFSET','JOIN','INNER','LEFT','RIGHT','UNION','INTERSECT','EXCEPT','WITH','RECURSIVE',
         'FULL','CROSS','OUTER','ON','AS','AND','OR','NOT','IN','IS','LIKE','REGEXP','RLIKE','BETWEEN','CASE','CAST','WHEN',
         'THEN','ELSE','END','SELECT','DISTINCT','ALL','ASC','DESC','BY','NULL','UNION','VALUES','SET',
     ];
@@ -98,7 +98,7 @@ final class Parser
 
     private function sentencia(): array
     {
-        if ($this->es('id', 'SELECT')) { return $this->select(); }
+        if ($this->es('id', 'SELECT') || $this->es('id', 'WITH')) { return $this->select(); }
         if ($this->es('id', 'INSERT')) { return $this->insert(); }
         if ($this->es('id', 'UPDATE')) { return $this->update(); }
         if ($this->es('id', 'DELETE')) { return $this->delete(); }
@@ -118,7 +118,7 @@ final class Parser
     // ==================================================================
 
     /**
-     * Un SELECT, o varios unidos con UNION.
+     * Un SELECT, o varios combinados con UNION, INTERSECT o EXCEPT.
      *
      * En  A UNION B ORDER BY x LIMIT n  el ORDER BY y el LIMIT son del conjunto,
      * no de B. Como selectSimple() ya los ha consumido al analizar la última
@@ -126,15 +126,54 @@ final class Parser
      */
     private function select(): array
     {
+        // WITH nombre AS (SELECT ...), otro AS (SELECT ...) SELECT ...
+        // Cada nombre queda disponible en el FROM de lo que viene después, igual
+        // que una vista, pero solo durante esta sentencia.
+        $con = [];
+        if ($this->comer('id', 'WITH')) {
+            if ($this->es('id', 'RECURSIVE')) {
+                throw JsonSqlDbError::syntax(
+                    'WITH RECURSIVE no está soportado: la consulta no puede referirse a sí misma'
+                );
+            }
+            do {
+                $nombre = $this->nombreTabla();
+                if (isset($con[$nombre])) {
+                    throw JsonSqlDbError::syntax("El nombre '$nombre' se repite en el WITH");
+                }
+                $this->exigir('id', 'AS');
+                $this->exigir('punc', '(');
+                $con[$nombre] = $this->select();
+                $this->exigir('punc', ')');
+            } while ($this->comer('punc', ','));
+        }
+
+        $consulta = $this->selectConCombinacion();
+        if ($con !== []) {
+            $consulta['with'] = $con;
+        }
+        return $consulta;
+    }
+
+    private function selectConCombinacion(): array
+    {
         $primera = $this->selectSimple();
-        if (!$this->es('id', 'UNION')) {
+        if (!$this->es('id', 'UNION') && !$this->es('id', 'INTERSECT') && !$this->es('id', 'EXCEPT')) {
             return $primera;
         }
 
         $partes = [$primera];
-        $todas  = [];                       // un flag por operador: UNION ALL o no
-        while ($this->comer('id', 'UNION')) {
-            $todas[]  = $this->comer('id', 'ALL');
+        $ops    = [];                       // un operador entre cada dos partes
+        while (true) {
+            if ($this->comer('id', 'UNION')) {
+                $ops[] = $this->comer('id', 'ALL') ? 'UNION ALL' : 'UNION';
+            } elseif ($this->comer('id', 'INTERSECT')) {
+                $ops[] = 'INTERSECT';
+            } elseif ($this->comer('id', 'EXCEPT')) {
+                $ops[] = 'EXCEPT';
+            } else {
+                break;
+            }
             $partes[] = $this->selectSimple();
         }
 
@@ -142,7 +181,7 @@ final class Parser
         $union  = [
             'k'      => 'union',
             'partes' => $partes,
-            'todas'  => $todas,
+            'ops'    => $ops,
             'order'  => $ultima['order'],
             'limit'  => $ultima['limit'],
             'offset' => $ultima['offset'],
@@ -571,8 +610,17 @@ final class Parser
                 $this->avanzar();
                 $this->avanzar();
                 $accion = strtoupper($this->nombreSimple('acción de RAISE'));
-                if (!in_array($accion, ['ABORT', 'FAIL', 'ROLLBACK', 'IGNORE'], true)) {
-                    throw JsonSqlDbError::syntax("RAISE no admite '$accion'");
+                // Solo ABORT. Las otras tres de SQLite significan cosas distintas
+                // que aquí no se pueden cumplir: ROLLBACK necesita transacciones,
+                // que no hay, e IGNORE tiene una semántica propia. Aceptarlas y
+                // tratarlas como ABORT sería prometer algo que no se hace.
+                if ($accion !== 'ABORT') {
+                    throw JsonSqlDbError::syntax(
+                        "RAISE($accion) no está soportado: solo RAISE(ABORT, 'mensaje'). "
+                        . ($accion === 'ROLLBACK'
+                            ? 'ROLLBACK necesitaría transacciones de varias sentencias.'
+                            : "El efecto de $accion no se puede reproducir aquí.")
+                    );
                 }
                 $mensaje = null;
                 if ($this->comer('punc', ',')) {

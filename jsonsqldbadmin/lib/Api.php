@@ -19,19 +19,42 @@ final class Api
      *
      * @throws RuntimeException si la API responde con error o no se puede llamar
      */
+    /**
+     * Clave con la que firmar: la de solo lectura si el usuario que ha entrado
+     * tiene ese rol y hay una configurada.
+     *
+     * Sin esto, el panel firmaba siempre con la clave admin y lo único que
+     * impedía escribir a un usuario de lectura era una comprobación de la propia
+     * aplicación. Con la clave de lectura, el motor se convierte en la segunda
+     * red: aunque un fallo del panel dejara pasar un DELETE, la API lo rechaza.
+     *
+     * @return array{0: string, 1: string} clave y secreto
+     */
+    private static function credenciales(): array
+    {
+        $lectura = trim((string)ADMIN_API_KEY_LECTURA);
+
+        if ($lectura !== '' && class_exists("Auth") && Auth::identificado() && !Auth::esAdmin()) {
+            return [$lectura, (string)ADMIN_HMAC_SECRET_LECTURA];
+        }
+        return [ADMIN_API_KEY, ADMIN_HMAC_SECRET];
+    }
+
     public static function sql(string $base, string $sql, array $params = []): array
     {
         $json = $params === [] ? '' : (string)json_encode(array_values($params), JSON_UNESCAPED_UNICODE);
         $ts   = (string)time();
 
+        [$clave, $secreto] = self::credenciales();
+
         $post = http_build_query([
-            'api_key'   => ADMIN_API_KEY,
+            'api_key'   => $clave,
             'db'        => $base,
             'sql'       => $sql,
             'params'    => $json,
             'timestamp' => $ts,
             'token'     => hash_hmac('sha256',
-                '+' . ADMIN_API_KEY . '|' . $ts . '|' . $sql . $json . '¿', ADMIN_HMAC_SECRET),
+                '+' . $clave . '|' . $ts . '|' . $sql . $json . '¿', $secreto),
         ]);
 
         $cuerpo = self::enviar($post);

@@ -436,6 +436,37 @@ chk('borrar la tabla de orden', function () use ($bd) {
     return true;
 });
 
+echo "\n== Casos límite de operadores y funciones ==\n";
+chk('el módulo con un divisor que se vuelve cero al truncar da NULL', function () use ($bd) {
+    // 0.4 no es cero, pero (int)0.4 sí: antes reventaba con DivisionByZeroError
+    $r = $bd->consultar('SELECT 5 % 0 AS a, 5 % 0.4 AS b, -1 % -0.5 AS c')[0];
+    return $r === ['a' => null, 'b' => null, 'c' => null] ?: json_encode($r);
+});
+chk('el módulo normal sigue funcionando', function () use ($bd) {
+    $r = $bd->consultar('SELECT 7 % 3 AS a, -7 % 3 AS b, 7 % -3 AS c')[0];
+    return $r === ['a' => 1, 'b' => -1, 'c' => 1] ?: json_encode($r);
+});
+chk('SUBSTR con índice 0 se comporta como en SQLite', function () use ($bd) {
+    // La posición 0 es el hueco anterior al primer carácter, así que se pierde
+    // uno de los caracteres pedidos
+    $r = $bd->consultar("SELECT SUBSTR('abcdef', 0, 3) AS a, SUBSTR('abc', 0, 1) AS b,
+                                SUBSTR('abcdef', 0, 1) AS c")[0];
+    return $r === ['a' => 'ab', 'b' => '', 'c' => ''] ?: json_encode($r);
+});
+chk('SUBSTR con índices positivos y negativos', function () use ($bd) {
+    $r = $bd->consultar("SELECT SUBSTR('abcdef', 1, 3) AS a, SUBSTR('abcdef', -2) AS b,
+                                SUBSTR('abcdef', 2, -2) AS c, SUBSTR('abcdef', 100) AS d")[0];
+    return $r === ['a' => 'abc', 'b' => 'ef', 'c' => 'a', 'd' => ''] ?: json_encode($r);
+});
+chk('SUBSTR respeta los caracteres UTF-8', function () use ($bd) {
+    $r = $bd->consultar("SELECT SUBSTR('áéíóú', 2, 2) AS a")[0]['a'];
+    return $r === 'éí' ?: $r;
+});
+chk('ROUND redondea alejándose del cero, como SQLite', function () use ($bd) {
+    $r = $bd->consultar('SELECT ROUND(2.5) AS a, ROUND(-2.5) AS b, ROUND(2.4) AS c')[0];
+    return $r === ['a' => 3.0, 'b' => -3.0, 'c' => 2.0] ?: json_encode($r);
+});
+
 echo "\n== Fechas: NULL y fechas imposibles ==\n";
 chk('DATE/TIME/DATETIME sobre NULL dan NULL, no la fecha de hoy', function () use ($bd) {
     $r = $bd->consultar('SELECT DATE(NULL) AS a, TIME(NULL) AS b, DATETIME(NULL) AS c')[0];
@@ -620,13 +651,46 @@ chk('NOT EXISTS invierte', function () use ($bd) {
     $r = $bd->consultar("SELECT COUNT(*) AS n FROM usuarios WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE edad > 999)");
     return $r[0]['n'] === $todas;
 });
-chk('una subconsulta correlacionada lo dice claramente', function () use ($bd) {
-    try {
-        $bd->consultar('SELECT nombre FROM usuarios u WHERE EXISTS (SELECT 1 FROM usuarios v WHERE v.edad = u.edad)');
-    } catch (JsonSqlDbError $e) {
-        return str_contains($e->getMessage(), 'correlacionadas') ?: $e->getMessage();
-    }
+chk('EXISTS correlacionado: la subconsulta ve la fila de fuera', function () use ($bd) {
+    $bd->consultar('CREATE TABLE cc (id INTEGER PRIMARY KEY AUTOINCREMENT, n VARCHAR(10))');
+    $bd->consultar('CREATE TABLE cp (id INTEGER PRIMARY KEY AUTOINCREMENT, cid INTEGER, t DECIMAL(10,2))');
+    $bd->consultar("INSERT INTO cc (n) VALUES ('Ana'),('Luis'),('Eva')");
+    $bd->consultar('INSERT INTO cp (cid, t) VALUES (1,100),(1,50),(2,30)');
+
+    $r = array_column($bd->consultar(
+        'SELECT n FROM cc WHERE EXISTS (SELECT 1 FROM cp WHERE cp.cid = cc.id) ORDER BY n'), 'n');
+    return $r === ['Ana', 'Luis'] ?: $r;
+});
+chk('NOT EXISTS correlacionado', function () use ($bd) {
+    $r = array_column($bd->consultar(
+        'SELECT n FROM cc WHERE NOT EXISTS (SELECT 1 FROM cp WHERE cp.cid = cc.id)'), 'n');
+    return $r === ['Eva'] ?: $r;
+});
+chk('subconsulta escalar correlacionada en la lista de columnas', function () use ($bd) {
+    $r = $bd->consultar('SELECT n, (SELECT SUM(t) FROM cp WHERE cp.cid = cc.id) AS g
+                         FROM cc ORDER BY n');
+    return $r === [['n' => 'Ana', 'g' => 150.0], ['n' => 'Eva', 'g' => null],
+                   ['n' => 'Luis', 'g' => 30.0]] ?: json_encode($r);
+});
+chk('IN correlacionado', function () use ($bd) {
+    $r = array_column($bd->consultar(
+        'SELECT n FROM cc WHERE id IN (SELECT cid FROM cp WHERE cp.t > 40)'), 'n');
+    return $r === ['Ana'] ?: $r;
+});
+chk('una subconsulta sin correlacionar se ejecuta una sola vez', function () use ($bd) {
+    // Sigue funcionando el camino rápido: mismo resultado que antes
+    $r = array_column($bd->consultar('SELECT n FROM cc WHERE id IN (SELECT cid FROM cp) ORDER BY n'), 'n');
+    return $r === ['Ana', 'Luis'] ?: $r;
+});
+chk('una columna que no existe en ningún lado sigue dando error', function () use ($bd) {
+    try { $bd->consultar('SELECT n FROM cc WHERE EXISTS (SELECT 1 FROM cp WHERE cp.cid = cc.fantasma)'); }
+    catch (JsonSqlDbError $e) { return str_contains($e->getMessage(), 'Columna desconocida'); }
     return 'no lanzó error';
+});
+chk('limpiar las tablas correlacionadas', function () use ($bd) {
+    $bd->consultar('DROP TABLE cp');
+    $bd->consultar('DROP TABLE cc');
+    return true;
 });
 
 echo "\n== RANDOM ==\n";

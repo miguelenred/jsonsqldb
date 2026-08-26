@@ -9,6 +9,85 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.9.0] - 2026-08-26
+
+### Added
+
+- **Table-level write locks.** There are now two levels — the database and the
+  table — always acquired in that order, which is what makes a deadlock
+  impossible. Reads and single-table writes take a shared lock on the database;
+  anything that can touch more than one table takes the exclusive one.
+  - Two writes to different tables now run in parallel, and a write no longer
+    blocks reads of other tables. This restores the behaviour originally
+    specified: a `SELECT` should wait for writes **to its table**, not to the
+    whole database.
+  - The decision is deliberately suspicious: a foreign key, another table
+    referencing this one, a trigger, or an `INSERT ... SELECT` all fall back to
+    the database lock, which waits for every pending write on every table
+    involved. When in doubt, the database lock — too much locking only costs
+    parallelism, too little costs data.
+  - `tests/f7_concurrencia.php` measures this with real simultaneous processes.
+
+- **Correlated subqueries.** The subquery can now read columns from the enclosing
+  query, which is how `EXISTS` is normally written:
+
+  ```sql
+  SELECT n FROM clientes c WHERE EXISTS (SELECT 1 FROM pedidos p WHERE p.cid = c.id);
+  SELECT n, (SELECT SUM(total) FROM pedidos p WHERE p.cid = c.id) AS gastado FROM clientes c;
+  ```
+
+  Uncorrelated subqueries keep running once and being cached; correlated ones are
+  cached per outer row, which is the most that can be reused.
+
+- **`INTERSECT` and `EXCEPT`**, completing `UNION`. They chain with each other
+  and with `UNION`, and the trailing `ORDER BY` and `LIMIT` still apply to the
+  whole.
+
+- **Common table expressions**: `WITH nombre AS (SELECT ...) SELECT ...`. Several
+  can be declared at once and each can use the previous ones. `WITH RECURSIVE`
+  is rejected with an explicit message.
+
+- **The admin panel can restore a database from a ZIP backup**, the mirror of the
+  export. It writes the engine's files directly, so it only appears when the
+  panel and the API share a host; across machines the SQL dump is the way, as
+  before.
+  - Everything is validated before anything is touched: only `.json` files (plus
+    `.htaccess` and `web.config`) are restored, table names are checked against
+    the engine's own rule, and the contents must be valid JSON with the shape the
+    engine expects.
+  - **A ZIP containing a path that escapes the destination folder is rejected
+    whole**, without writing anything. That is the classic attack against ZIP
+    imports, and there is a test that builds such an archive and checks nothing
+    lands outside.
+  - The current contents are moved aside before writing, and put back if the
+    restore fails halfway.
+
+- **Optional read-only API key for the panel** (`ADMIN_API_KEY_LECTURA`). When
+  set, the panel signs with it for users whose role is read-only, so the engine
+  itself refuses writes: until now the only thing stopping a read-only user was
+  a check in the panel's own code. Leaving it empty keeps the previous behaviour.
+
+### Changed
+
+- **`RAISE` now only accepts `ABORT`.** `FAIL`, `ROLLBACK` and `IGNORE` were
+  parsed and then all treated as `ABORT`. `ROLLBACK` cannot mean what it means in
+  SQLite because there are no multi-statement transactions, so promising it was
+  wrong. They are rejected with a message explaining why.
+
+- CI now also runs on **PHP 8.5**, the current stable branch, and runs the
+  concurrency suite.
+
+### Documentation
+
+- **The documentation no longer claims to be "SQLite compatible".** It says what
+  is true: the dialect resembles SQLite's and takes most of its decisions from
+  it, but there are constructs SQLite has and this does not, others borrowed from
+  MySQL, and concrete behavioural differences — all of them now listed. The
+  biggest is type comparison: here a text compared against a number is converted
+  (`'12abc'` is 12), whereas SQLite applies the declared column's affinity. That
+  difference is deliberate, and this documentation is the reference, not
+  SQLite's.
+
 ## [1.8.0] - 2026-08-25
 
 ### Added
@@ -49,6 +128,18 @@ configuration constants, and the on-disk format of `data/`.
   `EXISTS` failed with a syntax error. They work with non-correlated subqueries.
 
 ### Fixed
+
+- **`5 % 0.4` crashed the request** with PHP's `DivisionByZeroError` instead of
+  returning a value. The zero check ran before the cast to integer, so a divisor
+  like `0.4` passed it and then became `0`. Any query could trigger it, and the
+  error escaped as a fatal rather than a controlled engine error. It now returns
+  `NULL`, as SQLite does.
+
+- **`SUBSTR` with index 0 returned one character too many.** In SQL position 0
+  is the gap before the first character, so `SUBSTR('abcdef', 0, 3)` covers
+  positions 0, 1 and 2, of which only two exist: the answer is `ab`, not `abc`.
+  The window is now computed once and clipped once, which also fixed
+  `SUBSTR('abcdef', 2, -2)` — the characters *preceding* a position.
 
 - **`DATE(NULL)`, `TIME(NULL)` and `DATETIME(NULL)` returned the current date
   and time** instead of `NULL`. A `?? 'now'` was treating "no argument" and "a
@@ -439,6 +530,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.9.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.9.0
 [1.8.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.8.0
 [1.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.7.0
 [1.6.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.6.0

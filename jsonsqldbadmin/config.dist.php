@@ -50,6 +50,17 @@ defined('ADMIN_TIMEOUT') || define('ADMIN_TIMEOUT', 60);
 defined('ADMIN_DATA_PATH') || define('ADMIN_DATA_PATH',
     (string)(getenv('ADMIN_DATA_PATH') ?: __DIR__ . '/datos'));
 
+// Clave de la API para los usuarios con rol de solo lectura. OPCIONAL.
+//
+// Si la pones, el panel firma con ella cuando quien ha entrado no es admin, y el
+// motor rechaza cualquier escritura aunque el panel se equivoque. Créala en
+// api/jsonsqldb_api_config.php con 'permiso' => 'lectura'.
+//
+// Vacía = todos los usuarios usan la clave admin y la única barrera es la
+// comprobación del propio panel.
+defined('ADMIN_API_KEY_LECTURA') || define('ADMIN_API_KEY_LECTURA', '');
+defined('ADMIN_HMAC_SECRET_LECTURA') || define('ADMIN_HMAC_SECRET_LECTURA', '');
+
 // ------------------------------------------------------------
 // QUIÉN PUEDE ABRIR EL PANEL
 // ------------------------------------------------------------

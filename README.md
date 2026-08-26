@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 1.8.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (tested on 8.3)
+**Version 1.9.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -33,7 +33,9 @@ back together. If your data needs that, this is not the right tool.
 built for tables in the thousands to low hundreds of thousands of rows, not
 millions. There is no network protocol and no connection pool: concurrency is
 handled with file locks, which is fine for a handful of simultaneous writers and
-not for hundreds. A write locks the whole database while it runs.
+not for hundreds. A write locks only its own table when it cannot affect any
+other; anything involving foreign keys, triggers or schema changes locks the
+whole database.
 
 Schema changes and multi-table data writes are crash-safe: `CREATE TABLE`,
 `DROP TABLE`, `ALTER TABLE`, and any write touching more than one table (a
@@ -48,7 +50,7 @@ into one unit of work — there is no `BEGIN`/`COMMIT`.
 
 | | |
 |---|---|
-| **PHP** | 8.0 or later. Developed and tested on **PHP 8.3** |
+| **PHP** | 8.0 or later. Developed on 8.3; CI runs every version from **8.0 to 8.5** |
 | **PHP extensions** | Only the standard ones (`json`, `pcre`, `hash`, `filter`). **No** mbstring, **no** intl, **no** PDO |
 | **cURL** | Required by **jsonSQLDBadmin** and by the test suite, because the panel talks to the API over HTTP. Not needed by the engine itself |
 | **zip** | Optional. Only for the panel's "ZIP backup" button |
@@ -365,9 +367,11 @@ What it does:
 - Browse, filter, sort, insert, edit and delete rows
 - A SQL editor for anything else
 - Export a table or a query result to **CSV** or to **INSERT statements**;
-  export a whole database as a **SQL dump** or a **ZIP** of its files (the ZIP
-  reads the engine's files from disk, so it is only offered when the panel and
-  the API share a host)
+  export a whole database as a **SQL dump** or a **ZIP** of its files, and
+  restore that ZIP back (both read and write the engine's files from disk, so
+  they are only offered when the panel and the API share a host)
+- An optional read-only API key, so the engine itself refuses writes from
+  read-only users rather than trusting the panel's own check
 - Its own users with `admin` / `read-only` roles, bcrypt passwords, session
   expiry, per-IP lockout after failed logins, CSRF tokens on every form, and a
   daily audit trail
@@ -390,7 +394,8 @@ external requests.
 | **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS` |
 | **Maintenance** | `CHECK KEYS`, `REPAIR KEYS` |
 
-`SELECT` supports `DISTINCT`, `UNION` / `UNION ALL`, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
+`SELECT` supports `DISTINCT`, `WITH` (CTEs), `UNION` / `UNION ALL` /
+`INTERSECT` / `EXCEPT`, correlated subqueries, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
 `HAVING`, `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
 subqueries in `WHERE` and in `FROM`, and `CASE WHEN`.
 
@@ -430,7 +435,13 @@ SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 
 ### Dialect
 
-Mostly SQLite's, with a few borrowings where they are what people expect:
+**It resembles SQLite's but is not compatible with it.** There are SQLite
+constructs missing here, others borrowed from MySQL, and concrete behavioural
+differences — the largest being that a text compared against a number is
+converted (`'12abc'` is 12) rather than following the declared column's affinity.
+Do not assume a query that runs in SQLite runs here, or the other way round.
+
+Borrowings, where they are what people expect:
 `CONCAT`, `REGEXP`/`RLIKE` and `LIMIT n, m` come from MySQL, `CAST` and
 `FULL JOIN` are standard SQL, and `AUTO_INCREMENT` is accepted alongside
 `AUTOINCREMENT`. Anything not mentioned behaves as in SQLite. See
@@ -447,7 +458,7 @@ These exist in SQLite and raise an error here: `INSERT OR IGNORE` / `OR REPLACE`
 temporary tables), `WITHOUT ROWID` (there is no rowid), `BEGIN`/`COMMIT`/
 `ROLLBACK` (no multi-statement transactions), `CHECK` constraints (use a `BEFORE`
 trigger with `RAISE(ABORT, …)`), `CREATE INDEX` (no indexes), window
-functions, CTEs, `INTERSECT`/`EXCEPT`, `GLOB`, and **correlated subqueries** (the subquery cannot
+functions, CTEs, `GLOB`, and `WITH RECURSIVE` (the subquery cannot
 see the outer query's columns — rewrite with a `JOIN`).
 
 Behavioural differences worth knowing: `DECIMAL` is a rounded float, `ORDER BY`
@@ -576,12 +587,13 @@ your data.
 ```
 php tests/f1_nucleo.php       → OK: 56    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 119    SELECT execution and collation
+php tests/f2_select.php       → OK: 131    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 50    real requests against the API
 php tests/f5_esquema.php      → OK: 87    SHOW, ALTER, constraints, views, integrity
-php tests/f5_admin.php        → OK: 113   the panel, driven like a user
+php tests/f5_admin.php        → OK: 118   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 5     crash recovery, killing real processes
+php tests/f7_concurrencia.php → OK: 19    real simultaneous processes and locking
 ```
 
 The engine, the API and the panel pass PHPStan at level 5 with no warnings. The

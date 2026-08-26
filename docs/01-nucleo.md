@@ -282,6 +282,36 @@ Tiene sentido en un script de mantenimiento, una migración o un proceso por cro
 donde el salto por HTTP solo añade latencia. Para cualquier cosa expuesta a
 terceros, la API.
 
+### Bloqueos: dos niveles
+
+Hay un bloqueo por base y otro por tabla, y **siempre se piden en ese orden**,
+nunca al revés. Ese orden fijo es lo que hace imposible un interbloqueo.
+
+| Operación | Base | Tabla |
+|---|---|---|
+| Lecturas (`SELECT`, `SHOW`, `CHECK KEYS`) | compartido | — |
+| Escritura en **una** tabla sin claves foráneas ni triggers | compartido | **exclusivo** |
+| Cascadas, triggers hacia otras tablas, DDL, `REPAIR KEYS` | **exclusivo** | — |
+
+Con esto, dos escrituras en tablas distintas van a la vez, y una escritura ya no
+bloquea las lecturas de las demás tablas. En cuanto la operación puede tocar más
+de una tabla se pide el exclusivo de la base, que espera a que terminen **todas**
+las escrituras pendientes de todas ellas.
+
+La decisión se toma en `Database::tablaUnica()`, y es deliberadamente
+desconfiada: basta con que la tabla tenga una clave foránea, con que otra tabla
+la referencie, con que exista un trigger o con que sea un `INSERT ... SELECT`
+para pedir el bloqueo de la base. Ante la duda, la base: un bloqueo de más solo
+cuesta paralelismo; uno de menos cuesta datos.
+
+Un detalle que costó encontrar: decidir el alcance obliga a leer la estructura, y
+eso ocurre **antes** de tener el bloqueo. Lo leído entonces puede quedar obsoleto
+en cuanto otro proceso escriba, así que el catálogo se olvida nada más bloquear.
+Sin eso, dos procesos podían reutilizar el mismo autoincremento.
+
+`tests/f7_concurrencia.php` lo comprueba con procesos de verdad, midiendo qué se
+solapa y qué espera.
+
 ### Operaciones de estructura a prueba de cortes
 
 Cada escritura suelta es atómica: se escribe un temporal y se hace `rename`, que

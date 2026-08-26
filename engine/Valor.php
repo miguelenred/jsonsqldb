@@ -6,7 +6,9 @@ namespace JsonSQLDB;
 /**
  * Semántica de valores SQL. Un valor es null, int, float o string.
  *
- * Comparación (igual que SQLite en la práctica):
+ * Comparación (parecida a la de SQLite, no idéntica: aquí no hay afinidad de
+ * tipos por columna, así que un texto se compara con un número convirtiendo el
+ * texto, no según el tipo declarado de la columna):
  *   - si los dos son numéricos (o cadenas numéricas) se comparan como números
  *   - si no, se comparan como texto
  *   - las fechas se guardan como 'yyyy-MM-dd...', así que el orden de texto

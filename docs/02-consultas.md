@@ -1,8 +1,11 @@
 # jsonSQLDB — Fase 2: consultas SELECT
 
 Analizador SQL propio (léxico + sintáctico) y ejecutor de `SELECT` sobre los
-ficheros JSON. Dialecto compatible con SQLite: la misma consulta funciona en los
-dos motores.
+ficheros JSON. El dialecto **se parece al de SQLite**, del que toma la mayoría de
+las decisiones, pero **no es compatible con él**: hay construcciones de SQLite
+que aquí no existen, otras que vienen de MySQL, y diferencias de comportamiento
+concretas. Todo eso está en las dos tablas de más abajo. No des por hecho que una
+consulta que funciona en SQLite funciona aquí, ni al revés.
 
 ## 1. Uso
 
@@ -71,8 +74,9 @@ porque son las que la gente espera encontrar:
 | `FULL JOIN` | Estándar | No existe en SQLite ni en MySQL 5 |
 | `AUTOINCREMENT` | SQLite | En MySQL es `AUTO_INCREMENT`, que también se acepta |
 
-Si algo no aparece en esta lista ni en la tabla siguiente, asume el
-comportamiento de SQLite.
+Si algo no aparece en esta lista ni en la tabla siguiente, lo más probable es que
+se comporte como en SQLite, pero **la referencia es esta documentación**, no la de
+SQLite: donde las dos digan cosas distintas, manda esta.
 
 ## 1.1. Qué NO se soporta
 
@@ -101,6 +105,17 @@ Y estas diferencias de comportamiento conviene tenerlas presentes:
 - `ORDER BY` usa la colación configurada, no el orden binario, salvo que lo
   cambies.
 - `LIKE` no distingue mayúsculas, pero **sí** distingue acentos.
+- La comparación entre un texto y un número **convierte el texto**: `'12abc'`
+  vale 12. SQLite no hace esto: aplica la afinidad del tipo declarado de la
+  columna, con reglas propias. Es la diferencia de comportamiento más grande
+  entre los dos motores, y es deliberada: aquí la regla es una sola y cabe en una
+  línea.
+- `ROUND` redondea alejándose del cero (`ROUND(2.5)` = 3), igual que SQLite. En
+  cambio `ROUND(2.675, 2)` da 2.68 aquí y 2.67 en SQLite: 2.675 no existe exacto
+  en coma flotante, y cada motor resuelve el empate de una forma. Si el céntimo
+  tiene que cuadrar, guarda céntimos en un `INTEGER`.
+- El `%` trabaja con enteros, como en SQLite: si el divisor se queda en cero al
+  truncarlo (`5 % 0.4`), el resultado es `NULL`.
 
 ## 2. Sintaxis soportada
 
@@ -149,7 +164,8 @@ Identificadores con espacios: `"mi campo"`, `[mi campo]` o `` `mi campo` ``.
 - **NULL**: cualquier comparación con `NULL` da desconocido, así que
   `telefono <> '600111222'` **no** devuelve las filas con teléfono nulo (igual
   que en SQLite y MySQL). Para incluirlas: `telefono IS NULL OR telefono <> '...'`.
-- `LIKE` **no distingue mayúsculas de minúsculas**, como en SQLite.
+- `LIKE` **no distingue mayúsculas de minúsculas**, igual que SQLite, pero **sí
+  distingue acentos**, y ahí SQLite hace lo mismo solo porque tampoco los conoce.
 - `ORDER BY` sobre texto usa la colación configurada en `config.php`
   (`JSONSQLDB_COLACION`). Por defecto, `'general'`: no distingue mayúsculas ni
   acentos, y coloca cada letra donde le toca, así que `'Óscar'` queda entre las
@@ -229,12 +245,12 @@ un resultado silenciosamente incorrecto.
 | `engine/Config.php` | lectura de `config.php` con valores por defecto |
 | `engine/Logger.php` | log de consultas |
 | `tests/f2_parser.php` | 70 comprobaciones del analizador |
-| `tests/f2_select.php` | 119 comprobaciones del ejecutor, con datos reales |
+| `tests/f2_select.php` | 131 comprobaciones del ejecutor, con datos reales |
 
 ## 8. Pruebas
 
 ```
 php tests/f1_nucleo.php     → OK: 56
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 119
+php tests/f2_select.php     → OK: 131
 ```

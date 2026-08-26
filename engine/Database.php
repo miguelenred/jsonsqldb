@@ -92,7 +92,14 @@ final class Database
             $filas = [];
             $res   = ['filas' => 0, 'mensaje' => ''];
 
-            $this->st->bloquear($escritura);
+            // Decidir el alcance del bloqueo obliga a mirar la estructura, y eso
+            // ocurre ANTES de tenerlo. Lo leído entonces puede quedar obsoleto en
+            // cuanto otro proceso escriba, así que se olvida nada más bloquear:
+            // sin esto, dos procesos podían reutilizar el mismo autoincremento.
+            $tablaSola = $escritura ? $this->tablaUnica($ast) : null;
+
+            $this->st->bloquear($escritura, $tablaSola);
+            $this->cat->olvidar();
             try {
                 if ($escritura) {
                     $res = (new Writer($this->cat))->ejecutar($ast);
@@ -203,6 +210,52 @@ final class Database
     }
 
     /** Tipo de operación tal y como se guarda en el log. */
+    /**
+     * Si la escritura afecta a UNA sola tabla, devuelve su nombre; si no, null.
+     *
+     * Solo entonces se puede bloquear la tabla en vez de la base entera. Basta
+     * con que haya una clave foránea, que otra tabla la referencie o que exista
+     * un trigger para que la operación pueda tocar más de una: en ese caso se
+     * pide el bloqueo exclusivo de la base, que espera a que terminen todas las
+     * escrituras pendientes de todas las tablas.
+     *
+     * Ante cualquier duda, null. Un bloqueo de más solo cuesta paralelismo; uno
+     * de menos cuesta datos.
+     */
+    public function tablaUnica(array $ast): ?string
+    {
+        // Solo el DML sencillo. El DDL, las vistas, los triggers y REPAIR KEYS
+        // tocan metadatos de la base o varias tablas a la vez.
+        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+            return null;
+        }
+        $tabla = $ast['tabla'] ?? null;
+        if (!is_string($tabla) || $tabla === '' || !$this->cat->existe($tabla)) {
+            return null;
+        }
+        // INSERT ... SELECT lee de otras tablas
+        if (($ast['select'] ?? null) !== null) {
+            return null;
+        }
+
+        $meta = $this->cat->meta($tabla);
+        if (($meta['foreign_keys'] ?? []) !== [] || ($meta['triggers'] ?? []) !== []) {
+            return null;                      // puede propagar hacia otras
+        }
+        // ¿Alguien la referencia? Un borrado suyo podría arrastrar filas ajenas
+        foreach ($this->cat->tablas() as $otra) {
+            if ($otra === $tabla) {
+                continue;
+            }
+            foreach ($this->cat->meta($otra)['foreign_keys'] ?? [] as $fk) {
+                if (strcasecmp((string)$fk['table'], $tabla) === 0) {
+                    return null;
+                }
+            }
+        }
+        return $tabla;
+    }
+
     public static function operacion(array $ast): string
     {
         return strtoupper(str_replace('_', ' ', $ast['k']));

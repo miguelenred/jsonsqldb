@@ -33,6 +33,9 @@ final class Storage
     private string $dir;
     private string $dirCache;
     private string $dirTx;
+
+    /** @var resource|null bloqueo de tabla, cuando la escritura afecta solo a una */
+    private $lockTabla = null;
     private string $base;
 
     /** @var resource|null */
@@ -153,7 +156,27 @@ final class Storage
      * Adquiere el bloqueo de la base. Reentrante: las llamadas anidadas
      * incrementan el nivel y deben ser compatibles con el modo ya adquirido.
      */
-    public function bloquear(bool $exclusivo): void
+    /**
+     * Bloqueo de la base, y opcionalmente de una sola tabla.
+     *
+     * Hay dos niveles, y siempre se piden en este orden, nunca al revés. Ese
+     * orden fijo es lo que hace imposible un interbloqueo:
+     *
+     *   1. `.lock` de la base
+     *   2. `.<tabla>.lock` de la tabla, si la operación afecta solo a una
+     *
+     * | Operación                                    | Base | Tabla |
+     * |----------------------------------------------|------|-------|
+     * | SELECT y demás lecturas                      | SH   | —     |
+     * | Escritura en UNA tabla sin claves ni triggers | SH   | EX    |
+     * | Cascadas, triggers a otras tablas, DDL        | EX   | —     |
+     *
+     * Con el bloqueo compartido de la base, dos escrituras en tablas distintas
+     * pueden ir a la vez y no bloquean las lecturas de las demás tablas. En
+     * cuanto la operación toca más de una tabla se pide el exclusivo de la base,
+     * que espera a que terminen todas las escrituras pendientes de todas ellas.
+     */
+    public function bloquear(bool $exclusivo, ?string $tabla = null): void
     {
         if ($this->lockNivel > 0) {
             if ($exclusivo && !$this->lockExclusivo) {
@@ -163,21 +186,36 @@ final class Storage
             return;
         }
 
-        $fichero = $this->dir . '/.lock';
-        $fh = @fopen($fichero, 'c');
-        if ($fh === false) {
-            throw JsonSqlDbError::io("No se puede abrir el fichero de bloqueo de '{$this->base}'");
-        }
-        if (!flock($fh, $exclusivo ? LOCK_EX : LOCK_SH)) {
-            fclose($fh);
-            throw JsonSqlDbError::lock("No se puede bloquear la base '{$this->base}'");
-        }
-        $this->lock          = $fh;
+        // Escritura acotada a una tabla: compartido en la base, exclusivo en ella
+        $exclusivoBase = $exclusivo && $tabla === null;
+
+        $this->lock          = $this->abrirLock($this->dir . '/.lock', $exclusivoBase, "la base '{$this->base}'");
         $this->lockNivel     = 1;
         $this->lockExclusivo = $exclusivo;
         $this->revs          = null;   // releer revisiones dentro del bloqueo
 
-        $this->recuperarTx($exclusivo);
+        if ($exclusivo && $tabla !== null) {
+            self::validarTabla($tabla);
+            $this->lockTabla = $this->abrirLock(
+                $this->dir . '/.' . $tabla . '.lock', true, "la tabla '$tabla'"
+            );
+        }
+
+        $this->recuperarTx($exclusivoBase);
+    }
+
+    /** @return resource */
+    private function abrirLock(string $fichero, bool $exclusivo, string $queEs)
+    {
+        $fh = @fopen($fichero, 'c');
+        if ($fh === false) {
+            throw JsonSqlDbError::io("No se puede abrir el fichero de bloqueo de $queEs");
+        }
+        if (!flock($fh, $exclusivo ? LOCK_EX : LOCK_SH)) {
+            fclose($fh);
+            throw JsonSqlDbError::lock("No se puede bloquear $queEs");
+        }
+        return $fh;
     }
 
     // ------------------------------------------------------------------
@@ -352,10 +390,16 @@ final class Storage
         if (--$this->lockNivel > 0) {
             return;
         }
+        // Se sueltan en orden inverso al que se pidieron
+        if (is_resource($this->lockTabla)) {
+            flock($this->lockTabla, LOCK_UN);
+            fclose($this->lockTabla);
+        }
         if (is_resource($this->lock)) {
             flock($this->lock, LOCK_UN);
             fclose($this->lock);
         }
+        $this->lockTabla     = null;
         $this->lock          = null;
         $this->lockExclusivo = false;
         $this->revs          = null;
