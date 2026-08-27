@@ -41,6 +41,12 @@ configuration constants, and the on-disk format of `data/`.
 
 ### Fixed
 
+- **The documentation still described the old locking.** Section 3 of
+  `docs/01-nucleo.md` said the lock covered the whole database and that writes
+  serialised against each other, which stopped being true in 1.9.0 and
+  contradicted the section further down that describes the two levels. The same
+  outdated sentence was in `Storage.php`'s header comment. Both corrected.
+
 - **The memory guard aborted the query that came after a big one.** It was
   measuring `memory_get_usage(true)`, the memory PHP has requested from the
   operating system — which includes blocks that are already free and kept for

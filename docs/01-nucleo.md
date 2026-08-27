@@ -117,17 +117,20 @@ Ejemplos válidos: `2026-02-28`, `2026-02-28 10:05`, `2026-02-28 10:05:09`,
 
 ## 3. Concurrencia (bloqueo)
 
-Un único fichero de bloqueo por base de datos (`.lock`) con `flock`:
+Con `flock` sobre dos ficheros: uno de la base (`.lock`) y uno por tabla
+(`.<tabla>.lock`). El detalle de qué operación pide cuál está en
+[Bloqueos: dos niveles](#bloqueos-dos-niveles), más abajo.
 
-| Operación | Bloqueo | Efecto |
-|---|---|---|
-| `SELECT` | `LOCK_SH` compartido | varias lecturas a la vez |
-| `INSERT/UPDATE/DELETE/DDL` | `LOCK_EX` exclusivo | una sola escritura; el resto espera |
+| Operación | Base | Tabla | Efecto |
+|---|---|---|---|
+| `SELECT` y demás lecturas | compartido | — | varias lecturas a la vez |
+| Escritura en **una** tabla sin claves foráneas ni triggers | compartido | exclusivo | escrituras en tablas distintas van a la vez |
+| Cascadas, triggers a otras tablas, DDL, `REPAIR KEYS` | exclusivo | — | una sola; el resto espera |
 
-Como el bloqueo es de toda la base, un `SELECT` lanzado mientras hay una
-escritura pendiente **espera a que termine** y devuelve ya los datos nuevos, que
-es el comportamiento pedido. Las escrituras se serializan solas: el sistema
-operativo hace de cola.
+Un `SELECT` sobre una tabla con una escritura pendiente **espera a que termine** y
+devuelve ya los datos nuevos, que es el comportamiento pedido. Lo que ya no
+ocurre es que una escritura en `pedidos` haga esperar a una lectura de
+`usuarios`: para eso están los dos niveles.
 
 El bloqueo es **reentrante** (un trigger que escribe dentro de un `INSERT` no
 vuelve a pedir el bloqueo) y se prohíbe escalar de lectura a escritura, para que

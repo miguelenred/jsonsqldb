@@ -18,9 +18,12 @@ namespace JsonSQLDB;
  *                                     estructura en curso (ver el journal)
  *   <raiz>/<base>/.lock               fichero de bloqueo lectura/escritura
  *
- * Concurrencia: un único bloqueo por base de datos.
- *   - lectura  => flock LOCK_SH  (varias a la vez)
- *   - escritura=> flock LOCK_EX  (una sola; los SELECT esperan a que termine)
+ * Concurrencia: dos niveles de bloqueo con flock, siempre pedidos en este orden
+ * —primero la base, después la tabla—, que es lo que hace imposible un
+ * interbloqueo. Ver bloquear() para el detalle.
+ *   - lectura                          => SH en la base
+ *   - escritura de UNA tabla aislada    => SH en la base + EX en la tabla
+ *   - cascadas, triggers ajenos, DDL    => EX en la base
  */
 final class Storage
 {
