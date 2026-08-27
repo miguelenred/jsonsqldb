@@ -138,8 +138,8 @@ Estas construcciones existen en SQLite y aquí **dan error**:
 | `BEGIN` / `COMMIT` / `ROLLBACK` | No hay transacciones de varias sentencias. Cada sentencia es atómica por su cuenta |
 | `CHECK (...)` | Usa un trigger `BEFORE` con `RAISE(ABORT, '...')` |
 | `CREATE INDEX` | No hay índices. Las búsquedas recorren la tabla |
-| Funciones de ventana, CTE (`WITH`), `INTERSECT`, `EXCEPT` | Fuera del alcance del proyecto |
-| Subconsultas **correlacionadas** | La subconsulta no ve las columnas de la consulta exterior. Reescríbela con un `JOIN` |
+| Funciones de ventana (`OVER`) | Fuera del alcance del proyecto |
+| `WITH RECURSIVE` | Las CTE normales sí están; una consulta no puede referirse a sí misma |
 | `ALTER TABLE` sobre la clave primaria | Se gestiona con `ADD`/`DROP PRIMARY KEY`, y el `AUTOINCREMENT` solo al crear |
 
 Y estas diferencias de comportamiento conviene tenerlas presentes:
@@ -265,15 +265,14 @@ Decisiones que lo hacen posible:
 
 | No soportado | Alternativa |
 |---|---|
-| Subconsultas correlacionadas (que usan columnas de la consulta externa) | reescribir con `JOIN` |
-| `INTERSECT`, `EXCEPT` | `UNION` sí está |
+| `WITH RECURSIVE` | Las CTE normales sí están |
 | Funciones de ventana (`OVER`) | — |
 | `GLOB` | Usa `LIKE` o `REGEXP` |
 
 Cualquier cosa no soportada devuelve un error claro con el número de línea, nunca
 un resultado silenciosamente incorrecto.
 
-## 7. Ficheros de la fase 2
+## 7. Ficheros
 
 | Fichero | Responsabilidad |
 |---|---|

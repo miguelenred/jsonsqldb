@@ -51,11 +51,13 @@
             "php tests/f3_escrituras.php",
             "php tests/f4_api.php",
             "php tests/f5_esquema.php",
-            "php tests/f5_admin.php"
+            "php tests/f5_admin.php",
+            "php tests/f6_cortes.php",
+            "php tests/f7_concurrencia.php"
         ]
     },
     "scripts-descriptions": {
-        "test": "Runs the seven test suites. Copy the two .dist config files first."
+        "test": "Runs the nine test suites. Copy the two .dist config files first."
     },
     "config": {
         "sort-packages": true

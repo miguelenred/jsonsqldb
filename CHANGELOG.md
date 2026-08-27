@@ -41,6 +41,23 @@ configuration constants, and the on-disk format of `data/`.
 
 ### Fixed
 
+- **Several documents still described the engine as it was before 1.9.0.** An
+  audit found the same kind of debt in more places than the locking section
+  fixed above: the tables of unsupported features in `docs/02-consultas.md` and
+  the README still listed **correlated subqueries, `INTERSECT`, `EXCEPT` and
+  CTEs as unsupported**, when all four have worked since 1.9.0 — and the README
+  contradicted itself, listing them as supported a few paragraphs earlier. Only
+  `WITH RECURSIVE` is genuinely out.
+
+  Also corrected: the README's Concurrency section still described the old
+  database-wide lock; `docs/01-nucleo.md` had a "pending phases" section listing
+  work finished long ago; the configuration table was missing six constants
+  (`JSONSQLDB_CONEXION_DIRECTA`, the two memory ones, the journal one and the two
+  collation ones); `MEMORIA` was missing from the list of error types; atomic
+  writes were described without the `fsync` added in this same release;
+  `composer.json` ran seven suites instead of nine; and `SECURITY.md` claimed to
+  support "1.0.x".
+
 - **The documentation still described the old locking.** Section 3 of
   `docs/01-nucleo.md` said the lock covered the whole database and that writes
   serialised against each other, which stopped being true in 1.9.0 and

@@ -470,9 +470,9 @@ These exist in SQLite and raise an error here: `INSERT OR IGNORE` / `OR REPLACE`
 (no upsert — do a `SELECT` and pick), `CREATE TEMP`/`TEMPORARY TABLE` (no
 temporary tables), `WITHOUT ROWID` (there is no rowid), `BEGIN`/`COMMIT`/
 `ROLLBACK` (no multi-statement transactions), `CHECK` constraints (use a `BEFORE`
-trigger with `RAISE(ABORT, …)`), `CREATE INDEX` (no indexes), window
-functions, CTEs, `GLOB`, and `WITH RECURSIVE` (the subquery cannot
-see the outer query's columns — rewrite with a `JOIN`).
+trigger with `RAISE(ABORT, …)`), `CREATE INDEX` (no indexes), `GLOB` (use `LIKE`
+or `REGEXP`), window functions (`OVER`), and `WITH RECURSIVE` — plain CTEs do
+work, but a query cannot refer to itself.
 
 Behavioural differences worth knowing: `DECIMAL` is a rounded float, `ORDER BY`
 uses a configurable collation rather than binary order, and `LIKE` is
@@ -550,13 +550,28 @@ readable and diffable, and a corrupt line does not destroy the rest.
 
 ### Concurrency
 
-Every operation takes a file lock before touching anything: a **shared** lock for
-reads, an **exclusive** lock for writes. Multiple readers run at once; a writer
-waits for the readers to finish and blocks new ones while it works.
+Locking has two levels, always taken in this order — first the database, then the
+table — which is what makes a deadlock impossible:
 
-Writes are **atomic**: the new content is written to a temporary file and then
-renamed over the original. A crash mid-write leaves the previous version intact,
-never a half-written file.
+| Operation | Database | Table |
+|---|---|---|
+| Reads (`SELECT`, `SHOW`, `CHECK KEYS`) | shared | — |
+| A write to **one** table with no foreign keys or triggers | shared | **exclusive** |
+| Cascades, triggers reaching other tables, DDL, `REPAIR KEYS` | **exclusive** | — |
+
+So two writes to different tables run at the same time, and a write no longer
+blocks reads of other tables. As soon as an operation could touch more than one
+table it takes the exclusive database lock, which waits for every pending write
+on all of them. The decision is deliberately suspicious: a foreign key, another
+table referencing this one, a trigger, or an `INSERT ... SELECT` all fall back to
+the database lock.
+
+Writes are **atomic and durable**: the new content goes to a temporary file, is
+forced to disk with `fsync()`, and is then renamed over the original. A crash
+mid-write leaves the previous version intact, never a half-written file — and
+never a file whose contents were still sitting in the operating system's cache.
+`fsync()` exists from PHP 8.1; on 8.0 the buffer is flushed, which is as far as
+that version goes.
 
 ### Query execution
 
@@ -594,7 +609,7 @@ protection, per-IP rate limiting, and suppressing detailed error messages.
 
 ## Tests
 
-Seven suites, no dependencies, all using temporary directories — they never touch
+Nine suites, no dependencies, all using temporary directories — they never touch
 your data.
 
 ```

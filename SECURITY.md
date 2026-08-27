@@ -4,7 +4,11 @@
 
 | Version | Supported |
 |---|---|
-| 1.0.x | Yes |
+| Latest 1.x release | Yes |
+| Anything older | No — upgrade first |
+
+Only the most recent release gets fixes. The project is small enough that
+maintaining several branches would mean testing none of them properly.
 
 ## Reporting a vulnerability
 

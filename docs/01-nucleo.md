@@ -166,11 +166,11 @@ Borrar la carpeta `.cache/` a mano es seguro en cualquier momento.
 | Fichero | Responsabilidad |
 |---|---|
 | `engine/bootstrap.php` | autoloader (único `require` necesario) |
-| `engine/JsonSqlDbError.php` | excepción única, con tipo: CONFIG, SCHEMA, TYPE, CONSTRAINT, SYNTAX, IO, LOCK, PERMISSION |
+| `engine/JsonSqlDbError.php` | excepción única, con tipo: CONFIG, SCHEMA, TYPE, CONSTRAINT, SYNTAX, IO, LOCK, PERMISSION, MEMORIA |
 | `engine/Types.php` | tipos, alias, validación y conversión de valores y fechas |
 | `engine/Storage.php` | ficheros JSON, bloqueo, escritura atómica, paginación, caché |
 | `engine/Catalog.php` | tablas, columnas, PK/UNIQUE/FK, triggers, autoincremento, ALTER TABLE |
-| `tests/f1_nucleo.php` | 49 comprobaciones del núcleo (no deja nada en disco) |
+| `tests/f1_nucleo.php` | comprobaciones del núcleo (no deja nada en disco) |
 
 Escritura **atómica**: todo se escribe en `fichero.<pid>.tmp` y se renombra al
 final; si algo falla, el temporal se borra en el `finally`. Nunca queda un
@@ -180,7 +180,7 @@ fichero a medias ni un temporal huérfano.
 
 ## 6. Uso desde PHP (nivel núcleo)
 
-Este nivel es el que usará el ejecutor SQL de la fase siguiente. Se puede usar
+Este nivel es el que usa el ejecutor SQL. Se puede usar
 directamente para tareas de mantenimiento:
 
 ```php
@@ -222,18 +222,19 @@ Resultado esperado: `OK: 63   FALLOS: 0`.
 
 ---
 
-## 8. Pendiente (siguientes fases)
+## 8. Qué se apoya en este nivel
 
-- **F2** analizador y ejecutor de `SELECT`: WHERE, JOIN, GROUP BY, HAVING,
-  ORDER BY, LIMIT, DISTINCT, alias, subconsultas en `FROM` e `IN`, funciones.
-- **F3** `INSERT/UPDATE/DELETE` + DDL por SQL + validación de PK/UNIQUE/FK +
-  ejecución de triggers.
-- **F4** API HTTP con HMAC, permisos por API key y parámetro de base de datos.
-- **F5** panel `jsonSQLDBDBadmin`.
+Todo lo demás del proyecto está construido encima de lo que describe este
+documento:
+
+- El analizador y el ejecutor de `SELECT` — ver [02-consultas.md](02-consultas.md)
+- Las escrituras, el DDL, las claves y los triggers — ver [03-escrituras.md](03-escrituras.md)
+- La API HTTP firmada — ver [04-api.md](04-api.md)
+- El panel `jsonSQLDBadmin` — ver [05-admin.md](05-admin.md)
 
 ---
 
-## 9. Configuración y protección (añadido)
+## 9. Configuración y protección
 
 ### `config.php`
 
@@ -249,6 +250,14 @@ Resultado esperado: `OK: 63   FALLOS: 0`.
 | `JSONSQLDB_LOG_PARAMS` | ¿guardar también los valores de los `?`? Por defecto **no** |
 | `JSONSQLDB_LOG_MAX_SIZE` | tamaño máximo por fichero antes de rotar |
 | `JSONSQLDB_LOG_DIAS` | días que se conservan los logs (0 = siempre) |
+| `JSONSQLDB_CONEXION_DIRECTA` | usar el motor sin pasar por la API. `false` por defecto |
+| `JSONSQLDB_MEMORIA_VIGILAR` | cortar la consulta antes de agotar la memoria. `true` |
+| `JSONSQLDB_MEMORIA_MARGEN` | fracción del `memory_limit` a la que se corta. `0.85` |
+| `JSONSQLDB_JOURNAL_DATOS` | journal también en escrituras de varias tablas. `true` |
+| `JSONSQLDB_COLACION` | orden alfabético del `ORDER BY`: `general` o `binaria` |
+| `JSONSQLDB_COLACION_MAPA` | correcciones de orden por idioma |
+
+Cada una se explica en su apartado más abajo.
 
 ### Conexión directa al motor
 
@@ -391,8 +400,15 @@ solapa y qué espera.
 
 ### Operaciones de estructura a prueba de cortes
 
-Cada escritura suelta es atómica: se escribe un temporal y se hace `rename`, que
-el sistema de ficheros garantiza indivisible. Pero un `ALTER TABLE` o un
+Cada escritura suelta es atómica y duradera: se escribe un temporal, se fuerza a
+disco con `fsync()` y se hace `rename`, que
+el sistema de ficheros garantiza indivisible. Sin ese `fsync` habría atomicidad
+de nombre pero no durabilidad: el sistema operativo puede tener los datos todavía
+en su caché, y un corte de corriente dejaría el fichero nuevo vacío pese a que el
+`rename` ya hubiera ocurrido. `fsync()` existe desde PHP 8.1; en 8.0 se vacía el
+buffer, que es hasta donde llega esa versión.
+
+Pero un `ALTER TABLE` o un
 `DROP TABLE` tocan **varios** ficheros, y el conjunto no lo es: si el proceso
 muere entre dos escrituras, la base queda a medias.
 
