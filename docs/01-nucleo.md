@@ -215,7 +215,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 62   FALLOS: 0`.
+Resultado esperado: `OK: 63   FALLOS: 0`.
 
 ---
 
@@ -316,6 +316,18 @@ Se mide la memoria **en uso**, no la reservada. PHP conserva los bloques que ya
 pidió al sistema aunque estén libres, así que después de una consulta grande ese
 número se queda alto —28 MB reservados con 1,5 MB realmente ocupados— y la
 siguiente consulta se cortaría nada más empezar aunque quepa de sobra.
+
+Y por debajo de todo eso hay una **red que no depende de acertar**. Predecir el
+consumo es una heurística: PHP reserva memoria a rachas y cuánto reserva cambia
+entre versiones, así que ninguna estimación es infalible. Por eso el motor aparta
+dos megas al empezar y registra una función de cierre. Si PHP llega a abortar por
+falta de memoria, esa función suelta la reserva —con lo que vuelve a haber sitio
+para trabajar— y avisa: la API devuelve entonces un JSON de error normal en vez
+de un cuerpo vacío o a medias.
+
+Las funciones de cierre se ejecutan **siempre**, incluso tras un error fatal. Esa
+es la diferencia: la predicción corta antes y con un mensaje mejor, pero la red
+funciona aunque la predicción falle.
 
 Cerca del límite se mira mucho más a menudo: cada 512 filas mientras hay sitio de
 sobra, y cada 8 a partir de la mitad del límite. Comprobar cuesta 0,01

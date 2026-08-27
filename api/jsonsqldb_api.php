@@ -53,6 +53,17 @@ if (HSTS_ACTIVO) {
     header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
 }
 
+// Si la consulta llega a agotar la memoria, PHP aborta sin excepción. La red de
+// seguridad del motor convierte ese final en una respuesta JSON como cualquier
+// otra, en vez de dejar al cliente con un cuerpo vacío o a medias.
+JsonSQLDB\Memoria::alAgotarse(static function (string $mensaje): void {
+    if (!headers_sent()) {
+        http_response_code(500);
+    }
+    echo json_encode(['error' => DEVOLVER_ERRORES ? $mensaje : 'Consulta demasiado grande'],
+        JSON_UNESCAPED_UNICODE);
+});
+
 $store  = new ApiStore(API_ESTADO_PATH);
 $ip     = ipCliente();
 $inicio = microtime(true);

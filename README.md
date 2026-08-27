@@ -598,7 +598,7 @@ Seven suites, no dependencies, all using temporary directories — they never to
 your data.
 
 ```
-php tests/f1_nucleo.php       → OK: 62    storage, types, locking, direct access
+php tests/f1_nucleo.php       → OK: 63    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
 php tests/f2_select.php       → OK: 138    SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers

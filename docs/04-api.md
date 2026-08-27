@@ -394,7 +394,7 @@ apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
 ## 9. Pruebas
 
 ```
-php tests/f1_nucleo.php       → OK: 62
+php tests/f1_nucleo.php       → OK: 63
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 138
 php tests/f3_escrituras.php   → OK: 56

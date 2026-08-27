@@ -72,7 +72,7 @@ Siete ficheros, sin dependencias. Usan carpetas temporales, así que no tocan tu
 datos.
 
 ```
-php tests/f1_nucleo.php       → OK: 62    almacenamiento, tipos, bloqueos
+php tests/f1_nucleo.php       → OK: 63    almacenamiento, tipos, bloqueos
 php tests/f2_parser.php       → OK: 70    analizador y parámetros ligados
 php tests/f2_select.php       → OK: 138    ejecución de SELECT y orden alfabético
 php tests/f3_escrituras.php   → OK: 56    escrituras, DDL, claves y triggers

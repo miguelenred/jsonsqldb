@@ -53,11 +53,23 @@ final class Memoria
     private const FACTOR_JSON  = 14;
     private const FACTOR_CACHE = 3.5;
 
+    /** Memoria apartada de antemano, para poder trabajar cuando ya no queda. */
+    private const RESERVA = 1048576 * 2;
+
+    /** @var string|null la reserva; se suelta cuando PHP se queda sin memoria */
+    private static ?string $reserva = null;
+
+    /** @var (callable(string):void)|null qué hacer si aun así se agota */
+    private static $alAgotarse = null;
+
+    private static bool $redPuesta = false;
+
     private static int $limite  = 0;      // memory_limit en bytes, 0 = sin límite
     private static int $techo   = 0;      // bytes a partir de los cuales se corta
     private static int $cuenta  = 0;
     private static int $cada    = self::CADA_LEJOS;
     private static int $ultimo  = 0;      // memoria en la comprobación anterior
+    private static int $mayorSalto = 0;   // el mayor crecimiento visto por fila
 
     /**
      * Prepara el vigilante para la consulta que empieza.
@@ -67,11 +79,17 @@ final class Memoria
      */
     public static function iniciar(): void
     {
-        self::$cuenta = 0;
-        self::$cada   = self::CADA_LEJOS;
+        self::$cuenta     = 0;
+        self::$cada       = self::CADA_LEJOS;
+        self::$mayorSalto = 0;
         self::$techo  = 0;
         self::$limite = 0;
         self::$ultimo = memory_get_usage();
+
+        // La red se pone siempre, aunque la predicción esté desactivada: no
+        // depende de acertar nada, solo de que PHP ejecute las funciones de
+        // cierre, cosa que hace incluso al abortar por falta de memoria.
+        self::ponerRed();
 
         if (!Config::limiteMemoriaActivo()) {
             return;
@@ -82,6 +100,50 @@ final class Memoria
         }
         self::$limite = $limite;
         self::$techo  = (int)($limite * Config::margenMemoria());
+    }
+
+    /**
+     * Qué hacer si, pese a todo, PHP llega a agotar la memoria.
+     *
+     * Predecir el consumo es una heurística: PHP reserva a rachas y cuánto varía
+     * entre versiones. Esto es la red que no depende de acertar. Se aparta un
+     * par de megas de antemano y se registra una función de cierre: cuando PHP
+     * aborta por falta de memoria, esa función suelta la reserva —con lo que
+     * vuelve a haber sitio para trabajar— y avisa a quien corresponda, que en la
+     * API es quien devuelve el JSON de error.
+     *
+     * @param (callable(string):void)|null $fn recibe el mensaje del fallo
+     */
+    public static function alAgotarse(?callable $fn): void
+    {
+        self::$alAgotarse = $fn;
+    }
+
+    private static function ponerRed(): void
+    {
+        if (self::$redPuesta) {
+            return;
+        }
+        self::$redPuesta = true;
+        self::$reserva   = str_repeat("\0", self::RESERVA);
+
+        register_shutdown_function(static function (): void {
+            self::$reserva = null;                  // sitio para poder responder
+
+            $e = error_get_last();
+            if ($e === null || ($e['type'] & (E_ERROR | E_USER_ERROR)) === 0) {
+                return;
+            }
+            if (!str_contains($e['message'], 'Allowed memory size')) {
+                return;
+            }
+            if (self::$alAgotarse !== null) {
+                (self::$alAgotarse)(
+                    'La consulta agotó la memoria de PHP. Acótala con WHERE o LIMIT, '
+                    . 'o sube memory_limit.'
+                );
+            }
+        });
     }
 
     /**
@@ -114,8 +176,14 @@ final class Memoria
         // sin pasar por aquí, porque PHP duplica la tabla hash al crecer y
         // porque una sola fila grande puede ocupar mucho. Por eso se reserva
         // varias veces lo que acaba de crecer, contado por fila comprobada.
-        $porFila   = (int)ceil($salto / max(1, self::$cada));
-        $reservado = max($salto, $porFila * self::CADA_CERCA) * self::SALTOS_RESERVADOS;
+        // Se guarda el MAYOR salto por fila visto hasta ahora, no el último: los
+        // saltos son a rachas, y el siguiente puede parecerse al peor, no al
+        // anterior. Con el mayor, la reserva no se queda corta por sorpresa.
+        $porFila = (int)ceil($salto / max(1, self::$cada));
+        if ($porFila > self::$mayorSalto) {
+            self::$mayorSalto = $porFila;
+        }
+        $reservado = self::$mayorSalto * self::CADA_CERCA * self::SALTOS_RESERVADOS;
 
         $cabeOtroSalto = ($uso + $reservado) < self::$limite;
 

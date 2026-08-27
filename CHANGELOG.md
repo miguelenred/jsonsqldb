@@ -70,6 +70,20 @@ configuration constants, and the on-disk format of `data/`.
 
   Verified at eight memory limits with small rows and seven with 4 KB rows.
 
+- **And underneath all of that, a safety net that does not depend on guessing
+  right.** Predicting consumption is a heuristic — PHP allocates in bursts and
+  how much differs between versions — so no estimate is infallible. The engine
+  now sets aside two megabytes at the start and registers a shutdown function.
+  If PHP does run out of memory, that function releases the reserve, which frees
+  room to work, and reports it: the API answers with an ordinary JSON error
+  instead of an empty or truncated body.
+
+  Shutdown functions run even after a fatal error. That is the difference: the
+  predictive guard stops earlier and with a better message, but the net works
+  even when the guard does not. Registered regardless of
+  `JSONSQLDB_MEMORIA_VIGILAR`, and there is a test that disables the guard on
+  purpose to prove the net alone is enough.
+
 ## [1.10.0] - 2026-08-26
 
 ### Added

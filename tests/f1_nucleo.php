@@ -286,6 +286,7 @@ chk('corta bien y deja el proceso utilizable, con distintos límites', function 
                 . 'if ($bd->consultar("SHOW TABLES") === []) {'
                 . '  $bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(200))");'
                 . '  for ($i = 0; $i < 1200; $i++) { $bd->consultar("INSERT INTO t (v) VALUES (?)", [str_repeat("x", 180)]); } }'
+                . 'JsonSQLDB\\Memoria::alAgotarse(function () { echo "MEMORIA"; });'
                 . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
                 . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }'
                 // Y después una consulta pequeña: tras un corte, PHP conserva los
@@ -322,6 +323,20 @@ chk('una consulta que no cabe en memoria se corta con un error, no con un fatal'
     // MEMORIA = cortó bien; y después sigue respondiendo, así que el proceso vivía
     return $salida === 'MEMORIA|1500' ?: $salida;
 });
+chk('la red actúa aunque la predicción esté desactivada', function () use ($raiz) {
+    // Esta es la garantía que no depende de acertar: aunque el vigilante no
+    // llegue a tiempo, la función de cierre convierte el final en un aviso.
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'define("JSONSQLDB_MEMORIA_VIGILAR", false);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . 'JsonSQLDB\\Memoria::alAgotarse(function () { echo "RED"; });'
+            . '$bd = new JsonSQLDB\\Database("m", ' . var_export($raiz . '/mem', true) . ');'
+            . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
+            . 'catch (Throwable $e) { echo "excepcion"; }';
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r '
+            . escapeshellarg($codigo) . ' 2>/dev/null');
+    return str_contains($salida, 'RED') ?: trim($salida);
+});
 chk('sin vigilancia, la misma consulta muere con un fatal de PHP', function () use ($raiz) {
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
             . 'define("JSONSQLDB_MEMORIA_VIGILAR", false);'
@@ -355,6 +370,7 @@ chk('también corta con filas grandes, donde cada una pesa mucho', function () u
     $leer = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
           . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
           . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
+          . 'JsonSQLDB\\Memoria::alAgotarse(function () { echo "MEMORIA"; });'
           . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
           . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }';
 
