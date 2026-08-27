@@ -28,8 +28,20 @@ namespace JsonSQLDB;
  */
 final class Memoria
 {
-    /** Cada cuántas filas se mira. Mirar en cada una costaría más que ahorrar. */
-    private const CADA = 512;
+    /**
+     * Cada cuántas filas se mira. Lejos del límite basta con mirar de vez en
+     * cuando; cerca hay que mirar a menudo, porque un solo salto del array puede
+     * pasarse de largo. Comprobar cuesta 0,01 microsegundos, así que apretar
+     * cerca del límite no se nota.
+     */
+    private const CADA_LEJOS = 512;
+    private const CADA_CERCA = 8;
+
+    /** A partir de qué fracción del límite se empieza a mirar más a menudo. */
+    private const VIGILANCIA_ESTRECHA = 0.5;
+
+    /** Cuántos saltos como el último se reservan antes de cortar. */
+    private const SALTOS_RESERVADOS = 4;
 
     /**
      * Cuánto ocupa un fichero ya convertido a datos, respecto a su tamaño.
@@ -44,6 +56,7 @@ final class Memoria
     private static int $limite  = 0;      // memory_limit en bytes, 0 = sin límite
     private static int $techo   = 0;      // bytes a partir de los cuales se corta
     private static int $cuenta  = 0;
+    private static int $cada    = self::CADA_LEJOS;
     private static int $ultimo  = 0;      // memoria en la comprobación anterior
 
     /**
@@ -55,6 +68,7 @@ final class Memoria
     public static function iniciar(): void
     {
         self::$cuenta = 0;
+        self::$cada   = self::CADA_LEJOS;
         self::$techo  = 0;
         self::$limite = 0;
         self::$ultimo = memory_get_usage();
@@ -80,20 +94,30 @@ final class Memoria
         if (self::$techo === 0) {
             return;
         }
-        if ((++self::$cuenta % self::CADA) !== 0) {
+        if ((++self::$cuenta % self::$cada) !== 0) {
             return;
         }
 
         $uso   = memory_get_usage();
+
+        // Al pasar de la mitad del límite se mira mucho más a menudo
+        if (self::$cada !== self::CADA_CERCA
+            && $uso > self::$limite * self::VIGILANCIA_ESTRECHA) {
+            self::$cada = self::CADA_CERCA;
+        }
+
         $salto = max(0, $uso - self::$ultimo);
         self::$ultimo = $uso;
 
-        // Mirar solo el techo no basta: PHP duplica la tabla hash al crecer, así
-        // que entre dos comprobaciones el consumo puede pegar un salto mayor que
-        // el margen que queda y llegar al fatal sin pasar por aquí. Por eso se
-        // corta también cuando otro salto como el último no cabría: se reserva
-        // el doble de lo que acaba de crecer.
-        $cabeOtroSalto = ($uso + $salto * 2) < self::$limite;
+        // Mirar solo el techo no basta: entre dos comprobaciones el consumo
+        // puede pegar un salto mayor que el margen que queda y llegar al fatal
+        // sin pasar por aquí, porque PHP duplica la tabla hash al crecer y
+        // porque una sola fila grande puede ocupar mucho. Por eso se reserva
+        // varias veces lo que acaba de crecer, contado por fila comprobada.
+        $porFila   = (int)ceil($salto / max(1, self::$cada));
+        $reservado = max($salto, $porFila * self::CADA_CERCA) * self::SALTOS_RESERVADOS;
+
+        $cabeOtroSalto = ($uso + $reservado) < self::$limite;
 
         if ($uso < self::$techo && $cabeOtroSalto) {
             return;

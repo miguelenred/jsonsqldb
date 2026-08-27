@@ -56,9 +56,19 @@ configuration constants, and the on-disk format of `data/`.
   much the allocator keeps in reserve differs between versions.
 
 - The guard also stops when **another jump the size of the last one would not
-  fit**, reserving twice what just grew: PHP doubles an array's hash table as it
-  grows, so between two checks the usage can jump further than the remaining
-  margin and reach the fatal without passing through the guard.
+  fit**. Getting this right took three attempts, and each one failed on different
+  PHP versions:
+  - PHP doubles an array's hash table as it grows, so between two checks the
+    usage can jump past the remaining margin.
+  - The reserve is computed **per row checked, not per batch**: a single 4 KB row
+    can take more than a whole batch of small ones.
+  - Checks happen every 512 rows while there is room and every 8 once past half
+    the limit. A check costs 0.01 µs, so tightening up where it matters does not
+    show in the benchmarks.
+  - The result-building loop was not being watched at all — with large rows the
+    query died there, not in the join.
+
+  Verified at eight memory limits with small rows and seven with 4 KB rows.
 
 ## [1.10.0] - 2026-08-26
 

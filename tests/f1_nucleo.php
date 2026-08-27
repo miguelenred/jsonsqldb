@@ -336,6 +336,39 @@ chk('sin vigilancia, la misma consulta muere con un fatal de PHP', function () u
     // Se comprueba que el interruptor sirve de algo: sin él, fatal incapturable
     return str_contains($salida, 'Allowed memory size') ?: trim($salida);
 });
+chk('también corta con filas grandes, donde cada una pesa mucho', function () use ($raiz) {
+    // Con filas de 4 KB, una sola fila puede ocupar más que una tanda entera de
+    // filas pequeñas: el margen hay que calcularlo por fila, no por tanda.
+    $base = $raiz . '/mem3';
+    $prep = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+          . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+          . '$r = ' . var_export($base, true) . ';'
+          . '@mkdir($r, 0777, true);'
+          . 'JsonSQLDB\\Database::crear("g", $r);'
+          . '$bd = new JsonSQLDB\\Database("g", $r);'
+          . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(4000))");'
+          . '$p = array_fill(0, 300, str_repeat("y", 3900));'
+          . '$v = implode(",", array_fill(0, 300, "(?)"));'
+          . '$bd->consultar("INSERT INTO t (v) VALUES $v", $p);';
+    shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
+
+    $leer = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+          . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+          . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
+          . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
+          . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }';
+
+    $fallos = [];
+    foreach (['16M', '32M', '48M', '64M'] as $limite) {
+        $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$limite -r "
+                . escapeshellarg($leer) . ' 2>&1'));
+        if ($salida !== 'MEMORIA') {
+            $fallos[] = "$limite -> " . substr($salida, 0, 50);
+        }
+    }
+    exec('rm -rf ' . escapeshellarg($base));
+    return $fallos === [] ?: implode(' | ', $fallos);
+});
 chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz) {
     // El pico de json_decode ocurre en una sola instrucción: comprobar cada 512
     // filas no llega a tiempo. Se mira el tamaño del fichero antes de abrirlo.

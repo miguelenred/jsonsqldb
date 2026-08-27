@@ -184,16 +184,19 @@ final class Select
                 foreach ($salida as $c) {
                     $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
                 }
+                Memoria::comprobar('la construcción del resultado');
                 $resultado[]   = $fila;
                 $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
             }
         } else {
             foreach ($filas as $f) {
+                Memoria::comprobar('la construcción del resultado');
                 $ctx  = ['fila' => $f, 'sub' => $sub, 'filaExterna' => $externa];
                 $fila = [];
                 foreach ($salida as $c) {
                     $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
                 }
+                Memoria::comprobar('la construcción del resultado');
                 $resultado[]   = $fila;
                 $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
             }

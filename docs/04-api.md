@@ -119,7 +119,7 @@ byte.
 ligados y soporte de certificado propio:
 
 ```powershell
-Set-JsonSqlDbConexion -Url 'https://example.com/jsonsqldb/api/jsonsqldb_api.php' `
+Set-JsonSqlDbConexion -Url 'https://shirka:44311/jsonsqldb/api/jsonsqldb_api.php' `
                       -ApiKey '...' -HmacSecret '...' -Base 'pruebas'
 
 API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ?" @('Torrevieja')
@@ -394,7 +394,7 @@ apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
 ## 9. Pruebas
 
 ```
-php tests/f1_nucleo.php       → OK: 61
+php tests/f1_nucleo.php       → OK: 62
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 138
 php tests/f3_escrituras.php   → OK: 56

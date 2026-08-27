@@ -215,7 +215,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 61   FALLOS: 0`.
+Resultado esperado: `OK: 62   FALLOS: 0`.
 
 ---
 
@@ -316,6 +316,10 @@ Se mide la memoria **en uso**, no la reservada. PHP conserva los bloques que ya
 pidió al sistema aunque estén libres, así que después de una consulta grande ese
 número se queda alto —28 MB reservados con 1,5 MB realmente ocupados— y la
 siguiente consulta se cortaría nada más empezar aunque quepa de sobra.
+
+Cerca del límite se mira mucho más a menudo: cada 512 filas mientras hay sitio de
+sobra, y cada 8 a partir de la mitad del límite. Comprobar cuesta 0,01
+microsegundos, así que apretar cuando importa no se nota en el rendimiento.
 
 No basta con mirar el techo. PHP duplica la tabla hash de un array cuando crece,
 así que entre dos comprobaciones el consumo puede pegar un salto mayor que el

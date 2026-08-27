@@ -212,8 +212,8 @@ fichero no existe o no se puede leer, el panel lo dice claramente en vez de
 fallar con un error de red confuso.
 
 Con la opción 1, el **nombre del servidor de `ADMIN_API_URL` tiene que coincidir
-con el del certificado**. Si el certificado es para `example.com`, la URL debe ser
-`https://example.com/...`, no la IP ni `localhost`. Si no coincide, cURL sigue
+con el del certificado**. Si el certificado es para `shirka`, la URL debe ser
+`https://shirka:44311/...`, no la IP ni `localhost`. Si no coincide, cURL sigue
 protestando (ahora por el nombre, no por la firma) y toca usar la opción 2 o
 regenerar el certificado con el nombre correcto.
 
