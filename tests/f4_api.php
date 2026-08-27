@@ -242,16 +242,21 @@ chk('una restricción devuelve error y no inserta', function () {
 
 echo "\n== Registro de peticiones ==\n";
 chk('el histórico guarda ip, sql, filas y tiempo', function () use ($raizDatos) {
-    $fichero = $raizDatos . '/api/peticiones-' . date('Y-m-d') . '.json';
-    if (!is_file($fichero)) { return 'no se creó el histórico'; }
+    // Se busca por patrón y no por la fecha de hoy: el fichero lo nombra el
+    // proceso de la API, que fija la zona horaria de config.php, y cerca de
+    // medianoche puede estar ya en el día siguiente respecto a quien comprueba.
+    $ficheros = (array)glob($raizDatos . '/api/peticiones-*.json');
+    if ($ficheros === []) { return 'no se creó el histórico'; }
+    $fichero = (string)end($ficheros);
     $lineas = array_filter(explode("\n", (string)file_get_contents($fichero)));
     $ultima = json_decode((string)end($lineas), true);
     return isset($ultima['ip'], $ultima['ms'], $ultima['filas'], $ultima['op'])
         && $ultima['ip'] === '10.0.0.7' && is_float($ultima['ms']) || is_int($ultima['ms'] ?? null);
 });
 chk('el log del motor guarda la etiqueta de la API key', function () use ($raizDatos) {
-    $fichero = $raizDatos . '/logs/consultas-' . date('Y-m-d') . '.json';
-    if (!is_file($fichero)) { return 'no se creó el log del motor'; }
+    $ficheros = (array)glob($raizDatos . '/logs/consultas-*.json');
+    if ($ficheros === []) { return 'no se creó el log del motor'; }
+    $fichero = (string)end($ficheros);
     $lineas = array_filter(explode("\n", (string)file_get_contents($fichero)));
     foreach ($lineas as $linea) {
         $e = json_decode($linea, true);

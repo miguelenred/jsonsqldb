@@ -215,7 +215,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 59   FALLOS: 0`.
+Resultado esperado: `OK: 61   FALLOS: 0`.
 
 ---
 
@@ -311,6 +311,27 @@ verdad necesitas ese volumen de una vez.
 El proceso sigue vivo, la API responde con su JSON de error y el cliente sabe qué
 ha pasado. **La consulta falla igual**: lo que no cabe no cabe. Lo que cambia es
 que falla de forma entendible en vez de reventar.
+
+Se mide la memoria **en uso**, no la reservada. PHP conserva los bloques que ya
+pidió al sistema aunque estén libres, así que después de una consulta grande ese
+número se queda alto —28 MB reservados con 1,5 MB realmente ocupados— y la
+siguiente consulta se cortaría nada más empezar aunque quepa de sobra.
+
+No basta con mirar el techo. PHP duplica la tabla hash de un array cuando crece,
+así que entre dos comprobaciones el consumo puede pegar un salto mayor que el
+margen que queda y llegar al fatal sin pasar por el vigilante. Por eso también se
+corta cuando **otro salto como el último no cabría**: se reserva el doble de lo
+que acaba de crecer. Sin esto, el corte funcionaba con unos límites de memoria y
+no con otros, según la versión de PHP y el tamaño de la tabla.
+
+**Lo que el vigilante no puede cubrir del todo.** Un fichero se lee entero de
+golpe: `file_get_contents()` y `json_decode()` materializan todo en una sola
+instrucción, y el pico ocurre antes de que nadie pueda mirar nada. Por eso, antes
+de abrir un fichero se estima si su contenido cabrá, a partir de su tamaño. La
+estimación es una heurística —cuánto se expande depende de la forma de los datos,
+y muchas columnas cortas inflan más que pocas largas—, así que **reduce la
+ventana pero no la cierra**. Cerrarla exigiría leer por trozos en vez de entero,
+que es un cambio de fondo del almacenamiento.
 
 Sobre subir el límite automáticamente: se puede leer con `ini_get('memory_limit')`
 y en muchos servidores se puede cambiar con `ini_set()`, pero **el motor no lo

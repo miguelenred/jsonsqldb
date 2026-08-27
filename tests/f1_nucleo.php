@@ -271,6 +271,38 @@ chk('borrar base', function () use ($raiz, $base) {
 @rmdir($raiz);
 
 echo "\n== Vigilancia de memoria ==\n";
+chk('corta bien y deja el proceso utilizable, con distintos límites', function () use ($raiz) {
+    // El consumo pega saltos al crecer los arrays de PHP, y el salto depende de
+    // la versión y del tamaño. Se prueban varios límites para que un salto
+    // grande no se cuele hasta el fatal en ninguno.
+    $fallos = [];
+    foreach (['16M', '32M', '64M', '128M'] as $limite) {
+        $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+                . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+                . '$r = ' . var_export($raiz . '/mem2', true) . ';'
+                . '@mkdir($r, 0777, true);'
+                . 'if (!is_dir("$r/m")) { JsonSQLDB\\Database::crear("m", $r); }'
+                . '$bd = new JsonSQLDB\\Database("m", $r);'
+                . 'if ($bd->consultar("SHOW TABLES") === []) {'
+                . '  $bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(200))");'
+                . '  for ($i = 0; $i < 1200; $i++) { $bd->consultar("INSERT INTO t (v) VALUES (?)", [str_repeat("x", 180)]); } }'
+                . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
+                . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }'
+                // Y después una consulta pequeña: tras un corte, PHP conserva los
+                // bloques que ya pidió al sistema aunque estén libres. Si se
+                // midiera eso en vez de la memoria en uso, esta segunda consulta
+                // se cortaría nada más empezar aunque quepa de sobra.
+                . 'try { echo "|", $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]; }'
+                . 'catch (Throwable $e) { echo "|SEGUNDA FALLA"; }';
+        $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$limite -r "
+                . escapeshellarg($codigo) . ' 2>&1'));
+        if ($salida !== 'MEMORIA|1200') {
+            $fallos[] = "$limite -> " . substr($salida, 0, 60);
+        }
+    }
+    exec('rm -rf ' . escapeshellarg($raiz . '/mem2'));
+    return $fallos === [] ?: implode(' | ', $fallos);
+});
 chk('una consulta que no cabe en memoria se corta con un error, no con un fatal', function () use ($raiz) {
     // En otro proceso, con poca memoria y una tabla que no cabe multiplicada
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
@@ -303,6 +335,38 @@ chk('sin vigilancia, la misma consulta muere con un fatal de PHP', function () u
 
     // Se comprueba que el interruptor sirve de algo: sin él, fatal incapturable
     return str_contains($salida, 'Allowed memory size') ?: trim($salida);
+});
+chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz) {
+    // El pico de json_decode ocurre en una sola instrucción: comprobar cada 512
+    // filas no llega a tiempo. Se mira el tamaño del fichero antes de abrirlo.
+    $base = $raiz . '/grande';
+    $prep = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+          . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+          . '$r = ' . var_export($base, true) . ';'
+          . '@mkdir($r, 0777, true);'
+          . 'JsonSQLDB\\Database::crear("g", $r);'
+          . '$bd = new JsonSQLDB\\Database("g", $r);'
+          . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(400))");'
+          . '$p = array_fill(0, 900, str_repeat("x", 380));'
+          . '$v = implode(",", array_fill(0, 900, "(?)"));'
+          . 'for ($i = 0; $i < 12; $i++) { $bd->consultar("INSERT INTO t (v) VALUES $v", $p); }';
+    shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
+
+    $leer = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+          . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+          . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
+          . 'try { echo $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]; }'
+          . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }';
+
+    // Con poca memoria: corte explicado. Con suficiente: la consulta sale.
+    $poco  = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=12M -r '
+           . escapeshellarg($leer) . ' 2>&1'));
+    $mucho = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=256M -r '
+           . escapeshellarg($leer) . ' 2>&1'));
+
+    exec('rm -rf ' . escapeshellarg($base));
+    return ($poco === 'MEMORIA' && $mucho === '10800')
+        ?: "12M -> " . substr($poco, 0, 50) . " | 256M -> " . substr($mucho, 0, 50);
 });
 chk('los datos siguen intactos tras el corte', function () use ($raiz) {
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'

@@ -9,6 +9,57 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [1.10.1] - 2026-08-26
+
+### Added
+
+- **Data is flushed to disk before the rename.** Writes were atomic in the sense
+  that the file was replaced in one step, but the contents could still be sitting
+  in the operating system's cache: a power cut could leave the new file empty or
+  half written even though the rename had already happened. Every write now
+  flushes and calls `fsync()` before the rename. `fsync()` exists from PHP 8.1;
+  on 8.0 the buffer is flushed, which is as far as that version goes.
+
+- **The memory guard checks a file before reading it.** A file is materialised in
+  one instruction, so checking every 512 rows never got the chance to intervene:
+  a large table exhausted memory inside `json_decode()`. The size is now
+  estimated before opening. It is a heuristic — how much data expands depends on
+  its shape — so it narrows the window rather than closing it; closing it would
+  mean reading in chunks instead of whole, which is a change to the storage
+  layer.
+
+- **Two tests looked for the log files by today's date**, which broke near
+  midnight: the file is named by the API process, which sets the timezone from
+  `config.php`, so it can already be on the next day relative to whoever checks.
+  They now match by pattern. The engine behaved correctly; only the tests were
+  time-dependent.
+
+- **A partially deleted database is now reported.** `DROP DATABASE` ignored
+  errors while removing files, so a permission problem could leave a directory
+  half deleted, looking like it existed but unusable. It now says what could not
+  be removed.
+
+### Fixed
+
+- **The memory guard aborted the query that came after a big one.** It was
+  measuring `memory_get_usage(true)`, the memory PHP has requested from the
+  operating system — which includes blocks that are already free and kept for
+  reuse. After a large query that number stays high (28 MB reserved with only
+  1.5 MB actually in use), so the next query, however small, was stopped before
+  it began.
+
+  It now measures the memory actually in use, which is what grows and eventually
+  meets the limit. Verified at seven different memory limits, and the test now
+  runs a second, small query after the abort — the exact case that failed.
+
+  This is what broke CI on PHP 8.2 and above while passing on 8.0 and 8.1: how
+  much the allocator keeps in reserve differs between versions.
+
+- The guard also stops when **another jump the size of the last one would not
+  fit**, reserving twice what just grew: PHP doubles an array's hash table as it
+  grows, so between two checks the usage can jump further than the remaining
+  margin and reach the fatal without passing through the guard.
+
 ## [1.10.0] - 2026-08-26
 
 ### Added
@@ -569,6 +620,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[1.10.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.10.1
 [1.10.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.10.0
 [1.9.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.9.0
 [1.8.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.8.0

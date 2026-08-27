@@ -293,7 +293,7 @@ un resultado silenciosamente incorrecto.
 ## 8. Pruebas
 
 ```
-php tests/f1_nucleo.php     → OK: 59
+php tests/f1_nucleo.php     → OK: 61
 php tests/f2_parser.php     → OK: 70
 php tests/f2_select.php     → OK: 138
 ```

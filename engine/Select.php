@@ -97,6 +97,8 @@ final class Select
                 Evaluator::$correlacionada = $marcaPrevia;
             }
 
+            // El análisis estático no puede seguir esto: la marca la pone
+            // Evaluator::resolver() durante la llamada anidada de arriba, no aquí
             if ($usoFuera) {
                 $this->subsCorr[$sid][$claveFila] = $filas;
             } else {

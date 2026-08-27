@@ -133,6 +133,17 @@ final class Storage
             throw JsonSqlDbError::config("La base de datos '$base' no existe");
         }
         self::borrarRecursivo($dir);
+
+        // Si algo quedó sin borrar, decirlo: una base a medias es peor que un
+        // error, porque parece que existe y no se puede usar
+        clearstatcache();
+        if (is_dir($dir)) {
+            $quedan = array_diff((array)scandir($dir), ['.', '..']);
+            throw JsonSqlDbError::io(
+                "La base '$base' se ha borrado solo en parte: no se pudieron eliminar "
+                . count($quedan) . ' fichero(s). Comprueba los permisos y bórrala a mano.'
+            );
+        }
     }
 
     private static function borrarRecursivo(string $dir): void
@@ -530,6 +541,10 @@ final class Storage
             if (!is_file($fichero)) {
                 break;
             }
+            // Antes de leer: si el fichero no va a caber, cortar aquí. Después
+            // de file_get_contents() ya sería tarde.
+            Memoria::comprobarFichero($fichero);
+
             $json = json_decode((string)file_get_contents($fichero), true);
             if (!is_array($json) || !isset($json['rows']) || !is_array($json['rows'])) {
                 throw JsonSqlDbError::io("Datos ilegibles en " . basename($fichero));
@@ -655,13 +670,45 @@ final class Storage
     }
 
     /** Escritura atómica: fichero temporal + rename, sin dejar restos. */
+    /**
+     * Escribe un fichero de forma que un corte no lo deje a medias.
+     *
+     * Se escribe en un temporal, se fuerza a disco y se pone en su sitio con
+     * rename(), que el sistema de ficheros hace de una pieza. Sin el volcado a
+     * disco previo habría atomicidad de nombre pero no durabilidad: el sistema
+     * operativo puede haber aceptado la escritura y tenerla todavía en su caché,
+     * de modo que un corte de corriente dejaría el fichero nuevo vacío o a
+     * medias aunque el rename ya hubiera ocurrido.
+     *
+     * fsync() existe desde PHP 8.1. En 8.0 se hace lo que se puede: vaciar el
+     * buffer de PHP. Está documentado como diferencia entre versiones.
+     *
+     * En Windows rename() NO reemplaza un fichero existente, así que hay que
+     * borrarlo antes. Eso abre una ventana —fichero viejo borrado, nuevo aún sin
+     * renombrar— en la que un corte deja la tabla sin su fichero. Es una
+     * limitación del sistema, no del motor, y por eso el journal copia los
+     * ficheros antes de tocarlos: la recuperación los devuelve a su sitio.
+     */
     private function escribirAtomico(string $fichero, string $contenido): void
     {
         $tmp = $fichero . '.' . getmypid() . '.tmp';
         try {
-            if (@file_put_contents($tmp, $contenido) === false) {
+            $fh = @fopen($tmp, 'wb');
+            if ($fh === false) {
                 throw JsonSqlDbError::io('No se puede escribir ' . basename($fichero));
             }
+            try {
+                if (@fwrite($fh, $contenido) !== strlen($contenido)) {
+                    throw JsonSqlDbError::io('Escritura incompleta de ' . basename($fichero));
+                }
+                @fflush($fh);
+                if (function_exists('fsync')) {
+                    @fsync($fh);                // los datos, en el disco de verdad
+                }
+            } finally {
+                @fclose($fh);
+            }
+
             if (!@rename($tmp, $fichero)) {
                 @unlink($fichero);              // Windows: rename falla si el destino existe
                 if (!@rename($tmp, $fichero)) {
@@ -726,6 +773,9 @@ final class Storage
         if (!is_file($fichero)) {
             return null;
         }
+        // La caché también se materializa entera de golpe
+        Memoria::comprobarFichero($fichero);
+
         $val = @unserialize((string)file_get_contents($fichero), ['allowed_classes' => false]);
         return $val === false ? null : $val;
     }
