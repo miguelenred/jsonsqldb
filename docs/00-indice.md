@@ -81,10 +81,10 @@ datos.
 php tests/f1_nucleo.php       → OK: 63    almacenamiento, tipos, bloqueos
 php tests/f2_parser.php       → OK: 70    analizador y parámetros ligados
 php tests/f2_select.php       → OK: 138   ejecución de SELECT y orden alfabético
-php tests/f3_escrituras.php   → OK: 56    escrituras, DDL, claves y triggers
+php tests/f3_escrituras.php   → OK: 58    escrituras, DDL, claves y triggers
 php tests/f4_api.php          → OK: 51    peticiones reales contra la API
 php tests/f5_esquema.php      → OK: 89    SHOW, ALTER y restricciones
-php tests/f5_admin.php        → OK: 118   el panel, navegado como un usuario
+php tests/f5_admin.php        → OK: 119   el panel, navegado como un usuario
 php tests/f6_cortes.php       → OK: 29    recuperación matando el proceso de verdad
 php tests/f7_concurrencia.php → OK: 20    procesos simultáneos y bloqueos
 php tests/f8_indices.php      → OK: 57    índices, siempre contra el escaneo completo

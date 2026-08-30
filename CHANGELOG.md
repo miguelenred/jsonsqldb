@@ -9,6 +9,122 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.1.0] - 2026-08-30
+
+Sets up in one command, refuses to start with the example keys, and bulk writes
+and point lookups are several times faster. Nothing breaking.
+
+### Added
+
+- **`configurar.php`.** One command creates both configuration files with random
+  keys already in place, keeping the panel's key and secret matching its account
+  in the API. `--local` also allows plain HTTP so you can try it on your own
+  machine. It never overwrites an existing configuration. Doing it by hand meant
+  nine values across two files, two of them duplicated, with no clear error when
+  you got it wrong.
+
+### Fixed
+
+- **Leaving the example keys in place used to work.** The two templates carry the
+  same `CHANGE_ME_` placeholders on both sides, so forgetting to replace them
+  left a working install — with a key and an HMAC secret that are published in
+  this repository. The API and the panel now refuse to start while any remain,
+  and say how to generate proper ones.
+
+- **The HTTPS refusal now says what to do about it.** Both the API and the panel
+  reject plain HTTP, which is the first wall anyone hits installing on their own
+  machine, and the message was just "only accepts HTTPS". It now names the two
+  constants and the two files, and reminds you to put them back before
+  publishing. The README covers it too, which it did not.
+
+- **The admin panel refused to restore a ZIP when served over IPv6.** Restoring
+  requires the panel and the engine to be on the same machine, decided by
+  comparing hosts. An IPv6 address arrives as `[::1]:8080`, and taking everything
+  before the first `:` returned `[`. A bare `::1` came out empty, and two empties
+  compared equal, which would have wrongly allowed it.
+
+- **A failing panel test now says what went wrong.** The diagnostics printed the
+  first 160 characters of the page with tags stripped, which is the stylesheet.
+
+### Changed
+
+- **Bulk `UPDATE` and `DELETE` were quadratic.** Three costs at once: each
+  affected row was located by scanning the table for a match by value;
+  `Catalog::tablas()` listed the directory once per row, because foreign-key
+  propagation asks "does anyone reference me?" for each one; and pulling the
+  table into a local variable before writing to it triggered PHP's copy-on-write,
+  copying every row on every iteration. `DELETE` also compacted with
+  `array_values()` per row, moving every following row and invalidating the
+  position just found. Rows are now found by the position they already had, an
+  `isset` in the normal case, with the old scan as the fallback for when a
+  trigger has moved things. On 8,000 rows: `UPDATE` **1,244 ms → 53 ms**,
+  `DELETE` down to **11.7 ms**. `f3_escrituras.php` measures the growth so it
+  cannot creep back.
+
+- **Point lookups cache the part they read.** The whole-table cache is no use
+  here — the point of an index is not reading the whole table — so every lookup
+  re-decoded its part to keep one row. On 20,000 rows a primary key lookup went
+  from **11.2 ms to 2.6 ms**, and by unique from 13.0 ms to 2.5 ms.
+
+- **The API's per-request state went from three file rewrites to one.** Checking
+  the global block, registering the nonce and counting the request each read,
+  decoded, modified and rewrote the whole state file under an exclusive lock, and
+  that file grows with traffic, so latency got worse on its own. The check is now
+  read-only, and the nonce and the count share one transaction. With 100 requests
+  in the window the state cost per request went from **0.70 ms to 0.21 ms**, and
+  the file is a third of the size. A request rejected for database permissions
+  now consumes rate-limit quota, which for an anti-abuse limit is the wanted
+  behaviour.
+
+- **The cache is no longer written atomically, and skips tables over
+  `JSONSQLDB_CACHE_MAX_FILAS` rows (20,000 by default).** It is regenerable and
+  its key carries the table revision, so a half-written file just fails to
+  unserialise and counts as a miss — which the read path already handled. That
+  removes an `fsync` the size of the table from every write, and the memory spike
+  from serialising large tables.
+
+- The credit for the four performance findings in this release goes to an
+  external review by arena.ai, which measured them on the 2.0.0 release. Each was
+  verified independently here before being applied.
+
+## [2.0.1] - 2026-08-30
+
+Fixes and performance over 2.0.0. Nothing breaking: no client changes, no data
+conversion.
+
+### Fixed
+
+- **The admin panel refused to restore a ZIP when served over IPv6.** Restoring
+  requires the panel and the engine to be on the same machine, and that is
+  decided by comparing hosts. An IPv6 address arrives as `[::1]:8080`, and taking
+  everything before the first `:` returned `[` — so the panel believed it was
+  somewhere else and declined. A bare `::1` came out empty, and two empties
+  compared equal, which would have gone the other way and wrongly allowed it.
+
+- **A failing panel test now says what went wrong.** The diagnostics printed the
+  first 160 characters of the page with its tags stripped, which is the
+  stylesheet: CI reported `no restauró: 'jsonSQLDBadmin body { font-size: ...'`
+  and told nobody anything. It now extracts the actual alert text.
+
+### Changed
+
+- **Bulk `UPDATE` and `DELETE` were quadratic.** Three hidden costs, each enough
+  on its own: every affected row was located by scanning the table for a match
+  by value; `Catalog::tablas()` listed the directory once per row, because the
+  foreign-key propagation asks "does anyone reference me?" for each one; and
+  pulling the table into a local variable before writing to it triggered PHP's
+  copy-on-write, copying every row on every iteration. A `DELETE` also compacted
+  the array with `array_values()` per row, which moved every following row and
+  invalidated the position that had just been found.
+
+  Rows are now located by the position they already had — an `isset` in the
+  normal case, with the old scan kept as the fallback for when a trigger has
+  moved things — written in place without a second live reference, and compacted
+  once at the end. Measured on 8,000 rows: `UPDATE` **1,244 ms → 53 ms** and
+  `DELETE` from the same order down to **11.7 ms**. Doubling the rows now doubles
+  the time instead of quadrupling it, which `f3_escrituras.php` checks directly
+  so it cannot creep back.
+
 ## [2.0.0] - 2026-08-27
 
 Major version because the API request format changes in a way that breaks

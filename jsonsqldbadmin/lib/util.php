@@ -278,19 +278,45 @@ function mismoHostQueLaApi(): ?bool
     if (!is_string($hostApi) || $hostApi === '' || $hostAqui === '') {
         return null;
     }
-    // HTTP_HOST puede traer el puerto; el host de la URL no
-    $hostAqui = strtolower(explode(':', $hostAqui)[0]);
-    $hostApi  = strtolower($hostApi);
+    $hostAqui = self_soloHost($hostAqui);
+    $hostApi  = self_soloHost($hostApi);
 
+    if ($hostApi === '' || $hostAqui === '') {
+        return null;                       // no se puede afirmar nada
+    }
     if ($hostApi === $hostAqui) {
         return true;
     }
     // Distintos nombres para la misma máquina: localhost, 127.0.0.1, ::1
-    $locales = ['localhost', '127.0.0.1', '::1', '[::1]'];
+    $locales = ['localhost', '127.0.0.1', '::1'];
     if (in_array($hostApi, $locales, true) && in_array($hostAqui, $locales, true)) {
         return true;
     }
     return false;
+}
+
+/**
+ * Deja un host sin puerto y sin corchetes, en minúsculas.
+ *
+ * Los corchetes importan: una dirección IPv6 viaja como `[::1]:8080`, y
+ * quedarse con lo anterior al primer `:` devolvía `[`. Eso hacía que el panel
+ * creyera estar en otra máquina que el motor y se negara a restaurar un ZIP,
+ * que es justo lo que pasaba al servir por IPv6.
+ */
+function self_soloHost(string $host): string
+{
+    $host = strtolower(trim($host));
+    if ($host !== '' && $host[0] === '[') {
+        $cierre = strpos($host, ']');
+        return $cierre === false ? substr($host, 1) : substr($host, 1, $cierre - 1);
+    }
+    // Más de un ':' y sin corchetes es una IPv6 escrita a pelo: no lleva
+    // puerto, y cortar por el primer ':' la dejaría vacía. Dos vacíos se darían
+    // por iguales, y el panel se creería en la misma máquina que el motor.
+    if (substr_count($host, ':') > 1) {
+        return $host;
+    }
+    return explode(':', $host)[0];
 }
 
 /** Nombre de tabla o columna citado para meterlo en la SQL. */

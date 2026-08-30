@@ -45,7 +45,21 @@ final class Catalog
 
     public function storage(): Storage { return $this->st; }
 
-    public function tablas(): array    { return $this->st->tablas(); }
+    /**
+     * Nombres de las tablas de la base.
+     *
+     * Memoizado porque propagarHijos() lo pregunta UNA VEZ POR FILA afectada
+     * («¿alguien me referencia?»), y detrás hay un glob del directorio. En un
+     * UPDATE de 8.000 filas eso eran 8.000 listados de carpeta. La lista solo
+     * cambia con una operación de estructura, y esas llaman a olvidar().
+     */
+    public function tablas(): array
+    {
+        return $this->memoTablas ??= $this->st->tablas();
+    }
+
+    /** @var list<string>|null lista de tablas de esta petición */
+    private ?array $memoTablas = null;
 
     public function existe(string $tabla): bool { return $this->st->existe($tabla); }
 
@@ -191,7 +205,12 @@ final class Catalog
     /** Olvida lo memorizado (tras un rollback o un cambio externo). */
     public function olvidar(?string $tabla = null): void
     {
-        if ($tabla === null) { $this->memo = []; } else { unset($this->memo[$tabla]); }
+        if ($tabla === null) {
+            $this->memo       = [];
+            $this->memoTablas = null;      // pudo crearse o borrarse una tabla
+        } else {
+            unset($this->memo[$tabla]);    // la lista de nombres no cambia
+        }
     }
 
     // ------------------------------------------------------------------
@@ -339,6 +358,7 @@ final class Catalog
 
         $this->st->crearTabla($tabla, self::compactar($meta), Indexes::definiciones($meta));
         unset($this->memo[$tabla]);
+        $this->memoTablas = null;          // hay una tabla más
     }
 
     public function borrarTabla(string $tabla): void
@@ -356,6 +376,7 @@ final class Catalog
         }
         $this->st->borrarTabla($tabla);
         unset($this->memo[$tabla]);
+        $this->memoTablas = null;          // hay una tabla menos
     }
 
     public function renombrarTabla(string $desde, string $hasta): void
@@ -377,6 +398,7 @@ final class Catalog
             }
         }
         unset($this->memo[$desde], $this->memo[$hasta]);
+        $this->memoTablas = null;          // ha cambiado un nombre
     }
 
     // ------------------------------------------------------------------

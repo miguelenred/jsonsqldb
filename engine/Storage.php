@@ -37,6 +37,9 @@ final class Storage
 
     private string $dir;
     private string $dirCache;
+    /** Partes cuya caché se intenta borrar en APCu al subir la revisión. */
+    private const MAX_PARTES_CACHE = 256;
+
     private string $dirTx;
 
     /**
@@ -1148,6 +1151,33 @@ final class Storage
     }
 
     /**
+     * Filas de una parte, con su propia entrada de caché.
+     *
+     * La caché de tabla completa no sirve aquí: el sentido de buscar por índice
+     * es no leer la tabla entera. Sin una caché por parte, cada búsqueda puntual
+     * volvía a decodificar las mil filas de su parte para quedarse con una.
+     *
+     * La clave lleva la revisión de la tabla, que sube en cada escritura, así
+     * que la invalidación es automática igual que con las demás.
+     *
+     * @return list<array>
+     */
+    private function filasDeParteCacheadas(string $tabla, int $parte, string $fichero): array
+    {
+        $clave = $this->claveCache($tabla, 'p' . $parte);
+        $filas = $this->cacheLeer($clave);
+        if (is_array($filas)) {
+            return $filas;
+        }
+        $filas = [];
+        foreach ($this->filasDeParte($fichero, true) as $fila) {
+            $filas[] = $fila;
+        }
+        $this->cacheGuardar($clave, $filas);
+        return $filas;
+    }
+
+    /**
      * Lee un índice, o null si no sirve.
      *
      * La revisión guardada tiene que ser la de la tabla y las columnas las
@@ -1248,17 +1278,14 @@ final class Storage
             if (!is_file($fichero)) {
                 return null;                          // índice y datos no cuadran
             }
-            // Se recorre la parte de una fila en una y solo se guardan las
-            // que pide el índice: de una parte de 5.000 filas puede que solo
-            // haga falta una, y no tiene sentido construir las otras 4.999
-            $base    = ($parte - 1) * $chunk;
-            $desfase = 0;
-            foreach ($this->filasDeParte($fichero, true) as $fila) {
+            // Solo se guardan las filas que pide el índice: de una parte puede
+            // que haga falta una sola, y no tiene sentido construir el resto.
+            $base = ($parte - 1) * $chunk;
+            foreach ($this->filasDeParteCacheadas($tabla, $parte, $fichero) as $desfase => $fila) {
                 if (isset($posiciones[$base + $desfase])) {
                     $filas[$base + $desfase] = $fila;
                     Memoria::comprobar('la lectura por índice');
                 }
-                $desfase++;
             }
         }
 
@@ -1500,6 +1527,14 @@ final class Storage
         if (Memoria::apretado()) {
             return;
         }
+        // Y por encima de cierto tamaño tampoco compensa. Serializar una tabla
+        // grande la tiene dos veces en memoria un instante, y justo esas son las
+        // que menos falta hacen en caché: las búsquedas puntuales van por índice
+        // y leen solo su parte.
+        $tope = Config::cacheMaxFilas();
+        if ($tope > 0 && is_array($valor) && count($valor) > $tope) {
+            return;
+        }
         if ($this->apcu) {
             apcu_store($clave, $valor);
             return;
@@ -1507,7 +1542,12 @@ final class Storage
         if (!is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {
             return;   // sin caché en disco: el motor sigue funcionando
         }
-        $this->escribirAtomico($this->ficheroCache($clave), serialize($valor));
+        // Sin escritura atómica ni fsync, a diferencia de los datos. La caché es
+        // regenerable y su clave lleva la revisión de la tabla, así que un
+        // fichero a medias solo produce un unserialize() fallido, que cacheLeer()
+        // ya trata como «no hay caché». Ahorrarse el fsync quita de cada
+        // escritura una sincronización del tamaño de la tabla.
+        @file_put_contents($this->ficheroCache($clave), serialize($valor));
     }
 
     /**
@@ -1526,6 +1566,11 @@ final class Storage
             $tipos = ['m', 'd'];
             foreach ($indices as $i) {
                 $tipos[] = 'x' . $i;
+            }
+            // Y las de cada parte. No se sabe cuántas hay, así que se barren
+            // hasta un hueco: las partes van seguidas desde 1.
+            for ($parte = 1; $parte <= self::MAX_PARTES_CACHE; $parte++) {
+                $tipos[] = 'p' . $parte;
             }
             foreach ($tipos as $tipo) {
                 for ($r = max(0, $rev - 1); $r <= $rev; $r++) {

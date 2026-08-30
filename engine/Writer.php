@@ -209,6 +209,68 @@ final class Writer
         }
     }
 
+    /**
+     * Escribe una fila en su sitio sin copiar la tabla entera.
+     *
+     * El patrón de antes era: sacar el array con filas(), tocar una posición y
+     * devolverlo con ponerFilas(). Con dos referencias vivas al mismo array,
+     * PHP separa la copia en cuanto se escribe, así que cada fila afectada
+     * copiaba la tabla completa. Aquí se escribe directamente en $this->datos,
+     * sin variable intermedia que lo referencie.
+     */
+    private function ponerFilaEn(string $tabla, int $pos, array $fila): void
+    {
+        $this->datos[$tabla][$pos] = $fila;
+        $this->sucioDatos[$tabla]  = true;
+        foreach (array_keys($this->idxPadre) as $clave) {
+            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
+                unset($this->idxPadre[$clave]);
+            }
+        }
+    }
+
+    /**
+     * Quita una fila sin copiar la tabla, y sin recolocar las demás.
+     *
+     * Compactar con array_values() en cada borrado movía todas las filas
+     * siguientes, así que la posición dejaba de valer y había que buscarla otra
+     * vez. Dejando el hueco, las posiciones siguen siendo buenas; se compacta
+     * una sola vez al terminar, y guardarTabla() lo haría igualmente al escribir.
+     */
+    private function quitarFilaEn(string $tabla, int $pos): void
+    {
+        unset($this->datos[$tabla][$pos]);
+        $this->sucioDatos[$tabla] = true;
+        foreach (array_keys($this->idxPadre) as $clave) {
+            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
+                unset($this->idxPadre[$clave]);
+            }
+        }
+    }
+
+    /** Cierra los huecos que hayan dejado los borrados. */
+    private function compactar(string $tabla): void
+    {
+        if (isset($this->datos[$tabla])) {
+            $this->datos[$tabla] = array_values($this->datos[$tabla]);
+        }
+    }
+
+    /**
+     * Dónde está ahora una fila, sabiendo dónde estaba.
+     *
+     * Casi siempre sigue en su sitio, y comprobarlo cuesta un isset. Solo si un
+     * trigger ha movido cosas hace falta el recorrido de antes, que es O(n) y
+     * era lo que volvía cuadrático un UPDATE masivo.
+     */
+    private static function posicionEn(array $filas, array $fila, int $antes): ?int
+    {
+        if (isset($filas[$antes]) && $filas[$antes] === $fila) {
+            return $antes;
+        }
+        return self::posicionDe($filas, $fila);
+    }
+
     /** Posición actual de una fila concreta dentro de la tabla. */
     private static function posicionDe(array $filas, array $fila): ?int
     {
@@ -441,7 +503,7 @@ final class Writer
         $sub     = fn(array $s, int $sid): array => $this->seleccionar($s);
         $tocadas = 0;
 
-        foreach ($filas as $vieja) {
+        foreach ($filas as $pos0 => $vieja) {
             $ctx = ['fila' => $vieja, 'sub' => $sub];
             if ($where !== null && !self::cumple($where, $simple, $vieja, $ctx)) {
                 continue;
@@ -460,15 +522,15 @@ final class Writer
             $this->comprobarForaneas($tabla, $meta, $nueva);
             $this->propagarHijos($tabla, $meta, $vieja, $nueva);
 
-            $actuales = $this->filas($tabla);
-            $pos      = self::posicionDe($actuales, $vieja);
+            // Sin variable local con la tabla: una segunda referencia viva
+            // obligaría a PHP a copiarla entera en cada fila
+            $pos = self::posicionEn($this->datos[$tabla], $vieja, $pos0);
             if ($pos === null) {
                 continue;                        // un trigger ya la había borrado
             }
-            $actuales[$pos] = $nueva;
             $this->quitarDeIndices($meta, $vieja, $indices);
             $this->anadirAIndices($meta, $nueva, $indices);
-            $this->ponerFilas($tabla, $actuales);
+            $this->ponerFilaEn($tabla, $pos, $nueva);
             $tocadas++;
 
             $this->lanzarTriggers($tabla, 'AFTER', 'UPDATE', $nueva, $vieja);
@@ -490,30 +552,32 @@ final class Writer
         $simple = $where === null ? null : Select::comparacionSimple($where);
         $sub   = fn(array $s, int $sid): array => $this->seleccionar($s);
 
+        // Se guarda la posición de cada fila: casi siempre sigue ahí, y
+        // encontrarla otra vez recorriendo la tabla era lo que volvía cuadrático
+        // un borrado masivo
         $objetivo = [];
-        foreach ($this->filas($tabla) as $fila) {
+        foreach ($this->filas($tabla) as $pos => $fila) {
             if ($where === null
                 || self::cumple($where, $simple, $fila, ['fila' => $fila, 'sub' => $sub])) {
-                $objetivo[] = $fila;
+                $objetivo[$pos] = $fila;
             }
         }
 
         $quitadas = 0;
-        foreach ($objetivo as $vieja) {
+        foreach ($objetivo as $pos0 => $vieja) {
             $this->lanzarTriggers($tabla, 'BEFORE', 'DELETE', null, $vieja);
             $this->propagarHijos($tabla, $meta, $vieja, null);
 
-            $actuales = $this->filas($tabla);
-            $pos      = self::posicionDe($actuales, $vieja);
+            $pos = self::posicionEn($this->datos[$tabla], $vieja, $pos0);
             if ($pos === null) {
                 continue;                        // ya la había borrado una cascada o un trigger
             }
-            unset($actuales[$pos]);
-            $this->ponerFilas($tabla, array_values($actuales));
+            $this->quitarFilaEn($tabla, $pos);
             $quitadas++;
 
             $this->lanzarTriggers($tabla, 'AFTER', 'DELETE', null, $vieja);
         }
+        $this->compactar($tabla);
 
         return $quitadas;
     }
@@ -751,20 +815,19 @@ final class Writer
     private function borrarHijas(string $tabla, array $hijas): void
     {
         $meta = $this->meta($tabla);
-        foreach ($hijas as $fila) {
+        foreach ($hijas as $pos0 => $fila) {
             $this->lanzarTriggers($tabla, 'BEFORE', 'DELETE', null, $fila);
             $this->propagarHijos($tabla, $meta, $fila, null);
 
-            $actuales = $this->filas($tabla);
-            $pos      = self::posicionDe($actuales, $fila);
+            $pos = self::posicionEn($this->datos[$tabla], $fila, (int)$pos0);
             if ($pos === null) {
                 continue;
             }
-            unset($actuales[$pos]);
-            $this->ponerFilas($tabla, array_values($actuales));
+            $this->quitarFilaEn($tabla, $pos);
 
             $this->lanzarTriggers($tabla, 'AFTER', 'DELETE', null, $fila);
         }
+        $this->compactar($tabla);
     }
 
     // ==================================================================

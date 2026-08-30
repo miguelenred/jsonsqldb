@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.0.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.1.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -140,20 +140,41 @@ On Windows with XAMPP the default permissions usually work as they are.
 ## Installation
 
 ```bash
-# 1. Copy the project into your web root
-#    (or clone it)
+# 1. Copy the project into your web root (or clone it)
 git clone https://github.com/miguelenred/jsonsqldb.git
+cd jsonsqldb
 
-# 2. Create the two configuration files from their templates
-cp api/jsonsqldb_api_config.dist.php api/jsonsqldb_api_config.php
-cp jsonsqldbadmin/config.dist.php    jsonsqldbadmin/config.php
+# 2. Create both configuration files, with random keys already in place
+php configurar.php
 
-# 3. Generate a secret and some API keys
-php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
+#    Testing on your own machine over plain HTTP? Use this instead, and put
+#    HTTPS back to true in both files before you publish anything:
+php configurar.php --local
 ```
 
-Replace every `CHANGE_ME_` placeholder in both files. The HMAC secret and the
-admin API key must be **the same value** in both.
+`configurar.php` copies the two `.dist` templates and replaces every
+`CHANGE_ME_` placeholder with a random value, keeping the panel's key and secret
+matching its account in the API — they have to be identical or the panel cannot
+talk to the engine. It never overwrites an existing configuration file.
+
+You can still do it by hand if you prefer: copy
+`api/jsonsqldb_api_config.dist.php` and `jsonsqldbadmin/config.dist.php` to the
+same names without `.dist`, and replace every `CHANGE_ME_` in both, generating
+each value with `php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"`.
+
+**Neither the API nor the panel will start while a `CHANGE_ME_` value is left**,
+and that is deliberate: the templates carry the same placeholders on both sides,
+so forgetting to change them used to leave everything working — with a key and a
+secret that are published in this repository.
+
+Two more things that catch people out on a first install:
+
+- **Both refuse plain HTTP by default.** On a real server that is what you want;
+  get a certificate. On your own machine use `php configurar.php --local`, or set
+  `EXIGIR_HTTPS` and `ADMIN_EXIGIR_HTTPS` to `false` yourself. The error message
+  tells you this too, so you do not have to come back here.
+- **The `data/` folder must be writable by the web server**, and is best kept
+  outside the web root. See `JSONSQLDB_DATA_PATH` in `config.php`.
 
 Then open `jsonsqldbadmin/` in a browser. **The first time the panel is opened —
 and only the first time — it asks you to create the administrator account**: you
@@ -825,10 +846,10 @@ your data.
 php tests/f1_nucleo.php       → OK: 63    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
 php tests/f2_select.php       → OK: 138   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 56    writes, DDL, keys and triggers
+php tests/f3_escrituras.php   → OK: 58    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 51    real requests against the API
 php tests/f5_esquema.php      → OK: 89    SHOW, ALTER, constraints, views, integrity
-php tests/f5_admin.php        → OK: 118   the panel, driven like a user
+php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 29    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 20    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 57    indexes, against a full scan every time

@@ -31,9 +31,31 @@ if (!util_ip_permitida(util_ip(), (array)ADMIN_IPS_PERMITIDAS)) {
     http_response_code(403);
     exit('Acceso no permitido desde esta IP.');
 }
+if (strpos(ADMIN_API_KEY, 'CHANGE_ME') === 0 || strpos(ADMIN_HMAC_SECRET, 'CHANGE_ME') === 0) {
+    http_response_code(500);
+    exit(
+        "El panel está sin configurar.\n\n"
+        . "jsonsqldbadmin/config.php todavía tiene valores CHANGE_ME_. Esas claves\n"
+        . "vienen en el repositorio, o sea que son públicas: con ellas cualquiera\n"
+        . "que llegue al panel entra. Por eso no arranca hasta que las cambies.\n\n"
+        . "Genera cada valor con:  php -r \"echo bin2hex(random_bytes(32));\"\n"
+        . "ADMIN_API_KEY y ADMIN_HMAC_SECRET tienen que valer lo mismo que 'key' y\n"
+        . "'hmac_secret' de la cuenta jsonSQLDBadmin en api/jsonsqldb_api_config.php."
+    );
+}
+
 if (ADMIN_EXIGIR_HTTPS && !util_https()) {
+    // El mensaje dice qué hacer, no solo qué pasa: en una máquina local esto es
+    // lo primero con lo que se choca al instalar, y sin la indicación hay que
+    // buscar la constante por el código
     http_response_code(403);
-    exit('Este panel solo admite conexiones HTTPS.');
+    exit(
+        "Este panel solo admite conexiones HTTPS y esta petición ha llegado por HTTP.\n\n"
+        . "En un servidor de verdad: pon un certificado (Let's Encrypt es gratis).\n"
+        . "En tu máquina, para probar: cambia ADMIN_EXIGIR_HTTPS a false en\n"
+        . "jsonsqldbadmin/config.php, y haz lo mismo con EXIGIR_HTTPS en\n"
+        . "api/jsonsqldb_api_config.php. Vuelve a ponerlas a true antes de publicar."
+    );
 }
 
 Auth::iniciarSesion();

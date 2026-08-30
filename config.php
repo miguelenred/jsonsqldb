@@ -153,6 +153,12 @@ defined('JSONSQLDB_JOURNAL_DATOS') || define('JSONSQLDB_JOURNAL_DATOS', true);
 // usan, y los que hubiera se borran en la siguiente escritura de la tabla.
 defined('JSONSQLDB_INDICES') || define('JSONSQLDB_INDICES', true);
 
+// Tope de filas para guardar una tabla entera en caché. Por encima no se
+// cachea: serializarla la tendría dos veces en memoria un instante, y son justo
+// las tablas donde menos falta hace, porque las búsquedas puntuales van por
+// índice y leen solo su parte. 0 quita el tope.
+defined('JSONSQLDB_CACHE_MAX_FILAS') || define('JSONSQLDB_CACHE_MAX_FILAS', 20000);
+
 // ------------------------------------------------------------
 // ORDEN ALFABÉTICO (solo afecta a ORDER BY)
 // ------------------------------------------------------------

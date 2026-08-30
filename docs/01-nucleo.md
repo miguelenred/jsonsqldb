@@ -380,6 +380,7 @@ base siga siendo utilizable después.
 | `JSONSQLDB_MEMORIA_MARGEN` | fracción del `memory_limit` a la que se corta. `0.85` |
 | `JSONSQLDB_JOURNAL_DATOS` | journal en las escrituras que tocan más de un fichero. `true` |
 | `JSONSQLDB_INDICES` | mantener y usar los índices de búsqueda. `true` |
+| `JSONSQLDB_CACHE_MAX_FILAS` | tope de filas para cachear la tabla entera. `20000` |
 | `JSONSQLDB_FILAS_POR_PARTE` | filas por fichero antes de partir la tabla. `1000` |
 | `JSONSQLDB_COLACION` | orden alfabético del `ORDER BY`: `general` o `binaria` |
 | `JSONSQLDB_COLACION_MAPA` | correcciones de orden por idioma |

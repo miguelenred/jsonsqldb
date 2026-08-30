@@ -407,8 +407,8 @@ apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
 php tests/f1_nucleo.php       → OK: 63
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 138
-php tests/f3_escrituras.php   → OK: 56
+php tests/f3_escrituras.php   → OK: 58
 php tests/f4_api.php          → OK: 51
 php tests/f5_esquema.php      → OK: 89
-php tests/f5_admin.php        → OK: 118
+php tests/f5_admin.php        → OK: 119
 ```

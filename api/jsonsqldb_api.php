@@ -175,9 +175,40 @@ if (!ipPermitida($ip, (array)IPS_PERMITIDAS)) {
     http_response_code(403);
     salirConError('Acceso no permitido desde esta IP');
 }
+// --- Configuración sin terminar ---
+// Los ficheros .dist traen los mismos marcadores en el panel y en la API, así
+// que si no se sustituyen todo FUNCIONA, con una clave y un secreto que están
+// publicados en GitHub. Callarse eso sería peor que no arrancar.
+if (defined('API_KEYS_SIN_CONFIGURAR') === false && isset($API_KEYS) && is_array($API_KEYS)) {
+    foreach ($API_KEYS as $datosCuenta) {
+        if (!is_array($datosCuenta)) {
+            continue;
+        }
+        foreach (['key', 'hmac_secret'] as $campo) {
+            if (strpos((string)($datosCuenta[$campo] ?? ''), 'CHANGE_ME') === 0) {
+                http_response_code(500);
+                salirConError(
+                    'La API está sin configurar: api/jsonsqldb_api_config.php todavía tiene '
+                    . 'valores CHANGE_ME_. Esas claves son públicas —vienen en el repositorio— '
+                    . 'así que la API no arranca hasta que las cambies. Genera cada una con: '
+                    . 'php -r "echo bin2hex(random_bytes(32));"'
+                );
+            }
+        }
+    }
+}
+
 if (EXIGIR_HTTPS && !esHttps()) {
     http_response_code(403);
-    salirConError('Esta API solo admite conexiones HTTPS');
+    // La indicación va en el mensaje público a propósito: quien la ve ya sabe
+    // que la petición fue por HTTP, así que no descubre nada, y es lo primero
+    // con lo que se choca al instalar en una máquina local
+    salirConError(
+        'Esta API solo admite conexiones HTTPS y esta petición ha llegado por HTTP. '
+        . 'En producción, pon un certificado. Para probar en local, cambia '
+        . 'EXIGIR_HTTPS a false en api/jsonsqldb_api_config.php y ADMIN_EXIGIR_HTTPS '
+        . 'en jsonsqldbadmin/config.php, y vuelve a ponerlas a true antes de publicar.'
+    );
 }
 
 // --- Solo POST ---
@@ -249,8 +280,7 @@ foreach ($API_KEYS as $nombreCuenta => $datos) {
     }
 }
 if ($cuenta === null) {
-    $store->fallo();
-    $store->contar($ip);
+    $store->fallo($ip);
     salirConError('API key no válida');
 }
 $permiso = strtolower((string)($cuenta['permiso'] ?? ''));
@@ -261,15 +291,13 @@ if (!in_array($permiso, ['lectura', 'escritura', 'admin'], true)) {
 
 // --- Formato del token ---
 if (!preg_match('/^[0-9a-f]{64}$/', $token)) {
-    $store->fallo();
-    $store->contar($ip);
+    $store->fallo($ip);
     salirConError('Token inválido');
 }
 
 // --- Ventana de tiempo ---
 if (abs(time() - (int)$timestamp) > RATE_TIMESTAMP_DIFF) {
-    $store->fallo();
-    $store->contar($ip);
+    $store->fallo($ip);
     salirConError('Timestamp fuera de rango');
 }
 
@@ -294,8 +322,7 @@ $tokenEsperado = hash_hmac(
     $secreto
 );
 if (!hash_equals($tokenEsperado, $token)) {
-    $store->fallo();
-    $store->contar($ip);
+    $store->fallo($ip);
     salirConError('Token inválido');
 }
 
@@ -303,10 +330,15 @@ if (!hash_equals($tokenEsperado, $token)) {
 // El nonce es el propio token, que ya es único por petición. Antes entraba la
 // IP, y eso permitía reenviar una petición capturada desde otra dirección: el
 // nonce cambiaba, pero la firma seguía siendo válida porque la IP no la cubre.
-if (!$store->nonce(hash('sha256', $token))) {
-    $store->fallo();
-    $store->contar($ip);
-    salirConError('Token ya utilizado');
+// El nonce se acorta a 16 hexadecimales. No debilita nada: reenviar el MISMO
+// token da el mismo nonce y se detecta igual; lo único que podría pasar es que
+// dos tokens distintos coincidieran en 64 bits dentro de la misma ventana de
+// minutos y se rechazara uno legítimo, que es despreciable. A cambio, el
+// fichero de estado se queda en una cuarta parte por esta vía.
+$acceso = $store->nonceYContar(substr(hash('sha256', $token), 0, 16), $ip);
+if ($acceso !== true) {
+    $store->fallo($ip);
+    salirConError($acceso === 'nonce' ? 'Token ya utilizado' : 'Límite de peticiones superado');
 }
 
 // --- Bases de datos permitidas para esta clave ---
@@ -318,11 +350,6 @@ if (!in_array('*', $permitidas, true)) {
     if (!in_array($baseDatos, $permitidas, true)) {
         salirConError('Esta API key no tiene acceso a la base de datos indicada');
     }
-}
-
-// --- Rate limit ---
-if (!$store->contar($ip)) {
-    salirConError('Límite de peticiones superado');
 }
 
 // --- Ejecución ---

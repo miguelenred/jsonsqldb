@@ -124,6 +124,26 @@ function borrarArbol(string $dir): void {
 }
 
 /** GET del panel. Devuelve el HTML. */
+/**
+ * Saca de una página el mensaje de aviso o de error.
+ *
+ * Sin esto, un fallo se informaba con los primeros 160 caracteres de la página
+ * ya sin etiquetas, que son la hoja de estilos: en la CI se veía
+ * «FALLO ... -> 'jsonSQLDBadmin body { font-size: .925rem; }'», que no dice
+ * absolutamente nada de lo que pasó.
+ */
+function mensajeDe(string $html): string {
+    if (preg_match_all('#<div class="alert[^"]*"[^>]*>(.*?)</div>#s', $html, $m) === 0) {
+        return 'sin mensaje en la página';
+    }
+    $textos = [];
+    foreach ($m[1] as $bloque) {
+        $t = trim(preg_replace('/\s+/', ' ', strip_tags($bloque)));
+        if ($t !== '') { $textos[] = $t; }
+    }
+    return $textos === [] ? 'sin mensaje en la página' : implode(' | ', $textos);
+}
+
 function pedir(string $query = ''): string {
     return peticion($query, null);
 }
@@ -886,6 +906,19 @@ chk('borrar la base restaurada', function () {
 });
 
 echo "\n== Restaurar desde ZIP ==\n";
+chk('el host se compara bien, también en IPv6', function () {
+    // util.php es del panel y aquí no está cargado: se carga en un proceso
+    // aparte para no arrastrar su configuración a esta prueba
+    $codigo = 'require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ';'
+            . '$c = ["[::1]:8080"=>"::1","::1"=>"::1","127.0.0.1:8080"=>"127.0.0.1",'
+            . '"localhost:8080"=>"localhost","LOCALHOST"=>"localhost",'
+            . '"[2001:db8::1]:443"=>"2001:db8::1","ejemplo.es"=>"ejemplo.es",""=>""];'
+            . 'foreach ($c as $e => $s) { $r = self_soloHost((string)$e);'
+            . '  if ($r !== $s) { echo "\"$e\" dio \"$r\" y no \"$s\""; exit; } }'
+            . 'echo "ok";';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    return $salida === 'ok' ?: $salida;
+});
 chk('exportar y volver a restaurar deja la base igual', function () use ($raizDatos) {
     if (!class_exists('ZipArchive')) {
         echo "       (omitida: falta la extensión zip)\n";
@@ -904,7 +937,7 @@ chk('exportar y volver a restaurar deja la base igual', function () use ($raizDa
     @unlink($f);
 
     if (!str_contains($html, 'restaurada')) {
-        return 'no restauró: ' . substr(strip_tags($html), 0, 160);
+        return 'no restauró -> ' . mensajeDe($html);
     }
     $r = enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM restaurable']);
     return str_contains($r, '<td>2</td>') ?: 'las filas no volvieron';
@@ -920,7 +953,7 @@ chk('un ZIP con rutas hacia arriba se rechaza sin tocar nada', function () use (
     $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
     @unlink($f);
     return str_contains($html, 'sale de la carpeta') && !is_file(dirname($raizDatos) . '/fuera.json')
-        ?: substr(strip_tags($html), 0, 200);
+        ?: mensajeDe($html);
 });
 chk('un ZIP con un .json que no es del motor se rechaza', function () {
     if (!class_exists('ZipArchive')) { return true; }
@@ -932,7 +965,7 @@ chk('un ZIP con un .json que no es del motor se rechaza', function () {
 
     $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
     @unlink($f);
-    return str_contains($html, 'no es un JSON válido') ?: substr(strip_tags($html), 0, 160);
+    return str_contains($html, 'no es un JSON válido') ?: mensajeDe($html);
 });
 chk('un ZIP sin tablas se rechaza', function () {
     if (!class_exists('ZipArchive')) { return true; }
@@ -944,7 +977,7 @@ chk('un ZIP sin tablas se rechaza', function () {
 
     $html = subir('p=bases', ['accion' => 'importar_zip', 'nombre' => 'tienda'], 'zip', $f);
     @unlink($f);
-    return str_contains($html, 'ninguna tabla') ?: substr(strip_tags($html), 0, 160);
+    return str_contains($html, 'ninguna tabla') ?: mensajeDe($html);
 });
 chk('limpiar la tabla restaurable', function () {
     enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE restaurable']);

@@ -33,10 +33,11 @@ jobs:
           extensions: curl, zip
           coverage: none
 
-      - name: Create configuration from templates
-        run: |
-          cp api/jsonsqldb_api_config.dist.php api/jsonsqldb_api_config.php
-          cp jsonsqldbadmin/config.dist.php    jsonsqldbadmin/config.php
+      - name: Create configuration
+        # configurar.php genera claves al azar y las hace coincidir entre panel
+        # y API. Copiar los .dist a secas dejaba las claves de ejemplo, que están
+        # publicadas en el repositorio y ahora impiden arrancar a propósito.
+        run: php configurar.php --local
 
       - name: Lint every PHP file
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
@@ -58,3 +59,9 @@ jobs:
 
       - name: Concurrency
         run: php tests/f7_concurrencia.php
+
+      - name: Indexes
+        run: php tests/f8_indices.php
+
+      - name: Journal
+        run: php tests/f9_journal.php

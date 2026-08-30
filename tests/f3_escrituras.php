@@ -379,6 +379,78 @@ chk('5.000 inserciones y actualización masiva', function () use ($bd) {
     return $r['filas'] === 5000 && $r2['filas'] === 500 && $r3['filas'] === 1000;
 });
 
+echo "\n== Coste de las escrituras masivas ==\n";
+
+chk('un UPDATE masivo crece de forma lineal, no cuadrática', function () use ($raiz) {
+    // Tres costes ocultos lo volvían cuadrático: buscar cada fila recorriendo
+    // la tabla, listar el directorio una vez por fila para ver quién
+    // referencia la tabla, y copiar el array entero en cada iteración por el
+    // copy-on-write de PHP. Con 8.000 filas eran 1,2 segundos.
+    //
+    // Se mide el coste POR FILA al doblar el tamaño: si es cuadrático, se
+    // dobla; si es lineal, se queda parecido. Un factor 2,5 deja margen de
+    // sobra para el ruido de una máquina compartida y aun así delata un O(n²),
+    // que daría 2 limpio y subiendo.
+    $porFila = [];
+    foreach ([1000, 4000] as $n) {
+        $dir = $raiz . '/masivo' . $n;
+        @mkdir($dir, 0775, true);
+        Database::crear('m', $dir);
+        $bd = new Database('m', $dir);
+        $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, ciudad VARCHAR(20), v INTEGER)');
+        $vals = [];
+        for ($i = 1; $i <= $n; $i++) { $vals[] = "($i,'Madrid',0)"; }
+        foreach (array_chunk($vals, 2000) as $b) {
+            $bd->consultar('INSERT INTO t VALUES ' . implode(',', $b));
+        }
+        $t0 = microtime(true);
+        $bd->consultar("UPDATE t SET v = 1 WHERE ciudad = 'Madrid'");
+        $porFila[$n] = ((microtime(true) - $t0) * 1000) / $n;
+
+        $tocadas = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t WHERE v = 1')[0]['n'];
+        unset($bd);
+        Database::borrar('m', $dir);
+        @rmdir($dir);
+        if ($tocadas !== $n) {
+            return "el UPDATE de $n filas tocó $tocadas";
+        }
+    }
+    $factor = $porFila[1000] > 0 ? $porFila[4000] / $porFila[1000] : 0;
+    return $factor < 2.5
+        ?: sprintf('el coste por fila se multiplicó por %.1f al cuadruplicar (%.4f -> %.4f ms)',
+                   $factor, $porFila[1000], $porFila[4000]);
+});
+
+chk('un DELETE masivo también', function () use ($raiz) {
+    $porFila = [];
+    foreach ([1000, 4000] as $n) {
+        $dir = $raiz . '/masivod' . $n;
+        @mkdir($dir, 0775, true);
+        Database::crear('m', $dir);
+        $bd = new Database('m', $dir);
+        $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, ciudad VARCHAR(20))');
+        $vals = [];
+        for ($i = 1; $i <= $n; $i++) { $vals[] = "($i,'Madrid')"; }
+        foreach (array_chunk($vals, 2000) as $b) {
+            $bd->consultar('INSERT INTO t VALUES ' . implode(',', $b));
+        }
+        $t0 = microtime(true);
+        $bd->consultar("DELETE FROM t WHERE ciudad = 'Madrid'");
+        $porFila[$n] = ((microtime(true) - $t0) * 1000) / $n;
+
+        $quedan = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
+        unset($bd);
+        Database::borrar('m', $dir);
+        @rmdir($dir);
+        if ($quedan !== 0) {
+            return "el DELETE de $n filas dejó $quedan sin borrar";
+        }
+    }
+    $factor = $porFila[1000] > 0 ? $porFila[4000] / $porFila[1000] : 0;
+    return $factor < 2.5
+        ?: sprintf('el coste por fila se multiplicó por %.1f al cuadruplicar', $factor);
+});
+
 echo "\n== Limpieza ==\n";
 chk('sin ficheros temporales y base borrada', function () use ($raiz, $base) {
     $restos = glob("$raiz/$base/*.tmp");

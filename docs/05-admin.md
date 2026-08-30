@@ -314,7 +314,7 @@ claves, triggers, datos, editor SQL, permisos del rol de lectura y auditoría.
 Usa una carpeta temporal, así que no toca tus datos.
 
 ```
-php tests/f5_admin.php     → OK: 118
+php tests/f5_admin.php     → OK: 119
 ```
 
 Necesita la extensión cURL. En Windows con XAMPP, actívala en `php.ini`

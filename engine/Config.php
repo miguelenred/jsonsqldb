@@ -110,6 +110,15 @@ final class Config
         return !defined('JSONSQLDB_INDICES') || JSONSQLDB_INDICES === true;
     }
 
+    /**
+     * Máximo de filas que se guardan en la caché de tabla completa. 0 = sin tope.
+     */
+    public static function cacheMaxFilas(): int
+    {
+        $n = defined('JSONSQLDB_CACHE_MAX_FILAS') ? (int)JSONSQLDB_CACHE_MAX_FILAS : 20000;
+        return max(0, $n);
+    }
+
     public static function journalDatos(): bool
     {
         return !defined('JSONSQLDB_JOURNAL_DATOS') || JSONSQLDB_JOURNAL_DATOS === true;
