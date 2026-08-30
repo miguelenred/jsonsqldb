@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.1.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.1.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 

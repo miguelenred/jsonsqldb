@@ -9,6 +9,25 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.1.1] - 2026-08-30
+
+One fix: exporting a database and restoring it back did not work in 2.1.0.
+
+### Fixed
+
+- **Exporting a database and restoring it failed.** The importer checks that
+  every `.json` in the ZIP has the name of a table file, and its list of allowed
+  suffixes was never updated for the two file types 2.0 introduced:
+  `<table>.rev.json` and `<table>.idx.<name>.json`. The exporter puts everything
+  in the folder into the ZIP, so a ZIP the panel had just produced was rejected
+  by the panel itself with "a name that is not a table's". Restores of ZIPs from
+  earlier versions keep working.
+
+  It went unnoticed because the round-trip test skips itself when the `zip`
+  extension is missing, which it was on the machine this was developed on: it
+  printed "(omitida: falta la extensión zip)" and counted as passing, and only
+  CI, which has the extension, ever ran it.
+
 ## [2.1.0] - 2026-08-30
 
 Sets up in one command, refuses to start with the example keys, and bulk writes
@@ -93,6 +112,19 @@ Fixes and performance over 2.0.0. Nothing breaking: no client changes, no data
 conversion.
 
 ### Fixed
+
+- **Exporting a database and restoring it failed.** The importer checks that
+  every `.json` in the ZIP has the name of a table file, and its list of allowed
+  suffixes was never updated for the two file types 2.0 introduced:
+  `<table>.rev.json` and `<table>.idx.<name>.json`. The exporter puts everything
+  in the folder into the ZIP, so a ZIP the panel had just produced was rejected
+  by the panel itself with "a name that is not a table's". Restores of ZIPs from
+  earlier versions keep working.
+
+  It went unnoticed because the round-trip test skips itself when the `zip`
+  extension is missing, which it was on the machine this was developed on: it
+  printed "(omitida: falta la extensión zip)" and counted as passing, and only
+  CI, which has the extension, ever ran it.
 
 - **The admin panel refused to restore a ZIP when served over IPv6.** Restoring
   requires the panel and the engine to be on the same machine, and that is

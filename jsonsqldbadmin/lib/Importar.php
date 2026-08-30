@@ -152,13 +152,32 @@ final class Importar
         return $out;
     }
 
-    /** El nombre del .json tiene que ser el de una tabla o uno de los internos. */
+    /**
+     * El nombre del .json tiene que ser el de una tabla o uno de los internos.
+     *
+     * Los sufijos son los que puede tener un fichero de una tabla:
+     *
+     *   usuarios.json              datos, primera parte
+     *   usuarios.part2.json        siguientes partes
+     *   usuarios.meta.json         estructura
+     *   usuarios.rev.json          revisión           (desde la 2.0)
+     *   usuarios.idx.auto_id.json  un índice          (desde la 2.0)
+     *
+     * Los dos últimos son de la 2.0 y no estaban aquí, así que exportar una base
+     * y volver a restaurarla fallaba: el propio ZIP recién generado se rechazaba
+     * por «un nombre que no es de tabla». `_revs.json` sigue admitiéndose porque
+     * los ZIP de versiones anteriores lo llevan.
+     */
     private static function validarNombreJson(string $fichero): void
     {
         if (in_array($fichero, ['_database.json', '_revs.json', '_views.json'], true)) {
             return;
         }
-        $tabla = preg_replace('/(\.meta)?(\.part\d+)?\.json$/', '', $fichero);
+        $tabla = preg_replace(
+            '/(\.meta|\.rev|\.idx\.[A-Za-z_][A-Za-z0-9_]{0,63})?(\.part\d+)?\.json$/',
+            '',
+            $fichero
+        );
         if (!is_string($tabla) || preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $tabla) !== 1) {
             throw new RuntimeException(
                 "El ZIP contiene un fichero con un nombre que no es de tabla: '$fichero'. "
@@ -180,8 +199,13 @@ final class Importar
                 "'$fichero' no es un JSON válido. No se ha tocado nada."
             );
         }
-        if (substr($fichero, -10) !== '.meta.json' && $fichero[0] !== '_'
-            && !isset($datos['rows'])) {
+        // Solo los ficheros de datos tienen 'rows'. La estructura, la revisión y
+        // los índices tienen su propia forma, y los internos empiezan por '_'.
+        $sinFilas = substr($fichero, -10) === '.meta.json'
+                 || substr($fichero, -9)  === '.rev.json'
+                 || strpos($fichero, '.idx.') !== false
+                 || $fichero[0] === '_';
+        if (!$sinFilas && !isset($datos['rows'])) {
             throw new RuntimeException(
                 "'$fichero' no tiene la forma de un fichero de datos del motor. "
                 . 'No se ha tocado nada.'
