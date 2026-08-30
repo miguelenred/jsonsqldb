@@ -304,8 +304,12 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
     $bd3 = new Database('cortes', $raiz);
     $bd3->consultar("UPDATE particionada SET v = v WHERE id = 1");
     unset($bd3);
-    if (glob($raiz . '/cortes/*.tmp') !== []) {
-        $problemas[] = "intento $i: los temporales huérfanos no se barrieron";
+    $restos = glob($raiz . '/cortes/*.tmp');
+    if ($restos !== []) {
+        // Con el nombre: sin él, un fallo aquí no dice de qué fichero es el
+        // temporal, que es justo lo que hace falta para saber por qué no se barrió
+        $problemas[] = "intento $i: quedaron temporales sin barrer -> "
+                     . implode(', ', array_map('basename', $restos));
     }
 }
 

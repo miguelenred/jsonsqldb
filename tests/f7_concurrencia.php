@@ -78,6 +78,32 @@ function alavez(array $bloqueos, string $raiz): float
     return (microtime(true) - $t0) * 1000;
 }
 
+/**
+ * Lo que cuesta levantar un proceso PHP y cargar el motor, sin hacer nada más.
+ *
+ * Hay que descontarlo: los tiempos de abajo se comparan entre sí para ver qué se
+ * solapa y qué espera, y el arranque es un sumando fijo que va en TODAS las
+ * medidas. En esta máquina son unas decenas de milisegundos; en una lenta pueden
+ * ser 150, y entonces dos procesos que se serializan de verdad quedaban por
+ * debajo del margen y la prueba fallaba sin que nada estuviera mal.
+ */
+function soloArranque(string $raiz): float
+{
+    $codigo = 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . 'new JsonSQLDB\\Storage(' . var_export($raiz, true) . ', "conc");';
+    $mejor = null;
+    for ($i = 0; $i < 3; $i++) {
+        $t0 = microtime(true);
+        $p  = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+        if (!is_resource($p)) { return 0.0; }
+        foreach ($tub as $t) { stream_get_contents($t); fclose($t); }
+        proc_close($p);
+        $ms = (microtime(true) - $t0) * 1000;
+        $mejor = $mejor === null ? $ms : min($mejor, $ms);
+    }
+    return (float)$mejor;
+}
+
 // ----------------------------------------------------------------------
 
 echo "\n== Preparación ==\n";
@@ -102,10 +128,18 @@ chk('la base queda lista', fn() => is_dir($raiz . '/conc'));
 
 echo "\n== Qué va en paralelo y qué espera ==\n";
 
-// Un solo proceso marca la referencia: todo lo demás se compara con esto
-$sola = alavez([[false, null]], $raiz);
-echo '       un proceso solo: ' . round($sola) . " ms\n";
-$juntos = $sola * 1.7;                      // por debajo = fueron a la vez
+// Un solo proceso marca la referencia, descontando lo que cuesta arrancarlo
+$arranque = soloArranque($raiz);
+$sola     = alavez([[false, null]], $raiz);
+$retencion = max(1.0, $sola - $arranque);   // lo que de verdad se retiene el bloqueo
+
+echo '       arranque de un proceso: ' . round($arranque) . " ms\n";
+echo '       un proceso solo: ' . round($sola) . ' ms (retención ' . round($retencion) . " ms)\n";
+
+// Por debajo = fueron a la vez. El umbral se calcula sobre la retención, no
+// sobre el total, para que el arranque no se lo coma en una máquina lenta.
+$juntos = $arranque + $retencion * 1.7;
+echo '       umbral: ' . round($juntos) . " ms\n";
 
 chk('dos lecturas van a la vez', function () use ($raiz, $juntos) {
     $t = alavez([[false, null], [false, null]], $raiz);
@@ -283,6 +317,109 @@ chk('una lectura no ve nunca media escritura de una tabla partida', function () 
 
     // 0 lecturas mezcladas de las que haya hecho
     return preg_match('#^0/\d+$#', trim($salida)) === 1 ?: trim($salida);
+});
+
+echo "\n== Barrido de temporales entre procesos ==\n";
+
+chk('escribir una tabla no borra el temporal de otra que se está escribiendo', function () use ($raiz) {
+    // El barrido de temporales huérfanos no mira de qué proceso son, así que la
+    // única garantía de no pisar una escritura viva es el bloqueo: solo se
+    // borran los de la tabla cuyo exclusivo se tiene. Esto lo comprueba con dos
+    // procesos de verdad escribiendo a la vez en tablas distintas.
+    $dir = $raiz . '/barrido';
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+
+    Database::crear('b', $dir);
+    $bd = new Database('b', $dir);
+    $bd->consultar('CREATE TABLE uno (id INTEGER PRIMARY KEY, v VARCHAR(10))');
+    $bd->consultar('CREATE TABLE dos (id INTEGER PRIMARY KEY, v VARCHAR(10))');
+    $bd->consultar("INSERT INTO uno VALUES (1,'a')");
+    $bd->consultar("INSERT INTO dos VALUES (1,'a')");
+    unset($bd);
+
+    // Temporales huérfanos de las dos tablas, como los que deja un proceso
+    // matado a mitad de una escritura
+    $ajeno  = "$dir/b/dos.json.999999.tmp";
+    $propio = "$dir/b/uno.json.999998.tmp";
+    file_put_contents($ajeno, 'a medias');
+    file_put_contents($propio, 'a medias');
+
+    // Una escritura en 'uno': tiene el exclusivo de 'uno' y solo el compartido
+    // de la base, así que no puede saber si alguien está escribiendo 'dos'
+    $bd = new Database('b', $dir);
+    $bd->consultar("UPDATE uno SET v = 'b' WHERE id = 1");
+    unset($bd);
+
+    $sobreviveAjeno = is_file($ajeno);
+    $barridoPropio  = !is_file($propio);
+
+    // Y una operación con el exclusivo de la base sí puede con todo, porque
+    // excluye a cualquier otro proceso
+    $bd = new Database('b', $dir);
+    $bd->consultar('CREATE TABLE tres (id INTEGER PRIMARY KEY)');
+    unset($bd);
+    $barridoTodo = !is_file($ajeno);
+
+    borrarArbol($dir);
+
+    if (!$barridoPropio) { return 'no barrió el temporal de la tabla que estaba escribiendo'; }
+    if (!$sobreviveAjeno) { return 'BORRÓ el temporal de otra tabla, que podía estar viva'; }
+    return $barridoTodo ?: 'con el exclusivo de la base no barrió el que quedaba';
+});
+
+chk('dos procesos escribiendo tablas distintas a la vez no se pisan', function () use ($raiz) {
+    // Lo mismo, pero con concurrencia real: uno escribe 'uno' en bucle mientras
+    // el otro escribe 'dos', y ninguno puede perder una escritura del otro.
+    $dir = $raiz . '/barrido2';
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+
+    Database::crear('b', $dir);
+    $bd = new Database('b', $dir);
+    $bd->consultar('CREATE TABLE uno (id INTEGER PRIMARY KEY, v INTEGER)');
+    $bd->consultar('CREATE TABLE dos (id INTEGER PRIMARY KEY, v INTEGER)');
+    $bd->consultar('INSERT INTO uno VALUES (1,0)');
+    $bd->consultar('INSERT INTO dos VALUES (1,0)');
+    unset($bd);
+
+    $cabecera = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+              . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+              . '$bd = new JsonSQLDB\\Database("b", ' . var_export($dir, true) . ');';
+
+    $procs = [];
+    foreach (['uno', 'dos'] as $tabla) {
+        $codigo = $cabecera
+                . 'for ($i = 1; $i <= 40; $i++) {'
+                . '  $bd->consultar("UPDATE ' . $tabla . ' SET v = ? WHERE id = 1", [$i]);'
+                . '}';
+        $p = proc_open([PHP_BINARY, '-r', $codigo],
+                       [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+        if (!is_resource($p)) { return 'no se pudo lanzar el proceso'; }
+        $procs[] = [$p, $tub];
+    }
+    $errores = [];
+    foreach ($procs as [$p, $tub]) {
+        $salida = '';
+        foreach ($tub as $t) { $salida .= stream_get_contents($t); fclose($t); }
+        if (proc_close($p) !== 0 || trim($salida) !== '') {
+            $errores[] = trim(substr($salida, 0, 200));
+        }
+    }
+    if ($errores !== []) {
+        borrarArbol($dir);
+        return 'algún proceso falló -> ' . implode(' | ', $errores);
+    }
+
+    $bd = new Database('b', $dir);
+    $u = (int)$bd->consultar('SELECT v FROM uno WHERE id = 1')[0]['v'];
+    $d = (int)$bd->consultar('SELECT v FROM dos WHERE id = 1')[0]['v'];
+    $restos = glob("$dir/b/*.tmp");
+    unset($bd);
+    borrarArbol($dir);
+
+    if ($u !== 40 || $d !== 40) { return "las escrituras se perdieron: uno=$u dos=$d"; }
+    return $restos === [] ?: 'quedaron temporales: ' . implode(', ', array_map('basename', $restos));
 });
 
 echo "\n== Limpieza ==\n";

@@ -338,7 +338,14 @@ if (!hash_equals($tokenEsperado, $token)) {
 $acceso = $store->nonceYContar(substr(hash('sha256', $token), 0, 16), $ip);
 if ($acceso !== true) {
     $store->fallo($ip);
-    salirConError($acceso === 'nonce' ? 'Token ya utilizado' : 'Límite de peticiones superado');
+    // false es un fallo de entrada/salida del fichero de estado, no un límite
+    // superado. Se sigue cerrando el paso, pero decir «límite» sería mentir y
+    // mandaría a quien lo lea a mirar donde no es.
+    salirConError(match ($acceso) {
+        'nonce'  => 'Token ya utilizado',
+        'limite' => 'Límite de peticiones superado',
+        default  => 'Servicio temporalmente no disponible',
+    });
 }
 
 // --- Bases de datos permitidas para esta clave ---

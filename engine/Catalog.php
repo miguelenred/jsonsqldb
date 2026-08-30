@@ -45,6 +45,9 @@ final class Catalog
 
     public function storage(): Storage { return $this->st; }
 
+    /** @var list<string>|null lista de tablas de esta petición */
+    private ?array $memoTablas = null;
+
     /**
      * Nombres de las tablas de la base.
      *
@@ -57,9 +60,6 @@ final class Catalog
     {
         return $this->memoTablas ??= $this->st->tablas();
     }
-
-    /** @var list<string>|null lista de tablas de esta petición */
-    private ?array $memoTablas = null;
 
     public function existe(string $tabla): bool { return $this->st->existe($tabla); }
 

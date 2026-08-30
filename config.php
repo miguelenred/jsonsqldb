@@ -9,7 +9,7 @@
 // ------------------------------------------------------------
 // Carpeta raíz donde vive una subcarpeta por cada base de datos.
 // Mejor fuera del webroot. Si no puede ser, el .htaccess de esa
-// carpeta la protege (ver docs/02-seguridad.md).
+// carpeta la protege (ver docs/01-nucleo.md, «Configuración y protección»).
 defined('JSONSQLDB_DATA_PATH') || define('JSONSQLDB_DATA_PATH', __DIR__ . '/data');
 
 // Filas por fichero de datos antes de partir la tabla en varios ficheros.

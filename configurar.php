@@ -89,6 +89,13 @@ foreach ($ficheros as $destino => $plantilla) {
         echo "No se pudo escribir $destino. Comprueba los permisos de la carpeta.\n";
         exit(1);
     }
+    // Estos dos ficheros son el secreto entero del sistema. Con el umask
+    // habitual saldrían 0644, o sea legibles por los demás usuarios de la
+    // máquina, que en un hosting compartido son desconocidos.
+    if (!@chmod("$raiz/$destino", 0600)) {
+        echo "  aviso: no se pudieron restringir los permisos de $destino.\n";
+        echo "  Hazlo a mano (chmod 600): contiene las claves de acceso.\n";
+    }
     echo "Creado $destino\n";
 }
 

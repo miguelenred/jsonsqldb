@@ -37,9 +37,6 @@ final class Storage
 
     private string $dir;
     private string $dirCache;
-    /** Partes cuya caché se intenta borrar en APCu al subir la revisión. */
-    private const MAX_PARTES_CACHE = 256;
-
     private string $dirTx;
 
     /**
@@ -1012,7 +1009,13 @@ final class Storage
         // que la siguiente lectura va al fichero y ve lo correcto. Al revés
         // —datos nuevos y revisión vieja— la caché seguiría sirviendo lo de
         // antes, y eso no se detecta nunca.
-        $rev = $this->subirRev($tabla, $nombres);
+        // Las que hay ahora y las que va a haber: al subir la revisión hay que
+        // invalidar la caché de las dos, porque la tabla puede encoger
+        $partesCache = max(
+            $this->partes($tabla),
+            $filas === null ? 0 : (int)max(1, ceil(count($filas) / $this->filasPorParte))
+        );
+        $rev = $this->subirRev($tabla, $nombres, $partesCache);
 
         if ($filas !== null) {
             $filas  = array_values($filas);
@@ -1072,12 +1075,23 @@ final class Storage
      */
     private function barrerTemporales(?string $tabla = null): void
     {
+        // Solo se borra aquello cuya escritura tenemos bloqueada, que es lo que
+        // garantiza que ningún otro proceso pueda estar a medias de renombrarlo:
+        //
+        //   $tabla === null   se tiene el EXCLUSIVO DE LA BASE, que excluye a
+        //                     todo el mundo: cualquier temporal que quede sobra.
+        //   $tabla !== null   se tiene el exclusivo DE ESA TABLA, así que solo
+        //                     se tocan los suyos. Los de otras tablas se dejan
+        //                     en paz: puede haber otro proceso escribiéndolas
+        //                     ahora mismo, que para eso el bloqueo es por tabla.
+        //
+        // No se mira el identificador del proceso. No hace falta: esto se llama
+        // antes de escribir nada, así que no hay ningún temporal propio en vuelo
+        // que proteger. Y era frágil, porque el identificador de un proceso
+        // puede ser sufijo del de otro.
         $patron = $tabla === null ? '/*.tmp' : '/' . $tabla . '.*.tmp';
-        $mio    = '.' . getmypid() . '.tmp';
         foreach ((array)glob($this->dir . $patron) as $f) {
-            if (substr((string)$f, -strlen($mio)) !== $mio) {
-                @unlink((string)$f);
-            }
+            @unlink((string)$f);
         }
     }
 
@@ -1475,15 +1489,18 @@ final class Storage
         return (int)($this->revsLegadas[$tabla] ?? 0);
     }
 
-    /** @param string[] $indices nombres de índice cuya caché también sobra */
-    private function subirRev(string $tabla, array $indices = []): int
+    /**
+     * @param string[] $indices nombres de índice cuya caché también sobra
+     * @param int      $partes  cuántas partes tiene o va a tener la tabla
+     */
+    private function subirRev(string $tabla, array $indices = [], int $partes = 0): int
     {
         $rev = $this->rev($tabla) + 1;
         $this->escribirAtomico(
             $this->dir . '/' . $tabla . '.rev.json',
             json_encode(['rev' => $rev], self::JSON_META) . "\n"
         );
-        $this->limpiarCache($tabla, $rev, $indices);
+        $this->limpiarCache($tabla, $rev, $indices, $partes);
         $this->revs[$tabla] = $rev;
         return $rev;
     }
@@ -1559,7 +1576,7 @@ final class Storage
      *
      * @param string[] $indices
      */
-    private function limpiarCache(string $tabla, ?int $rev = null, array $indices = []): void
+    private function limpiarCache(string $tabla, ?int $rev = null, array $indices = [], int $partes = 0): void
     {
         if ($this->apcu) {
             $rev ??= $this->rev($tabla);
@@ -1567,9 +1584,11 @@ final class Storage
             foreach ($indices as $i) {
                 $tipos[] = 'x' . $i;
             }
-            // Y las de cada parte. No se sabe cuántas hay, así que se barren
-            // hasta un hueco: las partes van seguidas desde 1.
-            for ($parte = 1; $parte <= self::MAX_PARTES_CACHE; $parte++) {
+            // Y las de cada parte. Se barren solo las que hay, no un tope fijo:
+            // hacerlo a ciegas eran quinientos y pico apcu_delete por escritura,
+            // y aun así una tabla con más partes que el tope se quedaba con
+            // entradas sin borrar.
+            for ($parte = 1; $parte <= $partes; $parte++) {
                 $tipos[] = 'p' . $parte;
             }
             foreach ($tipos as $tipo) {

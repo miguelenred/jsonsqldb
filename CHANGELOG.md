@@ -11,9 +11,59 @@ configuration constants, and the on-disk format of `data/`.
 
 ## [2.1.1] - 2026-08-30
 
-One fix: exporting a database and restoring it back did not work in 2.1.0.
+Fixes over 2.1.0. Nothing breaking. Most of these come from external reviews of
+2.1.1 and from running it on a real shared host; each was reproduced here before
+being changed, except the temporary-file sweep, which is noted below.
 
 ### Fixed
+
+- **The concurrency suite failed on slow machines for no good reason.** It
+  compared total wall times against a fixed 1.7× margin, and every measurement
+  includes the cost of starting a PHP process — a fixed addend that is a few tens
+  of milliseconds here and 150 or more on a modest shared host. Past that point,
+  two writes that really did serialise came in under the margin and the test
+  called it a failure. It now measures the process startup separately and takes
+  the margin over the time the lock is actually held, and prints all three
+  numbers so a failure says which one drifted. Reported from an external
+  environment where it gave 3 failures out of 20 with nothing wrong.
+
+- **`configurar.php` now creates the configuration files as `0600`.** They hold
+  every key and secret in the system, and with the usual umask they came out
+  `0644` — readable by the other users of the machine, who on shared hosting are
+  strangers. If the permissions cannot be set it says so instead of staying
+  quiet.
+
+- **An I/O failure on the API state file reported "rate limit exceeded".** It
+  still closes the door, which is right, but the message sent whoever read it to
+  look in the wrong place. It now says the service is unavailable.
+
+- **Clearing a table's part caches in APCu issued 512 deletions per write**,
+  covering a fixed ceiling of parts whether they existed or not — and a table
+  past that ceiling kept entries that were never cleared. It now clears exactly
+  the parts the table has or is about to have.
+
+- `config.php` pointed at `docs/02-seguridad.md`, which does not exist.
+
+- The `[2.0.1]` section of this file was removed: it was never released, and its
+  contents shipped inside 2.1.0, so it only duplicated them.
+
+- **Sweeping orphaned temporary files no longer depends on comparing process
+  ids.** After a `SIGKILL` a write can leave its `.tmp` behind, and the next
+  write to that table removes it — it holds the table's exclusive lock, so any
+  temporary it finds is someone else's leftover. It skipped files whose name
+  ended with its own `.<pid>.tmp`, which is both unnecessary — the sweep runs
+  before writing anything, so there is no temporary of its own in flight — and
+  fragile, because one process id can be a suffix of another's. The sweep also
+  reaches the shared files now (`_views.json` and friends): holding the shared
+  database lock means nobody can hold the exclusive one, so nobody is writing
+  them. Only other tables' temporaries are left alone, because those may be live.
+
+  This was reported by CI on PHP 8.4 only, in one run out of twelve, as
+  "temporary files were not swept". **It has not been reproduced here** — the
+  crash suite needs the timing of a kill to land in a specific window, and 8.4 is
+  not available in this environment — so this removes the one mechanism that
+  could plausibly cause it rather than a confirmed diagnosis. The test now names
+  the files that were left, so a recurrence says which write produced them.
 
 - **Exporting a database and restoring it failed.** The importer checks that
   every `.json` in the ZIP has the name of a table file, and its list of allowed
@@ -105,57 +155,6 @@ and point lookups are several times faster. Nothing breaking.
 - The credit for the four performance findings in this release goes to an
   external review by arena.ai, which measured them on the 2.0.0 release. Each was
   verified independently here before being applied.
-
-## [2.0.1] - 2026-08-30
-
-Fixes and performance over 2.0.0. Nothing breaking: no client changes, no data
-conversion.
-
-### Fixed
-
-- **Exporting a database and restoring it failed.** The importer checks that
-  every `.json` in the ZIP has the name of a table file, and its list of allowed
-  suffixes was never updated for the two file types 2.0 introduced:
-  `<table>.rev.json` and `<table>.idx.<name>.json`. The exporter puts everything
-  in the folder into the ZIP, so a ZIP the panel had just produced was rejected
-  by the panel itself with "a name that is not a table's". Restores of ZIPs from
-  earlier versions keep working.
-
-  It went unnoticed because the round-trip test skips itself when the `zip`
-  extension is missing, which it was on the machine this was developed on: it
-  printed "(omitida: falta la extensión zip)" and counted as passing, and only
-  CI, which has the extension, ever ran it.
-
-- **The admin panel refused to restore a ZIP when served over IPv6.** Restoring
-  requires the panel and the engine to be on the same machine, and that is
-  decided by comparing hosts. An IPv6 address arrives as `[::1]:8080`, and taking
-  everything before the first `:` returned `[` — so the panel believed it was
-  somewhere else and declined. A bare `::1` came out empty, and two empties
-  compared equal, which would have gone the other way and wrongly allowed it.
-
-- **A failing panel test now says what went wrong.** The diagnostics printed the
-  first 160 characters of the page with its tags stripped, which is the
-  stylesheet: CI reported `no restauró: 'jsonSQLDBadmin body { font-size: ...'`
-  and told nobody anything. It now extracts the actual alert text.
-
-### Changed
-
-- **Bulk `UPDATE` and `DELETE` were quadratic.** Three hidden costs, each enough
-  on its own: every affected row was located by scanning the table for a match
-  by value; `Catalog::tablas()` listed the directory once per row, because the
-  foreign-key propagation asks "does anyone reference me?" for each one; and
-  pulling the table into a local variable before writing to it triggered PHP's
-  copy-on-write, copying every row on every iteration. A `DELETE` also compacted
-  the array with `array_values()` per row, which moved every following row and
-  invalidated the position that had just been found.
-
-  Rows are now located by the position they already had — an `isset` in the
-  normal case, with the old scan kept as the fallback for when a trigger has
-  moved things — written in place without a second live reference, and compacted
-  once at the end. Measured on 8,000 rows: `UPDATE` **1,244 ms → 53 ms** and
-  `DELETE` from the same order down to **11.7 ms**. Doubling the rows now doubles
-  the time instead of quadrupling it, which `f3_escrituras.php` checks directly
-  so it cannot creep back.
 
 ## [2.0.0] - 2026-08-27
 
