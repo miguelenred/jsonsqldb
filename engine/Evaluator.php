@@ -100,6 +100,16 @@ final class Evaluator
                 if ($n['select'] !== null && !isset($n['sid'])) {
                     $n['sid'] = ++self::$sid;
                 }
+                // Una lista de literales vale igual para todas las filas: se
+                // agrupa aquí una vez en lugar de recorrerla en cada una
+                if ($n['lista'] !== null && $n['lista'] !== []) {
+                    $valores = [];
+                    foreach ($n['lista'] as $a) {
+                        if (($a['k'] ?? '') !== 'lit') { return $n; }
+                        $valores[] = $a['v'];
+                    }
+                    $n['conjunto'] = Indexes::conjunto($valores);
+                }
                 return $n;                       // la subconsulta se resuelve al ejecutarse
 
             case 'between':
@@ -450,17 +460,74 @@ final class Evaluator
         return $memo[$clave] = $regex;
     }
 
+    /**
+     * Resuelve un IN.
+     *
+     * La lista de valores se recorría entera para cada fila, y con una
+     * subconsulta eso es cuadrático: 30.000 filas contra 2.000 valores son
+     * sesenta millones de comparaciones, trece segundos donde SQLite tarda ocho
+     * milisegundos.
+     *
+     * Cuando los valores son los mismos para todas las filas —una subconsulta
+     * que no mira hacia fuera, o una lista de literales— se agrupan una sola vez
+     * por clave y después cada fila cuesta una búsqueda. La clave solo acota los
+     * candidatos: la igualdad la sigue decidiendo Valor::comparar(), porque dos
+     * valores distintos pueden compartir clave y el resultado tiene que ser el
+     * mismo que antes, no parecido.
+     *
+     * Con una subconsulta correlacionada los valores cambian con cada fila y no
+     * hay nada que reutilizar; ahí se recorre como siempre.
+     */
     private static function in(array $n, array $ctx)
     {
         $v = self::evaluar($n['e'], $ctx);
 
+        // Conjunto ya preparado: literales resueltos en resolver(), o una
+        // subconsulta cuyo resultado no depende de la fila
+        $preparado = $n['conjunto'] ?? null;
+        if ($preparado === null && $n['select'] !== null && isset($ctx['conjunto'])) {
+            $preparado = ($ctx['conjunto'])($n['select'], $n['sid'], $ctx['fila'] ?? []);
+        }
+
+        if ($preparado !== null) {
+            [$conjunto, $dudosos, $hayNulo] = $preparado;
+            if ($conjunto === [] && $dudosos === [] && !$hayNulo) {
+                return $n['not'] ? 1 : 0;        // NOT IN () siempre cierto
+            }
+            if ($v === null) {
+                return null;
+            }
+            $candidatos = $dudosos;
+            if (Indexes::claveFiable($v)) {
+                $clave = Indexes::clave([$v]);
+                if ($clave !== null && isset($conjunto[$clave])) {
+                    // Sin dudosos —lo normal— se usa el grupo tal cual, sin
+                    // copiarlo: esto se ejecuta una vez por fila
+                    $candidatos = $dudosos === []
+                        ? $conjunto[$clave]
+                        : array_merge($conjunto[$clave], $dudosos);
+                }
+            } else {
+                // Valor fuera del rango en que la clave es de fiar: se compara
+                // contra todo, que es lo que se hacía siempre
+                foreach ($conjunto as $grupo) {
+                    $candidatos = array_merge($candidatos, $grupo);
+                }
+            }
+            foreach ($candidatos as $x) {
+                if (Valor::comparar($v, $x) === 0) {
+                    return $n['not'] ? 0 : 1;
+                }
+            }
+            return $hayNulo ? null : ($n['not'] ? 1 : 0);
+        }
+
+        $valores = [];
         if ($n['select'] !== null) {
-            $valores = [];
             foreach (($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []) as $fila) {
                 $valores[] = reset($fila);
             }
         } else {
-            $valores = [];
             foreach ($n['lista'] as $e) {
                 $valores[] = self::evaluar($e, $ctx);
             }

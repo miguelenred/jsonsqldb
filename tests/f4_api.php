@@ -86,7 +86,8 @@ function firmada(string $sql, string $clave, string $bd = null, ?string $ts = nu
         'sql'       => $sql,
         'params'    => $pr,
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . $pr . '¿', secretoDe($clave)),
+        'token'     => hash_hmac('sha256',
+            '+' . $clave . '|' . $bd . '|' . $ts . '|' . $sql . $pr . '¿', secretoDe($clave)),
     ]);
 }
 
@@ -117,7 +118,8 @@ chk('token manipulado', function () {
 chk('la SQL no puede cambiarse sin rehacer la firma', function () {
     global $CLAVE_ADMIN, $base;
     $ts  = (string)time();
-    $tok = hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|SELECT 1¿', secretoDe($CLAVE_ADMIN));
+    $tok = hash_hmac('sha256',
+        '+' . $CLAVE_ADMIN . '|' . $base . '|' . $ts . '|SELECT 1¿', secretoDe($CLAVE_ADMIN));
     $r = peticion(['api_key' => $CLAVE_ADMIN, 'db' => $base, 'sql' => 'DROP TABLE clientes',
                    'timestamp' => $ts, 'token' => $tok]);
     return str_contains($r['error'] ?? '', 'Token inválido');
@@ -307,7 +309,8 @@ chk('cambiar los parámetros invalida la firma', function () {
         'sql'       => $sql,
         'params'    => '["otro"]',                                  // manipulado
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . '["Ana"]¿', secretoDe($CLAVE_ADMIN)),
+        'token'     => hash_hmac('sha256',
+            '+' . $CLAVE_ADMIN . '|' . $base . '|' . $ts . '|' . $sql . '["Ana"]¿', secretoDe($CLAVE_ADMIN)),
     ]);
     return str_contains($r['error'] ?? '', 'Token inválido');
 });
@@ -323,7 +326,8 @@ chk('parámetros que no son una lista JSON', function () {
     $pr  = '{"a":1}';
     $r = peticion([
         'api_key' => $CLAVE_ADMIN, 'db' => $base, 'sql' => $sql, 'params' => $pr, 'timestamp' => $ts,
-        'token'   => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . $pr . '¿', secretoDe($CLAVE_ADMIN)),
+        'token'   => hash_hmac('sha256',
+            '+' . $CLAVE_ADMIN . '|' . $base . '|' . $ts . '|' . $sql . $pr . '¿', secretoDe($CLAVE_ADMIN)),
     ]);
     return str_contains($r['error'] ?? '', 'lista JSON');
 });
@@ -364,9 +368,33 @@ chk('una clave sin hmac_secret se rechaza con un mensaje claro', function () {
         'db'        => $GLOBALS['base'],
         'sql'       => $sql,
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . '¿', 'lo-que-sea'),
+        'token'     => hash_hmac('sha256',
+            '+' . $clave . '|' . $GLOBALS['base'] . '|' . $ts . '|' . $sql . '¿', 'lo-que-sea'),
     ]);
     return str_contains($r['error'] ?? '', 'Configuración incompleta');
+});
+chk('la base entra en la firma: no se puede reenviar contra otra', function () {
+    global $CLAVE_ADMIN, $base;
+    // Se firma para 'apibase' y se manda tal cual contra otra base. Antes de la
+    // 2.0 esto colaba: la firma no cubría el campo 'db', así que bastaba con
+    // cambiarlo para ejecutar la misma consulta donde no tocaba.
+    $sql = 'SELECT 1 AS uno';
+    $ts  = (string)time();
+    $tok = hash_hmac('sha256',
+        '+' . $CLAVE_ADMIN . '|' . $base . '|' . $ts . '|' . $sql . '¿', secretoDe($CLAVE_ADMIN));
+
+    $r = peticion(['api_key' => $CLAVE_ADMIN, 'db' => 'otrabase',
+                   'sql' => $sql, 'timestamp' => $ts, 'token' => $tok]);
+    if (!str_contains($r['error'] ?? '', 'Token inválido')) {
+        return 'aceptó la petición con la base cambiada: ' . json_encode($r);
+    }
+    // Y con la base correcta, la misma firma sí vale
+    $ts2 = (string)time();
+    $tok2 = hash_hmac('sha256',
+        '+' . $CLAVE_ADMIN . '|' . $base . '|' . $ts2 . '|' . $sql . '¿', secretoDe($CLAVE_ADMIN));
+    $ok = peticion(['api_key' => $CLAVE_ADMIN, 'db' => $base,
+                    'sql' => $sql, 'timestamp' => $ts2, 'token' => $tok2]);
+    return ($ok[0]['uno'] ?? null) === 1 ?: 'rechazó la petición legítima';
 });
 chk('el secreto de una clave no sirve para firmar por otra', function () {
     global $CLAVE_ADMIN;
@@ -378,7 +406,8 @@ chk('el secreto de una clave no sirve para firmar por otra', function () {
         'db'        => '',
         'sql'       => $sql,
         'timestamp' => $ts,
-        'token'     => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $ts . '|' . $sql . '¿', $ajeno),
+        'token'     => hash_hmac('sha256',
+            '+' . $CLAVE_ADMIN . '|' . '' . '|' . $ts . '|' . $sql . '¿', $ajeno),
     ]);
     return str_contains($r['error'] ?? '', 'Token inválido');
 });
@@ -426,6 +455,7 @@ chk('el cliente Python usa la misma clave y secreto', function () {
         && str_contains($py, '"' . JsonSqlDbCliente::EJEMPLO_SECRETO . '"');
 });
 chk('el cliente Python firma igual que el de PHP', function () {
+    global $base;
     if (trim((string)shell_exec('command -v python3')) === '') {
         echo "       (omitida: no hay python3)\n";
         return true;
@@ -440,9 +470,9 @@ chk('el cliente Python firma igual que el de PHP', function () {
 
     $codigo = <<<'PY'
 import sys, json, hmac, hashlib
-sql, valor, clave, secre, ts = sys.argv[1:6]
+sql, valor, clave, secre, ts, base = sys.argv[1:7]
 params = json.dumps([valor], ensure_ascii=False, separators=(",", ":"))
-msg = f"+{clave}|{ts}|{sql}{params}¿"
+msg = f"+{clave}|{base}|{ts}|{sql}{params}¿"
 print(params)
 print(hmac.new(secre.encode(), msg.encode(), hashlib.sha256).hexdigest())
 PY;
@@ -450,11 +480,13 @@ PY;
     file_put_contents($tmp, $codigo);
     $salida = (string)shell_exec('python3 ' . escapeshellarg($tmp) . ' '
         . escapeshellarg($sql) . ' ' . escapeshellarg($valor) . ' '
-        . escapeshellarg($clave) . ' ' . escapeshellarg($secre) . ' ' . escapeshellarg($ts) . ' 2>&1');
+        . escapeshellarg($clave) . ' ' . escapeshellarg($secre) . ' ' . escapeshellarg($ts) . ' '
+        . escapeshellarg($base) . ' 2>&1');
     @unlink($tmp);
 
     [$paramsPy, $tokenPy] = array_pad(explode("\n", trim($salida)), 2, '');
-    $tokenPhp = hash_hmac('sha256', '+' . $clave . '|' . $ts . '|' . $sql . $paramsPy . '¿', $secre);
+    $tokenPhp = hash_hmac('sha256',
+        '+' . $clave . '|' . $base . '|' . $ts . '|' . $sql . $paramsPy . '¿', $secre);
 
     return $tokenPy === $tokenPhp ?: "python: $tokenPy / php: $tokenPhp";
 });

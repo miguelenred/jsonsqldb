@@ -9,6 +9,302 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.0.0] - 2026-08-27
+
+Major version because the API request format changes in a way that breaks
+existing clients. See the first entry under *Changed*.
+
+### Added
+
+- **Indexes.** `CREATE INDEX name ON t (a, b)`, `DROP INDEX name [ON t]` and
+  `SHOW INDEXES [FROM t]`. Primary keys and unique constraints get one
+  automatically, named `auto_<columns>`. An index stores the positions of the
+  rows holding each value, which tells the engine which part files to decode: a
+  primary key lookup over 50,000 rows went from 107 ms and 50 MB of peak memory
+  to 17 ms and 19 MB.
+
+  Composite indexes are used left to right — `(a, b)` serves a lookup on `a`, or
+  on `a` and `b`, but not on `b` alone. Only `=` and `IN` against literals, and
+  only in the top-level `AND` chain of a `WHERE`: anything under a `NOT`, a
+  top-level `OR`, `IS NULL` and `NOT IN` are deliberately left alone, because an
+  index there would change the answer instead of just finding it faster.
+
+  Index keys follow the engine's equality rather than PHP's, so `5`, `'5'` and
+  `'5.0'` share a key and looking up a number still finds a row that stored it as
+  text. The whole index is rebuilt on every write, because saving re-packs the
+  rows from zero and a single `DELETE` moves every row after it into a different
+  part. Each file records the revision it belongs to; a mismatch makes the engine
+  ignore it and scan, so a stale index can cost speed but never correctness.
+
+  Indexes only help reads. Writes get slower, since a table with indexes rewrites
+  their files too. `JSONSQLDB_INDICES` turns the whole thing off.
+
+- **The admin panel lists, creates and deletes indexes** on the table structure
+  screen. Automatic ones are shown but cannot be deleted on their own.
+
+### Fixed
+
+- **The journal's copies were not forced to disk, which is exactly what a power
+  cut needs.** `copy()` leaves the contents in the operating system's cache. That
+  survives the process dying — the cache belongs to the system, not to it — but
+  not the power going out. The manifest *was* flushed, so a cut could leave a
+  perfectly valid manifest pointing at copies that were empty or half written,
+  and recovery would then restore those over data that was intact. Copies are now
+  streamed and `fsync()`ed before the manifest is written, and restoring does the
+  same, so an interrupted recovery leaves something the next one can repeat.
+
+- **The manifest now records the size of every copy, and recovery checks it.** If
+  a copy does not measure what it should, the engine refuses to touch anything
+  and says so, leaving the journal in place to be looked at. Restoring blindly
+  would destroy data that might be perfectly fine, and deleting the journal would
+  throw away the only copy left.
+
+- **A journal could be lost to a race between two writers.** Creating
+  `.tx/<scope>/` makes `.tx/` first and the scope directory second, and another
+  process finishing its own journal could sweep the empty `.tx/` in between. The
+  second `mkdir` then failed and the whole write was lost. It is retried now.
+  Found by the concurrency suite, which lost five rows out of forty about one run
+  in five; it now also reports what a failing child process said instead of
+  silently counting rows that never arrived.
+
+- **A boolean and its number produced different index keys.** The engine
+  compares booleans as text, so `true` and `1` — which it considers the same
+  value — hashed to different keys, and looking up `1` would not have found a row
+  storing `true`. Booleans are now normalised to numbers before the key is built.
+  Where the engine's own equality cannot be reproduced exactly (it is not
+  transitive: `true == 1` and `1 == '1.0'`, but `true != '1.0'`), the key errs
+  towards returning *more* candidate rows, because the `WHERE` filters those out
+  afterwards while a missing row is never noticed.
+
+- **`REPAIR KEYS` deleted the indexes of the table it repaired.** It rewrote the
+  rows without declaring them, and a write that declares no indexes removes the
+  files of any it finds. Results stayed correct — without an index the table is
+  scanned — but repairing a foreign key has no business making the table slower.
+
+- **A write to a table spread over several files was not crash-safe.** The
+  journal decided by counting *tables*, but the unit that has to be atomic is
+  *files*, and one table is rarely one file: past `JSONSQLDB_FILAS_POR_PARTE`
+  rows it is several parts, with indexes it is one file per index, and an
+  `INSERT` into a table with `AUTOINCREMENT` also rewrites the schema file. A
+  power cut between two renames left some parts new and some old — and since
+  parts are split by position, that did not lose "a few rows", it threw the
+  table out of alignment from the cut onwards. Any write touching more than one
+  file now runs under a journal.
+
+- **The journal is scoped to the lock the write holds**, `.tx/_base/` or
+  `.tx/<table>/`, so making single-table writes crash-safe did not cost the
+  concurrency that the table lock buys: two writes to different tables still run
+  at the same time. Recovery of a table journal asks for that table's lock
+  without waiting — if it cannot get it, a live write owns the journal and there
+  is nothing orphaned to undo.
+
+- **An interrupted journal could corrupt the table it was protecting.** The
+  manifest is written after the copies, so a process killed while copying left a
+  half-written file with no manifest — and recovery restored it over the intact
+  original. With no readable manifest the copies are now discarded instead:
+  copying happens before anything is modified, so if it did not finish, nothing
+  was touched. The manifest is also deleted first when clearing a journal, so a
+  crash during cleanup cannot leave a manifest pointing at a set of copies that
+  is already half gone.
+
+- **Reads did not take the table lock**, so a reader could see half a write. A
+  `SELECT` took only the shared database lock while a write to one table held the
+  table lock, and the two could run at once. Harmless when a table was one file
+  and a single atomic rename; wrong as soon as it spans several, where a reader
+  could pick up the first part already new and the second still old. Reads now
+  take the shared lock of every table they touch — shared locks do not block each
+  other, so reads still run together and only wait on a write to that same table.
+
+- **The revision counter is now per table.** All tables shared `_revs.json`, and
+  two writes to different tables — which run at the same time by design — each
+  read it and rewrote it whole, so whichever finished last erased the other's
+  bump and left that table's cache serving rows from before the write, with no
+  visible symptom. Bases created with earlier versions keep reading the old file
+  until each table is written once.
+
+- **The revision is now written before the data, not after.** A crash between the
+  two leaves a new revision over old data: nothing is cached under that revision,
+  so the next read goes to the file and sees the truth. The other order left new
+  data under an old revision, with the cache serving what was there before —
+  which is not detectable afterwards.
+
+- **Orphaned temporary files are swept.** A process killed with `SIGKILL` never
+  runs the `finally` that removes its temporary, so it stayed on disk. Every
+  write now clears any temporary of that table left by another process, which it
+  can do safely because it holds the table's exclusive lock; taking the database
+  lock clears the rest.
+
+- **The memory guard now also checks the memory PHP has requested from the
+  system**, not only what is in use. The limit applies to the former, and the gap
+  — blocks already requested but too fragmented to reuse — is not negligible on a
+  small `memory_limit`: with 16 MB the process hit PHP's fatal with 13 MB in use.
+  The reserve kept before cutting also never drops below a fraction of what is
+  already used, to cover an array doubling, which costs about as much as the
+  array already occupies and cannot be predicted from how the previous rows grew.
+
+### Changed
+
+- **A join rebuilt the list of every inner row on each outer row, and threw it
+  away.** `array_keys($internas)` sat inside the loop over outer rows and was
+  overwritten straight after whenever there was a hash index — which is the
+  normal case. A join of 30,000 by 20,000 rows built a 20,000-element array
+  thirty thousand times for nothing. The aggregate join in the benchmark went
+  from **673 ms to 95 ms**.
+
+- **Building an index no longer goes the long way round for the common values.**
+  `Indexes::trozo()` was almost half the cost of an `INSERT`, because it is
+  called once per row and column and every value went through `esNumerico()` and
+  `aNumero()`. Integers and non-numeric strings — primary keys, emails, cities —
+  now take a direct path to the same result. An `INSERT` of one row went from
+  **117 ms to 90 ms**.
+
+- **`Valor::comparar()` short-circuits two numbers and two strings.** It is the
+  single hottest function in the engine: an `ORDER BY` over 20,000 rows calls it
+  around three hundred thousand times, and it was doing four function calls to
+  reach a comparison that `<=>` or `strcmp` answers directly. The shortcuts give
+  the same result — verified exhaustively over 1,225 pairs against the long path,
+  including `NAN`, `INF`, `'0x1A'`, `' 5 '` and booleans. `ORDER BY … LIMIT` went
+  from **177 ms to 109 ms** and a filtered scan from 39 ms to 22 ms.
+
+- **`IN (SELECT …)` was quadratic, and is now linear.** The list of values was
+  scanned in full for every row, so 30,000 rows against 2,000 values meant sixty
+  million comparisons: 13.4 seconds where SQLite took 8 ms. When the values are
+  the same for every row — a subquery that does not look outwards, or a list of
+  literals — they are now grouped by key once and each row costs a lookup. On the
+  benchmark that is **13,364 ms → 105 ms**, and doubling the data now doubles the
+  time instead of quadrupling it.
+
+  The key only narrows the candidates; equality is still decided by
+  `Valor::comparar`, because two different values can share a key and the answer
+  has to be the same as before rather than merely similar. Correlated subqueries
+  change with each row and have nothing to reuse, so they are scanned as before.
+
+- **`JSONSQLDB_FILAS_POR_PARTE` now defaults to 1,000 instead of 5,000.** It sets
+  how much an indexed lookup can skip: the index says which positions hold the
+  rows and therefore which parts, so with large parts you decode a lot to get a
+  little. With 20,000 rows and parts of 5,000 there are only four files and
+  almost any lookup touches them all. Measured on the benchmark table: a primary
+  key lookup goes from **8.56 ms to 4.46 ms** and an `IN` of ten keys from
+  **46.11 ms to 9.44 ms**. Full scans are unaffected, and writes cost between 4 %
+  and 15 % more depending on table size. Going below 1,000 barely improves reads
+  and makes writes noticeably worse.
+
+  Existing tables keep whatever size they were written with until the next write
+  to them; nothing has to be converted.
+
+- **BREAKING: the HMAC signature now covers the database name.** The formula
+  goes from
+
+  ```
+  "+" . api_key . "|" . timestamp . "|" . sql . params . "¿"
+  ```
+
+  to
+
+  ```
+  "+" . api_key . "|" . db . "|" . timestamp . "|" . sql . params . "¿"
+  ```
+
+  The `db` field was outside the signature, so a legitimate signed request could
+  be captured, have its `db` changed, and be replayed against a different
+  database — the signature stayed valid because it did not cover the field. For
+  an API key with access to more than one database, that was enough to run a
+  statement where it did not belong.
+
+  **Every client signing with the old formula stops working** and has to be
+  updated. The four bundled clients (PHP, Python, PowerShell and the admin
+  panel) already use the new one. For statements that target no database
+  (`SHOW DATABASES`, `CREATE DATABASE`) the empty string is signed, which is what
+  the clients send.
+
+- **Rows are read one at a time when the query will not keep them all.** The
+  files are one row per line, so a query that discards most rows no longer holds
+  the whole file and the whole decoded array at once. `SELECT * FROM t LIMIT 50`
+  over 50,000 rows went from 56 ms and 50 MB to 3.6 ms and 3.6 MB. When every row
+  is wanted the file is still decoded in one go, which is about 25 % faster and
+  costs no extra memory, since the rows were going to be held anyway.
+
+- **`LIMIT` is pushed into the read** when there is no `WHERE` and no `JOIN`.
+  With either of those the surviving rows are not the first ones, so the read
+  cannot stop early.
+
+- **`SELECT COUNT(*)` and `SHOW TABLES` no longer build the rows.** `SHOW TABLES`
+  loaded every table in the database into memory just to count its rows.
+
+- **Rows are no longer held twice while a table is prepared for a query.**
+  Loading a table copies every row with its columns prefixed by the table alias,
+  and both full copies were kept until the loop finished. The original is now
+  released row by row: `SELECT COUNT(*)` over 50,000 rows went from 50 MB of peak
+  memory to 32 MB. That loop was also outside the memory guard's watch, so it
+  could reach PHP's fatal without the engine getting a chance to stop first.
+
+- **The cache is skipped when memory is tight.** Storing a table means
+  serialising it, which holds it twice for a moment. Past half of `memory_limit`
+  the engine gives up the cache rather than risk the query for it.
+
+- **Data and structure are written in a single operation.** They were two writes,
+  each raising the revision and rebuilding the indexes, so every `INSERT` into a
+  table with `AUTOINCREMENT` did that work twice and left an instant with new
+  rows and an old schema.
+
+- `CREATE UNIQUE INDEX` is rejected with an explanation rather than silently
+  accepted: an index here only speeds up lookups, and uniqueness is what
+  `ALTER TABLE … ADD UNIQUE` is for — which creates its own index anyway.
+
+- **New on-disk files.** `<table>.rev.json` per table, and
+  `<table>.idx.<name>.json` per index. `_revs.json` is no longer written. Nothing
+  has to be migrated by hand: an existing database is read as it is, and each
+  table moves over on the first write to it, carrying on from the revision the
+  old `_revs.json` had rather than starting from zero — otherwise a stale cache
+  entry could be taken for a current one. Indexes appear at that same moment.
+
+  One case needs care and is handled: a database left with a **pending journal
+  from before 2.0**. Journals used to keep their copies loose inside `.tx/`, with
+  no scope directory, and recovery now looks for subdirectories — so an old
+  journal went unnoticed, and an operation interrupted before the upgrade was
+  never rolled back. Those are now picked up and undone like any other.
+
+- **New test suite `f8_indices.php`** (57 checks), which validates almost
+  everything by comparing the indexed query against the same condition rewritten
+  so the index cannot be used. It covers booleans, dates and decimals; strings
+  with quotes, newlines, emoji and shapes that look like index keys themselves;
+  and composite keys that would collide if the format did not record where each
+  part ends (`('x','yz')` against `('xy','z')`).
+
+- **`f6_cortes.php` went from 5 checks to 29.** It now kills processes during a
+  write to a table spread over part files with indexes; during each kind of
+  operation in turn (`UPDATE` of every row, `UPDATE` of an indexed column, an
+  `INSERT` that adds a part, a `DELETE` that removes one, `CREATE INDEX`,
+  `DROP INDEX`, four kinds of `ALTER TABLE`, `CREATE TABLE`, `DROP TABLE`); and
+  it builds damaged journals by hand to cover the states a power cut produces but
+  a `SIGKILL` cannot — a truncated copy under a valid manifest, a journal with no
+  manifest, a `COMMITTED` one, two table journals at once, a revision file that
+  is ahead of the data, and a missing one. After every kill it demands that no
+  row be left mixed between the old and new value, that the indexes agree with
+  the data, that the cache agrees with the files, and that nothing is left over.
+
+- **New test suite `f9_journal.php`** (34 checks), exhaustive where
+  `f6_cortes.php` is only a sample. Killing processes is realistic but it
+  samples: where the kill lands is luck. This one opens a real journal on a table
+  spread across ten files and builds by hand **every** state the write could have
+  been interrupted in — first file replaced and the rest not, first two, first
+  three, all of them; the same with files truncated, and again with them deleted;
+  each under both journal scopes. Sixty-six states, each demanding that every file
+  return to its exact original bytes.
+
+  It also pins the two invariants the scheme rests on: that the journal copies
+  everything a write touches, across eleven kinds of write; and that writes which
+  skip the journal really do touch one file. To tell whether a write journalled
+  without guessing, it drops a *file* named `.tx` where the directory would go, so
+  any attempt to journal fails and a write that succeeds is one that never tried.
+
+  It also covers upgrading: a database in the old format is read without being
+  written to, its first write produces the new files without reusing revision
+  numbers, and a journal left pending by the previous version is undone.
+
+- `f7_concurrencia.php` gained a reader running against a writer on a partitioned
+  table, which is the case the shared table lock exists for.
+
 ## [1.10.1] - 2026-08-26
 
 ### Added

@@ -188,9 +188,20 @@ chk('muchas escrituras simultáneas en la misma tabla no pierden ninguna', funct
         $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
         if (is_resource($p)) { $procs[] = [$p, $tub]; }
     }
+    // Se recoge lo que digan los hijos: si uno falla, hay que verlo. Sin esto,
+    // un proceso que muriera con un error se traducía en «faltan cinco filas»
+    // sin ninguna pista de por qué.
+    $errores = [];
     foreach ($procs as [$p, $tub]) {
-        foreach ($tub as $t) { stream_get_contents($t); fclose($t); }
-        proc_close($p);
+        $salida = '';
+        foreach ($tub as $t) { $salida .= stream_get_contents($t); fclose($t); }
+        $codigo = proc_close($p);
+        if ($codigo !== 0 || trim($salida) !== '') {
+            $errores[] = "salida $codigo: " . trim(substr($salida, 0, 200));
+        }
+    }
+    if ($errores !== []) {
+        return 'algún proceso falló -> ' . implode(' | ', array_slice($errores, 0, 2));
     }
 
     $bd  = new Database('conc', $raiz);
@@ -208,6 +219,71 @@ chk('las claves foráneas quedan bien', function () use ($raiz) {
 });
 
 chk('no quedan journals a medias', fn() => !is_dir($raiz . '/conc/.tx'));
+
+echo "\n== Lectura con tablas repartidas en partes ==\n";
+chk('una lectura no ve nunca media escritura de una tabla partida', function () use ($raiz) {
+    // Con la tabla en varias partes, la escritura reemplaza los ficheros uno a
+    // uno. Sin el compartido de tabla, una lectura simultánea podía coger la
+    // primera parte ya nueva y la segunda todavía vieja: filas de dos
+    // versiones distintas mezcladas, sin ningún corte de luz de por medio.
+    $dir = $raiz . '/conc2';
+    if (is_dir($dir)) {
+        foreach ((array)glob("$dir/*/*") as $f) { @unlink($f); }
+        foreach ((array)glob("$dir/*") as $f) { @rmdir($f); }
+        @rmdir($dir);
+    }
+    @mkdir($dir, 0775, true);
+
+    $prep = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+          . 'define("JSONSQLDB_FILAS_POR_PARTE", 25);'
+          . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';';
+
+    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg(
+        $prep
+        . 'JsonSQLDB\\Database::crear("p", ' . var_export($dir, true) . ');'
+        . '$bd = new JsonSQLDB\\Database("p", ' . var_export($dir, true) . ');'
+        . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, v VARCHAR(10))");'
+        . '$v = []; for ($i=1;$i<=400;$i++) { $v[] = "($i, \'A\')"; }'
+        . '$bd->consultar("INSERT INTO t (id,v) VALUES " . implode(",", $v));'
+    ) . ' 2>&1');
+
+    // Escritor: alterna todas las filas entre A y B, muchas veces
+    $escritor = $prep
+        . '$bd = new JsonSQLDB\\Database("p", ' . var_export($dir, true) . ');'
+        . 'for ($i=0;$i<25;$i++) { $bd->consultar("UPDATE t SET v = ?", [$i % 2 ? "A" : "B"]); }';
+
+    // Lector: cada lectura tiene que ver un solo valor, nunca A y B a la vez
+    $lector = $prep
+        . '$bd = new JsonSQLDB\\Database("p", ' . var_export($dir, true) . ');'
+        . '$mal = 0; $n = 0;'
+        . 'for ($i=0;$i<60;$i++) {'
+        . '  $f = $bd->consultar("SELECT DISTINCT v FROM t");'
+        . '  $c = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"];'
+        . '  if (count($f) !== 1 || $c !== 400) { $mal++; }'
+        . '  $n++;'
+        . '}'
+        . 'echo "$mal/$n";';
+
+    $cmdE = escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($escritor) . ' > /dev/null 2>&1';
+    $cmdL = escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($lector) . ' 2>&1';
+
+    $pE = proc_open($cmdE, [1 => ['pipe','w'], 2 => ['pipe','w']], $tE);
+    $pL = proc_open($cmdL, [1 => ['pipe','w'], 2 => ['pipe','w']], $tL);
+    if (!is_resource($pE) || !is_resource($pL)) { return 'no se pudieron lanzar los procesos'; }
+
+    $salida = stream_get_contents($tL[1]);
+    foreach ($tL as $t) { @fclose($t); }
+    foreach ($tE as $t) { @fclose($t); }
+    proc_close($pL);
+    proc_close($pE);
+
+    foreach ((array)glob("$dir/*/*") as $f) { @unlink($f); }
+    foreach ((array)glob("$dir/*") as $f) { @rmdir($f); }
+    @rmdir($dir);
+
+    // 0 lecturas mezcladas de las que haya hecho
+    return preg_match('#^0/\d+$#', trim($salida)) === 1 ?: trim($salida);
+});
 
 echo "\n== Limpieza ==\n";
 chk('borrar la base de pruebas', function () use ($raiz) {

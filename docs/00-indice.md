@@ -17,9 +17,15 @@ data/             una carpeta por base, un .json por tabla
 
 ## Documentación
 
+> **¿Vienes de la 1.x?** Lee
+> [«Actualizar desde una versión anterior»](01-nucleo.md#85-actualizar-desde-una-versión-anterior)
+> antes de reemplazar la carpeta. Los datos no hay que convertirlos, pero **la
+> firma HMAC de la API cambió** y los clientes propios dejan de funcionar hasta
+> que se actualicen.
+
 | Documento | Qué cuenta |
 |---|---|
-| [01-nucleo.md](01-nucleo.md) | almacenamiento, tipos, bloqueos, catálogo, log |
+| [01-nucleo.md](01-nucleo.md) | almacenamiento, tipos, bloqueos, journal, memoria, catálogo, log |
 | [02-consultas.md](02-consultas.md) | `SELECT`: sintaxis, funciones, orden alfabético |
 | [03-escrituras.md](03-escrituras.md) | `INSERT`/`UPDATE`/`DELETE`, DDL, claves, triggers |
 | [04-api.md](04-api.md) | endpoint HTTP, firma HMAC, parámetros ligados, clientes |
@@ -68,19 +74,21 @@ $filas = $cli->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Torrevieja
 
 ## Pruebas
 
-Siete ficheros, sin dependencias. Usan carpetas temporales, así que no tocan tus
+Once ficheros, sin dependencias. Usan carpetas temporales, así que no tocan tus
 datos.
 
 ```
 php tests/f1_nucleo.php       → OK: 63    almacenamiento, tipos, bloqueos
 php tests/f2_parser.php       → OK: 70    analizador y parámetros ligados
-php tests/f2_select.php       → OK: 138    ejecución de SELECT y orden alfabético
+php tests/f2_select.php       → OK: 138   ejecución de SELECT y orden alfabético
 php tests/f3_escrituras.php   → OK: 56    escrituras, DDL, claves y triggers
-php tests/f4_api.php          → OK: 50    peticiones reales contra la API
-php tests/f5_esquema.php      → OK: 87    SHOW, ALTER y restricciones
-php tests/f5_admin.php        → OK: 118    el panel, navegado como un usuario
-php tests/f6_cortes.php       → OK: 5     recuperación matando el proceso de verdad
-php tests/f7_concurrencia.php → OK: 19    procesos simultáneos y bloqueos
+php tests/f4_api.php          → OK: 51    peticiones reales contra la API
+php tests/f5_esquema.php      → OK: 89    SHOW, ALTER y restricciones
+php tests/f5_admin.php        → OK: 118   el panel, navegado como un usuario
+php tests/f6_cortes.php       → OK: 29    recuperación matando el proceso de verdad
+php tests/f7_concurrencia.php → OK: 20    procesos simultáneos y bloqueos
+php tests/f8_indices.php      → OK: 57    índices, siempre contra el escaneo completo
+php tests/f9_journal.php      → OK: 34    todos los estados en que puede quedar un corte
 ```
 
 `f5_admin.php` necesita la extensión cURL, y levanta dos servidores propios de

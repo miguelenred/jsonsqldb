@@ -191,7 +191,7 @@ chk('renombrar propaga FK', function () use ($cat) {
 });
 
 echo "\n== Paginación y rendimiento ==\n";
-chk('12.000 filas en 3 partes', function () use ($cat, $st, $raiz, $base) {
+chk('una tabla grande se reparte en las partes que tocan', function () use ($cat, $st, $raiz, $base) {
     $cat->crearTabla('log', ['columns'=>[
         ['name'=>'id','type'=>'INTEGER','pk'=>true],
         ['name'=>'texto','type'=>'TEXT'],
@@ -205,15 +205,22 @@ chk('12.000 filas en 3 partes', function () use ($cat, $st, $raiz, $base) {
     $st->guardarFilas('log', $filas);
     $tw = microtime(true) - $t0;
 
-    $partes = is_file("$raiz/$base/log.json") && is_file("$raiz/$base/log.part2.json")
-           && is_file("$raiz/$base/log.part3.json") && !is_file("$raiz/$base/log.part4.json");
+    // Cuántas partes salen depende de JSONSQLDB_FILAS_POR_PARTE, así que se
+    // calcula en vez de darlo por sabido: si no, cambiar el valor por defecto
+    // rompe la prueba sin que nada esté mal
+    $esperadas = (int)ceil(12000 / JsonSQLDB\Config::filasPorParte());
+    $partes = is_file("$raiz/$base/log.json")
+           && !is_file("$raiz/$base/log.part" . ($esperadas + 1) . ".json");
+    for ($n = 2; $n <= $esperadas; $n++) {
+        $partes = $partes && is_file("$raiz/$base/log.part$n.json");
+    }
 
     $t0 = microtime(true);
     $leidas = $st->leerFilas('log');   // desde caché
     $tc = microtime(true) - $t0;
 
-    printf("       escritura %.3fs | lectura cacheada %.4fs | fichero %.1f KB\n",
-        $tw, $tc, filesize("$raiz/$base/log.json") / 1024);
+    printf("       %d partes | escritura %.3fs | lectura cacheada %.4fs | parte %.1f KB\n",
+        $esperadas, $tw, $tc, filesize("$raiz/$base/log.json") / 1024);
 
     return $partes && count($leidas) === 12000 && $leidas[11999]['id'] === 12000;
 });

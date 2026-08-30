@@ -113,6 +113,35 @@ DROP TRIGGER IF EXISTS trg_suma;
   y no deja datos escritos.
 - No soportado: `INSTEAD OF` y `UPDATE OF columnas`.
 
+### CREATE INDEX y DROP INDEX
+
+```sql
+CREATE INDEX idx_email ON clientes (email);
+CREATE INDEX IF NOT EXISTS idx_ciu_edad ON clientes (ciudad, edad);
+DROP INDEX idx_email;
+DROP INDEX IF EXISTS idx_ciu_edad ON clientes;
+SHOW INDEXES FROM clientes;
+```
+
+La `PRIMARY KEY` y los `UNIQUE` ya tienen el suyo, creado solo, con nombre
+`auto_<columnas>`; salen en `SHOW INDEXES` con `automatico = 1` y no se pueden
+borrar por su cuenta —se van cuando se quita la restricción—. El prefijo `auto_`
+está reservado.
+
+Un índice compuesto se usa **de izquierda a derecha**: uno sobre `(ciudad, edad)`
+sirve para buscar por `ciudad`, o por `ciudad` y `edad`, pero no por `edad` sola.
+
+Solo aceleran las igualdades y los `IN` contra literales que estén en la cadena
+de `AND` de primer nivel del `WHERE`. Los rangos, `LIKE`, `ORDER BY`, los
+agregados, `IS NULL`, `NOT IN`, el `OR` de primer nivel y todo lo que cuelgue de
+un `NOT` siguen recorriendo la tabla. Y **no aceleran ninguna escritura**: la
+hacen algo más lenta, porque una tabla con índices reescribe también sus
+ficheros. `JSONSQLDB_INDICES` a `false` los desactiva por completo.
+
+`CREATE UNIQUE INDEX` se rechaza con un mensaje que lo explica: un índice aquí
+solo acelera, no impone unicidad. Para eso está `ALTER TABLE t ADD UNIQUE (...)`,
+que además crea su propio índice.
+
 ## 3. Restricciones
 
 | Restricción | Cuándo se comprueba | Qué pasa si falla |
@@ -138,8 +167,16 @@ falla una restricción en la fila 3 de un `INSERT` de 3 filas, no se escribe
 ninguna. Lo mismo con los triggers: si un `RAISE(ABORT)` salta en el nivel más
 profundo de una cascada, no queda nada a medias.
 
-Los ficheros se escriben con temporal + `rename`, así que tampoco puede quedar
-un `.json` a medio escribir aunque se corte la luz.
+Los ficheros se escriben con temporal, `fsync()` y `rename`, así que tampoco
+puede quedar un `.json` a medio escribir aunque se corte la luz.
+
+Pero una escritura casi nunca toca un solo fichero: una tabla de más de
+`JSONSQLDB_FILAS_POR_PARTE` filas vive repartida en varias partes, una tabla con
+índices reescribe el fichero de cada uno, y un `INSERT` en una tabla con
+`AUTOINCREMENT` reescribe también el de estructura. En cuanto hay más de uno en
+juego, la escritura va con **journal**: se copia lo que va a cambiar antes de
+tocarlo, y un corte de corriente a mitad se deshace al volver a abrir la base. El
+detalle está en [01-nucleo.md](01-nucleo.md).
 
 ## 5. Rendimiento
 
@@ -160,6 +197,7 @@ al final aunque la sentencia toque miles de filas.
 | Fichero | Responsabilidad |
 |---|---|
 | `engine/Show.php` | ejecuta las sentencias SHOW |
+| `engine/Indexes.php` | claves de índice, construcción y elección para una consulta |
 | `engine/Writer.php` | INSERT, UPDATE, DELETE, DDL, restricciones y triggers |
 | `engine/Parser.php` | ampliado con DML, DDL, triggers y `RAISE` |
 | `engine/Database.php` | decide bloqueo compartido o exclusivo según la sentencia |

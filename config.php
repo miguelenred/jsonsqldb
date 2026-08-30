@@ -13,8 +13,22 @@
 defined('JSONSQLDB_DATA_PATH') || define('JSONSQLDB_DATA_PATH', __DIR__ . '/data');
 
 // Filas por fichero de datos antes de partir la tabla en varios ficheros.
-// Más filas = menos ficheros pero cada lectura carga más de golpe.
-defined('JSONSQLDB_FILAS_POR_PARTE') || define('JSONSQLDB_FILAS_POR_PARTE', 5000);
+//
+// Es lo que decide cuánto se puede saltar una búsqueda por índice: el índice
+// dice en qué posiciones están las filas, y de ahí en qué partes, así que con
+// partes grandes hay que decodificar mucho para sacar poco. Con 20.000 filas y
+// partes de 5.000 solo hay cuatro ficheros, y casi cualquier búsqueda los toca
+// todos; medido, buscar por clave primaria pasaba de 3,55 ms a 6,87 ms y un IN
+// de diez claves de 7,31 ms a 33,86 ms.
+//
+// También acota la memoria: cada parte se decodifica de una vez, así que su
+// tamaño es el pico de esa lectura.
+//
+// A cambio, más partes son más ficheros que reescribir en cada escritura: pasar
+// de 5.000 a 1.000 cuesta alrededor de un 5 % en una tabla de 20.000 filas y un
+// 20 % en una de 100.000. Bajar de 1.000 ya casi no mejora las lecturas y
+// encarece bastante las escrituras.
+defined('JSONSQLDB_FILAS_POR_PARTE') || define('JSONSQLDB_FILAS_POR_PARTE', 1000);
 
 // Caché de tablas (APCu si está disponible, si no en <base>/.cache).
 // Se invalida sola en cada escritura. Ponerlo a false solo para depurar.
@@ -132,6 +146,12 @@ defined('JSONSQLDB_MEMORIA_MARGEN') || define('JSONSQLDB_MEMORIA_MARGEN', 0.85);
 // Ponlo a false solo si haces borrados en cascada enormes y prefieres velocidad
 // a que un corte de luz no te deje el borrado a medias.
 defined('JSONSQLDB_JOURNAL_DATOS') || define('JSONSQLDB_JOURNAL_DATOS', true);
+
+// Índices de búsqueda. Aceleran los SELECT que filtran por igualdad o IN sobre
+// columnas indexadas, y hacen algo más lenta cada escritura, porque una tabla
+// con índices reescribe también sus ficheros. A false no se mantienen ni se
+// usan, y los que hubiera se borran en la siguiente escritura de la tabla.
+defined('JSONSQLDB_INDICES') || define('JSONSQLDB_INDICES', true);
 
 // ------------------------------------------------------------
 // ORDEN ALFABÉTICO (solo afecta a ORDER BY)

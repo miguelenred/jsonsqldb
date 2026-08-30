@@ -24,8 +24,8 @@ final class Config
 
     public static function filasPorParte(): int
     {
-        $n = defined('JSONSQLDB_FILAS_POR_PARTE') ? (int)JSONSQLDB_FILAS_POR_PARTE : 5000;
-        return $n > 0 ? $n : 5000;
+        $n = defined('JSONSQLDB_FILAS_POR_PARTE') ? (int)JSONSQLDB_FILAS_POR_PARTE : 1000;
+        return $n > 0 ? $n : 1000;
     }
 
     public static function cacheActiva(): bool
@@ -102,6 +102,12 @@ final class Config
     public static function conexionDirecta(): bool
     {
         return defined('JSONSQLDB_CONEXION_DIRECTA') && JSONSQLDB_CONEXION_DIRECTA === true;
+    }
+
+    /** ¿Se mantienen y se usan los índices de búsqueda? */
+    public static function indices(): bool
+    {
+        return !defined('JSONSQLDB_INDICES') || JSONSQLDB_INDICES === true;
     }
 
     public static function journalDatos(): bool

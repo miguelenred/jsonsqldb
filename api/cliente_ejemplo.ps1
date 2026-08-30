@@ -8,10 +8,11 @@
       0. El secreto es EL DE LA API KEY: el campo 'hmac_secret' de esa entrada de
          $API_KEYS en api/jsonsqldb_api_config.php. Cada clave tiene el suyo.
 
-      1. La firma lleva los parámetros:
-             '+' + apiKey + '|' + timestamp + '|' + sql + params + '¿'
-         Sin parámetros, params es cadena vacía y la fórmula queda igual que
-         la de siempre.
+      1. La firma lleva la base y los parámetros:
+             '+' + apiKey + '|' + base + '|' + timestamp + '|' + sql + params + '¿'
+         Sin parámetros, params es cadena vacía. La base entró en la fórmula en
+         la 2.0: antes se podía coger una petición firmada, cambiarle el campo
+         'db' y reenviarla contra otra base.
 
       2. Hay que indicar SOBRE QUÉ BASE se ejecuta, en el campo 'db'. No hay
          USE ni prefijos tipo mibase.clientes. Solo puede ir vacío para
@@ -174,14 +175,14 @@ function API-SQL-JSON {
     $params    = ConvertTo-JsonSqlDbParametros -Parametros $Parametros
     $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
 
-    # Firma de jsonSQLDB: '+' apiKey '|' timestamp '|' sql params '¿'
+    # Firma de jsonSQLDB: '+' apiKey '|' base '|' timestamp '|' sql params '¿'
     #
     # El '¿' se monta desde su código (U+00BF) a propósito: si el fichero se
     # guardara en ANSI en lugar de UTF-8, un '¿' escrito literalmente daría
     # otros bytes y el token no cuadraría con el del servidor.
     $cierre = [char]0x00BF
     $token = Get-HMACSHA256 -Key $cfg.HmacSecret `
-                            -InputString ('+' + $cfg.ApiKey + '|' + $timestamp + '|' + $Sql + $params + $cierre)
+                            -InputString ('+' + $cfg.ApiKey + '|' + $Base + '|' + $timestamp + '|' + $Sql + $params + $cierre)
 
     $campos = [ordered]@{
         api_key   = $cfg.ApiKey

@@ -100,7 +100,14 @@ final class Integrity
             }
 
             if ($cambiada) {
-                $this->cat->storage()->guardarFilas($t, array_values($filas));
+                // Las definiciones van siempre: sin ellas, guardarFilas() da por
+                // hecho que la tabla no tiene índices y borra los ficheros de
+                // los que tenga. Los resultados seguirían siendo correctos
+                // —sin índice se recorre la tabla— pero reparar unas claves no
+                // tiene por qué dejar la tabla más lenta.
+                $this->cat->storage()->guardarFilas(
+                    $t, array_values($filas), Indexes::definiciones($this->cat->meta($t))
+                );
             }
         }
 

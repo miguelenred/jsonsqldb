@@ -115,7 +115,13 @@ sobren; las que queden en blanco se ignoran.
   desplegable de `INSERT`/`UPDATE`/`DELETE`, condición opcional (el `WHEN`) y el
   cuerpo. Debajo se ve en directo la sentencia que se va a crear. Dentro del
   cuerpo valen `NEW.columna`, `OLD.columna` y `RAISE(ABORT, 'mensaje')`.
-- Borrar cualquier clave única o foránea, y cualquier trigger.
+- Índices de búsqueda: crear uno sobre una o varias columnas —el formulario
+  avisa de que el orden importa y de que aceleran las lecturas pero no las
+  escrituras— y borrarlo. Los automáticos de la clave primaria y de los `UNIQUE`
+  se ven marcados como tales y no se pueden borrar sueltos: se van con su
+  restricción.
+- Borrar cualquier clave única o foránea, cualquier trigger y cualquier índice
+  creado a mano.
 
 Al añadir una clave única o foránea se validan **los datos que ya hay**: si hay
 valores repetidos o filas huérfanas, la operación se rechaza y la estructura no

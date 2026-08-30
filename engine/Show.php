@@ -12,6 +12,7 @@ namespace JsonSQLDB;
  *   SHOW SCHEMA t          (o SHOW COLUMNS FROM t)
  *   SHOW KEYS FROM t       claves únicas y foráneas
  *   SHOW TRIGGERS [FROM t]
+ *   SHOW INDEXES [FROM t]
  */
 final class Show
 {
@@ -30,6 +31,7 @@ final class Show
             case 'show_schema':    return $this->esquema($ast['tabla']);
             case 'show_keys':      return $this->claves($ast['tabla']);
             case 'show_triggers':  return $this->triggers($ast['tabla']);
+            case 'show_indexes':   return $this->indices($ast['tabla']);
         }
         throw JsonSqlDbError::syntax("Sentencia no ejecutable: {$ast['k']}");
     }
@@ -42,7 +44,7 @@ final class Show
             $out[] = [
                 'tabla'    => $t,
                 'columnas' => count($meta['columns']),
-                'filas'    => count($this->cat->storage()->leerFilas($t)),
+                'filas'    => $this->cat->storage()->contarFilas($t),
                 'creada'   => $meta['created_at'] ?? null,
             ];
         }
@@ -126,6 +128,25 @@ final class Show
                     'evento'  => $trg['event'],
                     'cuando'  => $trg['when'] ?? null,
                     'sql'     => $trg['sql'] ?? null,
+                ];
+            }
+        }
+        return $out;
+    }
+
+    private function indices(?string $tabla): array
+    {
+        $tablas = $tabla === null ? $this->cat->tablas() : [$this->exigirTabla($tabla)['table']];
+        $out    = [];
+        foreach ($tablas as $t) {
+            foreach ($this->cat->indicesDe($t) as $idx) {
+                $out[] = [
+                    'indice'   => $idx['name'],
+                    'tabla'    => $t,
+                    'columnas' => implode(',', $idx['columns']),
+                    // Los automáticos vienen de una PRIMARY KEY o un UNIQUE y no
+                    // se pueden borrar por su cuenta
+                    'automatico' => $idx['auto'] ? 1 : 0,
                 ];
             }
         }

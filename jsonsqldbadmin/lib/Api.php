@@ -54,7 +54,7 @@ final class Api
             'params'    => $json,
             'timestamp' => $ts,
             'token'     => hash_hmac('sha256',
-                '+' . $clave . '|' . $ts . '|' . $sql . $json . '¿', $secreto),
+                '+' . $clave . '|' . $base . '|' . $ts . '|' . $sql . $json . '¿', $secreto),
         ]);
 
         $cuerpo = self::enviar($post);

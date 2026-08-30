@@ -80,8 +80,17 @@ SQLite: donde las dos digan cosas distintas, manda esta.
 
 ### Cómo escribir consultas que vayan rápidas
 
-No hay índices: toda búsqueda recorre la tabla. Pero el motor tiene dos atajos
-que se activan solos, y merece la pena escribir pensando en ellos.
+Sin índice, una búsqueda recorre la tabla. Hay tres cosas que lo evitan o lo
+abaratan, todas automáticas, y merece la pena escribir pensando en ellas.
+
+**Índices.** La clave primaria y los `UNIQUE` tienen el suyo desde que se crean;
+el resto se añaden con `CREATE INDEX`. Solo se aprovechan en igualdades e `IN`
+contra literales que estén en la cadena de `AND` de primer nivel del `WHERE`:
+`WHERE ciudad = 'Elche' AND edad = 30` sí, `WHERE ciudad = 'Elche' OR edad = 30`
+no, y tampoco nada que cuelgue de un `NOT`, ni `IS NULL`, ni `NOT IN`, ni los
+rangos, ni `LIKE`. Un índice compuesto se usa de izquierda a derecha: uno sobre
+`(ciudad, edad)` vale para buscar por `ciudad`, o por las dos, pero no por `edad`
+sola. Detalle completo en [03-escrituras.md](03-escrituras.md).
 
 **Comparaciones simples.** Un `WHERE columna = valor` —y lo mismo con `<>`, `<`,
 `<=`, `>`, `>=`— se resuelve sin pasar por el evaluador general de expresiones.
@@ -137,7 +146,7 @@ Estas construcciones existen en SQLite y aquí **dan error**:
 | `WITHOUT ROWID` | No hay `rowid`: las filas son objetos JSON y la clave es la que declares |
 | `BEGIN` / `COMMIT` / `ROLLBACK` | No hay transacciones de varias sentencias. Cada sentencia es atómica por su cuenta |
 | `CHECK (...)` | Usa un trigger `BEFORE` con `RAISE(ABORT, '...')` |
-| `CREATE INDEX` | No hay índices. Las búsquedas recorren la tabla |
+| `CREATE UNIQUE INDEX` | Un índice aquí solo acelera, no impone unicidad. Usa `ALTER TABLE t ADD UNIQUE (...)`, que además crea su propio índice |
 | Funciones de ventana (`OVER`) | Fuera del alcance del proyecto |
 | `WITH RECURSIVE` | Las CTE normales sí están; una consulta no puede referirse a sí misma |
 | `ALTER TABLE` sobre la clave primaria | Se gestiona con `ADD`/`DROP PRIMARY KEY`, y el `AUTOINCREMENT` solo al crear |
@@ -260,6 +269,14 @@ Decisiones que lo hacen posible:
    escalares se ejecutan una sola vez por consulta y su resultado se reutiliza.
 5. **Caché de tablas**: las filas ya leídas se reutilizan mientras nadie escriba
    (ver fase 1).
+6. **Índices**: una igualdad sobre una columna indexada decodifica solo las
+   partes del fichero donde están las filas buscadas. Sobre 50.000 filas, buscar
+   por clave primaria pasa de 107 ms y 50 MB de pico a 17 ms y 19 MB.
+7. **Lectura fila a fila cuando sobran casi todas**: `SELECT * FROM t LIMIT 50`
+   sobre 50.000 filas pasa de 56 ms y 50 MB a 3,6 ms y 3,6 MB, porque el `LIMIT`
+   se empuja a la lectura y esta se corta en cuanto tiene bastante. Solo cuando
+   no hay `WHERE` ni `JOIN`: con cualquiera de los dos, las filas que sobreviven
+   no son las primeras.
 
 ## 6. Lo que todavía no soporta
 
@@ -295,4 +312,5 @@ un resultado silenciosamente incorrecto.
 php tests/f1_nucleo.php     → OK: 63
 php tests/f2_parser.php     → OK: 70
 php tests/f2_select.php     → OK: 138
+php tests/f8_indices.php    → OK: 57
 ```

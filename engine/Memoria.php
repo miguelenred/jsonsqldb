@@ -40,8 +40,16 @@ final class Memoria
     /** A partir de qué fracción del límite se empieza a mirar más a menudo. */
     private const VIGILANCIA_ESTRECHA = 0.5;
 
-    /** Cuántos saltos como el último se reservan antes de cortar. */
-    private const SALTOS_RESERVADOS = 4;
+    /**
+     * Cuántos saltos como el último se reservan antes de cortar.
+     *
+     * No basta con reservar para unas pocas filas más. Un array de PHP no crece
+     * fila a fila: cuando se llena, pide el doble y copia, así que el salto que
+     * de verdad importa no es el de una fila sino el de una duplicación, y ese
+     * es proporcional al tamaño ya alcanzado. Con un margen corto, esa
+     * reasignación se colaba entre dos comprobaciones y llegaba al fatal.
+     */
+    private const SALTOS_RESERVADOS = 8;
 
     /**
      * Cuánto ocupa un fichero ya convertido a datos, respecto a su tamaño.
@@ -52,6 +60,16 @@ final class Memoria
      */
     private const FACTOR_JSON  = 14;
     private const FACTOR_CACHE = 3.5;
+
+    /**
+     * Fracción de la memoria ya usada que se reserva como mínimo.
+     *
+     * Cubre la duplicación de un array: PHP pide el doble y copia, de modo que
+     * la reasignación cuesta del orden de lo ya ocupado por ese array. Un octavo
+     * del total en uso da margen de sobra para la tabla que esté creciendo sin
+     * cortar consultas que caben.
+     */
+    private const DIVISOR_RESERVA = 8;
 
     /** Memoria apartada de antemano, para poder trabajar cuando ya no queda. */
     private const RESERVA = 1048576 * 2;
@@ -183,9 +201,34 @@ final class Memoria
         if ($porFila > self::$mayorSalto) {
             self::$mayorSalto = $porFila;
         }
-        $reservado = self::$mayorSalto * self::CADA_CERCA * self::SALTOS_RESERVADOS;
+        // Pero contar por filas no basta, porque el salto que de verdad puede
+        // matar el proceso no es el de una fila: cuando un array de PHP se
+        // llena, pide el doble y copia, así que esa reasignación cuesta
+        // aproximadamente lo que el array ya ocupa. Eso no se deduce de lo que
+        // han crecido las filas anteriores —es un salto que no se ha visto
+        // nunca hasta que ocurre—, y por eso la reserva nunca baja de una
+        // fracción de lo que ya se lleva usado.
+        $reservado = max(
+            self::$mayorSalto * self::CADA_CERCA * self::SALTOS_RESERVADOS,
+            intdiv($uso, self::DIVISOR_RESERVA)
+        );
 
-        $cabeOtroSalto = ($uso + $reservado) < self::$limite;
+        // Y una última comprobación sobre la memoria que PHP tiene pedida al
+        // sistema, no sobre la que está en uso. El límite se aplica a la
+        // primera, y entre las dos hay un hueco —bloques ya pedidos pero
+        // troceados, que no sirven para una petición nueva— que en límites
+        // pequeños no es despreciable: con memory_limit de 16 MB se llegaba al
+        // fatal con solo 13 MB en uso, porque los 3 MB restantes estaban
+        // pedidos pero fragmentados.
+        //
+        // No se usa este número para el resto del cálculo, y con razón: se
+        // queda alto después de una consulta grande aunque ya no se use nada,
+        // así que como medida principal cortaría consultas que caben de sobra.
+        // Aquí solo dice cuánto queda de verdad antes del fatal.
+        $pedida = memory_get_usage(true);
+
+        $cabeOtroSalto = ($uso + $reservado) < self::$limite
+                      && ($pedida + $reservado) < self::$limite;
 
         if ($uso < self::$techo && $cabeOtroSalto) {
             return;
@@ -199,6 +242,23 @@ final class Memoria
             . 'Acota la consulta con WHERE o LIMIT, o sube memory_limit si de verdad necesitas '
             . 'ese volumen de una vez.'
         );
+    }
+
+    /**
+     * ¿Queda poca memoria libre?
+     *
+     * Sirve para decidir si merece la pena hacer algo que consume de golpe y no
+     * es imprescindible, como guardar una tabla entera en la caché: serializarla
+     * duplica su tamaño durante un instante, y si ya se va justo, es preferible
+     * quedarse sin caché que quedarse sin memoria.
+     */
+    public static function apretado(): bool
+    {
+        if (self::$limite === 0) {
+            return false;                  // sin límite o sin vigilancia
+        }
+        return max(memory_get_usage(), memory_get_usage(true))
+             > self::$limite * self::VIGILANCIA_ESTRECHA;
     }
 
     /**

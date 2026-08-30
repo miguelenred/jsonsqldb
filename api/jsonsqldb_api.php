@@ -11,7 +11,7 @@ declare(strict_types=1);
 //   db         nombre de la base de datos
 //   sql        sentencia a ejecutar (puede ser multilínea)
 //   timestamp  hora UNIX actual (10 dígitos)
-//   token      hash_hmac('sha256', "+".$apiKey."|".$timestamp."|".$sql.$params."¿", $secretoDeLaKey)
+//   token      hash_hmac('sha256', "+".$apiKey."|".$db."|".$timestamp."|".$sql.$params."¿", $secretoDeLaKey)
 //
 // Respuesta:
 //   SELECT  → [ {...}, {...} ]
@@ -282,9 +282,17 @@ if ($secreto === '') {
         "La API key '$origen' no tiene 'hmac_secret' en api/jsonsqldb_api_config.php");
 }
 
-// La firma cubre también los parámetros. Sin parámetros, $paramsRaw está vacío
-// y la fórmula es exactamente la de siempre (clientes antiguos siguen valiendo).
-$tokenEsperado = hash_hmac('sha256', '+' . $apiKey . '|' . $timestamp . '|' . $sql . $paramsRaw . '¿', $secreto);
+// La firma cubre la clave, la BASE DE DATOS, la hora, la SQL y los parámetros.
+//
+// La base entró en la fórmula en la 2.0. Antes quedaba fuera, y eso permitía
+// coger una petición firmada y reenviarla contra otra base sin más que cambiar
+// el campo 'db': la firma seguía siendo válida porque no lo cubría. Una clave
+// con permiso sobre varias bases podía así ejecutar en la que no tocaba.
+$tokenEsperado = hash_hmac(
+    'sha256',
+    '+' . $apiKey . '|' . $baseDatos . '|' . $timestamp . '|' . $sql . $paramsRaw . '¿',
+    $secreto
+);
 if (!hash_equals($tokenEsperado, $token)) {
     $store->fallo();
     $store->contar($ip);

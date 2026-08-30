@@ -2,6 +2,7 @@
 $columnas = Api::sql($base, 'SHOW SCHEMA ' . cita($tabla));
 $claves   = Api::sql($base, 'SHOW KEYS FROM ' . cita($tabla));
 $triggers = Api::sql($base, 'SHOW TRIGGERS FROM ' . cita($tabla));
+$indices  = Api::sql($base, 'SHOW INDEXES FROM ' . cita($tabla));
 $otras    = array_column(Api::sql($base, 'SHOW TABLES'), 'tabla');
 $admin    = Auth::esAdmin();
 $tipos    = ['INTEGER', 'DOUBLE', 'DECIMAL', 'TEXT', 'DATETIME'];
@@ -262,7 +263,95 @@ require __DIR__ . '/_pestanas.php';
       <?php endif; ?>
     </div>
   </div>
+
+  <!-- Índices -->
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-search"></i> Índices</div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0 align-middle">
+          <thead><tr><th>Nombre</th><th>Columnas</th><th>Origen</th>
+            <?php if ($admin): ?><th></th><?php endif; ?></tr></thead>
+          <tbody>
+          <?php if ($indices === []): ?>
+            <tr><td colspan="4" class="text-body-secondary">Sin índices.</td></tr>
+          <?php endif; ?>
+          <?php foreach ($indices as $ix): ?>
+            <tr>
+              <td class="small"><?= h($ix['indice']) ?></td>
+              <td class="small"><?= h($ix['columnas']) ?></td>
+              <td class="small text-body-secondary">
+                <?= (int)$ix['automatico'] === 1 ? 'PRIMARY KEY / UNIQUE' : 'creado a mano' ?>
+              </td>
+              <?php if ($admin): ?>
+              <td class="text-end">
+                <?php if ((int)$ix['automatico'] === 0): ?>
+                <form method="post" onsubmit="return confirm('¿Borrar el índice?');">
+                  <?= csrf() ?>
+                  <input type="hidden" name="accion" value="borrar_indice">
+                  <input type="hidden" name="db" value="<?= h($base) ?>">
+                  <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
+                  <input type="hidden" name="nombre" value="<?= h($ix['indice']) ?>">
+                  <input type="hidden" name="volver" value="estructura">
+                  <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                </form>
+                <?php endif; ?>
+              </td>
+              <?php endif; ?>
+            </tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php if ($admin): ?>
+      <div class="card-footer">
+        <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#nuevoIndice">
+          <i class="bi bi-plus"></i> Nuevo índice</button>
+      </div>
+      <?php endif; ?>
+    </div>
+  </div>
 </div>
+
+<?php if ($admin): ?>
+<div class="modal fade" id="nuevoIndice" tabindex="-1">
+  <div class="modal-dialog">
+    <form method="post" class="modal-content">
+      <?= csrf() ?>
+      <input type="hidden" name="accion" value="crear_indice">
+      <input type="hidden" name="db" value="<?= h($base) ?>">
+      <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
+      <input type="hidden" name="volver" value="estructura">
+      <div class="modal-header"><h5 class="modal-title">Nuevo índice</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Nombre</label>
+          <input name="nombre" class="form-control" required
+                 pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Columnas</label>
+          <select name="columnas[]" class="form-select" multiple size="6" required>
+            <?php foreach ($columnas as $c): ?>
+              <option value="<?= h($c['columna']) ?>"><?= h($c['columna']) ?></option>
+            <?php endforeach; ?>
+          </select>
+          <div class="form-text">
+            El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b,
+            pero no para buscar solo por b. Acelera las igualdades y los IN; no los rangos,
+            ni LIKE, ni ORDER BY. Y hace algo más lenta cada escritura de la tabla.
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-primary">Crear</button>
+      </div>
+    </form>
+  </div>
+</div>
+<?php endif; ?>
 
 <?php if ($admin): ?>
 <!-- Modales de columna -->

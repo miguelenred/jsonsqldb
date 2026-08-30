@@ -283,6 +283,33 @@ function ejecutarAccion(string $accion): void
             flash('success', "Trigger '$nombre' borrado.");
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
+        // ---------------- Índices ----------------
+        case 'crear_indice':
+            Auth::exigirAdmin();
+            identificador($tabla, 'tabla');
+            $nombre = identificador(post('nombre'), 'índice');
+            $cols   = (array)($_POST['columnas'] ?? []);
+            if ($cols === []) {
+                throw new RuntimeException('Elige al menos una columna para el índice.');
+            }
+            foreach ($cols as $i => $c) {
+                $cols[$i] = cita(identificador((string)$c, 'columna'));
+            }
+            Api::sql($base, 'CREATE INDEX ' . cita($nombre) . ' ON ' . cita($tabla)
+                          . ' (' . implode(', ', $cols) . ')');
+            Audit::registrar('crear_indice', $tabla . '.' . $nombre, $base);
+            flash('success', "Índice '$nombre' creado.");
+            redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
+
+        case 'borrar_indice':
+            Auth::exigirAdmin();
+            identificador($tabla, 'tabla');
+            $nombre = identificador(post('nombre'), 'índice');
+            Api::sql($base, 'DROP INDEX ' . cita($nombre) . ' ON ' . cita($tabla));
+            Audit::registrar('borrar_indice', $tabla . '.' . $nombre, $base);
+            flash('success', "Índice '$nombre' borrado.");
+            redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
+
         // ---------------- Filas ----------------
         case 'insertar_fila':
             Auth::exigirAdmin();

@@ -344,7 +344,7 @@ chk('un corte a mitad se deshace al volver a abrir', function () use ($raiz) {
     // deja el .tx sin confirmar, como si el proceso hubiera muerto ahí.
     $st = new Storage($raiz, 'tienda');
     $st->bloquear(true);
-    $st->txIniciar('ALTER TABLE', ['diario2']);
+    $st->txIniciar('ALTER TABLE', ['diario2'], null);
     @unlink("$raiz/tienda/diario2.json");            // la operación a medias
     file_put_contents("$raiz/tienda/diario2.meta.json", '{"roto":true}');
     $st->desbloquear();
@@ -358,11 +358,11 @@ chk('un corte a mitad se deshace al volver a abrir', function () use ($raiz) {
 chk('un journal ya confirmado no deshace nada', function () use ($raiz) {
     $st = new Storage($raiz, 'tienda');
     $st->bloquear(true);
-    $st->txIniciar('ALTER TABLE', ['diario2']);
+    $st->txIniciar('ALTER TABLE', ['diario2'], null);
     $st->desbloquear();
 
     // La operación terminó: se marca COMMITTED pero no da tiempo a borrar
-    file_put_contents("$raiz/tienda/.tx/manifiesto.json", '{"estado":"COMMITTED"}');
+    file_put_contents("$raiz/tienda/.tx/_base/manifiesto.json", '{"estado":"COMMITTED"}');
     $antes = (string)file_get_contents("$raiz/tienda/diario2.json");
 
     $bd2 = new Database('tienda', $raiz);
@@ -394,7 +394,7 @@ chk('un CASCADE que toca dos tablas se journaliza', function () use ($bd, $raiz)
 chk('un corte a mitad de un CASCADE se deshace entero', function () use ($raiz) {
     $st = new Storage($raiz, 'tienda');
     $st->bloquear(true);
-    $st->txIniciar('ESCRITURA', ['jpadres', 'jhijas']);
+    $st->txIniciar('ESCRITURA', ['jpadres', 'jhijas'], null);
     // El borrado se aplicó en la tabla padre pero no llegó a la hija
     file_put_contents("$raiz/tienda/jpadres.json",
         '{"table":"jpadres","rows":[]}' . "\n");
@@ -406,11 +406,42 @@ chk('un corte a mitad de un CASCADE se deshace entero', function () use ($raiz) 
         && $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 1
         && !is_dir("$raiz/tienda/.tx");
 });
-chk('una escritura de una sola tabla no paga el journal', function () use ($raiz) {
-    // Sin journal, el .tx no llega a crearse en ningún momento
+chk('una escritura de una sola tabla usa el journal de esa tabla, no el de la base', function () use ($raiz) {
+    // Una tabla con clave primaria tiene índice, así que su escritura toca
+    // varios ficheros y sí se journaliza. Lo que importa es el ÁMBITO: tiene
+    // que ser el de la tabla, porque el de la base esperaría a que terminaran
+    // todas las escrituras de todas las demás.
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar("INSERT INTO jpadres (n) VALUES ('tres')");
-    return !is_dir("$raiz/tienda/.tx");
+    return !is_dir("$raiz/tienda/.tx")
+        && $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 2;
+});
+chk('el journal de una tabla se deshace solo con el bloqueo de esa tabla', function () use ($raiz) {
+    // Se simula el corte de una escritura acotada a una tabla: journal con
+    // ámbito 'jpadres', datos destrozados y muerte sin confirmar.
+    $st = new Storage($raiz, 'tienda');
+    $st->bloquear(true, 'jpadres');
+    $st->txIniciar('ESCRITURA', ['jpadres'], 'jpadres');
+    file_put_contents("$raiz/tienda/jpadres.json", '{"table":"jpadres","rows":[]}' . "\n");
+    $st->desbloquear();
+    unset($st);
+
+    // Una lectura cualquiera lo encuentra y lo deshace sin necesitar el
+    // exclusivo de la base
+    $bd2 = new Database('tienda', $raiz);
+    return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 2
+        && !is_dir("$raiz/tienda/.tx");
+});
+chk('un journal huérfano de una tabla no bloquea las lecturas de otra', function () use ($raiz) {
+    $st = new Storage($raiz, 'tienda');
+    $st->bloquear(true, 'jpadres');
+    $st->txIniciar('ESCRITURA', ['jpadres'], 'jpadres');
+    $st->desbloquear();
+    unset($st);
+
+    $bd2 = new Database('tienda', $raiz);
+    $n = $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'];
+    return $n === 1 && !is_dir("$raiz/tienda/.tx");
 });
 chk('un trigger que escribe en otra tabla también se journaliza', function () use ($raiz) {
     $bd2 = new Database('tienda', $raiz);

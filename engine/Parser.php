@@ -835,6 +835,18 @@ final class Parser
             return ['k' => 'create_database', 'base' => $this->nombreSimple('base de datos'),
                     'si_no_existe' => $siNoExiste];
         }
+        if ($this->comer('id', 'INDEX')) {
+            return $this->createIndex();
+        }
+        // Un índice aquí solo acelera la búsqueda; la unicidad la imponen
+        // PRIMARY KEY y UNIQUE, y esos ya crean su índice ellos solos
+        if ($this->es('id', 'UNIQUE')) {
+            throw JsonSqlDbError::syntax(
+                'CREATE UNIQUE INDEX no está soportado: un índice aquí solo acelera las '
+                . 'búsquedas, no impone unicidad. Usa ALTER TABLE t ADD UNIQUE (...), que '
+                . 'además crea su propio índice.'
+            );
+        }
         // Aceptarlos e ignorarlos era lo más peligroso de todo: creabas una tabla
         // permanente creyendo que era temporal.
         if ($this->es('id', 'TEMP') || $this->es('id', 'TEMPORARY')) {
@@ -845,6 +857,30 @@ final class Parser
         }
         $this->exigir('id', 'TABLE');
         return $this->createTable();
+    }
+
+    /** CREATE INDEX [IF NOT EXISTS] n ON t (col [, col...]) */
+    private function createIndex(): array
+    {
+        $siNoExiste = false;
+        if ($this->comer('id', 'IF')) {
+            $this->exigir('id', 'NOT');
+            $this->exigir('id', 'EXISTS');
+            $siNoExiste = true;
+        }
+        $nombre = $this->nombreSimple('índice');
+        $this->exigir('id', 'ON');
+        $tabla = $this->nombreTabla();
+
+        $this->exigir('punc', '(');
+        $columnas = [];
+        do {
+            $columnas[] = $this->nombreSimple('columna');
+        } while ($this->comer('punc', ','));
+        $this->exigir('punc', ')');
+
+        return ['k' => 'create_index', 'tabla' => $tabla, 'nombre' => $nombre,
+                'columnas' => $columnas, 'si_no_existe' => $siNoExiste];
     }
 
     /** CREATE TABLE [IF NOT EXISTS] t (definiciones) */
@@ -1175,6 +1211,14 @@ final class Parser
             return ['k' => 'drop_database', 'base' => $this->nombreSimple('base de datos'),
                     'si_existe' => $siExiste];
         }
+        if ($this->comer('id', 'INDEX')) {
+            $siExiste = $this->siExiste();
+            $nombre   = $this->nombreSimple('índice');
+            // El ON es opcional: sin él se busca en todas las tablas
+            $tabla = $this->comer('id', 'ON') ? $this->nombreTabla() : null;
+            return ['k' => 'drop_index', 'nombre' => $nombre, 'tabla' => $tabla,
+                    'si_existe' => $siExiste];
+        }
         $this->exigir('id', 'TABLE');
         $siExiste = $this->siExiste();
         return ['k' => 'drop_table', 'tabla' => $this->nombreTabla(), 'si_existe' => $siExiste];
@@ -1212,7 +1256,7 @@ final class Parser
         $tk = $this->actual();
         if ($tk['t'] !== 'id') {
             throw JsonSqlDbError::syntax(
-                'SHOW necesita DATABASES, TABLES, VIEWS, SCHEMA, COLUMNS, KEYS o TRIGGERS');
+                'SHOW necesita DATABASES, TABLES, VIEWS, SCHEMA, COLUMNS, KEYS, INDEXES o TRIGGERS');
         }
         $que = $tk['u'];
         $this->avanzar();
@@ -1234,6 +1278,12 @@ final class Parser
             case 'TRIGGERS':
                 $tabla = $this->comer('id', 'FROM') ? $this->nombreTabla() : null;
                 return ['k' => 'show_triggers', 'tabla' => $tabla];
+
+            case 'INDEXES':
+            case 'INDICES':
+            case 'INDEX':
+                $tabla = $this->comer('id', 'FROM') ? $this->nombreTabla() : null;
+                return ['k' => 'show_indexes', 'tabla' => $tabla];
         }
         throw JsonSqlDbError::syntax("SHOW no admite '{$tk['v']}'");
     }

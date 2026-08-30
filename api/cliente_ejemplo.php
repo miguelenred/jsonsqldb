@@ -103,7 +103,7 @@ final class JsonSqlDbCliente
         $timestamp = (string)time();
         $token     = hash_hmac(
             'sha256',
-            '+' . $this->apiKey . '|' . $timestamp . '|' . $sql . $params . '¿',
+            '+' . $this->apiKey . '|' . $this->base . '|' . $timestamp . '|' . $sql . $params . '¿',
             $this->secreto
         );
 

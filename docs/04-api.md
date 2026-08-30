@@ -21,18 +21,28 @@ Fichero: `api/jsonsqldb_api.php` — Configuración: `api/jsonsqldb_api_config.p
 La firma se calcula así:
 
 ```php
-$token = hash_hmac('sha256', "+" . $apiKey . "|" . $timestamp . "|" . $sql . $params . "¿", $secreto);
+$token = hash_hmac('sha256',
+    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $sql . $params . "¿", $secreto);
 ```
 
 Donde `$secreto` es el campo `hmac_secret` de esa cuenta en
 `api/jsonsqldb_api_config.php`. **Cada cuenta tiene el suyo**, distinto del de las demás.
 
-`$params` es el JSON tal cual se envía, o cadena vacía si no hay parámetros (en
-ese caso la fórmula es exactamente la de siempre y los clientes antiguos siguen
-funcionando sin tocar nada).
+`$db` es el nombre de la base tal cual se manda en el campo `db`, o cadena vacía
+en las sentencias que no van contra ninguna (`SHOW DATABASES`,
+`CREATE DATABASE`). `$params` es el JSON tal cual se envía, o cadena vacía si no
+hay parámetros.
 
-Como la SQL y los parámetros entran en la firma, no se puede cambiar ni la
-consulta ni los valores por el camino sin conocer el secreto.
+La firma cubre la clave, la base, la hora, la SQL y los parámetros, así que nada
+de eso se puede cambiar por el camino sin conocer el secreto.
+
+> **Cambio incompatible en la 2.0.** Hasta entonces la base quedaba fuera de la
+> firma, y eso permitía coger una petición legítima, cambiarle el campo `db` y
+> reenviarla contra otra base: la firma seguía siendo válida porque no la
+> cubría. A una clave con acceso a varias bases eso le bastaba para ejecutar en
+> la que no le tocaba. **Cualquier cliente que firme con la fórmula antigua deja
+> de funcionar** y hay que actualizarlo. Los cuatro clientes de ejemplo (PHP,
+> Python, PowerShell y el panel) ya vienen con la fórmula nueva.
 
 ### La base de datos va en `db`, no en la SQL
 
@@ -398,7 +408,7 @@ php tests/f1_nucleo.php       → OK: 63
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 138
 php tests/f3_escrituras.php   → OK: 56
-php tests/f4_api.php          → OK: 50
-php tests/f5_esquema.php      → OK: 87
+php tests/f4_api.php          → OK: 51
+php tests/f5_esquema.php      → OK: 89
 php tests/f5_admin.php        → OK: 118
 ```

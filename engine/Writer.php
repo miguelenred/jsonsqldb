@@ -53,11 +53,12 @@ final class Writer
         }
 
         // Las operaciones de estructura tocan varios ficheros: van con journal,
-        // para que un corte a mitad no deje la base a medias.
-        $tablasTx = self::tablasDelDdl($ast);
+        // para que un corte a mitad no deje la base a medias. Llevan siempre el
+        // bloqueo exclusivo de la base, así que el ámbito del journal es la base.
+        $tablasTx = $this->tablasDelDdl($ast);
         if ($tablasTx !== []) {
             $st = $this->cat->storage();
-            $st->txIniciar(Database::operacion($ast), $tablasTx);
+            $st->txIniciar(Database::operacion($ast), $tablasTx, null);
             try {
                 $r = $this->despachar($ast);
             } catch (\Throwable $e) {
@@ -74,8 +75,15 @@ final class Writer
      *
      * @return string[]
      */
-    private static function tablasDelDdl(array $ast): array
+    private function tablasDelDdl(array $ast): array
     {
+        if ($ast['k'] === 'drop_index') {
+            // El nombre de la tabla puede no venir en la sentencia: se busca
+            // ahora, que ya se tiene el bloqueo y lo leído no puede cambiar
+            $tabla = $this->tablaDelIndice($ast);
+            return $tabla === null ? [] : [$tabla];
+        }
+
         $tabla = (string)($ast['tabla'] ?? '');
         if ($tabla === '') {
             return [];
@@ -83,12 +91,31 @@ final class Writer
         switch ($ast['k']) {
             case 'create_table':
             case 'drop_table':
+            case 'create_index':
                 return [$tabla];
             case 'alter_table':
                 // El renombrado escribe con el nombre nuevo: hay que copiar los dos
                 return $ast['accion'] === 'rename' ? [$tabla, (string)$ast['nuevo']] : [$tabla];
         }
         return [];
+    }
+
+    /** Tabla dueña del índice de un DROP INDEX, o null si no se encuentra. */
+    private function tablaDelIndice(array $ast): ?string
+    {
+        $nombre = (string)$ast['nombre'];
+        $donde  = $ast['tabla'] === null ? $this->cat->tablas() : [(string)$ast['tabla']];
+        foreach ($donde as $t) {
+            if (!$this->cat->existe($t)) {
+                continue;
+            }
+            foreach ($this->cat->meta($t)['indexes'] as $idx) {
+                if (strcasecmp((string)$idx['name'], $nombre) === 0) {
+                    return $t;
+                }
+            }
+        }
+        return null;
     }
 
     private function despachar(array $ast): array
@@ -119,6 +146,20 @@ final class Writer
                 return $this->crearTrigger($ast);
             case 'drop_trigger':
                 return $this->borrarTrigger($ast);
+
+            case 'create_index':
+                $creado = $this->cat->crearIndice(
+                    $ast['tabla'], $ast['nombre'], $ast['columnas'], $ast['si_no_existe']
+                );
+                return ['filas' => 0, 'mensaje' => $creado
+                    ? "Índice '{$ast['nombre']}' creado sobre '{$ast['tabla']}'"
+                    : "El índice '{$ast['nombre']}' ya existía"];
+
+            case 'drop_index':
+                $tabla = $this->cat->borrarIndice($ast['tabla'], $ast['nombre'], $ast['si_existe']);
+                return ['filas' => 0, 'mensaje' => $tabla !== null
+                    ? "Índice '{$ast['nombre']}' borrado de '$tabla'"
+                    : "El índice '{$ast['nombre']}' no existía"];
 
             case 'repair_keys':
                 $problemas = (new Integrity($this->cat))->claves($ast['tabla'], true);
@@ -199,15 +240,28 @@ final class Writer
     /**
      * Vuelca a disco todo lo modificado.
      *
-     * Cuando la escritura toca más de una tabla —un DELETE con ON DELETE
-     * CASCADE, un trigger que escribe en otra tabla— cada fichero se guarda de
-     * forma atómica, pero el conjunto no: un corte entre dos deja el cambio a
-     * medias. En ese caso se abre el journal, igual que en las operaciones de
-     * estructura.
+     * Cada fichero se guarda de forma atómica, pero el conjunto no: un corte
+     * entre dos deja el cambio a medias. Y una escritura casi nunca toca un solo
+     * fichero, ni siquiera cuando toca una sola tabla:
      *
-     * Con una sola tabla no se journaliza: sería copiar el fichero de datos
-     * entero en cada INSERT, y el coste no compensa. Ahí basta con el rename
-     * atómico de cada escritura.
+     *   - una tabla de más de JSONSQLDB_FILAS_POR_PARTE filas vive repartida en
+     *     varias partes, y todas se reescriben;
+     *   - una tabla con índices reescribe además el fichero de cada uno;
+     *   - un INSERT en una tabla con AUTOINCREMENT reescribe también el fichero
+     *     de estructura, para guardar el siguiente valor;
+     *   - un DELETE con ON DELETE CASCADE o un trigger que escribe en otra
+     *     tabla tocan varias tablas.
+     *
+     * Antes se miraba solo lo último y se contaban tablas, no ficheros. Con una
+     * tabla partida en dos, un corte de corriente entre el rename de la primera
+     * parte y el de la segunda dejaba media tabla nueva y media vieja; como el
+     * reparto en partes es por posición, no se perdían «unas filas», se
+     * descuadraba todo a partir del corte.
+     *
+     * Así que se journaliza en cuanto haya más de un fichero en juego. El ámbito
+     * del journal es el bloqueo que se tiene: con una sola tabla se tiene su
+     * exclusivo y basta con el suyo, que es lo que permite que dos escrituras en
+     * tablas distintas sigan yendo a la vez.
      */
     private function volcar(): void
     {
@@ -216,16 +270,28 @@ final class Writer
 
         // txAbierta(): si venimos de una operación de estructura, el journal ya
         // está abierto y no hay que anidar otro
-        $conJournal = count($tablas) > 1 && Config::journalDatos() && !$st->txAbierta();
+        $conJournal = $tablas !== [] && Config::journalDatos() && !$st->txAbierta()
+                   && (count($tablas) > 1 || $this->variosFicheros((string)$tablas[0]));
+
         if ($conJournal) {
-            $st->txIniciar('ESCRITURA', $tablas);
+            // El ámbito del journal es el bloqueo que se tiene, y dice cuál hará
+            // falta para deshacerlo. Que la escritura acabe tocando una sola
+            // tabla no basta: si se entró con el exclusivo de la base —porque la
+            // tabla tiene claves foráneas, triggers, o alguien la referencia— el
+            // journal es de base, no suyo.
+            $ambito = count($tablas) === 1 && $st->tieneExclusivoDe((string)$tablas[0])
+                ? (string)$tablas[0]
+                : null;
+            $st->txIniciar('ESCRITURA', $tablas, $ambito);
         }
 
-        foreach (array_keys($this->sucioDatos) as $tabla) {
-            $st->guardarFilas($tabla, $this->datos[$tabla]);
-        }
-        foreach (array_keys($this->sucioMeta) as $tabla) {
-            $st->guardarMeta($tabla, Catalog::compactar($this->metas[$tabla]));
+        foreach ($tablas as $tabla) {
+            $st->guardarTabla(
+                $tabla,
+                isset($this->sucioDatos[$tabla]) ? $this->datos[$tabla] : null,
+                isset($this->sucioMeta[$tabla]) ? Catalog::compactar($this->metas[$tabla]) : null,
+                Indexes::definiciones($this->metas[$tabla] ?? $this->cat->meta($tabla))
+            );
         }
 
         if ($conJournal) {
@@ -235,6 +301,34 @@ final class Writer
         $this->sucioDatos = [];
         $this->sucioMeta  = [];
         $this->cat->olvidar();
+    }
+
+    /**
+     * ¿La escritura de esta tabla va a tocar más de un fichero?
+     *
+     * Basta con que tenga índices, con que cambien datos y estructura a la vez,
+     * o con que las filas no quepan en una sola parte. Se mira sobre las filas
+     * que se van a escribir, no sobre las que hay: una tabla que ahora ocupa una
+     * parte y va a ocupar dos también necesita journal.
+     */
+    private function variosFicheros(string $tabla): bool
+    {
+        if (isset($this->sucioDatos[$tabla]) && isset($this->sucioMeta[$tabla])) {
+            return true;
+        }
+        $meta = $this->metas[$tabla] ?? $this->cat->meta($tabla);
+        if ($this->cat->storage()->indicesActivos()
+            && (Indexes::definiciones($meta) !== [] || $this->cat->storage()->tieneIndices($tabla))) {
+            return true;
+        }
+        $st = $this->cat->storage();
+        if ($st->partes($tabla) > 1) {
+            return true;                  // ya está repartida: se reescribe entera
+        }
+        if (!isset($this->sucioDatos[$tabla])) {
+            return false;                 // solo cambia la estructura: un fichero
+        }
+        return count($this->datos[$tabla]) > Config::filasPorParte();
     }
 
     // ==================================================================
@@ -915,7 +1009,13 @@ final class Writer
     /** Las consultas internas ven también los cambios todavía en memoria. */
     private function seleccionar(array $ast): array
     {
-        return (new Select($this->cat, fn(string $t): array => $this->filas($t)))->ejecutar($ast);
+        // El $tope se declara porque lo exige la firma del lector, y se ignora a
+        // propósito: aquí las filas salen de lo que el Writer lleva en memoria,
+        // no de un fichero, así que no hay lectura que cortar antes de tiempo.
+        return (new Select(
+            $this->cat,
+            fn(string $t, ?int $tope = null): array => $this->filas($t)
+        ))->ejecutar($ast);
     }
 
     /** 'col' => 'col' y 'tabla.col' => 'col' */

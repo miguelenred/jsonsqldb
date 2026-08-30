@@ -70,6 +70,27 @@ final class Valor
         if ($a === null || $b === null) {
             return null;
         }
+        // Atajo para dos números, que es el caso corriente: esNumerico() diría
+        // que sí y aNumero() los devolvería tal cual, así que el resultado es
+        // idéntico ahorrando cuatro llamadas. En un ORDER BY sobre 20.000 filas
+        // esto se ejecuta unas trescientas mil veces.
+        if ((is_int($a) || is_float($a)) && (is_int($b) || is_float($b))) {
+            return $a <=> $b;
+        }
+        // Y otro para dos textos, que es lo que compara cualquier WHERE sobre
+        // una columna de texto. Mismo resultado por el camino corto: si alguno
+        // no es un número, esNumerico() diría que no y se acabaría en el mismo
+        // strcmp. El trim() va detrás del is_numeric() directo porque para un
+        // texto normal el primero ya falla y así no se copia la cadena.
+        if (is_string($a) && is_string($b)) {
+            if (!is_numeric($a) && !is_numeric(trim($a))) {
+                return strcmp($a, $b) <=> 0;
+            }
+            if (!is_numeric($b) && !is_numeric(trim($b))) {
+                return strcmp($a, $b) <=> 0;
+            }
+            return (trim($a) + 0) <=> (trim($b) + 0);
+        }
         if (self::esNumerico($a) && self::esNumerico($b)) {
             $x = self::aNumero($a);
             $y = self::aNumero($b);

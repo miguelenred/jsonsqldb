@@ -105,7 +105,7 @@ class JsonSqlDbCliente:
             )
 
         timestamp = str(int(time.time()))
-        mensaje = f"+{self.api_key}|{timestamp}|{sql}{params}\u00bf"
+        mensaje = f"+{self.api_key}|{self.base}|{timestamp}|{sql}{params}\u00bf"
         # HMAC-SHA256 sobre el mensaje. Los analizadores estáticos a veces marcan
         # esto como "hash débil para contraseñas": no lo es. Aquí no se almacena
         # ninguna contraseña; se firma un mensaje con una clave compartida, que es

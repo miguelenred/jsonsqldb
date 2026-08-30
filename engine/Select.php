@@ -14,8 +14,17 @@ namespace JsonSQLDB;
 final class Select
 {
     private Catalog $cat;
-    /** @var callable(string):array lector de filas; permite ver cambios aún no volcados a disco */
+    /** @var callable(string,?int):array lector de filas; permite ver cambios aún no volcados a disco */
     private $lector;
+
+    /**
+     * Si se puede resolver una consulta por índice.
+     *
+     * Solo con el lector de disco. Cuando escribe el Writer, las filas que se
+     * ven son las que tiene a medias en memoria y los índices en disco todavía
+     * no las conocen.
+     */
+    private bool $indexable;
     /** Profundidad máxima de vistas anidadas (una vista que usa otra vista). */
     private const MAX_VISTAS = 8;
 
@@ -33,11 +42,15 @@ final class Select
 
     /** @var array<int,array> resultado de cada subconsulta ya ejecutada */
     private array $subs = [];
+    /** @var array<int, array> conjuntos de un IN cuya subconsulta no mira hacia fuera */
+    private array $conjuntos = [];
 
     public function __construct(Catalog $cat, ?callable $lector = null)
     {
-        $this->cat    = $cat;
-        $this->lector = $lector ?? static fn(string $t): array => $cat->storage()->leerFilas($t);
+        $this->cat       = $cat;
+        $this->indexable = $lector === null;
+        $this->lector    = $lector
+            ?? static fn(string $t, ?int $tope = null): array => $cat->storage()->leerFilas($t, false, $tope);
     }
 
     /** Ejecuta la consulta y devuelve las filas de salida. */
@@ -69,7 +82,12 @@ final class Select
     private function correrSimple(array $ast): array
     {
 
-        [$filas, $claves] = $this->origenes($ast['from']);
+        // ¿Se puede dejar de recorrer en cuanto haya suficientes filas?
+        // Solo si el resultado no depende de las filas que vendrían después:
+        // sin ORDER BY, sin agrupar, sin agregados y sin DISTINCT.
+        $tope = $this->topeTemprano($ast);
+
+        [$filas, $claves] = $this->origenes($ast['from'], $ast['where'], $tope);
         $mapa = $this->mapaColumnas($claves);
         $externa = $this->externo['fila'] ?? [];
         $sub  = function (array $sel, int $sid, array $filaExterna = []) use ($mapa): array {
@@ -107,10 +125,26 @@ final class Select
             return $filas;
         };
 
-        // ¿Se puede dejar de recorrer en cuanto haya suficientes filas?
-        // Solo si el resultado no depende de las filas que vendrían después:
-        // sin ORDER BY, sin agrupar, sin agregados y sin DISTINCT.
-        $tope = $this->topeTemprano($ast);
+        // Los valores de un IN agrupados por clave, para no recorrer la lista en
+        // cada fila. Solo se guarda si la subconsulta no mira hacia fuera: si
+        // está correlacionada, su resultado cambia con la fila y no hay nada que
+        // reutilizar, así que se construye cada vez igual que antes.
+        $conjunto = function (array $sel, int $sid, array $filaExterna = []) use ($sub): array {
+            // Lo primero, el memo: recorrer las filas para sacar los valores ya
+            // cuesta tanto como la búsqueda lineal que se quería evitar
+            if (isset($this->conjuntos[$sid])) {
+                return $this->conjuntos[$sid];
+            }
+            $valores = [];
+            foreach ($sub($sel, $sid, $filaExterna) as $fila) {
+                $valores[] = reset($fila);
+            }
+            $c = Indexes::conjunto($valores);
+            if (isset($this->subs[$sid])) {
+                $this->conjuntos[$sid] = $c;      // no mira hacia fuera: vale para todas
+            }
+            return $c;
+        };
 
         // WHERE
         if ($ast['where'] !== null) {
@@ -127,7 +161,8 @@ final class Select
                     $vale = $v === null ? false : self::compara($simple['op'], $v, $simple['valor']);
                 } else {
                     $vale = Valor::verdadero(Evaluator::evaluar(
-                        $where, ['fila' => $fila, 'sub' => $sub, 'filaExterna' => $externa])) === true;
+                        $where, ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
+                                 'filaExterna' => $externa])) === true;
                 }
                 if ($vale) {
                     Memoria::comprobar('el filtrado del WHERE');
@@ -167,7 +202,7 @@ final class Select
         }
 
         // Grupos: cada elemento es [fila representativa, filas del grupo|null]
-        $bloques = $agrupar ? $this->agrupar($filas, $grupoExprs, $sub) : null;
+        $bloques = $agrupar ? $this->agrupar($filas, $grupoExprs, $sub, $conjunto) : null;
 
         // Proyección + claves de ordenación
         $resultado = [];
@@ -176,7 +211,7 @@ final class Select
         if ($bloques !== null) {
             foreach ($bloques as $grupo) {
                 $ctx = ['fila' => $grupo[0] ?? [], 'grupo' => $grupo, 'sub' => $sub,
-                        'filaExterna' => $externa];
+                        'conjunto' => $conjunto, 'filaExterna' => $externa];
                 if ($having !== null && Valor::verdadero(Evaluator::evaluar($having, $ctx)) !== true) {
                     continue;
                 }
@@ -191,7 +226,8 @@ final class Select
         } else {
             foreach ($filas as $f) {
                 Memoria::comprobar('la construcción del resultado');
-                $ctx  = ['fila' => $f, 'sub' => $sub, 'filaExterna' => $externa];
+                $ctx  = ['fila' => $f, 'sub' => $sub, 'conjunto' => $conjunto,
+                         'filaExterna' => $externa];
                 $fila = [];
                 foreach ($salida as $c) {
                     $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
@@ -402,6 +438,31 @@ final class Select
     }
 
     /** Clave comparable de una fila completa, para deduplicar y cruzar. */
+    /**
+     * Intenta resolver la lectura de una tabla por índice.
+     *
+     * Devuelve null cuando no hay índice que sirva, cuando el que hay no está al
+     * día o cuando haría falta leer casi toda la tabla igualmente: en todos esos
+     * casos la lectura sigue por el camino de siempre.
+     *
+     * @param array<string, list<mixed>> $predicados
+     */
+    private function porIndice(string $tabla, array $predicados): ?array
+    {
+        if (!$this->indexable || $predicados === []) {
+            return null;
+        }
+        $st = $this->cat->storage();
+        if (!$st->indicesActivos()) {
+            return null;
+        }
+        $elegido = Indexes::elegir($this->cat->indicesDe($tabla), $predicados);
+        if ($elegido === null) {
+            return null;
+        }
+        return $st->filasPorIndice($tabla, $elegido['def'], $elegido['claves'], $elegido['prefijo']);
+    }
+
     private static function claveFila(array $fila): string
     {
         $k = '';
@@ -488,18 +549,31 @@ final class Select
     // ==================================================================
 
     /** @return array{0: array, 1: string[]} filas planas y lista de claves "alias.columna" */
-    private function origenes(array $from): array
+    private function origenes(array $from, ?array $where = null, ?int $tope = null): array
     {
         if ($from === []) {
             return [[[]], []];                            // SELECT sin FROM: una fila vacía
         }
 
-        $primero = $this->cargar($from[0]);
+        // Con un solo origen, una columna sin cualificar solo puede ser suya.
+        // Con varios haría falta el mapa de columnas, y para eso ya habría que
+        // haber leído las tablas, que es justo lo que se quiere evitar.
+        $unico = count($from) === 1 && $from[0]['tipo'] === 'tabla'
+            ? strtolower((string)($from[0]['alias'] ?? $from[0]['nombre']))
+            : null;
+        $predicados = $this->indexable ? Indexes::predicados($where, $unico) : [];
+
+        // El tope solo se puede aplicar al leer si no hay nada que filtrar
+        // después: con WHERE o con JOIN, las filas que sobran no son las
+        // últimas, y quedarse con las primeras daría un resultado distinto.
+        $topeLectura = $where === null && count($from) === 1 ? $tope : null;
+
+        $primero = $this->cargar($from[0], $predicados, $topeLectura);
         $filas   = $primero['filas'];
         $claves  = $primero['claves'];
 
         for ($i = 1, $n = count($from); $i < $n; $i++) {
-            $der    = $this->cargar($from[$i]);
+            $der    = $this->cargar($from[$i], $predicados);
             $filas  = $this->unir($filas, $claves, $der, $from[$i]);
             $claves = array_merge($claves, $der['claves']);
         }
@@ -507,7 +581,7 @@ final class Select
     }
 
     /** Carga una tabla o subconsulta como filas planas con prefijo de alias. */
-    private function cargar(array $o): array
+    private function cargar(array $o, array $predicados = [], ?int $tope = null): array
     {
         if ($o['tipo'] === 'sub') {
             $r      = $this->correr($o['select']);
@@ -520,6 +594,7 @@ final class Select
             $alias  = $o['alias'] ?? $o['nombre'];
             $cols   = $r['cols'];
             $origen = $r['filas'];
+            unset($r);                     // que no queden dos referencias a las filas
         } elseif ($this->cat->esVista($o['nombre'])) {
             // Una vista es un SELECT guardado: se analiza y se ejecuta igual
             // que una subconsulta del FROM.
@@ -541,6 +616,7 @@ final class Select
             $alias  = $o['alias'] ?? $o['nombre'];
             $cols   = $r['cols'];
             $origen = $r['filas'];
+            unset($r);                     // que no queden dos referencias a las filas
         } else {
             $nombre = $o['nombre'];
             if (!$this->cat->existe($nombre)) {
@@ -552,7 +628,10 @@ final class Select
             foreach ($meta['columns'] as $c) {
                 $cols[] = $c['name'];
             }
-            $origen = ($this->lector)($nombre);
+            // Con un índice aprovechable se leen solo las partes donde están las
+            // filas buscadas; si no lo hay, o no compensa, se lee la tabla.
+            $origen = $this->porIndice($nombre, $predicados[strtolower($alias)] ?? [])
+                   ?? ($this->lector)($nombre, $tope);
         }
 
         $claves = [];
@@ -560,13 +639,19 @@ final class Select
             $claves[] = $alias . '.' . $c;
         }
 
+        // Aquí cada fila se copia con las claves prefijadas por el alias, y eso
+        // llegaba a tener la tabla dos veces en memoria: la leída y la aplanada.
+        // Se va soltando cada fila original según se convierte, así que solo hay
+        // una copia y media a medio camino en vez de dos enteras.
         $filas = [];
-        foreach ($origen as $fila) {
+        foreach (array_keys($origen) as $k) {
             $plana = [];
             foreach ($cols as $i => $c) {
-                $plana[$claves[$i]] = $fila[$c] ?? null;
+                $plana[$claves[$i]] = $origen[$k][$c] ?? null;
             }
+            unset($origen[$k]);
             $filas[] = $plana;
+            Memoria::comprobar('la carga de la tabla');
         }
 
         return ['alias' => $alias, 'cols' => $cols, 'claves' => $claves, 'filas' => $filas];
@@ -606,6 +691,18 @@ final class Select
         $sub   = function (array $sel, int $sid): array {
             return $this->subs[$sid] ??= $this->correr($sel)['filas'];
         };
+        // Aquí la subconsulta nunca mira hacia fuera —se resuelve entera antes
+        // del cruce— así que su conjunto se puede guardar siempre
+        $conjunto = function (array $sel, int $sid) use ($sub): array {
+            if (!isset($this->conjuntos[$sid])) {
+                $valores = [];
+                foreach ($sub($sel, $sid) as $fila) {
+                    $valores[] = reset($fila);
+                }
+                $this->conjuntos[$sid] = Indexes::conjunto($valores);
+            }
+            return $this->conjuntos[$sid];
+        };
 
         // Índice hash del lado interno. Guarda posiciones, no filas, para poder
         // saber después cuáles quedaron sin pareja (lo necesita FULL JOIN).
@@ -623,10 +720,18 @@ final class Select
         $completo = $tipo === 'FULL';
         $casadas  = [];                     // posiciones internas que sí casaron
 
+        // Sin índice hay que probar contra todas las filas internas, y esa lista
+        // es la misma en cada vuelta: se calcula una vez. Estaba dentro del
+        // bucle y se descartaba enseguida cuando sí había índice, así que un
+        // JOIN de 30.000 por 20.000 filas construía treinta mil veces un array
+        // de veinte mil claves para no usarlo.
+        $todas = $indice === null ? array_keys($internas) : [];
+
         $salida = [];
         foreach ($externas as $ext) {
-            $candidatas = array_keys($internas);
-            if ($indice !== null) {
+            if ($indice === null) {
+                $candidatas = $todas;
+            } else {
                 // Una sola llamada: claveHash() recorre la fila y no es gratis
                 $clave      = $this->claveHash($ext, $clavesExt);
                 $candidatas = $clave === null ? [] : ($indice[$clave] ?? []);
@@ -637,6 +742,7 @@ final class Select
                 $fila = $ext + $internas[$i];
                 if ($resto !== null
                     && Valor::verdadero(Evaluator::evaluar($resto, ['fila' => $fila, 'sub' => $sub,
+                        'conjunto' => $conjunto,
                         'filaExterna' => $this->externo['fila'] ?? []])) !== true) {
                     continue;
                 }
@@ -803,14 +909,14 @@ final class Select
     }
 
     /** @return array<int,array> lista de grupos; cada grupo es una lista de filas */
-    private function agrupar(array $filas, array $exprs, callable $sub): array
+    private function agrupar(array $filas, array $exprs, callable $sub, callable $conjunto): array
     {
         if ($exprs === []) {
             return [$filas];        // agregación total: una sola fila aunque no haya datos
         }
         $grupos = [];
         foreach ($filas as $fila) {
-            $ctx   = ['fila' => $fila, 'sub' => $sub,
+            $ctx   = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
                       'filaExterna' => $this->externo['fila'] ?? []];
             $clave = '';
             foreach ($exprs as $e) {

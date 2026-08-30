@@ -138,7 +138,22 @@ final class Catalog
         $meta['unique']       = $meta['unique']       ?? [];
         $meta['foreign_keys'] = $meta['foreign_keys'] ?? [];
         $meta['triggers']     = $meta['triggers']     ?? [];
+        $meta['indexes']      = $meta['indexes']      ?? [];
         $meta['autoincrement'] = $meta['autoincrement'] ?? null;
+
+        // Un índice sobre una columna que ya no existe es basura de un ALTER
+        // anterior: se ignora en vez de romper cada consulta de la tabla.
+        $meta['indexes'] = array_values(array_filter(
+            $meta['indexes'],
+            static function ($idx) use ($meta): bool {
+                foreach ((array)($idx['columns'] ?? []) as $c) {
+                    if (self::columna($meta, (string)$c) === null) {
+                        return false;
+                    }
+                }
+                return ($idx['columns'] ?? []) !== [];
+            }
+        ));
 
         // Un autoincremento que apunte a una columna inexistente es basura de
         // una versión anterior: se ignora en lugar de arrastrar el error.
@@ -150,10 +165,26 @@ final class Catalog
         return $this->memo[$tabla] = $meta;
     }
 
+    /**
+     * Guarda datos y estructura en una sola escritura.
+     *
+     * Juntas y no una detrás de otra: cada escritura sube la revisión de la
+     * tabla y reconstruye sus índices, así que separarlas sería hacer ese
+     * trabajo dos veces y dejar un instante con los datos nuevos y la
+     * estructura vieja.
+     */
+    private function guardarTodo(string $tabla, array $filas, array $meta): void
+    {
+        $this->st->guardarTabla($tabla, $filas, self::compactar($meta), Indexes::definiciones($meta));
+        unset($this->memo[$tabla]);
+    }
+
     /** Guarda la estructura (compactada) e invalida la caché de la petición. */
     private function guardar(string $tabla, array $meta): void
     {
-        $this->st->guardarMeta($tabla, self::compactar($meta));
+        // Las definiciones van siempre: un ALTER puede añadir o quitar una
+        // PRIMARY KEY o un UNIQUE, y con ellos el índice automático que llevan.
+        $this->st->guardarMeta($tabla, self::compactar($meta), Indexes::definiciones($meta));
         unset($this->memo[$tabla]);
     }
 
@@ -284,6 +315,7 @@ final class Catalog
             'unique'        => [],
             'foreign_keys'  => [],
             'triggers'      => [],
+            'indexes'       => [],
             'autoincrement' => null,
             'created_at'    => date('Y-m-d H:i:s'),
         ];
@@ -305,7 +337,7 @@ final class Catalog
             $meta['foreign_keys'][] = $this->normalizarFk($tabla, $meta, $fk);
         }
 
-        $this->st->crearTabla($tabla, self::compactar($meta));
+        $this->st->crearTabla($tabla, self::compactar($meta), Indexes::definiciones($meta));
         unset($this->memo[$tabla]);
     }
 
@@ -328,7 +360,9 @@ final class Catalog
 
     public function renombrarTabla(string $desde, string $hasta): void
     {
-        $this->st->renombrarTabla($desde, $hasta);
+        $meta = $this->meta($desde);
+        $meta['table'] = $hasta;
+        $this->st->renombrarTabla($desde, $hasta, Indexes::definiciones($meta));
         foreach ($this->st->tablas() as $t) {
             $meta    = $this->meta($t);
             $cambia  = false;
@@ -371,8 +405,7 @@ final class Catalog
         }
 
         $meta['columns'][] = $col;
-        $this->st->guardarFilas($tabla, $filas);
-        $this->guardar($tabla, $meta);
+        $this->guardarTodo($tabla, $filas, $meta);
     }
 
     /**
@@ -449,8 +482,7 @@ final class Catalog
             }
         }
 
-        $this->st->guardarFilas($tabla, $filas);
-        $this->guardar($tabla, $meta);
+        $this->guardarTodo($tabla, $filas, $meta);
     }
 
     public function borrarColumna(string $tabla, string $nombre): void
@@ -475,6 +507,20 @@ final class Catalog
             && strcasecmp((string)$meta['autoincrement']['column'], $col['name']) === 0) {
             $meta['autoincrement'] = null;
         }
+
+        // Y los índices que la usaban: un índice acelera, no restringe, así que
+        // se va sin más en vez de impedir el ALTER
+        $meta['indexes'] = array_values(array_filter(
+            $meta['indexes'],
+            static function (array $idx) use ($col): bool {
+                foreach ($idx['columns'] as $c) {
+                    if (strcasecmp((string)$c, $col['name']) === 0) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        ));
 
         $filas = $this->st->leerFilas($tabla);
         foreach ($filas as $i => $fila) {
@@ -506,8 +552,7 @@ final class Catalog
             }
         }
 
-        $this->st->guardarFilas($tabla, $filas);
-        $this->guardar($tabla, $meta);
+        $this->guardarTodo($tabla, $filas, $meta);
     }
 
     public function renombrarColumna(string $tabla, string $desde, string $hasta): void
@@ -527,6 +572,15 @@ final class Catalog
                 $meta['columns'][$i]['name'] = $hasta;
             }
         }
+        // Los índices siguen a la columna: si no, se quedarían apuntando a un
+        // nombre que ya no existe y se perderían sin avisar
+        foreach ($meta['indexes'] as $i => $idx) {
+            foreach ($idx['columns'] as $j => $c) {
+                if (strcasecmp((string)$c, $col['name']) === 0) {
+                    $meta['indexes'][$i]['columns'][$j] = $hasta;
+                }
+            }
+        }
         if (($meta['autoincrement']['column'] ?? null) !== null
             && strcasecmp($meta['autoincrement']['column'], $col['name']) === 0) {
             $meta['autoincrement']['column'] = $hasta;
@@ -541,8 +595,7 @@ final class Catalog
             }
         }
 
-        $this->st->guardarFilas($tabla, $filas);
-        $this->guardar($tabla, $meta);
+        $this->guardarTodo($tabla, $filas, $meta);
     }
 
     /** Impide tocar una columna usada por UNIQUE compuesto o por una FK (propia o ajena). */
@@ -647,6 +700,102 @@ final class Catalog
         $meta['foreign_keys'][] = $nuevo;
         $this->guardar($tabla, $meta);
         return $nuevo['name'];
+    }
+
+    // ------------------------------------------------------------------
+    // Índices
+    // ------------------------------------------------------------------
+
+    /**
+     * Crea un índice sobre una o varias columnas.
+     *
+     * @param string[] $columnas
+     * @return bool false si ya existía y se pidió IF NOT EXISTS
+     */
+    public function crearIndice(string $tabla, string $nombre, array $columnas, bool $siNoExiste = false): bool
+    {
+        Indexes::validarNombre($nombre);
+        $meta = $this->metaExistente($tabla);
+
+        $cols  = [];
+        $vistas = [];
+        foreach ($columnas as $c) {
+            $col = self::columna($meta, (string)$c);
+            if ($col === null) {
+                throw JsonSqlDbError::schema("Índice sobre columna inexistente '$c' en '$tabla'");
+            }
+            if (isset($vistas[strtolower($col['name'])])) {
+                throw JsonSqlDbError::schema("La columna '{$col['name']}' se repite en el índice '$nombre'");
+            }
+            $vistas[strtolower($col['name'])] = true;
+            $cols[] = $col['name'];
+        }
+        if ($cols === []) {
+            throw JsonSqlDbError::schema("El índice '$nombre' no indica columnas");
+        }
+
+        // El nombre acaba siendo parte de un nombre de fichero, y hay sistemas
+        // que no distinguen mayúsculas: la comparación tampoco
+        foreach ($this->indicesDe($tabla) as $idx) {
+            if (strcasecmp($idx['name'], $nombre) === 0) {
+                if ($siNoExiste) {
+                    return false;
+                }
+                throw JsonSqlDbError::schema(
+                    $idx['auto']
+                        ? "'$nombre' es el índice automático de una PRIMARY KEY o un UNIQUE de '$tabla'"
+                        : "El índice '$nombre' ya existe en '$tabla'"
+                );
+            }
+        }
+
+        $meta['indexes'][] = ['name' => $nombre, 'columns' => $cols];
+        $this->guardar($tabla, $meta);
+        return true;
+    }
+
+    /**
+     * Borra un índice creado a mano. Devuelve la tabla a la que pertenecía, o
+     * null si no existía y se pidió IF EXISTS.
+     */
+    public function borrarIndice(?string $tabla, string $nombre, bool $siExiste = false): ?string
+    {
+        foreach ($tabla === null ? $this->tablas() : [$tabla] as $t) {
+            $meta = $this->metaExistente($t);
+            foreach ($meta['indexes'] as $i => $idx) {
+                if (strcasecmp((string)$idx['name'], $nombre) !== 0) {
+                    continue;
+                }
+                array_splice($meta['indexes'], $i, 1);
+                $this->guardar($t, $meta);
+                return $t;
+            }
+            // Un índice automático no se borra suelto: se va con su restricción
+            foreach (Indexes::definiciones($meta) as $def) {
+                if ($def['auto'] && strcasecmp($def['name'], $nombre) === 0) {
+                    throw JsonSqlDbError::schema(
+                        "'$nombre' es el índice automático de una PRIMARY KEY o un UNIQUE de '$t': "
+                        . 'quita la restricción con ALTER TABLE si no lo quieres'
+                    );
+                }
+            }
+        }
+        if ($siExiste) {
+            return null;
+        }
+        throw JsonSqlDbError::schema(
+            "El índice '$nombre' no existe" . ($tabla === null ? '' : " en '$tabla'")
+        );
+    }
+
+    /**
+     * Índices efectivos de una tabla, los creados a mano y los automáticos.
+     *
+     * @return list<array{name: string, columns: list<string>, auto: bool}>
+     */
+    public function indicesDe(string $tabla): array
+    {
+        return Indexes::definiciones($this->meta($tabla));
     }
 
     /** Borra una clave única o foránea por su nombre. */
@@ -987,7 +1136,7 @@ final class Catalog
         }
 
         $out = ['table' => $meta['table'], 'columns' => $cols];
-        foreach (['unique', 'foreign_keys', 'triggers'] as $k) {
+        foreach (['unique', 'foreign_keys', 'triggers', 'indexes'] as $k) {
             if (!empty($meta[$k])) {
                 $out[$k] = $meta[$k];
             }
