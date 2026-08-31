@@ -98,9 +98,9 @@ final class Database
             // ocurre ANTES de tenerlo. Lo leído entonces puede quedar obsoleto en
             // cuanto otro proceso escriba, así que se olvida nada más bloquear:
             // sin esto, dos procesos podían reutilizar el mismo autoincremento.
-            $tablaSola = $escritura ? $this->tablaUnica($ast) : null;
+            $tablas = $escritura ? $this->tablasAfectadas($ast) : null;
 
-            $this->st->bloquear($escritura, $tablaSola);
+            $this->st->bloquear($escritura, $tablas);
             $this->cat->olvidar();
             try {
                 if ($escritura) {
@@ -224,6 +224,35 @@ final class Database
      * Ante cualquier duda, null. Un bloqueo de más solo cuesta paralelismo; uno
      * de menos cuesta datos.
      */
+    /**
+     * Qué tablas hay que bloquear para esta escritura, o null si hay que
+     * bloquear la base entera.
+     *
+     * Se devuelven ORDENADAS. Ese orden es lo que hace imposible el
+     * interbloqueo: dos procesos que necesiten las mismas tablas las piden en la
+     * misma secuencia, así que uno espera al otro en vez de esperarse
+     * mutuamente. Y se piden TODAS de golpe antes de escribir nada: pedir un
+     * bloqueo más a mitad de la escritura sería justo lo que hay que evitar.
+     *
+     * @return list<string>|null
+     */
+    public function tablasAfectadas(array $ast): ?array
+    {
+        $tabla = $this->tablaUnica($ast);
+        if ($tabla !== null) {
+            return [$tabla];                  // no puede propagar: ella sola
+        }
+        // Solo el DML sencillo tiene un conjunto de tablas calculable
+        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+            return null;
+        }
+        $destino = $ast['tabla'] ?? null;
+        if (!is_string($destino) || $destino === '' || ($ast['select'] ?? null) !== null) {
+            return null;
+        }
+        return $this->cat->cierreDeTablas($destino);
+    }
+
     public function tablaUnica(array $ast): ?string
     {
         // Solo el DML sencillo. El DDL, las vistas, los triggers y REPAIR KEYS

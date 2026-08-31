@@ -369,8 +369,11 @@ chk('también corta con filas grandes, donde cada una pesa mucho', function () u
           . 'JsonSQLDB\\Database::crear("g", $r);'
           . '$bd = new JsonSQLDB\\Database("g", $r);'
           . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v VARCHAR(4000))");'
-          . '$p = array_fill(0, 300, str_repeat("y", 3900));'
-          . '$v = implode(",", array_fill(0, 300, "(?)"));'
+          // 500 filas de 3,9 KB: el producto cartesiano son 250.000 filas, que
+          // no caben ni con 64 MB. Eran 300 y con las mejoras de la 2.2 el
+          // resultado pasó a caber, así que la prueba dejó de probar el corte.
+          . '$p = array_fill(0, 500, str_repeat("y", 3900));'
+          . '$v = implode(",", array_fill(0, 500, "(?)"));'
           . '$bd->consultar("INSERT INTO t (v) VALUES $v", $p);';
     shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
 

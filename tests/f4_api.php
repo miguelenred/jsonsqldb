@@ -206,6 +206,23 @@ chk('lectura solo puede consultar', function () {
         && str_contains($r3['error'] ?? '', 'solo tiene permiso de lectura')
         && str_contains($r4['error'] ?? '', 'solo tiene permiso de lectura');
 });
+chk('lectura puede usar todos los SHOW, que no modifican nada', function () {
+    // La lista de sentencias permitidas a una clave de lectura se mantiene a
+    // mano, y es fácil añadir un SHOW nuevo al parser y olvidarla: eso le pasó a
+    // SHOW INDEXES, que una clave de solo lectura no podía ejecutar pese a ser
+    // estrictamente lectura. Aquí se recorren todos.
+    $sentencias = [
+        'SHOW TABLES', 'SHOW VIEWS', 'SHOW SCHEMA clientes', 'SHOW COLUMNS FROM clientes',
+        'SHOW KEYS FROM clientes', 'SHOW TRIGGERS', 'SHOW INDEXES FROM clientes',
+    ];
+    foreach ($sentencias as $sql) {
+        $r = firmada($sql, $GLOBALS['CLAVE_LECTURA']);
+        if (isset($r['error'])) {
+            return "$sql -> " . $r['error'];
+        }
+    }
+    return true;
+});
 chk('una consulta denegada no modifica nada', function () {
     $r = firmada('SELECT COUNT(*) AS n FROM clientes', $GLOBALS['CLAVE_ADMIN']);
     return ($r[0]['n'] ?? null) === 1;

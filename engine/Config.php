@@ -11,7 +11,21 @@ namespace JsonSQLDB;
 final class Config
 {
     /** Versión de jsonSQLDB. */
-    public const VERSION = '1.0.0';
+    /**
+     * Versión del motor. Se lee del fichero VERSION para que no haya dos sitios
+     * que puedan decir cosas distintas: estaba fijada a mano en '1.0.0' y no la
+     * usaba nadie, así que llevaba versiones desincronizada sin que se notara.
+     */
+    public static function version(): string
+    {
+        static $v = null;
+        if ($v === null) {
+            $f = dirname(__DIR__) . '/VERSION';
+            $v = is_file($f) ? trim((string)@file_get_contents($f)) : 'desconocida';
+            if ($v === '') { $v = 'desconocida'; }
+        }
+        return $v;
+    }
 
     public static function datos(): string
     {

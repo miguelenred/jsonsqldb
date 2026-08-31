@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.1.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.2.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -604,6 +604,24 @@ jsonSQLDBadmin    ──HTTP──►         │
                               data/<database>/<table>.json
 ```
 
+### More than one installation on the same machine
+
+Nothing special is needed: **everything the engine shares between processes lives
+inside the database folder** — the lock files, the journal, the temporaries and
+the on-disk cache — so two installations with different data folders never see
+each other. The one genuinely global resource is APCu, and its keys are prefixed
+with a digest of the data path so two databases with the same name in different
+installations cannot collide.
+
+What is worth keeping separate, because it is not the engine's doing:
+`JSONSQLDB_DATA_PATH`, `API_ESTADO_PATH` (the anti-replay and per-IP quota),
+`ADMIN_SESION_NOMBRE` (two panels on one domain would share the cookie) and
+`ADMIN_DATA_PATH`. All four default to paths inside the project folder, so two
+copies of the project are already separate without touching anything.
+
+Several processes against the *same* database is a different thing — that is
+ordinary concurrency, handled by the locks above.
+
 ### Upgrading from 1.x
 
 Replace the folder and keep your two configuration files
@@ -682,14 +700,28 @@ table — which is what makes a deadlock impossible:
 |---|---|---|
 | Reads (`SELECT`, `SHOW`, `CHECK KEYS`) | shared | **shared**, per table read |
 | A write to **one** table with no foreign keys or triggers | shared | **exclusive** |
-| Cascades, triggers reaching other tables, DDL, `REPAIR KEYS` | **exclusive** | — |
+| Cascades and triggers, when the set of tables is knowable | shared | **exclusive on every table** it can reach |
+| Schema changes, views, `REPAIR KEYS`, `INSERT ... SELECT` | **exclusive** | — |
 
 So two writes to different tables run at the same time, and a write no longer
-blocks reads of other tables. As soon as an operation could touch more than one
-table it takes the exclusive database lock, which waits for every pending write
-on all of them. The decision is deliberately suspicious: a foreign key, another
-table referencing this one, a trigger, or an `INSERT ... SELECT` all fall back to
-the database lock.
+blocks reads of other tables.
+
+A write that can propagate does not lock the database. Writing to a table does
+not always stay in it — a foreign key with `ON DELETE CASCADE` drags child rows,
+a trigger can write anywhere — so the engine works out the set of tables it could
+reach first, following foreign keys in both directions and transitively, plus
+wherever the triggers write, by parsing their SQL. Only those are locked, so an
+unrelated group of tables carries on writing at the same time.
+
+Two things make that safe: **all the locks are taken up front**, because asking
+for one more halfway through a write is how deadlocks happen; and they are taken
+**in alphabetical order**, so two processes that need the same tables ask in the
+same sequence and one waits for the other instead of both waiting forever.
+
+It falls back to the exclusive database lock the moment the set cannot be stated:
+a trigger whose SQL will not parse, an `INSERT ... SELECT` (which reads from other
+tables), any schema change, or more than eight tables, where taking that many
+locks costs more than taking one.
 
 Reads take the shared lock of each table they touch. Shared locks do not block
 each other, so reads still run together; a read only waits when that same table
@@ -846,14 +878,14 @@ your data.
 php tests/f1_nucleo.php       → OK: 63    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
 php tests/f2_select.php       → OK: 138   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 58    writes, DDL, keys and triggers
+php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 51    real requests against the API
 php tests/f5_esquema.php      → OK: 89    SHOW, ALTER, constraints, views, integrity
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
-php tests/f6_cortes.php       → OK: 29    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 20    real simultaneous processes and locking
+php tests/f6_cortes.php       → OK: 31    crash recovery, killing real processes
+php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 57    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 34    every partial state a crash can leave
+php tests/f9_journal.php      → OK: 37    every partial state a crash can leave
 ```
 
 Two of these are worth knowing what they actually do.

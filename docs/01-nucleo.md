@@ -133,7 +133,33 @@ Con `flock` sobre dos ficheros: uno de la base (`.lock`) y uno por tabla
 |---|---|---|---|
 | `SELECT` y demás lecturas | compartido | compartido, por cada tabla leída | varias lecturas a la vez |
 | Escritura en **una** tabla sin claves foráneas ni triggers | compartido | exclusivo | escrituras en tablas distintas van a la vez |
-| Cascadas, triggers a otras tablas, DDL, `REPAIR KEYS` | exclusivo | — | una sola; el resto espera |
+| Cascadas y triggers, con el conjunto de tablas calculable | compartido | exclusivo, en TODAS las que puede tocar | otros grupos de tablas siguen escribiendo |
+| DDL, vistas, `REPAIR KEYS`, `INSERT ... SELECT` | exclusivo | — | espera a todo y todo la espera |
+
+### Qué se bloquea cuando una escritura puede propagar
+
+Escribir en una tabla no siempre se queda en ella: una clave foránea con
+`ON DELETE CASCADE` arrastra filas hijas, y un trigger puede escribir donde
+quiera. Hasta la 2.2 eso bastaba para tomar el exclusivo de la base, y cualquier
+otra escritura esperaba aunque fuera a tablas sin ninguna relación.
+
+Ahora se calcula antes el **conjunto de tablas alcanzables** —claves foráneas en
+las dos direcciones y de forma transitiva, más los destinos de los triggers,
+leyendo su SQL— y se bloquean solo esas.
+
+Dos detalles que son lo que lo hace seguro:
+
+- **Se piden todas de golpe, antes de escribir nada.** Pedir un bloqueo más a
+  mitad de la escritura es la receta del interbloqueo.
+- **Se piden en orden alfabético.** Dos procesos que necesiten las mismas tablas
+  las piden en la misma secuencia, así que uno espera al otro en vez de
+  esperarse mutuamente. Sin un orden fijo, uno que fuera de A a B y otro de B a A
+  se bloquearían para siempre.
+
+Se cae al exclusivo de la base en cuanto el conjunto no se puede afirmar: un
+trigger cuya SQL no se deja analizar, un `INSERT ... SELECT` (que lee de otras
+tablas), cualquier operación de estructura, o más de ocho tablas, donde pedir
+tantos bloqueos cuesta más que uno solo.
 
 Un `SELECT` sobre una tabla con una escritura pendiente **espera a que termine** y
 devuelve ya los datos nuevos, que es el comportamiento pedido. Lo que ya no
@@ -311,6 +337,43 @@ documento:
 - El panel `jsonSQLDBadmin` — ver [05-admin.md](05-admin.md)
 
 ---
+
+## 8.4 Varias instalaciones en la misma máquina
+
+Sí se puede, y de hecho no hay que hacer nada especial: **todo lo que el motor
+comparte entre procesos vive dentro de la carpeta de la base de datos**. Los
+ficheros de bloqueo (`.lock`, `.<tabla>.lock`), el journal (`.tx/`), los
+temporales y la caché en disco (`.cache/`) están todos ahí, así que dos
+instalaciones con carpetas de datos distintas no se ven entre sí.
+
+El único recurso de verdad global es **APCu**, que es memoria compartida de todo
+el servidor PHP. Ahí las claves llevan delante un prefijo derivado de la ruta de
+la base (`jsq:` más un resumen de la ruta), justamente para que dos bases que se
+llamen igual en instalaciones distintas no se pisen.
+
+Lo que sí conviene separar, porque no depende del motor:
+
+| | Constante | Por qué |
+|---|---|---|
+| Carpeta de datos | `JSONSQLDB_DATA_PATH` | Es lo que hace independientes a las dos instalaciones |
+| Estado de la API | `API_ESTADO_PATH` | Guarda el anti-replay y el cupo por IP; compartirlo mezclaría los límites de las dos |
+| Sesión del panel | `ADMIN_SESION_NOMBRE` | Dos paneles en el mismo dominio con el mismo nombre de sesión se pisan la cookie |
+| Datos del panel | `ADMIN_DATA_PATH` | Usuarios y auditoría de cada panel |
+
+Los cuatro por defecto son relativos a la carpeta del proyecto, así que **dos
+copias del proyecto en carpetas distintas ya salen separadas** sin tocar nada. Si
+montas dos instalaciones que comparten el código y solo cambian la
+configuración, tendrás que darles valores distintos a mano.
+
+Un caso que no es «varias instalaciones» y conviene no confundir: **varios
+procesos sobre la MISMA base** —que es lo normal con PHP-FPM— es concurrencia
+corriente y la resuelven los bloqueos descritos arriba. Ahí no hay que separar
+nada.
+
+Lo que **no** se puede hacer es tener dos carpetas de datos distintas apuntando a
+los mismos ficheros (por enlaces simbólicos, por ejemplo). Los bloqueos se piden
+por ruta, así que dos rutas distintas para el mismo fichero son dos bloqueos
+distintos y no se excluyen entre sí.
 
 ## 8.5 Actualizar desde una versión anterior
 
@@ -573,16 +636,18 @@ nunca al revés. Ese orden fijo es lo que hace imposible un interbloqueo.
 
 | Operación | Base | Tabla |
 |---|---|---|
-| Lecturas (`SELECT`, `SHOW`, `CHECK KEYS`) | compartido | — |
+| Lecturas (`SELECT`, `SHOW`, `CHECK KEYS`) | compartido | compartido, por cada tabla leída |
 | Escritura en **una** tabla sin claves foráneas ni triggers | compartido | **exclusivo** |
-| Cascadas, triggers hacia otras tablas, DDL, `REPAIR KEYS` | **exclusivo** | — |
+| Cascadas y triggers, con el conjunto calculable | compartido | **exclusivo en todas** las que puede tocar |
+| DDL, vistas, `REPAIR KEYS`, `INSERT ... SELECT` | **exclusivo** | — |
 
 Con esto, dos escrituras en tablas distintas van a la vez, y una escritura ya no
-bloquea las lecturas de las demás tablas. En cuanto la operación puede tocar más
-de una tabla se pide el exclusivo de la base, que espera a que terminen **todas**
-las escrituras pendientes de todas ellas.
+bloquea las lecturas de las demás tablas. Una escritura que puede propagar por
+claves foráneas o triggers bloquea el grupo de tablas al que puede llegar, no la
+base: otro grupo sin relación sigue escribiendo a la vez. Solo se toma el
+exclusivo de la base cuando ese conjunto no se puede afirmar.
 
-La decisión se toma en `Database::tablaUnica()`, y es deliberadamente
+La decisión se toma en `Database::tablasAfectadas()`, y es deliberadamente
 desconfiada: basta con que la tabla tenga una clave foránea, con que otra tabla
 la referencie, con que exista un trigger o con que sea un `INSERT ... SELECT`
 para pedir el bloqueo de la base. Ante la duda, la base: un bloqueo de más solo

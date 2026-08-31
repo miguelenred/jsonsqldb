@@ -440,6 +440,42 @@ $casos = [
         "UPDATE art SET v = 'nuevo'",
         fn(Database $bd) => sinMezcla($bd, 'v', 300) === true ? indiceCuadra($bd) : sinMezcla($bd, 'v', 300),
     ],
+    // Desde la 2.2 una escritura solo reescribe las partes que pudieron cambiar.
+    // Estos dos casos son justo los que aprovechan ese camino: tocan una fila de
+    // una tabla de tres partes, así que dos de las tres no se reescriben. Si el
+    // cálculo de cuáles se equivoca, un corte deja una parte con datos de antes
+    // y otra con los de después.
+    'UPDATE de UNA fila (escritura parcial de partes)' => [
+        "UPDATE art SET v = 'solouna' WHERE id = 150",
+        function (Database $bd) {
+            $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'];
+            if ($n !== 300) { return "quedaron $n filas de 300"; }
+            // La fila 150 tiene el valor viejo o el nuevo, y NINGUNA otra puede
+            // haber cambiado: son las que viven en las partes no reescritas
+            $cambiadas = (int)$bd->consultar(
+                "SELECT COUNT(*) AS n FROM art WHERE v = 'solouna'")[0]['n'];
+            if ($cambiadas > 1) { return "cambiaron $cambiadas filas y solo tocaba una"; }
+            $intactas = (int)$bd->consultar(
+                "SELECT COUNT(*) AS n FROM art WHERE v = 'viejo'")[0]['n'];
+            if ($intactas !== 300 - $cambiadas) {
+                return "hay $intactas filas con el valor original y deberían ser " . (300 - $cambiadas);
+            }
+            return indiceCuadra($bd);
+        },
+    ],
+    'INSERT de UNA fila (solo cambia la última parte)' => [
+        "INSERT INTO art (ref, cat, v) VALUES ('nueva', 'c9', 'nueva')",
+        function (Database $bd) {
+            $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'];
+            if ($n !== 300 && $n !== 301) { return "quedaron $n filas (esperado 300 o 301)"; }
+            // Las 300 de antes tienen que seguir enteras, estén en la parte que
+            // se reescribió o en las que no
+            $viejas = (int)$bd->consultar(
+                "SELECT COUNT(*) AS n FROM art WHERE v = 'viejo'")[0]['n'];
+            if ($viejas !== 300) { return "solo quedan $viejas de las 300 filas originales"; }
+            return indiceCuadra($bd);
+        },
+    ],
     'UPDATE de la columna indexada' => [
         "UPDATE art SET cat = 'z'",
         fn(Database $bd) => indiceCuadra($bd),

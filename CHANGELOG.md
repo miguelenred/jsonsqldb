@@ -9,6 +9,113 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.2.0] - 2026-08-30
+
+Less memory and faster queries. Nothing breaking, no data conversion.
+
+### Fixed
+
+- **A read-only API key could not run `SHOW INDEXES`.** The list of statements a
+  `lectura` key may execute is kept by hand, and `show_indexes` was never added
+  when indexes arrived in 2.0 — even though it reveals nothing beyond the
+  structure, which the other `SHOW` statements already do. `f4_api.php` now walks
+  every `SHOW` with a read-only key, so adding one to the parser and forgetting
+  the list shows up as a failure.
+
+- **`Config::VERSION` was dead and stuck at `1.0.0`.** Nothing read it, so it
+  drifted several releases without anyone noticing. It is now
+  `Config::version()`, reading the `VERSION` file: one place that can state the
+  version instead of two that can disagree.
+
+
+### Changed
+
+- **`ORDER BY … LIMIT` no longer sorts everything to return a handful of rows.**
+  It keeps only the best N as it goes, in a heap of fixed size. On 50,000 rows,
+  `ORDER BY saldo DESC LIMIT 20` went from **457 ms and 63 MB to 169 ms and
+  38 MB**, and with `LIMIT 1000` from 443 ms to 201 ms.
+
+  The delicate part was proving it returns the same thing: ties break by the
+  row's original position, which is exactly what the stable sort did, so the rows
+  and their order are identical to sorting everything and slicing. Checked
+  against the full sort over 11 cases built with plenty of ties on purpose,
+  including `LIMIT 0`, an `OFFSET` past the end of the table, and a `LIMIT`
+  larger than the table.
+
+- **A write that can propagate no longer locks the whole database.** Writing to a
+  table does not always stay in it: a foreign key with `ON DELETE CASCADE` drags
+  child rows and a trigger can write anywhere, and that was enough to take the
+  exclusive database lock — so any other write waited, even to tables with no
+  relation to it at all.
+
+  The engine now works out the set of tables the write could reach before locking
+  anything: foreign keys in both directions and transitively, plus wherever the
+  triggers write, parsing their SQL rather than pattern-matching it. Only those
+  are locked. Two padre/hija groups with no relation between them now write at
+  the same time.
+
+  Two things make it safe. **All the locks are taken up front**, because asking
+  for one more halfway through a write is exactly how deadlocks happen. And they
+  are taken **in alphabetical order**, so two processes needing the same tables
+  ask in the same sequence: one waits for the other instead of both waiting
+  forever. It falls back to the database lock the moment the set cannot be
+  stated — a trigger whose SQL will not parse, an `INSERT ... SELECT`, any schema
+  change, or more than eight tables.
+
+  The journal follows: its scope is the first table of the set, the manifest
+  lists them all, and recovery takes the exclusive lock of every one of them —
+  without waiting — before undoing anything.
+
+  `f7_concurrencia.php` checks the two halves of the claim: two unrelated groups
+  overlap, and two writes to the same group do not. It measures overlap rather
+  than total time, because on a single-core machine two processes take the same
+  wall time whether they run together or in turn.
+
+- **A write only rewrites the parts that can have changed.** Inserting one row
+  into a table spread over a hundred part files rewrote all hundred. The writer
+  now tracks which positions changed and whether the rest shifted, and passes
+  that down. Writes are 20–25 % faster and the gap grows with the table: on
+  100,000 rows a single-row `INSERT` went from 384 ms to 294 ms.
+
+  Writes are 20–25 % faster and the gap grows with the table: on 100,000 rows a
+  single-row `INSERT` went from 272 ms to 221 ms, an `UPDATE` from 282 ms to
+  231 ms, and an `UPDATE` of the last twenty rows from 316 ms to 213 ms.
+
+  It falls back to rewriting everything at the slightest doubt: when the caller
+  did not say what changed, or when `JSONSQLDB_FILAS_POR_PARTE` is not the one
+  the table was written with — that one matters more than it looks, because
+  changing it moves the boundaries, so a part left untouched ends up holding rows
+  that are no longer its own. The part size is now noted in `<table>.rev.json`,
+  and the count of existing parts comes from the files on disk rather than from
+  arithmetic, because that is the one figure that cannot lie.
+
+  Two tests guard it. `f3_escrituras.php` runs ten kinds of write, forces a full
+  rewrite afterwards with the same rows, and demands that not a single byte
+  changes. `f9_journal.php` covers the part-size change across processes, and it
+  was written the hard way: the first version passed with the safeguard removed,
+  because the cache was serving the correct rows under the new revision and
+  hiding the damage on disk. Reading past the cache, removing the safeguard
+  leaves 160 rows out of 200 — which is the point of having the test.
+
+- **The source rows are released while the result is built.** They used to live
+  alongside the finished result until the loop ended, which is two copies of the
+  same data at the peak. The order keys are no longer built either when there is
+  no `ORDER BY` to use them.
+
+- **Writing a part no longer builds its JSON in memory first.** It is written row
+  by row to the file, so the row array, the complete string and each row's
+  `json_encode` no longer coexist. Same guarantees as before — temporary file,
+  `fsync`, `rename` — and the output is identical byte for byte.
+
+### Note
+
+The queries that were already fast stay the same, within measurement noise: this
+release moves `ORDER BY` and writes, and touches nothing else. What is left for
+memory is the query engine materialising whole tables in arrays — turning
+`Select::cargar()` into a generator, and having `agrupar()` keep aggregation
+state instead of every row of every group. Both are large enough to deserve their
+own release.
+
 ## [2.1.1] - 2026-08-30
 
 Fixes over 2.1.0. Nothing breaking. Most of these come from external reviews of

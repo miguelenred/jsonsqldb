@@ -422,6 +422,90 @@ chk('dos procesos escribiendo tablas distintas a la vez no se pisan', function (
     return $restos === [] ?: 'quedaron temporales: ' . implode(', ', array_map('basename', $restos));
 });
 
+echo "\n== Bloqueo por tablas con claves foráneas ==\n";
+
+chk('dos escrituras sobre grupos de tablas sin relación no se esperan', function () use ($raiz) {
+    // Una escritura con claves foráneas o triggers puede propagar a otras
+    // tablas, y hasta la 2.2 eso obligaba a bloquear la base entera: cualquier
+    // otra escritura, aunque fuera a tablas que no tienen nada que ver, tenía
+    // que esperar.
+    //
+    // Ahora se calcula antes el conjunto de tablas alcanzables y se bloquean
+    // solo esas. Aquí hay dos grupos padre/hija independientes: escribir en uno
+    // no puede hacer esperar al otro.
+    //
+    // Se mide por solapamiento y no por tiempo total: esta máquina tiene un solo
+    // núcleo, así que dos procesos que van a la vez tardan lo mismo que en fila.
+    // Lo que se comprueba es si el segundo ENTRA mientras el primero retiene.
+    $dir = $raiz . '/fk';
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+
+    Database::crear('f', $dir);
+    $bd = new Database('f', $dir);
+    foreach (['a', 'b'] as $g) {
+        $bd->consultar("CREATE TABLE {$g}padre (id INTEGER PRIMARY KEY, v INTEGER)");
+        $bd->consultar("CREATE TABLE {$g}hija (id INTEGER PRIMARY KEY, pid INTEGER)");
+        $bd->consultar("ALTER TABLE {$g}hija ADD CONSTRAINT fk_$g
+                        FOREIGN KEY (pid) REFERENCES {$g}padre(id) ON DELETE CASCADE");
+        $bd->consultar("INSERT INTO {$g}padre VALUES (1, 0)");
+    }
+    unset($bd);
+
+    // Cada hijo toma los bloqueos de su grupo, dice cuándo entra y cuándo sale,
+    // y los retiene un rato en medio
+    $hijo = static function (string $grupo) use ($dir): string {
+        return 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+             . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+             . '$st = new JsonSQLDB\\Storage(' . var_export($dir, true) . ', "f");'
+             . '$st->bloquear(true, ["' . $grupo . 'hija", "' . $grupo . 'padre"]);'
+             . 'echo microtime(true), " ";'
+             . 'usleep(250000);'
+             . 'echo microtime(true);'
+             . '$st->desbloquear();';
+    };
+
+    $lanzar = static function (string $codigo) {
+        return proc_open([PHP_BINARY, '-r', $codigo],
+                         [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub) ?: null;
+    };
+
+    $ventanas = [];
+    foreach ([['a', 'b'], ['a', 'a']] as $par) {
+        $procs = [];
+        foreach ($par as $g) {
+            $p = proc_open([PHP_BINARY, '-r', $hijo($g)],
+                           [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+            if (!is_resource($p)) { borrarArbol($dir); return 'no se pudo lanzar el proceso'; }
+            $procs[] = [$p, $tub];
+            usleep(30000);                          // que el primero llegue antes
+        }
+        $tiempos = [];
+        foreach ($procs as [$p, $tub]) {
+            $salida = '';
+            foreach ($tub as $t) { $salida .= stream_get_contents($t); fclose($t); }
+            proc_close($p);
+            $partes = preg_split('/\s+/', trim($salida));
+            if (count($partes) !== 2 || !is_numeric($partes[0])) {
+                borrarArbol($dir);
+                return 'un proceso no dio sus tiempos: ' . substr(trim($salida), 0, 150);
+            }
+            $tiempos[] = [(float)$partes[0], (float)$partes[1]];
+        }
+        // ¿Se solapan las dos ventanas de retención?
+        $ventanas[] = $tiempos[0][0] < $tiempos[1][1] && $tiempos[1][0] < $tiempos[0][1];
+    }
+    borrarArbol($dir);
+
+    if (!$ventanas[0]) {
+        return 'dos grupos sin relación se esperaron: el bloqueo sigue siendo de base';
+    }
+    if ($ventanas[1]) {
+        return 'dos escrituras del MISMO grupo se solaparon: no se están excluyendo';
+    }
+    return true;
+});
+
 echo "\n== Limpieza ==\n";
 chk('borrar la base de pruebas', function () use ($raiz) {
     borrarArbol($raiz);

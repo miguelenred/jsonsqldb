@@ -25,6 +25,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
 use JsonSQLDB\Storage;
+use JsonSQLDB\Catalog;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_journal';
 $ok = 0; $ko = 0;
@@ -651,6 +652,163 @@ chk('tras deshacerlo la base sigue siendo utilizable', function () use ($raiz) {
     $bd->consultar("INSERT INTO t (ref, cat, v) VALUES ('nuevo', 'c9', 'z')");
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'] === 121
         && count($bd->consultar("SELECT id FROM t WHERE ref = 'nuevo'")) === 1;
+});
+
+// ----------------------------------------------------------------------
+// El fichero de revisión, que ahora decide qué partes se reescriben
+// ----------------------------------------------------------------------
+
+echo "\n== Cuando el fichero de revisión no es de fiar ==\n";
+
+/**
+ * Desde la 2.2 una escritura solo rehace las partes que pudieron cambiar, y para
+ * saber si las demás siguen valiendo mira cómo quedó la tabla la última vez:
+ * cuántas filas y con qué tamaño de parte, anotado en `<tabla>.rev.json`.
+ *
+ * Eso es información nueva de la que depende la integridad, así que hay que
+ * comprobar qué pasa cuando no cuadra. Un corte de luz, una copia de seguridad
+ * restaurada a medias o un cambio de JSONSQLDB_FILAS_POR_PARTE pueden dejarla
+ * mintiendo. La regla es que ante la duda se reescriba todo.
+ */
+function conRevisionTocada(string $raiz, callable $tocar): bool|string
+{
+    $dir = "$raiz/j";
+    preparar($raiz, 200);                          // varias partes: partes de 40
+
+    $bd = new Database('j', $raiz);
+    $antes = $bd->consultar('SELECT * FROM t ORDER BY id');
+    unset($bd);
+
+    // Se estropea la anotación de cómo quedó la tabla
+    $fichero = "$dir/t.rev.json";
+    $json = json_decode((string)file_get_contents($fichero), true);
+    $json = $tocar($json);
+    file_put_contents($fichero, json_encode($json) . "\n");
+
+    // Una escritura cualquiera: la que tiene que decidir qué partes rehacer
+    $bd = new Database('j', $raiz);
+    $bd->consultar("UPDATE t SET v = 'tocada' WHERE id = 5");
+    $despues = $bd->consultar('SELECT * FROM t ORDER BY id');
+    unset($bd);
+
+    if (count($despues) !== count($antes)) {
+        return 'quedaron ' . count($despues) . ' filas de ' . count($antes);
+    }
+    // Solo la fila 5 puede haber cambiado
+    foreach ($antes as $i => $fila) {
+        $esperada = (int)$fila['id'] === 5 ? 'tocada' : $fila['v'];
+        if ($despues[$i]['id'] !== $fila['id'] || $despues[$i]['v'] !== $esperada) {
+            return "la fila {$fila['id']} cambió cuando no debía";
+        }
+    }
+
+    // Y los ficheros tienen que ser los mismos que si se reescribiera todo: si
+    // se saltó una parte que sí cambiaba, aquí se ve
+    $ficheros = static function (string $dir): array {
+        $out = [];
+        foreach ((array)glob("$dir/t*.json") as $f) {
+            $n = basename((string)$f);
+            if (str_ends_with($n, '.rev.json') || str_contains($n, '.idx.')) {
+                continue;                          // llevan dentro la revisión
+            }
+            $out[$n] = md5_file((string)$f);
+        }
+        ksort($out);
+        return $out;
+    };
+    $parcial = $ficheros("$raiz/j");
+
+    $st = new Storage($raiz, 'j');
+    $st->bloquear(true);
+    $cat  = new Catalog($st);
+    $meta = $cat->meta('t');
+    $st->guardarTabla('t', $st->leerFilas('t', true), null, Indexes::definiciones($meta));
+    $st->desbloquear();
+    unset($st, $cat);
+
+    $completa = $ficheros("$raiz/j");
+    if ($parcial !== $completa) {
+        $dif = [];
+        foreach ($completa as $f => $md5) {
+            if (($parcial[$f] ?? null) !== $md5) { $dif[] = $f; }
+        }
+        return 'difieren de una reescritura completa: ' . implode(', ', $dif);
+    }
+    return true;
+}
+
+chk('cambiar el tamaño de parte con datos ya escritos no corrompe la tabla', function () use ($raiz) {
+    // Una escritura solo rehace las partes que pudieron cambiar. Eso vale
+    // mientras los límites de las partes sean los mismos, y dejan de serlo si
+    // se cambia JSONSQLDB_FILAS_POR_PARTE con datos ya en disco: con partes de
+    // 40 la segunda tiene las filas 40-79, y con partes de 80 las 80-159.
+    // Saltársela dejaría ahí las filas de antes.
+    //
+    // Hace falta cambiar el ajuste ENTRE PROCESOS: es una constante.
+    //
+    // Y hay que leer sin caché. La escritura deja las filas correctas cacheadas
+    // bajo la revisión nueva, así que leer del modo normal devuelve lo correcto
+    // aunque el disco esté mal: la primera versión de esta prueba daba por bueno
+    // justo el caso que tenía que cazar.
+    $dir = "$raiz/cambiaparte";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+
+    $correr = static function (int $parte, string $codigo): string {
+        $c = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+           . 'define("JSONSQLDB_FILAS_POR_PARTE", ' . $parte . ');'
+           . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+           . $codigo;
+        return trim((string)shell_exec(
+            escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($c) . ' 2>&1'));
+    };
+    $d = var_export($dir, true);
+
+    // Cinco partes de 40
+    $correr(40,
+        'JsonSQLDB\\Database::crear("g", ' . $d . ');'
+      . '$bd = new JsonSQLDB\\Database("g", ' . $d . ');'
+      . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, v VARCHAR(20))");'
+      . '$v = []; for ($i = 1; $i <= 200; $i++) { $v[] = "($i, " . chr(39) . "f$i" . chr(39) . ")"; }'
+      . '$bd->consultar("INSERT INTO t VALUES " . implode(",", $v));');
+
+    $partes = count((array)glob("$dir/g/t.part*.json")) + 1;
+    if ($partes !== 5) {
+        borrarArbol($dir);
+        return "se esperaban 5 partes y hay $partes";
+    }
+
+    // Ahora con partes de 80: la tabla pasa a necesitar tres
+    $correr(80, '$bd = new JsonSQLDB\\Database("g", ' . $d . ');'
+              . '$bd->consultar("UPDATE t SET v = " . chr(39) . "X" . chr(39) . " WHERE id = 5");');
+
+    borrarArbol("$dir/g/.cache");                  // que responda el disco, no la caché
+
+    $salida = $correr(80,
+        '$bd = new JsonSQLDB\\Database("g", ' . $d . ');'
+      . '$f = $bd->consultar("SELECT id, v FROM t ORDER BY id");'
+      . '$mal = count($f) !== 200 ? ("quedan " . count($f) . " filas de 200") : "";'
+      . 'if ($mal === "") { foreach ($f as $x) {'
+      . '  $e = (int)$x["id"] === 5 ? "X" : "f" . $x["id"];'
+      . '  if ($x["v"] !== $e) { $mal = "la fila " . $x["id"] . " vale " . $x["v"]; break; } } }'
+      . 'echo $mal === "" ? "ok" : $mal;');
+
+    borrarArbol($dir);
+    return $salida === 'ok' ?: $salida;
+});
+
+chk('un recuento de filas que no cuadra no rompe la tabla', function () use ($raiz) {
+    return conRevisionTocada($raiz, static function (array $j): array {
+        $j['rows'] = 999999;
+        return $j;
+    });
+});
+
+chk('un fichero de revisión de la 2.1, sin recuento, se acepta y reescribe todo', function () use ($raiz) {
+    // Las bases escritas con 2.1.x no tienen 'rows' ni 'chunk'
+    return conRevisionTocada($raiz, static function (array $j): array {
+        return ['rev' => $j['rev']];
+    });
 });
 
 echo "\n== Limpieza ==\n";

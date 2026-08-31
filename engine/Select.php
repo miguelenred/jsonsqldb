@@ -220,21 +220,30 @@ final class Select
                     $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
                 }
                 Memoria::comprobar('la construcción del resultado');
-                $resultado[]   = $fila;
-                $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
+                $resultado[] = $fila;
+                if ($orden !== []) {
+                    $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
+                }
             }
         } else {
-            foreach ($filas as $f) {
+            // Se va soltando cada fila de origen según se proyecta. Si no, la
+            // tabla leída y el resultado conviven enteros hasta el final del
+            // bucle, o sea dos copias de lo mismo en el pico.
+            foreach (array_keys($filas) as $k) {
                 Memoria::comprobar('la construcción del resultado');
-                $ctx  = ['fila' => $f, 'sub' => $sub, 'conjunto' => $conjunto,
+                $ctx  = ['fila' => $filas[$k], 'sub' => $sub, 'conjunto' => $conjunto,
                          'filaExterna' => $externa];
                 $fila = [];
                 foreach ($salida as $c) {
                     $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
                 }
-                Memoria::comprobar('la construcción del resultado');
-                $resultado[]   = $fila;
-                $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
+                unset($filas[$k]);
+                $resultado[] = $fila;
+                // Sin ORDER BY no hay nada que ordenar: construir las claves
+                // sería un array más por fila para tirarlo enseguida
+                if ($orden !== []) {
+                    $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
+                }
             }
         }
 
@@ -253,7 +262,9 @@ final class Select
                 }
                 $vistos[$clave] = true;
                 $r[] = $fila;
-                $k[] = $clavesOrden[$i];
+                if ($orden !== []) {
+                    $k[] = $clavesOrden[$i];
+                }
             }
             $resultado   = $r;
             $clavesOrden = $k;
@@ -261,8 +272,7 @@ final class Select
 
         // ORDER BY
         if ($orden !== []) {
-            $indices = array_keys($resultado);
-            usort($indices, static function (int $a, int $b) use ($clavesOrden, $orden): int {
+            $comparar = static function (int $a, int $b) use ($clavesOrden, $orden): int {
                 foreach ($orden as $i => $o) {
                     $c = Valor::compararOrden($clavesOrden[$a][$i], $clavesOrden[$b][$i]);
                     if ($c !== 0) {
@@ -270,7 +280,21 @@ final class Select
                     }
                 }
                 return $a <=> $b;                        // orden estable
-            });
+            };
+
+            // Con LIMIT no hace falta ordenarlo todo: basta con quedarse con las
+            // primeras. Ordenar un millón de filas para devolver diez es tirar
+            // el trabajo, y además obliga a tener el resultado entero ordenado
+            // en memoria a la vez.
+            //
+            // El desempate por posición original es el mismo que usa el orden
+            // estable de arriba, así que las filas que salen y su orden son
+            // EXACTAMENTE los mismos que ordenando entero y cortando después.
+            $cuantas = self::cuantasHacenFalta($ast);
+            $indices = $cuantas !== null && $cuantas < count($resultado)
+                ? self::primeras(array_keys($resultado), $cuantas, $comparar)
+                : self::todasOrdenadas(array_keys($resultado), $comparar);
+
             $ordenadas = [];
             foreach ($indices as $i) {
                 $ordenadas[] = $resultado[$i];
@@ -288,6 +312,89 @@ final class Select
             $cols[] = $c['nombre'];
         }
         return ['cols' => $cols, 'filas' => $resultado];
+    }
+
+    /**
+     * Cuántas filas hay que dejar ordenadas para responder, o null si todas.
+     *
+     * Con `LIMIT 10 OFFSET 5` hacen falta las 15 primeras: el OFFSET se aplica
+     * después sobre ellas.
+     */
+    private static function cuantasHacenFalta(array $ast): ?int
+    {
+        if ($ast['limit'] === null) {
+            return null;                          // sin LIMIT hay que ordenarlo todo
+        }
+        $limite = (int)$ast['limit'];
+        $salto  = (int)($ast['offset'] ?? 0);
+        if ($limite < 0 || $salto < 0) {
+            return null;
+        }
+        return $limite + $salto;
+    }
+
+    /**
+     * Ordena la lista entera.
+     *
+     * @param list<int> $indices
+     */
+    private static function todasOrdenadas(array $indices, callable $comparar): array
+    {
+        usort($indices, $comparar);
+        return $indices;
+    }
+
+    /**
+     * Las $cuantas primeras según $comparar, sin ordenar el resto.
+     *
+     * Mantiene un montón con las mejores vistas hasta ahora: cada fila nueva se
+     * compara con la peor de ellas y se descarta enseguida si no entra. Así el
+     * coste pasa de ordenar n elementos a recorrerlos comparando contra un
+     * conjunto de tamaño fijo, y en memoria solo viven esas $cuantas posiciones.
+     *
+     * @param list<int> $indices
+     * @return list<int>
+     */
+    private static function primeras(array $indices, int $cuantas, callable $comparar): array
+    {
+        if ($cuantas <= 0) {
+            return [];                            // LIMIT 0: no hace falta ninguna
+        }
+        // Montón con el PEOR de los elegidos arriba, para poder echarlo cuando
+        // entre uno mejor. compare() devuelve positivo si el primero va más
+        // arriba, así que basta con devolver la comparación tal cual.
+        $monton = new class ($comparar) extends \SplHeap {
+            /** @var callable */
+            private $comparar;
+
+            public function __construct(callable $comparar)
+            {
+                $this->comparar = $comparar;
+            }
+
+            protected function compare($a, $b): int
+            {
+                return ($this->comparar)($a, $b);
+            }
+        };
+
+        foreach ($indices as $i) {
+            if ($monton->count() < $cuantas) {
+                $monton->insert($i);
+                continue;
+            }
+            if ($comparar($i, $monton->top()) < 0) {
+                $monton->extract();
+                $monton->insert($i);
+            }
+        }
+
+        $elegidos = [];
+        foreach ($monton as $i) {
+            $elegidos[] = $i;
+        }
+        usort($elegidos, $comparar);              // son pocas: ordenarlas es barato
+        return $elegidos;
     }
 
     /**

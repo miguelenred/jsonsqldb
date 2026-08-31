@@ -368,7 +368,8 @@ try {
         $operacion = strtoupper(str_replace('_', ' ', $tipo));
 
         $lectura   = ['select', 'union', 'show_databases', 'show_tables', 'show_views',
-                      'show_schema', 'show_keys', 'show_triggers', 'check_keys'];
+                      'show_schema', 'show_keys', 'show_triggers', 'show_indexes',
+                      'check_keys'];
         $escritura = array_merge($lectura, ['insert', 'update', 'delete', 'repair_keys']);
 
         if ($permiso === 'lectura' && !in_array($tipo, $lectura, true)) {

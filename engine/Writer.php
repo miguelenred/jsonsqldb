@@ -198,10 +198,54 @@ final class Writer
         return $this->datos[$tabla] ??= $this->cat->storage()->leerFilas($tabla);
     }
 
-    private function ponerFilas(string $tabla, array $filas): void
+    /**
+     * Qué posiciones cambió cada tabla, para no reescribirla entera al guardar.
+     *
+     *   desde[t]   a partir de esa posición las filas se han desplazado
+     *   sueltas[t] posiciones que cambiaron sin mover a las demás
+     *   sabe[t]    si se puede afirmar lo anterior; si no, se reescribe todo
+     *
+     * @var array<string,int>            $desde
+     * @var array<string,array<int,true>> $sueltas
+     * @var array<string,bool>           $sabe
+     */
+    private array $desde   = [];
+    private array $sueltas = [];
+    private array $sabe    = [];
+
+    /** Cambió a partir de $pos, desplazando lo que venga detrás. */
+    private function marcarDesde(string $tabla, int $pos): void
+    {
+        $this->desde[$tabla] = min($this->desde[$tabla] ?? PHP_INT_MAX, max(0, $pos));
+        $this->sabe[$tabla]  = $this->sabe[$tabla] ?? true;
+    }
+
+    /** Cambió UNA fila y las demás siguen donde estaban. */
+    private function marcarSuelta(string $tabla, int $pos): void
+    {
+        $this->sueltas[$tabla][$pos] = true;
+        $this->sabe[$tabla] = $this->sabe[$tabla] ?? true;
+    }
+
+    /** No se sabe qué cambió: al guardar se reescribe la tabla entera. */
+    private function marcarTodo(string $tabla): void
+    {
+        $this->sabe[$tabla] = false;
+    }
+
+    /**
+     * @param int|null $desde posición desde la que se desplazan las filas, o
+     *                        null si quien llama no lo sabe (se reescribe todo)
+     */
+    private function ponerFilas(string $tabla, array $filas, ?int $desde = null): void
     {
         $this->datos[$tabla]      = $filas;
         $this->sucioDatos[$tabla] = true;
+        if ($desde === null) {
+            $this->marcarTodo($tabla);
+        } else {
+            $this->marcarDesde($tabla, $desde);
+        }
         foreach (array_keys($this->idxPadre) as $clave) {
             if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
                 unset($this->idxPadre[$clave]);
@@ -222,6 +266,7 @@ final class Writer
     {
         $this->datos[$tabla][$pos] = $fila;
         $this->sucioDatos[$tabla]  = true;
+        $this->marcarSuelta($tabla, $pos);        // no mueve a las demás
         foreach (array_keys($this->idxPadre) as $clave) {
             if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
                 unset($this->idxPadre[$clave]);
@@ -241,6 +286,7 @@ final class Writer
     {
         unset($this->datos[$tabla][$pos]);
         $this->sucioDatos[$tabla] = true;
+        $this->marcarDesde($tabla, $pos);         // al compactar se mueve lo de detrás
         foreach (array_keys($this->idxPadre) as $clave) {
             if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
                 unset($this->idxPadre[$clave]);
@@ -341,9 +387,20 @@ final class Writer
             // tabla no basta: si se entró con el exclusivo de la base —porque la
             // tabla tiene claves foráneas, triggers, o alguien la referencia— el
             // journal es de base, no suyo.
-            $ambito = count($tablas) === 1 && $st->tieneExclusivoDe((string)$tablas[0])
-                ? (string)$tablas[0]
-                : null;
+            // El ámbito es una tabla concreta solo si se tiene el exclusivo de
+            // TODAS las que toca la escritura: al deshacer harán falta todos.
+            // Si alguna no está bloqueada, se entró con el exclusivo de la base
+            // y el journal es de base.
+            $conBloqueo = true;
+            foreach ($tablas as $t) {
+                if (!$st->tieneExclusivoDe((string)$t)) {
+                    $conBloqueo = false;
+                    break;
+                }
+            }
+            $ordenadas = $tablas;
+            sort($ordenadas, SORT_STRING);
+            $ambito = $conBloqueo ? (string)$ordenadas[0] : null;
             $st->txIniciar('ESCRITURA', $tablas, $ambito);
         }
 
@@ -352,7 +409,10 @@ final class Writer
                 $tabla,
                 isset($this->sucioDatos[$tabla]) ? $this->datos[$tabla] : null,
                 isset($this->sucioMeta[$tabla]) ? Catalog::compactar($this->metas[$tabla]) : null,
-                Indexes::definiciones($this->metas[$tabla] ?? $this->cat->meta($tabla))
+                Indexes::definiciones($this->metas[$tabla] ?? $this->cat->meta($tabla)),
+                $this->desde[$tabla] ?? null,
+                array_keys($this->sueltas[$tabla] ?? []),
+                ($this->sabe[$tabla] ?? false) === true
             );
         }
 
@@ -362,6 +422,9 @@ final class Writer
 
         $this->sucioDatos = [];
         $this->sucioMeta  = [];
+        $this->desde      = [];
+        $this->sueltas    = [];
+        $this->sabe       = [];
         $this->cat->olvidar();
     }
 
@@ -462,9 +525,12 @@ final class Writer
             $this->comprobarUnicos($tabla, $meta, $nueva, $indices, null);
             $this->comprobarForaneas($tabla, $meta, $nueva);
 
+            // Se añade al final: nada de lo anterior se mueve, así que solo
+            // cambia la última parte
+            $posNueva = count($filas);
             $filas[] = $nueva;
             $this->anadirAIndices($meta, $nueva, $indices);
-            $this->ponerFilas($tabla, $filas);
+            $this->ponerFilas($tabla, $filas, $posNueva);
             $puestas++;
 
             $this->lanzarTriggers($tabla, 'AFTER', 'INSERT', $nueva, null);

@@ -13,6 +13,8 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
+use JsonSQLDB\Catalog;
+use JsonSQLDB\Indexes;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f3';
 $base = 'gestion';
@@ -449,6 +451,82 @@ chk('un DELETE masivo también', function () use ($raiz) {
     $factor = $porFila[1000] > 0 ? $porFila[4000] / $porFila[1000] : 0;
     return $factor < 2.5
         ?: sprintf('el coste por fila se multiplicó por %.1f al cuadruplicar', $factor);
+});
+
+echo "\n== Escritura parcial de partes ==\n";
+
+chk('reescribir solo las partes que cambian deja lo mismo que reescribirlas todas', function () use ($raiz) {
+    // Se hace la operación, se fuerza después una reescritura COMPLETA con las
+    // mismas filas, y se exige que ningún fichero cambie ni un byte. Si el
+    // cálculo de qué partes tocar se equivoca, la que no se reescribió se queda
+    // con datos viejos y aquí se ve.
+    $ops = [
+        "INSERT INTO pp (v, c) VALUES ('nueva', 'z')",
+        "INSERT INTO pp (v, c) VALUES ('a','q'),('b','q'),('c','q')",
+        "UPDATE pp SET v = 'X' WHERE id = 1",
+        "UPDATE pp SET v = 'Y' WHERE id = 260",
+        "UPDATE pp SET v = 'Z' WHERE c = 'c1'",
+        "UPDATE pp SET c = 'w'",
+        "DELETE FROM pp WHERE id = 3",
+        "DELETE FROM pp WHERE id > 250",
+        "DELETE FROM pp WHERE id < 20",
+        "DELETE FROM pp",
+    ];
+    $huella = static function (string $dir): array {
+        $out = [];
+        foreach ((array)glob("$dir/pp*.json") as $f) {
+            $n = basename((string)$f);
+            if (str_ends_with($n, '.rev.json')) { continue; }
+            if (str_contains($n, '.idx.')) {
+                $j = json_decode((string)file_get_contents((string)$f), true);
+                unset($j['rev']);                  // sube en toda escritura
+                $out[$n] = md5((string)json_encode($j));
+                continue;
+            }
+            $out[$n] = md5_file((string)$f);
+        }
+        ksort($out);
+        return $out;
+    };
+
+    foreach ($ops as $sql) {
+        $dir = $raiz . '/parcial';
+        @mkdir($dir, 0775, true);
+        Database::crear('p', $dir);
+        $bd = new Database('p', $dir);
+        $bd->consultar('CREATE TABLE pp (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         v VARCHAR(20), c VARCHAR(10))');
+        $bd->consultar('CREATE INDEX ix ON pp (c)');
+        $vals = [];
+        for ($i = 1; $i <= 280; $i++) { $vals[] = "($i,'v$i','c" . ($i % 5) . "')"; }
+        $bd->consultar('INSERT INTO pp (id,v,c) VALUES ' . implode(',', $vals));
+        $bd->consultar($sql);
+        unset($bd);
+
+        $parcial = $huella("$dir/p");
+
+        $st = new Storage($dir, 'p');
+        $st->bloquear(true);
+        $cat  = new Catalog($st);
+        $meta = $cat->meta('pp');
+        // Sin decirle qué cambió: rehace todas las partes
+        $st->guardarTabla('pp', $st->leerFilas('pp', true), null, Indexes::definiciones($meta));
+        $st->desbloquear();
+        unset($st, $cat);
+
+        $completa = $huella("$dir/p");
+        Database::borrar('p', $dir);
+        @rmdir($dir);
+
+        if ($parcial !== $completa) {
+            $dif = [];
+            foreach ($completa as $f => $md5) {
+                if (($parcial[$f] ?? null) !== $md5) { $dif[] = $f; }
+            }
+            return "tras '$sql' difieren: " . implode(', ', $dif);
+        }
+    }
+    return true;
 });
 
 echo "\n== Limpieza ==\n";
