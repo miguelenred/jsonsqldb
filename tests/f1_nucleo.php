@@ -484,21 +484,29 @@ chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz)
           . 'for ($i = 0; $i < 12; $i++) { $bd->consultar("INSERT INTO t (v) VALUES $v", $p); }';
     shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
 
-    $leer = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+    // COUNT(v) y no COUNT(*): desde 2.4.0 el COUNT(*) cuenta líneas sin cargar
+    // nada, así que ya no sirve de sonda para el corte. COUNT(v) sigue el
+    // camino normal y materializa la tabla, que es lo que se quiere cortar.
+    $sonda = static fn(string $sql): string => 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
           . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
           . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
-          . 'try { echo $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]; }'
+          . 'try { echo $bd->consultar(' . var_export($sql, true) . ')[0]["n"]; }'
           . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }';
 
     // Con poca memoria: corte explicado. Con suficiente: la consulta sale.
     $poco  = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=12M -r '
-           . escapeshellarg($leer) . ' 2>&1'));
+           . escapeshellarg($sonda('SELECT COUNT(v) AS n FROM t')) . ' 2>&1'));
     $mucho = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=256M -r '
-           . escapeshellarg($leer) . ' 2>&1'));
+           . escapeshellarg($sonda('SELECT COUNT(v) AS n FROM t')) . ' 2>&1'));
+    // Y el COUNT(*) de 2.4.0 tiene que salir justo donde la tabla no cabe:
+    // cuenta líneas, no depende del memory_limit ni de lo que haya en caché.
+    $atajo = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=12M -r '
+           . escapeshellarg($sonda('SELECT COUNT(*) AS n FROM t')) . ' 2>&1'));
 
     exec('rm -rf ' . escapeshellarg($base));
-    return ($poco === 'MEMORIA' && $mucho === '10800')
-        ?: "12M -> " . substr($poco, 0, 50) . " | 256M -> " . substr($mucho, 0, 50);
+    return ($poco === 'MEMORIA' && $mucho === '10800' && $atajo === '10800')
+        ?: "12M -> " . substr($poco, 0, 50) . " | 256M -> " . substr($mucho, 0, 50)
+         . " | COUNT(*) 12M -> " . substr($atajo, 0, 50);
 });
 chk('los datos siguen intactos tras el corte', function () use ($raiz) {
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'

@@ -19,7 +19,14 @@ configuration constants, and the on-disk format of `data/`.
   the row count, not from the rows.** The engine writes one row per line, so
   counting is reading lines: no `json_decode`, no materialised table, and the
   memory peak is one line. On 100,000 rows it went from 180 ms to 22 ms, and it
-  no longer depends on the table fitting in memory.
+  no longer depends on the table fitting in memory — including the cache:
+  counting skips the whole-table cache on purpose, because reading that cache
+  is the one thing that could still not fit. CI caught exactly that: the same
+  `COUNT(*)` under a 12 MB limit passed or failed depending on whether the PHP
+  version's memory baseline let the cache be read. `tests/f1_nucleo.php` now
+  probes the memory guard with `COUNT(v)`, which still materialises the table,
+  and separately demands that `COUNT(*)` succeed right where the table does
+  not fit.
 
   The shortcut steps aside for anything it cannot answer by counting: a `WHERE`,
   `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT`/`OFFSET`, more than one

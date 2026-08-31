@@ -935,16 +935,20 @@ final class Storage
         return $filas;
     }
 
-    /** Cuenta las filas de una tabla sin llegar a construirlas en memoria. */
+    /**
+     * Cuenta las filas de una tabla sin llegar a construirlas en memoria.
+     *
+     * A propósito no mira la caché de tabla completa: contar líneas cuesta menos
+     * que deserializarla, y sobre todo no depende de que quepa en memoria. Con
+     * la caché delante, el mismo COUNT salía o se cortaba según el memory_limit
+     * y la versión de PHP dejaran leerla o no — el CI lo cazó en cuanto existió
+     * el atajo.
+     */
     public function contarFilas(string $tabla): int
     {
         self::validarTabla($tabla);
         $this->bloquearLectura($tabla);
 
-        $filas = $this->cacheLeer($this->claveCache($tabla, 'd'));
-        if ($filas !== null) {
-            return count($filas);
-        }
         $n = 0;
         for ($parte = 1; ; $parte++) {
             $fichero = $this->ficheroDatos($tabla, $parte);
