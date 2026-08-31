@@ -309,23 +309,8 @@ $rows = $db->consultar('SELECT * FROM customers WHERE city = ?', ['Madrid']);
 $db->consultar('INSERT INTO customers (name, balance) VALUES (?, ?)', ["O'Donnell", 10.55]);
 ```
 
-```python
-from cliente_ejemplo import JsonSqlDbCliente
-
-db = JsonSqlDbCliente("https://yourserver/jsonsqldb/api/jsonsqldb_api.php",
-                      "YOUR_API_KEY", "THAT_KEY_S_HMAC_SECRET", "mydatabase")
-
-rows = db.consultar("SELECT * FROM customers WHERE city = ?", ["Madrid"])
-```
-
-```powershell
-. .\cliente_ejemplo.ps1
-
-Set-JsonSqlDbConexion -Url 'https://yourserver/jsonsqldb/api/jsonsqldb_api.php' `
-                      -ApiKey 'YOUR_API_KEY' -HmacSecret 'YOUR_HMAC_SECRET' -Base 'mydatabase'
-
-API-SQL-JSON "SELECT * FROM customers WHERE city = ?" @('Madrid')
-```
+The Python and PowerShell clients work the same way; each file opens with a
+usage example.
 
 ### Values never go into the SQL string
 
@@ -372,21 +357,8 @@ anything exposed to third parties, use the API.
 
 ### Examples
 
-With Composer's autoloader:
-
-```php
-require 'vendor/autoload.php';
-
-define('JSONSQLDB_CONEXION_DIRECTA', true);
-define('JSONSQLDB_DATA_PATH', __DIR__ . '/data');
-
-$db = new JsonSQLDB\Database('mydatabase');
-
-$rows = $db->consultar('SELECT * FROM customers WHERE city = ?', ['Madrid']);
-$db->consultar('INSERT INTO customers (name, balance) VALUES (?, ?)', ["O'Donnell", 10.55]);
-```
-
-Without Composer, requiring the project's own bootstrap:
+With Composer, `require 'vendor/autoload.php';` instead of the bootstrap.
+Requiring the project's own bootstrap:
 
 ```php
 require 'config.php';                    // your settings, with direct access on
@@ -411,20 +383,6 @@ JsonSQLDB\Database::crear('another');
 print_r(JsonSQLDB\Database::bases());
 ```
 
-A migration script, which is the case this is really for:
-
-```php
-require 'config.php';
-require 'engine/bootstrap.php';
-
-$db = new JsonSQLDB\Database('mydatabase');
-
-foreach ($db->consultar('SELECT id, email FROM customers WHERE email IS NOT NULL') as $row) {
-    $db->consultar('UPDATE customers SET email = ? WHERE id = ?',
-                   [strtolower(trim($row['email'])), $row['id']]);
-}
-```
-
 Errors arrive as `JsonSQLDB\JsonSqlDbError`, which carries a `sqlState` telling
 you what kind of problem it was:
 
@@ -445,27 +403,11 @@ it talks to `jsonsqldb_api.php` over HTTP exactly like your application does, an
 never touches the engine or the data files directly. On XAMPP, uncomment
 `extension=curl` in `php.ini`.
 
-What it does:
-
-- Create, list, back up and drop databases
-- Create, rename, empty and drop tables; full column editing (type, length,
-  decimals, `NOT NULL`, `UNIQUE`, `DEFAULT`)
-- Primary keys (including composite ones, added after the fact), unique keys and
-  foreign keys with `ON DELETE` / `ON UPDATE`
-- Views: create, list and drop, with a jump to the SQL editor
-- Referential integrity check and repair
-- A trigger wizard with a live preview of the generated statement
-- Browse, filter, sort, insert, edit and delete rows
-- A SQL editor for anything else
-- Export a table or a query result to **CSV** or to **INSERT statements**;
-  export a whole database as a **SQL dump** or a **ZIP** of its files, and
-  restore that ZIP back (both read and write the engine's files from disk, so
-  they are only offered when the panel and the API share a host)
-- An optional read-only API key, so the engine itself refuses writes from
-  read-only users rather than trusting the panel's own check
-- Its own users with `admin` / `read-only` roles, bcrypt passwords, session
-  expiry, per-IP lockout after failed logins, CSRF tokens on every form, and a
-  daily audit trail
+It manages databases, tables, columns, keys, views, triggers and rows; checks
+and repairs referential integrity; exports to CSV, `INSERT` statements, SQL
+dump or ZIP (and restores the ZIP); and has its own users with `admin` /
+read-only roles, bcrypt passwords, per-IP lockout, CSRF tokens and a daily
+audit trail. The full tour is in [`docs/05-admin.md`](docs/05-admin.md).
 
 Bootstrap 5.3.3 and Bootstrap Icons are bundled locally. The panel makes **zero**
 external requests.
@@ -620,21 +562,12 @@ jsonSQLDBadmin    ──HTTP──►         │
 
 ### More than one installation on the same machine
 
-Nothing special is needed: **everything the engine shares between processes lives
-inside the database folder** — the lock files, the journal, the temporaries and
-the on-disk cache — so two installations with different data folders never see
-each other. The one genuinely global resource is APCu, and its keys are prefixed
-with a digest of the data path so two databases with the same name in different
-installations cannot collide.
-
-What is worth keeping separate, because it is not the engine's doing:
-`JSONSQLDB_DATA_PATH`, `API_ESTADO_PATH` (the anti-replay and per-IP quota),
-`ADMIN_SESION_NOMBRE` (two panels on one domain would share the cookie) and
-`ADMIN_DATA_PATH`. All four default to paths inside the project folder, so two
-copies of the project are already separate without touching anything.
-
-Several processes against the *same* database is a different thing — that is
-ordinary concurrency, handled by the locks above.
+Everything the engine shares between processes lives inside the database
+folder, so two installations with different data folders never see each other;
+APCu keys are prefixed with a digest of the data path for the same reason.
+Keep `JSONSQLDB_DATA_PATH`, `API_ESTADO_PATH`, `ADMIN_SESION_NOMBRE` and
+`ADMIN_DATA_PATH` separate — all four already default to paths inside the
+project folder.
 
 ### Upgrading from 1.x
 
@@ -696,14 +629,11 @@ speed it up. Index keys follow the engine's own equality, not PHP's: `5`, `'5'`
 and `'5.0'` share a key, so looking up a number still finds the row that stored
 it as text.
 
-The whole index is rebuilt on every write to the table. Positions are not stable
-— saving re-packs the rows from zero, so one `DELETE` shifts every row after it
-into a different part — and keeping positions up to date incrementally would be
-an endless source of quiet, hard-to-see wrong answers. Rebuilding costs one pass
-over rows that are already in memory, which is small next to the `json_encode` of
-the table that the write does anyway. Each index file records the revision it
-belongs to; if it does not match, the engine ignores the file and scans, so a
-stale or hand-edited index can make a query slower but never wrong.
+An index is rebuilt on writes that move rows — saving re-packs them, so one
+`DELETE` shifts every row after it — and **extended instead of rebuilt when a
+write only appends** (2.3.0). Each index file records the revision it belongs
+to; on any mismatch the engine ignores it and scans, so a stale or hand-edited
+index can make a query slower but never wrong.
 
 ### Concurrency
 
@@ -720,29 +650,13 @@ table — which is what makes a deadlock impossible:
 So two writes to different tables run at the same time, and a write no longer
 blocks reads of other tables.
 
-A write that can propagate does not lock the database. Writing to a table does
-not always stay in it — a foreign key with `ON DELETE CASCADE` drags child rows,
-a trigger can write anywhere — so the engine works out the set of tables it could
-reach first, following foreign keys in both directions and transitively, plus
-wherever the triggers write, by parsing their SQL. Only those are locked, so an
-unrelated group of tables carries on writing at the same time.
-
-Two things make that safe: **all the locks are taken up front**, because asking
-for one more halfway through a write is how deadlocks happen; and they are taken
-**in alphabetical order**, so two processes that need the same tables ask in the
-same sequence and one waits for the other instead of both waiting forever.
-
-It falls back to the exclusive database lock the moment the set cannot be stated:
-a trigger whose SQL will not parse, an `INSERT ... SELECT` (which reads from other
-tables), any schema change, or more than eight tables, where taking that many
-locks costs more than taking one.
-
-Reads take the shared lock of each table they touch. Shared locks do not block
-each other, so reads still run together; a read only waits when that same table
-is being written. This is needed as soon as a table spans more than one file: the
-writer replaces them one at a time, and without it a reader could pick up the
-first part already new and the second still old — rows from two different
-versions, with no power cut involved.
+A write that can propagate works out the set of tables it could reach first
+(foreign keys both ways and transitively, plus wherever the triggers write),
+takes every lock up front in alphabetical order — which is what makes deadlock
+impossible — and falls back to the database lock when the set cannot be
+stated. Reads take each table's shared lock, so reads run together and only
+wait for a write to that same table. The detail is in
+[`docs/01-nucleo.md`](docs/01-nucleo.md).
 
 Writes are **atomic and durable**: the new content goes to a temporary file, is
 forced to disk with `fsync()`, and is then renamed over the original. A crash
@@ -751,16 +665,10 @@ never a file whose contents were still sitting in the operating system's cache.
 `fsync()` exists from PHP 8.1; on 8.0 the buffer is flushed, which is as far as
 that version goes.
 
-That covers one file. For the rest there is a journal: before touching anything,
-the files about to change are copied into `.tx/<scope>/` and a manifest is written
-last. If the process dies, the copies are still there and the next time the
-database is opened they go back. The manifest being written last is what makes it
-safe — no manifest means the copying never finished, which means nothing was
-modified yet, so the leftovers are discarded rather than restored. The scope is
-whichever lock the write holds: `.tx/_base/` for anything holding the database
-lock, `.tx/<table>/` for a write scoped to one table, so journalling does not cost
-the concurrency that the table lock buys. Checking whether anything is pending is
-a single `stat` on `.tx/`.
+That covers one file. Multi-file writes are protected by a journal in
+`.tx/<scope>/`: the files about to change are copied first and a manifest is
+written last, so a crash either finds a complete copy set to restore or no
+manifest, which means nothing had been modified yet.
 
 ### Memory
 
@@ -790,14 +698,6 @@ into more part files only bounds the size of each individual decode; a query tha
 needs every row still ends up with every row in memory. What the split does buy
 is the ability to *skip* parts, which is where indexes come in.
 
-#### Why compression is not the answer
-
-The peak is not the JSON text, it is the decoded PHP array, and an array has to
-be decompressed to be filtered, joined or sorted. Compressing the cache on disk
-or in APCu would save disk and shared memory, but not the process memory that
-`memory_limit` actually governs. The only real lever is **not loading rows the
-query does not need**, which is what everything below does.
-
 #### What the engine does about it
 
 | | Before | After |
@@ -806,26 +706,10 @@ query does not need**, which is what everything below does.
 | `SELECT * FROM t WHERE id = ?` (50,000 rows) | 107 ms · 50 MB | **17 ms · 19 MB** |
 | `SELECT COUNT(*) FROM t` (50,000 rows) | 49 ms · 50 MB | **52 ms · 32 MB** |
 
-- **Rows are read one at a time when the query will discard most of them.** The
-  files are one JSON object per line, so a `LIMIT` or an indexed lookup never
-  holds the whole file text and the whole decoded array at the same time. When
-  the query genuinely wants every row the file is decoded in one call instead,
-  which is about 25 % faster and costs nothing extra, because those rows were
-  going to be held either way.
-- **Indexes decode only the parts where the matching rows live.** On a table
-  spread over twenty parts, an equality lookup reads one.
-- **`LIMIT` is pushed into the read** when there is no `WHERE` and no `JOIN` —
-  with either of those the surviving rows are not the first ones, so the read
-  cannot stop early.
-- **`SELECT COUNT(*)` and `SHOW TABLES` never build the rows at all.**
-  `SHOW TABLES` used to load every table in the database just to count them.
-- **Rows are no longer held twice while being prepared for a query.** Loading a
-  table copies each row with its columns prefixed by the table alias; the
-  original is now released as it goes, instead of keeping both full copies until
-  the loop ended. That is the 50 MB → 32 MB above.
-- **The cache steps aside when memory is tight.** Storing a table means
-  serialising it, which briefly doubles it. Past half the limit the engine skips
-  the cache rather than risk the query for it.
+Rows are read one at a time when most will be discarded, indexes decode only
+the parts where the matching rows live, `LIMIT` is pushed into the read when
+nothing filters after it, `SELECT COUNT(*)` counts lines without decoding a
+single row (2.4.0), and the cache steps aside when memory is tight.
 
 #### When it still will not fit
 
@@ -834,15 +718,6 @@ guarantees is *how* it fails: `JSONSQLDB_MEMORIA_VIGILAR` makes it stop and rais
 a normal error with `sqlState` `MEMORIA` — catchable, with the connection intact
 and the data untouched — instead of PHP's fatal, which cannot be caught, runs no
 `finally`, and hands the client a broken response.
-
-The guard checks both the memory in use and the memory PHP has **requested from
-the system**. The limit applies to the latter, and the gap between them — blocks
-already requested but too fragmented to reuse — is not negligible when
-`memory_limit` is small: with 16 MB the process hit the fatal with only 13 MB in
-use. It also never reserves less than a fraction of what is already allocated,
-because when a PHP array fills up it asks for double and copies, and that jump
-costs about as much as the array already occupies — something no amount of
-watching the previous rows can predict.
 
 Data is never at risk from running out of memory, whichever way it ends: a read
 writes nothing, a write accumulates in memory and flushes at the end so it has
@@ -903,51 +778,12 @@ php tests/f9_journal.php      → OK: 38    every partial state a crash can leav
 php tests/f10_indices_incrementales.php → OK: 16   indexes extended instead of rebuilt
 ```
 
-Two of these are worth knowing what they actually do.
-
-`f6_cortes.php` kills real processes with `SIGKILL`, which cannot be caught — no
-destructors, no shutdown functions, no chance to clean up. It does it mid-cascade
-across two tables, mid-write to a table spread over part files with indexes, and
-once for each kind of operation in turn: `UPDATE` of every row, `UPDATE` of an
-indexed column, an `INSERT` that adds a part, a `DELETE` that removes one,
-`CREATE INDEX`, `DROP INDEX`, four kinds of `ALTER TABLE`, `CREATE TABLE`,
-`DROP TABLE`. After each kill it reopens the database and demands that every row
-be either the old value or the new one and never a mix, that the indexes agree
-with the data, that the cache agrees with the files, and that nothing is left
-behind.
-
-Killing a process does not reproduce everything a power cut does, so the last
-part of that suite builds the damaged journals by hand: a copy truncated under a
-valid manifest, a journal with no manifest, a `COMMITTED` one, two table journals
-at once, a revision file ahead of its data, a missing one. Many kills land
-outside the critical window, and the suite reports how many landed inside so
-nobody assumes it proved more than it saw.
-
-`f9_journal.php` exists because that reporting kept being uncomfortable. Killing
-processes is realistic but it samples: where the kill lands is luck, and a run
-can easily miss the window entirely. So this suite does the opposite — it is
-exhaustive and deterministic. It opens a real journal on a table spread across
-ten files and then builds by hand **every** intermediate state the write could
-have been interrupted in: the first file already replaced and the rest not, the
-first two, the first three, all of them; the same again with files truncated
-instead of replaced, and again with them deleted; each of those under both a
-database-scoped and a table-scoped journal. Sixty-six states, and for each one it
-demands that every file come back to its exact original bytes.
-
-It also checks the two invariants the whole scheme rests on. First, that the
-journal copies everything a write touches — if a write modified a file the
-journal had not copied, recovery could not give it back, and that is data loss
-with nothing to warn you. Second, that writes which skip the journal really do
-touch a single file. To know whether a write journalled without guessing, the
-test drops a *file* named `.tx` where the directory would go: any attempt to
-journal then fails, so a write that succeeds is one that never tried.
-
-`f8_indices.php` almost never asserts a literal result. It runs the indexed query
-and the same condition rewritten so the index cannot be used, and requires the
-two to be identical. An index that returns too much is obvious; one that returns
-too little is not, and that is the failure worth catching. The oracle has to be
-the engine scanning the table rather than a comparison in PHP, because the
-engine's equality is its own: `'0'`, `'00'` and `'-0'` are the same value to it.
+`f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that
+every row be either the old value or the new one, never a mix. `f9_journal.php`
+is its deterministic counterpart: it builds by hand every intermediate state a
+crash could leave — sixty-six of them — and demands the exact original bytes
+back. `f8_indices.php` never asserts literal results: it compares every indexed
+query against the same condition written so the index cannot be used.
 
 The engine, the API and the panel pass PHPStan at level 5 with no warnings. The
 configuration is not committed — it is a development tool and the project needs

@@ -81,6 +81,10 @@ final class Select
 
     private function correrSimple(array $ast): array
     {
+        $contado = $this->contarRapido($ast);
+        if ($contado !== null) {
+            return $contado;
+        }
 
         // ¿Se puede dejar de recorrer en cuanto haya suficientes filas?
         // Solo si el resultado no depende de las filas que vendrían después:
@@ -406,6 +410,44 @@ final class Select
      *
      * @return array{cols: string[], filas: array}
      */
+    /**
+     * SELECT COUNT(*) FROM tabla, sin nada más: el resultado es el número de
+     * filas, que Storage sabe contar sin decodificar ni materializar la tabla.
+     * En cuanto la consulta tiene cualquier otra cosa —WHERE, GROUP BY, JOIN,
+     * DISTINCT, más columnas, una vista o una CTE— se sigue el camino normal,
+     * que es quien sabe hacerla bien.
+     */
+    private function contarRapido(array $ast): ?array
+    {
+        // Con un lector propio (un trigger en mitad de una escritura) las filas
+        // buenas están en memoria, no en disco: cuenta el camino normal.
+        if (!$this->indexable) {
+            return null;
+        }
+        if ($ast['where'] !== null || $ast['group'] !== null || $ast['having'] !== null
+            || $ast['distinct'] || $ast['order'] !== [] || $ast['limit'] !== null
+            || $ast['offset'] !== null || count($ast['from']) !== 1 || count($ast['cols']) !== 1) {
+            return null;
+        }
+        $o = $ast['from'][0];
+        if ($o['tipo'] !== 'tabla'
+            || isset($this->con[strtolower($o['nombre'])]) || isset($this->con[$o['nombre']])
+            || $this->cat->esVista($o['nombre'])) {
+            return null;
+        }
+        $c = $ast['cols'][0];
+        $e = $c['expr'] ?? null;
+        if (($c['star'] ?? false) || !is_array($e) || ($e['k'] ?? '') !== 'fn'
+            || strtoupper((string)$e['nombre']) !== 'COUNT' || !($e['star'] ?? false)) {
+            return null;
+        }
+        if (!$this->cat->existe($o['nombre'])) {
+            throw JsonSqlDbError::schema("La tabla '{$o['nombre']}' no existe");
+        }
+        $nombre = $c['alias'] ?? self::etiqueta($e);
+        return ['cols' => [$nombre], 'filas' => [[$nombre => $this->cat->storage()->contarFilas($o['nombre'])]]];
+    }
+
     private function correrUnion(array $ast): array
     {
         $cols  = [];

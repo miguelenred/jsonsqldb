@@ -9,6 +9,47 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.4.0] - 2026-08-31
+
+`SELECT COUNT(*)` no longer reads the table. Nothing breaking, no data conversion.
+
+### Changed
+
+- **`SELECT COUNT(*) FROM tabla` — with nothing else in the query — answers from
+  the row count, not from the rows.** The engine writes one row per line, so
+  counting is reading lines: no `json_decode`, no materialised table, and the
+  memory peak is one line. On 100,000 rows it went from 180 ms to 22 ms, and it
+  no longer depends on the table fitting in memory.
+
+  The shortcut steps aside for anything it cannot answer by counting: a `WHERE`,
+  `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT`/`OFFSET`, more than one
+  column or table, a view, a CTE, `COUNT(col)`, or a trigger counting in the
+  middle of a write, where the rows that matter are in memory and not on disk
+  yet — that last one is covered by `tests/f3_escrituras.php`, which failed until
+  the shortcut learned to step aside. A part file not in the one-row-per-line
+  format (edited by hand, or compacted) falls back to counting by decoding, same
+  as reading does. On a canonical-looking file with a corrupt row the count
+  includes it; detecting that is `INTEGRITY CHECK`'s job, not `COUNT(*)`'s.
+
+- `SHOW TABLES` benefits from the same counting, since it reports row counts
+  through the same code path.
+
+- **A write no longer serialises the table it is about to change into the
+  cache.** The read that precedes every `INSERT`, `UPDATE` or `DELETE` was
+  storing the whole table in the cache under the current revision — and the
+  write then retired that revision and cached the new rows itself, so the store
+  was thrown away within the same operation. On tables under the cache cap it
+  was the table serialised and written to disk once per write, for nothing.
+  Single-row writes on a 15,000-row table got 10-20 % faster; tables above
+  `JSONSQLDB_CACHE_MAX_FILAS` never paid this and are unchanged. Reads cache
+  exactly as before.
+
+- **README trimmed by a fifth** (48 KB -> 39 KB): the deep dives on locking,
+  journalling, admin features and test internals now summarise and point to
+  `docs/`, which already had them in full. While at it, the index section still
+  said the whole index is rebuilt on every write, which stopped being true in
+  2.3.0.
+
 ## [2.3.0] - 2026-08-31
 
 Faster writes on tables with indexes. Nothing breaking, no data conversion.

@@ -195,7 +195,7 @@ final class Writer
 
     public function filas(string $tabla): array
     {
-        return $this->datos[$tabla] ??= $this->cat->storage()->leerFilas($tabla);
+        return $this->datos[$tabla] ??= $this->cat->storage()->leerFilas($tabla, false, null, false);
     }
 
     /**
