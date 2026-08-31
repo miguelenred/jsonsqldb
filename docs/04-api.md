@@ -213,6 +213,11 @@ Los tipos vienen ya normalizados por el motor: los números llegan como números
 las fechas como `yyyy-MM-dd[ HH:mm[:ss[.fff]]]` y los nulos como `null`. No hace
 falta convertir nada en el cliente.
 
+> **Déjalo a `false` en producción.** Con `DEVOLVER_ERRORES = true` la respuesta
+> incluye el mensaje interno, que puede nombrar tablas y columnas: es cómodo
+> mientras desarrollas y una fuente de información gratis para quien sondea tu
+> API. La plantilla viene con `false`.
+
 Con `DEVOLVER_ERRORES = false` los errores se reducen a un mensaje genérico
 (recomendado en producción); el detalle sigue quedando en el log.
 
@@ -237,6 +242,25 @@ $API_KEYS = [
 El permiso se comprueba **después de analizar la SQL y antes de ejecutarla**, así
 que se mira lo que la sentencia hace de verdad, no cómo esté escrita. `bases`
 limita a qué bases de datos puede acceder esa clave; `['*']` son todas.
+
+Qué puede hacer cada permiso, sin ambigüedades:
+
+| Sentencia | `lectura` | `escritura` | `admin` |
+|---|:---:|:---:|:---:|
+| `SELECT`, `UNION` | sí | sí | sí |
+| `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA` / `COLUMNS` | sí | sí | sí |
+| `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` | sí | sí | sí |
+| `SHOW DATABASES` | sí | sí | sí |
+| `CHECK KEYS` | sí | sí | sí |
+| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS` | no | sí | sí |
+| `CREATE` / `ALTER` / `DROP` de tabla, índice, vista o trigger | no | no | sí |
+| `CREATE DATABASE`, `DROP DATABASE` | no | no | sí |
+
+La lista se mantiene a mano en `api/jsonsqldb_api.php`, así que añadir una
+sentencia al analizador y olvidarse de ella la deja fuera. Le pasó a
+`SHOW INDEXES`, que hasta la 2.2 no podían ejecutar las claves de lectura pese a
+no revelar nada más que la estructura. `tests/f4_api.php` recorre ahora todos los
+`SHOW` con una clave de lectura para que se note.
 
 Las claves y los secretos **no se listan aquí a propósito**: duplicar un secreto
 en la documentación es una forma estupenda de que acabe donde no debe. Están en
@@ -408,7 +432,7 @@ php tests/f1_nucleo.php       → OK: 63
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 138
 php tests/f3_escrituras.php   → OK: 59
-php tests/f4_api.php          → OK: 51
+php tests/f4_api.php          → OK: 52
 php tests/f5_esquema.php      → OK: 89
 php tests/f5_admin.php        → OK: 119
 ```

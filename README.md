@@ -38,7 +38,12 @@ multi-table operations are undone by the journal.
 
 Rough numbers on 20,000 customers and 30,000 orders, one core: a primary key
 lookup 3.4 ms, a filtered scan 22 ms, an aggregate join 95 ms, a single-row
-`INSERT` 90 ms. SQLite is between 40 and 300 times faster at all of it, which is
+`INSERT` 39 ms. On 50,000 rows, `ORDER BY … LIMIT 20` is 169 ms and a single-row
+`INSERT` 105 ms; on 100,000 rows that `INSERT` is 221 ms. Writes scale with the
+table because each one rewrites the parts it touches and rebuilds the table's
+indexes, so these numbers get worse as the table grows and batching matters more.
+Measure on your own hardware: a shared host with a network disk will be slower
+than any of this. SQLite is between 40 and 300 times faster at all of it, which is
 what you would expect from a B-tree over binary pages against JSON decoded into
 PHP arrays. The point of this engine is that it runs where neither MySQL nor the
 SQLite extension is available.
@@ -879,7 +884,7 @@ php tests/f1_nucleo.php       → OK: 63    storage, types, locking, direct acce
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
 php tests/f2_select.php       → OK: 138   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 51    real requests against the API
+php tests/f4_api.php          → OK: 52    real requests against the API
 php tests/f5_esquema.php      → OK: 89    SHOW, ALTER, constraints, views, integrity
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 31    crash recovery, killing real processes

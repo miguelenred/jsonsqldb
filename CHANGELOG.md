@@ -22,6 +22,20 @@ Less memory and faster queries. Nothing breaking, no data conversion.
   every `SHOW` with a read-only key, so adding one to the parser and forgetting
   the list shows up as a failure.
 
+- **`composer test` did not run the index and journal suites.** The script listed
+  f1 to f7, so a contributor running it never exercised `f8_indices.php` or
+  `f9_journal.php` — the two that cover indexes and crash recovery.
+
+- **The header comment in `Storage.php` still described `_revs.json`** as the
+  per-table revision counter. Since 2.0 each table has its own
+  `<table>.rev.json`, and the shared file is only read for databases written by
+  an earlier version.
+
+- **The API permission matrix is now written out in the documentation**, one row
+  per statement and one column per permission, instead of being implied. That
+  list is kept by hand in the code, and the `SHOW INDEXES` omission above is what
+  happens when it is not visible anywhere.
+
 - **`Config::VERSION` was dead and stuck at `1.0.0`.** Nothing read it, so it
   drifted several releases without anyone noticing. It is now
   `Config::version()`, reading the `VERSION` file: one place that can state the

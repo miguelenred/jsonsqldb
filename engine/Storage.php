@@ -8,7 +8,10 @@ namespace JsonSQLDB;
  *
  * Estructura en disco:
  *   <raiz>/<base>/_database.json      metadatos de la base
- *   <raiz>/<base>/_revs.json          contador de revisión por tabla (invalida caché)
+ *   <raiz>/<base>/<tabla>.rev.json    revisión de esa tabla (invalida su caché)
+ *   <raiz>/<base>/_revs.json          contador común de antes de la 2.0; ya no se
+ *                                     escribe, solo se lee si una tabla no tiene
+ *                                     todavía el suyo
  *   <raiz>/<base>/_views.json         vistas: nombre => SELECT guardado
  *   <raiz>/<base>/<tabla>.meta.json   estructura de la tabla
  *   <raiz>/<base>/<tabla>.json        datos (una fila por línea, legible)
