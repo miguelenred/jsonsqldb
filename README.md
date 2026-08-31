@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.2.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.3.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -900,6 +900,7 @@ php tests/f6_cortes.php       → OK: 31    crash recovery, killing real process
 php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 57    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 38    every partial state a crash can leave
+php tests/f10_indices_incrementales.php → OK: 16   indexes extended instead of rebuilt
 ```
 
 Two of these are worth knowing what they actually do.

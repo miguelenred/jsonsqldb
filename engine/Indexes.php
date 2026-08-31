@@ -253,6 +253,45 @@ final class Indexes
      * @param list<string>   $columnas
      * @return array<string, list<int>>
      */
+    /**
+     * Añade al índice ANTERIOR solo las filas nuevas del final.
+     *
+     * Reconstruir el índice entero es el 67 % de lo que cuesta insertar una fila
+     * en una tabla grande: se recorren todas las filas y se calcula la clave de
+     * cada una, cuando las de antes no se han movido ni han cambiado.
+     *
+     * Solo vale si las posiciones anteriores siguen siendo las mismas. Quien
+     * llama tiene que haberlo comprobado; aquí se da por cierto. Y la
+     * comprobación tiene que ser estricta, porque los dos errores no cuestan lo
+     * mismo: una entrada de MÁS solo hace la consulta más lenta —el WHERE se
+     * vuelve a aplicar sobre las filas leídas— pero una de MENOS devuelve
+     * resultados incompletos sin que nada lo delate.
+     *
+     * @param array<string, list<int>> $anterior claves del índice de antes
+     * @param list<array>              $filas    la tabla entera, ya con las nuevas
+     * @param list<string>             $columnas columnas del índice
+     * @param int                      $desde    primera posición nueva
+     * @return array<string, list<int>>
+     */
+    public static function ampliar(array $anterior, array $filas, array $columnas, int $desde): array
+    {
+        $keys = $anterior;
+        $n    = count($filas);
+        for ($pos = $desde; $pos < $n; $pos++) {
+            $valores = [];
+            foreach ($columnas as $c) {
+                $valores[] = $filas[$pos][$c] ?? null;
+            }
+            $clave = self::clave($valores);
+            if ($clave === null) {
+                continue;                       // los NULL no se indexan
+            }
+            $keys[$clave][] = $pos;
+            Memoria::comprobar('la ampliación del índice');
+        }
+        return $keys;
+    }
+
     public static function construir(array $filas, array $columnas): array
     {
         $keys = [];

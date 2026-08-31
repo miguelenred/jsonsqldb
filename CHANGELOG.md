@@ -9,6 +9,48 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.3.0] - 2026-08-31
+
+Faster writes on tables with indexes. Nothing breaking, no data conversion.
+
+### Added
+
+- **`tests/f10_indices_incrementales.php`**, a suite of its own for the change
+  below. It has one because the risk is not symmetric: an extra entry in an index
+  only makes a query slower, since the `WHERE` is applied again to the rows that
+  are read, but a missing one returns incomplete results with nothing to show for
+  it — no error, no warning, just fewer rows. Every check compares the extended
+  index against rebuilding it from scratch, and every query against the same
+  query written so the index cannot be used.
+
+  Removing either safeguard on its own does not turn it red, because the two
+  cover each other; removing both does, with `sobran 396 posiciones`. That was
+  checked, not assumed.
+
+### Changed
+
+- **An index is extended instead of rebuilt when a write only appends.**
+  Rebuilding it was 67 % of what a single-row `INSERT` costs on a large table —
+  measured, `Indexes::construir` plus `clave` plus `trozo` — and it is repeated
+  work: if nothing moved, the keys of the existing rows are the same ones.
+
+  It is only reused when it can be shown to still fit: the write appended at the
+  end and touched no scattered positions, the index on disk is readable and for
+  these same columns, its revision is exactly the one before this write, and it
+  claimed to hold as many rows as there were positions. Any doubt and it is
+  rebuilt.
+
+  Measured: a single-row `INSERT` on 100,000 rows went from 363 ms to 321 ms, and
+  on 50,000 from 180 ms to 156 ms. Less than the 67 % ceiling, because a write
+  does other things too and checking the index files costs a read of each.
+
+### Note
+
+Reading each part through its own cache on full scans was tried and dropped. It
+saved about 6 ms on a 50,000-row table above the cache cap, but made writes worse
+— `leerFilas()` runs during writes, and caching each part means serialising it —
+and it broke `REPAIR KEYS`. The measurement said yes and the test suite said no.
+
 ## [2.2.1] - 2026-08-31
 
 One durability fix. Nothing breaking, no data conversion.

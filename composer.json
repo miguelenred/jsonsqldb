@@ -55,7 +55,8 @@
             "php tests/f6_cortes.php",
             "php tests/f7_concurrencia.php",
             "php tests/f8_indices.php",
-            "php tests/f9_journal.php"
+            "php tests/f9_journal.php",
+            "php tests/f10_indices_incrementales.php"
         ]
     },
     "scripts-descriptions": {

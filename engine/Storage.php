@@ -908,6 +908,12 @@ final class Storage
             // Si hace falta la tabla entera, se decodifica el fichero de una
             // vez, que es bastante más rápido que fila a fila; leer por líneas
             // solo compensa cuando se van a descartar casi todas.
+            //
+            // Se probó a pasar también por la caché de cada parte. Da unos 6 ms
+            // en una tabla de 50.000 filas por encima del tope de caché, pero
+            // las escrituras empeoraban —leerFilas() se llama al escribir, y
+            // cachear cada parte cuesta serializarla— y además rompía
+            // REPAIR KEYS. No compensa.
             foreach ($this->filasDeParte($fichero, $tope !== null) as $fila) {
                 if ($tope !== null && count($filas) >= $tope) {
                     $completa = false;
@@ -1096,6 +1102,18 @@ final class Storage
         // si las partes que no se tocan siguen valiendo.
         $partesAntes = $this->partes($tabla);
         $chunkAntes  = $this->chunkAnterior($tabla);
+        $revAntes    = $this->rev($tabla);
+
+        // ¿Esta escritura SOLO añadió filas al final? Entonces las posiciones de
+        // las de antes no se han movido y el índice anterior sigue valiendo para
+        // ellas. Hace falta que no haya posiciones sueltas tocadas y que el
+        // desplazamiento empiece justo donde acababa la tabla.
+        $filasAntes  = $this->filasSegunIndices($tabla);
+        $desdeNuevas = null;
+        if ($sabeQueCambio && $posSueltas === [] && $desdePos !== null
+            && $filasAntes !== null && $desdePos === $filasAntes) {
+            $desdeNuevas = $desdePos;
+        }
 
         // Las que hay ahora y las que va a haber: al subir la revisión hay que
         // invalidar la caché de las dos, porque la tabla puede encoger
@@ -1152,7 +1170,14 @@ final class Storage
         // tocaba, se leen —salvo que no haya ningún índice, que es lo normal en
         // una tabla sin clave primaria y no hace falta leer nada.
         if ($definiciones !== [] || $this->indicesEnDisco($tabla) !== []) {
-            $this->escribirIndices($tabla, $filas ?? $this->leerFilas($tabla), $definiciones, $rev);
+            $this->escribirIndices(
+                $tabla,
+                $filas ?? $this->leerFilas($tabla),
+                $definiciones,
+                $rev,
+                $filas === null ? null : $desdeNuevas,
+                $revAntes
+            );
         }
 
         if ($filas !== null) {
@@ -1229,11 +1254,24 @@ final class Storage
      *
      * @param list<array> $definiciones
      */
-    private function escribirIndices(string $tabla, array $filas, array $definiciones, int $rev): void
-    {
+    /**
+     * @param int|null $desdeNuevas primera posición añadida al final, si la
+     *        escritura SOLO añadió filas ahí y no movió ninguna de las de antes.
+     *        null significa que no se puede afirmar y hay que rehacer el índice.
+     * @param int      $revAntes    revisión que tenía la tabla antes de escribir
+     */
+    private function escribirIndices(
+        string $tabla,
+        array $filas,
+        array $definiciones,
+        int $rev,
+        ?int $desdeNuevas = null,
+        int $revAntes = -1
+    ): void {
         $vigentes = [];
         foreach ($definiciones as $def) {
             $vigentes[$def['name']] = true;
+            $keys = $this->clavesDelIndice($tabla, $def, $filas, $desdeNuevas, $revAntes);
             $this->escribirAtomico($this->ficheroIndice($tabla, $def['name']), json_encode([
                 'index'   => $def['name'],
                 'table'   => $tabla,
@@ -1241,7 +1279,7 @@ final class Storage
                 'rev'     => $rev,
                 'rows'    => count($filas),
                 'chunk'   => $this->filasPorParte,
-                'keys'    => Indexes::construir($filas, $def['columns']),
+                'keys'    => $keys,
             ], self::JSON_FILA) . "\n");
         }
 
@@ -1484,6 +1522,80 @@ final class Storage
     }
 
     /** Fichero de datos legible: cabecera indentada y una fila por línea. */
+    /**
+     * Cuántas filas decía tener la tabla la última vez que se escribió un
+     * índice, o null si no consta.
+     *
+     * Sale del propio fichero de índice, que es quien tiene que estar de acuerdo
+     * con las posiciones: si el número no coincide con dónde empiezan las filas
+     * nuevas, sus posiciones no valen y hay que rehacerlo.
+     */
+    private function filasSegunIndices(string $tabla): ?int
+    {
+        $filas = null;
+        foreach ($this->indicesEnDisco($tabla) as $fichero) {
+            $json = json_decode((string)@file_get_contents((string)$fichero), true);
+            if (!is_array($json) || !isset($json['rows'])) {
+                return null;                      // uno ilegible: no se afirma nada
+            }
+            $n = (int)$json['rows'];
+            if ($filas !== null && $filas !== $n) {
+                return null;                      // no se ponen de acuerdo
+            }
+            $filas = $n;
+        }
+        return $filas;
+    }
+
+    /**
+     * Las claves de un índice, ampliando el anterior si se puede demostrar que
+     * sirve, y rehaciéndolo entero si no.
+     *
+     * Rehacerlo es el 67 % de lo que cuesta insertar una fila en una tabla
+     * grande, y casi siempre es trabajo repetido: si la escritura solo añadió al
+     * final, las claves de las filas de antes son exactamente las mismas.
+     *
+     * Se exige TODO esto para reutilizarlo, y con cualquier duda se rehace:
+     *
+     *   - la escritura solo añadió al final y no movió nada ($desdeNuevas);
+     *   - el índice de disco es legible y de este mismo índice y columnas;
+     *   - su revisión es exactamente la anterior a esta escritura, o sea que
+     *     corresponde al estado del que venimos;
+     *   - decía tener tantas filas como posiciones había antes.
+     *
+     * Esa última comprobación es la que importa: si el índice viejo se hizo con
+     * otro número de filas, sus posiciones no son las de ahora. Y una entrada
+     * que falte no da un error, da una consulta que devuelve de menos.
+     *
+     * @param list<array> $filas
+     * @return array<string, list<int>>
+     */
+    private function clavesDelIndice(
+        string $tabla,
+        array $def,
+        array $filas,
+        ?int $desdeNuevas,
+        int $revAntes
+    ): array {
+        if ($desdeNuevas === null || $desdeNuevas < 0 || $desdeNuevas > count($filas)) {
+            return Indexes::construir($filas, $def['columns']);
+        }
+        $fichero = $this->ficheroIndice($tabla, $def['name']);
+        if (!is_file($fichero)) {
+            return Indexes::construir($filas, $def['columns']);
+        }
+        $viejo = json_decode((string)@file_get_contents($fichero), true);
+        if (!is_array($viejo)
+            || ($viejo['index'] ?? null) !== $def['name']
+            || ($viejo['columns'] ?? null) !== $def['columns']
+            || ($viejo['rev'] ?? null) !== $revAntes
+            || ($viejo['rows'] ?? null) !== $desdeNuevas
+            || !isset($viejo['keys']) || !is_array($viejo['keys'])) {
+            return Indexes::construir($filas, $def['columns']);
+        }
+        return Indexes::ampliar($viejo['keys'], $filas, $def['columns'], $desdeNuevas);
+    }
+
     /**
      * Con qué tamaño de parte se escribió la tabla la última vez, o null si no
      * consta. Va en el fichero de revisión, que ya se escribe en cada escritura.

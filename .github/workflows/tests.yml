@@ -65,3 +65,6 @@ jobs:
 
       - name: Journal
         run: php tests/f9_journal.php
+
+      - name: Incremental indexes
+        run: php tests/f10_indices_incrementales.php
