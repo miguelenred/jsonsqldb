@@ -322,7 +322,7 @@ php tests/f1_nucleo.php
 
 Crea una base temporal, comprueba tipos, estructura, datos, ALTER TABLE,
 triggers, paginación, caché, bloqueo y limpieza, y la borra al terminar.
-Resultado esperado: `OK: 63   FALLOS: 0`.
+Resultado esperado: `OK: 65   FALLOS: 0`.
 
 ---
 

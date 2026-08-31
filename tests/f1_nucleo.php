@@ -267,6 +267,79 @@ esperaError('no se puede escribir dentro de una lectura', 'LOCK', function () us
     try { $st->bloquear(true); } finally { $st->desbloquear(); }
 });
 
+echo "\n== Sincronización del directorio ==\n";
+
+chk('el directorio se puede sincronizar de verdad, no en apariencia', function () {
+    // Escribir un fichero con fsync pone su CONTENIDO en el disco, pero el
+    // nombre puede seguir solo en la caché del sistema: tras un corte, el
+    // fichero puede no aparecer en el directorio. Por eso hay que sincronizar
+    // también el directorio.
+    //
+    // Lo que se comprueba aquí es CÓMO se hace, porque hay una forma que parece
+    // funcionar y no hace nada: fsync() sobre lo que devuelve opendir()
+    // devuelve false en silencio. Hay que abrir el directorio con fopen().
+    if (!function_exists('fsync')) {
+        echo "       (omitida: fsync() necesita PHP 8.1)\n";
+        return true;
+    }
+    $dir = sys_get_temp_dir() . '/jsonsqldb_fsyncdir_' . getmypid();
+    @mkdir($dir, 0775, true);
+
+    $porOpendir = @fsync(@opendir($dir));
+    $fh = @fopen($dir, 'r');
+    $porFopen = $fh !== false ? @fsync($fh) : false;
+    if ($fh !== false) { @fclose($fh); }
+    @rmdir($dir);
+
+    if ($porFopen !== true) {
+        return 'fsync() sobre el directorio abierto con fopen() no funcionó';
+    }
+    // Si algún día opendir() empezara a valer, mejor enterarse: significaría
+    // que el comentario del código ya no describe la realidad
+    return $porOpendir === false
+        ?: 'fsync(opendir()) ha empezado a funcionar: revisar el comentario de fsyncDir()';
+});
+
+echo "\n== La versión, en un solo sitio ==\n";
+
+chk('el motor, el panel y el fichero VERSION dicen lo mismo', function () {
+    // Había una constante Config::VERSION fijada a mano en '1.0.0' que no leía
+    // nadie, y llevaba versiones desincronizada sin que se notara. Lo mismo le
+    // pasó al índice de la documentación, que se quedó tres versiones atrás.
+    // Ahora todo sale del fichero VERSION, y esto lo comprueba.
+    $raizProyecto = dirname(__DIR__);
+    $fichero = $raizProyecto . '/VERSION';
+    if (!is_file($fichero)) {
+        return 'no hay fichero VERSION';
+    }
+    $esperada = trim((string)file_get_contents($fichero));
+    if ($esperada === '') {
+        return 'el fichero VERSION está vacío';
+    }
+
+    if (JsonSQLDB\Config::version() !== $esperada) {
+        return "el motor dice '" . JsonSQLDB\Config::version() . "' y VERSION dice '$esperada'";
+    }
+
+    // El panel tiene su propia función porque no carga el motor; se comprueba
+    // en un proceso aparte para no arrastrar aquí sus constantes
+    $codigo = 'require ' . var_export($raizProyecto . '/engine/bootstrap.php', true) . ';'
+            . 'require ' . var_export($raizProyecto . '/jsonsqldbadmin/lib/util.php', true) . ';'
+            . 'echo version();';
+    $delPanel = trim((string)shell_exec(
+        escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    if ($delPanel !== $esperada) {
+        return "el panel dice '$delPanel' y VERSION dice '$esperada'";
+    }
+
+    // Y la última entrada del CHANGELOG tiene que ser esa versión
+    $cambios = (string)@file_get_contents($raizProyecto . '/CHANGELOG.md');
+    if (preg_match('/^## \[([^\]]+)\]/m', $cambios, $m) !== 1) {
+        return 'no se pudo leer la primera versión del CHANGELOG';
+    }
+    return $m[1] === $esperada ?: "el CHANGELOG empieza en '{$m[1]}' y VERSION dice '$esperada'";
+});
+
 echo "\n== Limpieza ==\n";
 chk('sin ficheros temporales huérfanos', function () use ($raiz, $base) {
     return glob("$raiz/$base/*.tmp") === [];

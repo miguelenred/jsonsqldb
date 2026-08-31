@@ -9,11 +9,73 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
-## [2.2.0] - 2026-08-30
+## [2.2.1] - 2026-08-31
 
-Less memory and faster queries. Nothing breaking, no data conversion.
+One durability fix. Nothing breaking, no data conversion.
 
 ### Fixed
+
+- **Renaming a file put its contents on disk, but not its name.** Every write
+  ends in `rename()`, and the `fsync()` before it covers the file's contents —
+  not the directory entry that gives it its name. That entry can sit in the
+  operating system's cache, so a power cut in between could leave the data
+  written and the file missing from its directory, or the name still pointing at
+  the old inode. The same applies to deleting a surplus part, and to creating and
+  removing the journal folder.
+
+  On ext4 with `data=ordered` it usually comes out right because of how writes
+  are ordered, but POSIX does not promise it, and "usually" is not what this
+  engine claims. The directory is now synced after renaming, after deleting a
+  part, and around the journal folder.
+
+  **How it is done matters.** `fsync()` on the handle from `opendir()` returns
+  false and does nothing — quietly, so it would have looked like a fix while
+  changing nothing. The directory has to be opened with `fopen($dir, 'r')`.
+  `f1_nucleo.php` checks both, and fails if the working one stops working or the
+  useless one starts.
+
+  On Windows `fopen()` on a directory does not work, so this does nothing there —
+  which is the platform where `rename()` is not atomic either, and that is what
+  the journal is for. On PHP 8.0 there is no `fsync()` at all, a limitation the
+  documentation already states.
+
+  Cost: one `fsync` per write operation. Measured against 2.2.0 it does not undo
+  that release's gains — a single-row `INSERT` on 50,000 rows is 130 ms against
+  149 ms in 2.1.1.
+
+  Found by an external review of 2.2.0, which flagged the gap and proposed the
+  `opendir()` version that does not work.
+
+## [2.2.0] - 2026-08-30
+
+Table-level locking for writes that can propagate, less memory and faster
+queries. Nothing breaking, no data conversion.
+
+### Added
+
+- **`tests/benchmark.php`.** A reproducible benchmark in the repository, so the
+  figures in the README can be checked on your own machine instead of taken on
+  trust. Fixed seed, median of several runs rather than the mean, and a `csv`
+  mode for comparing two versions. It is not a test: it neither passes nor fails,
+  it measures.
+
+### Fixed
+
+- **The documentation index still said version 1.10.1**, three releases behind.
+  The number is gone from it: written by hand it falls behind without anyone
+  noticing, which is exactly what happened. It points at `VERSION` and the
+  changelog instead.
+
+- **The version was read in two independent places.** The panel had its own
+  reader; it now asks the engine, and only falls back to reading the file
+  directly because it does not load the engine — it talks to it over HTTP.
+  `f1_nucleo.php` checks that the engine, the panel, the `VERSION` file and the
+  first heading of this changelog all say the same thing.
+
+- **`Config::version()` was added in this release and never called**, which made
+  it dead code by the strictest reading. The API now returns it in an
+  `X-JsonSQLDB-Version` header, which is useful for telling which version
+  answered without opening an FTP session.
 
 - **Recovery copied a leftover temporary file into the data folder.** It restored
   everything it found in the journal folder, skipping only the manifest — so a

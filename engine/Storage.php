@@ -499,6 +499,10 @@ final class Storage
         // segundo mkdir falla, y sin reintento la escritura se perdía entera.
         for ($intento = 0; ; $intento++) {
             if (@mkdir($dir, 0775, true) || is_dir($dir)) {
+                // La carpeta tiene que existir en el disco antes de meter nada:
+                // si no, un corte puede dejar las copias sin carpeta que las
+                // nombre y la recuperación no las encontraría
+                $this->fsyncDir($this->dirTx);
                 break;
             }
             clearstatcache(true, $dir);
@@ -736,6 +740,9 @@ final class Storage
         }
         @rmdir($dir);
         @rmdir($this->dirTx);                         // falla sola si queda otro ámbito
+        // Que el journal haya desaparecido de verdad. Si no, tras un corte la
+        // recuperación podría volver a ver una carpeta que ya se dio por buena.
+        $this->fsyncDir($this->dir);
         clearstatcache(true, $dir);
     }
 
@@ -1119,12 +1126,20 @@ final class Storage
                 }
             }
             // Eliminar partes sobrantes de una escritura anterior más grande
+            $sobraban = false;
             for ($parte = count($partes) + 1; ; $parte++) {
                 $fichero = $this->ficheroDatos($tabla, $parte);
                 if (!is_file($fichero)) {
                     break;
                 }
                 @unlink($fichero);
+                $sobraban = true;
+            }
+            if ($sobraban) {
+                // Que el borrado esté en el disco, no solo la escritura: si no,
+                // tras un corte el directorio puede seguir listando una parte
+                // que ya no debería existir, y se leería junto a las nuevas
+                $this->fsyncDir($this->dir);
             }
         }
 
@@ -1586,6 +1601,8 @@ final class Storage
                     throw JsonSqlDbError::io('No se puede reemplazar ' . basename($fichero));
                 }
             }
+            // El contenido ya está en el disco; ahora el nombre
+            $this->fsyncDir($fichero);
         } finally {
             if (is_file($tmp)) {
                 @unlink($tmp);
@@ -1613,6 +1630,37 @@ final class Storage
      * limitación del sistema, no del motor, y por eso el journal copia los
      * ficheros antes de tocarlos: la recuperación los devuelve a su sitio.
      */
+    /**
+     * Fuerza a disco la ENTRADA DE DIRECTORIO, no el contenido del fichero.
+     *
+     * Son dos cosas distintas y hacen falta las dos. Después de un rename() el
+     * contenido nuevo puede estar ya en el disco —eso lo garantiza el fsync del
+     * fichero— y sin embargo el nombre seguir solo en la caché del sistema. Si
+     * la luz se va justo ahí, al arrancar el fichero puede no aparecer en el
+     * directorio, o el nombre apuntar todavía al inodo viejo, que ya no existe.
+     * En ext4 con data=ordered suele salir bien por cómo se ordenan las
+     * escrituras, pero POSIX no lo garantiza, y aquí no vale «casi siempre».
+     *
+     * Ojo con cómo se abre: fsync() sobre lo que devuelve opendir() falla en
+     * silencio y devuelve false. Hay que abrir el directorio con fopen() en
+     * modo lectura, que da un descriptor de verdad. En Windows fopen() sobre un
+     * directorio no funciona, así que allí esto no hace nada: es el sistema
+     * donde el rename tampoco es atómico, y de eso ya se encarga el journal.
+     */
+    private function fsyncDir(string $ruta): void
+    {
+        if (!function_exists('fsync')) {
+            return;                             // PHP 8.0: no hay con qué
+        }
+        $dir = is_dir($ruta) ? $ruta : dirname($ruta);
+        $fh  = @fopen($dir, 'r');
+        if ($fh === false) {
+            return;                             // Windows, o sin permiso de lectura
+        }
+        @fsync($fh);
+        @fclose($fh);
+    }
+
     private function escribirAtomico(string $fichero, string $contenido): void
     {
         $tmp = $fichero . '.' . getmypid() . '.tmp';
@@ -1639,6 +1687,8 @@ final class Storage
                     throw JsonSqlDbError::io('No se puede reemplazar ' . basename($fichero));
                 }
             }
+            // El contenido ya está en el disco; ahora el nombre
+            $this->fsyncDir($fichero);
         } finally {
             if (is_file($tmp)) {
                 @unlink($tmp);

@@ -42,6 +42,9 @@ set_time_limit(TIME_LIMIT);
 
 // --- Cabeceras de seguridad ---
 header('Content-Type: application/json; charset=utf-8');
+// Qué versión responde. Sirve para diagnosticar sin entrar por FTP, y no
+// descubre nada: el proyecto es público y la versión está en el repositorio.
+header('X-JsonSQLDB-Version: ' . JsonSQLDB\Config::version());
 header('Cache-Control: no-cache, no-store, must-revalidate');
 header('Pragma: no-cache');
 header('Expires: 0');

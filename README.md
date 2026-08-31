@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.2.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.2.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -42,8 +42,17 @@ lookup 3.4 ms, a filtered scan 22 ms, an aggregate join 95 ms, a single-row
 `INSERT` 105 ms; on 100,000 rows that `INSERT` is 221 ms. Writes scale with the
 table because each one rewrites the parts it touches and rebuilds the table's
 indexes, so these numbers get worse as the table grows and batching matters more.
-Measure on your own hardware: a shared host with a network disk will be slower
-than any of this. SQLite is between 40 and 300 times faster at all of it, which is
+Measure on your own hardware rather than trusting these — a shared host with a
+network disk will be slower than any of this:
+
+```
+php tests/benchmark.php            # 20,000 rows
+php tests/benchmark.php 50000      # any size
+php tests/benchmark.php 20000 csv  # CSV, to compare two versions
+```
+
+It reports the median of several runs, not the mean, and uses a fixed seed so two
+runs compare the same data. SQLite is between 40 and 300 times faster at all of it, which is
 what you would expect from a B-tree over binary pages against JSON decoded into
 PHP arrays. The point of this engine is that it runs where neither MySQL nor the
 SQLite extension is available.
@@ -880,7 +889,7 @@ Eleven suites, no dependencies, all using temporary directories — they never t
 your data.
 
 ```
-php tests/f1_nucleo.php       → OK: 63    storage, types, locking, direct access
+php tests/f1_nucleo.php       → OK: 65    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
 php tests/f2_select.php       → OK: 138   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers

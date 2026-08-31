@@ -1,6 +1,9 @@
 # jsonSQLDB
 
-Versión **1.10.1** — ver [CHANGELOG.md](../CHANGELOG.md).
+La versión está en el fichero [VERSION](../VERSION); lo que cambió en cada una,
+en el [CHANGELOG](../CHANGELOG.md). Aquí no se repite el número a propósito:
+escrito a mano se queda atrás sin que nadie lo note, que es justo lo que le pasó
+a este documento durante tres versiones.
 
 Base de datos SQL sobre ficheros JSON, en PHP puro. Sin Composer, sin
 extensiones raras y sin servidor de base de datos: se copia la carpeta y
@@ -78,7 +81,7 @@ Once ficheros, sin dependencias. Usan carpetas temporales, así que no tocan tus
 datos.
 
 ```
-php tests/f1_nucleo.php       → OK: 63    almacenamiento, tipos, bloqueos
+php tests/f1_nucleo.php       → OK: 65    almacenamiento, tipos, bloqueos
 php tests/f2_parser.php       → OK: 70    analizador y parámetros ligados
 php tests/f2_select.php       → OK: 138   ejecución de SELECT y orden alfabético
 php tests/f3_escrituras.php   → OK: 59    escrituras, DDL, claves y triggers

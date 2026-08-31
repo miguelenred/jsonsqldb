@@ -1,11 +1,22 @@
 <?php
 declare(strict_types=1);
 
-/** Versión del proyecto, leída del fichero VERSION de la raíz. */
+/**
+ * Versión del proyecto.
+ *
+ * La dice el motor, que es de donde sale. El panel no lo carga —habla con él por
+ * HTTP— así que si no está disponible se lee el mismo fichero directamente. Lo
+ * que no puede haber son dos sitios que sepan la versión por su cuenta: así es
+ * como el índice de la documentación se quedó tres versiones atrás.
+ */
 function version(): string
 {
     static $v = null;
     if ($v === null) {
+        if (class_exists(\JsonSQLDB\Config::class)) {
+            $v = \JsonSQLDB\Config::version();
+            return $v === 'desconocida' ? '' : $v;
+        }
         $f = dirname(__DIR__, 2) . '/VERSION';
         $v = is_file($f) ? trim((string)file_get_contents($f)) : '';
     }
