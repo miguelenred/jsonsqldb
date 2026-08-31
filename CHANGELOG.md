@@ -15,6 +15,17 @@ Less memory and faster queries. Nothing breaking, no data conversion.
 
 ### Fixed
 
+- **Recovery copied a leftover temporary file into the data folder.** It restored
+  everything it found in the journal folder, skipping only the manifest — so a
+  process killed while writing the manifest left its
+  `manifiesto.json.<pid>.tmp` there, and recovery put it among the tables. It now
+  skips temporaries too. Restoring only what the manifest lists would be more
+  precise, but an incomplete list would lose files, and here prudence beats
+  precision.
+
+  CI caught this on one crash out of twelve, so `f9_journal.php` now builds the
+  situation by hand instead of waiting for luck: it fails if the file reappears.
+
 - **A read-only API key could not run `SHOW INDEXES`.** The list of statements a
   `lectura` key may execute is kept by hand, and `show_indexes` was never added
   when indexes arrived in 2.0 — even though it reveals nothing beyond the

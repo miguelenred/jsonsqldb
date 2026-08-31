@@ -277,6 +277,38 @@ chk('un journal a medias de otra tabla no estorba', function () use ($raiz) {
 
 echo "\n== La recuperación interrumpida se repite entera ==\n";
 
+chk('un temporal olvidado dentro del journal no acaba en la carpeta de datos', function () use ($raiz) {
+    // La recuperación restauraba TODO lo que hubiera en la carpeta del journal.
+    // Un proceso muerto mientras escribía el manifiesto deja ahí su temporal
+    // (manifiesto.json.<pid>.tmp), y ese fichero acababa copiado a la carpeta de
+    // datos, entre las tablas. Lo cazó la CI en un corte de doce, así que se
+    // monta a mano en vez de esperar a que la suerte vuelva a dar.
+    $dir = "$raiz/j";
+    $original = preparar($raiz, 120);
+
+    $st = new Storage($raiz, 'j');
+    $st->bloquear(true, null);
+    $st->txIniciar('PRUEBA', ['t'], null);
+    $st->desbloquear();
+    unset($st);
+
+    file_put_contents("$dir/.tx/_base/manifiesto.json.999999.tmp", 'a medias');
+    file_put_contents("$dir/t.json", '{"table":"t","rows":[]}' . "\n");
+
+    $bd = new Database('j', $raiz);
+    $bd->consultar('SHOW TABLES');
+    $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
+    unset($bd);
+
+    $restos = glob("$dir/*.tmp");
+    if ($restos !== []) {
+        return 'la recuperación soltó ' . implode(', ', array_map('basename', $restos))
+             . ' en la carpeta de datos';
+    }
+    if ($n !== 120) { return "quedaron $n filas de 120"; }
+    return huella($dir) === $original ?: 'los ficheros no quedaron como estaban';
+});
+
 chk('un corte a mitad de restaurar se arregla en la siguiente apertura', function () use ($raiz) {
     $dir = "$raiz/j";
     // Se simula: journal válido, algunos ficheros ya devueltos y otros no,

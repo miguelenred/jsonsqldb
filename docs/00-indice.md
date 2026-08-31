@@ -88,7 +88,7 @@ php tests/f5_admin.php        → OK: 119   el panel, navegado como un usuario
 php tests/f6_cortes.php       → OK: 31    recuperación matando el proceso de verdad
 php tests/f7_concurrencia.php → OK: 23    procesos simultáneos y bloqueos
 php tests/f8_indices.php      → OK: 57    índices, siempre contra el escaneo completo
-php tests/f9_journal.php      → OK: 37    todos los estados en que puede quedar un corte
+php tests/f9_journal.php      → OK: 38    todos los estados en que puede quedar un corte
 ```
 
 `f5_admin.php` necesita la extensión cURL, y levanta dos servidores propios de

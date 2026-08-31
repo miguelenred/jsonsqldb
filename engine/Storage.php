@@ -596,6 +596,12 @@ final class Storage
         // único seguro es pararse. Restaurar a ciegas destruiría datos que
         // quizá estaban intactos, y borrarlo perdería la única copia que queda.
         $esperados = (array)($manifiesto['ficheros'] ?? []);
+        // Los manifiestos anteriores a la 2.0 traían una lista de nombres, no un
+        // mapa nombre => tamaño. Se normaliza para poder recorrerla igual.
+        // array_is_list() es de PHP 8.1 y el proyecto soporta 8.0
+        if ($esperados !== [] && array_keys($esperados) === range(0, count($esperados) - 1)) {
+            $esperados = array_fill_keys(array_map('strval', $esperados), null);
+        }
         foreach ($esperados as $nombre => $tam) {
             if (!is_string($nombre) || !is_int($tam)) {
                 continue;                             // manifiesto de una versión anterior
@@ -613,15 +619,25 @@ final class Storage
         foreach ($this->ficherosDe($tablas, $ambito === null) as $f) {
             @unlink($f);                              // fuera lo que dejó a medias
         }
-        foreach ((array)glob($dir . '/*') as $copia) {
-            if (basename((string)$copia) === 'manifiesto.json') {
+        // Se restaura todo lo que haya en la carpeta MENOS el manifiesto y los
+        // temporales. Restaurar solo lo que el manifiesto lista sería más
+        // preciso, pero si esa lista estuviera incompleta se perderían ficheros,
+        // y aquí lo prudente pesa más que lo exacto.
+        //
+        // Los temporales hay que saltarlos: un proceso muerto mientras escribía
+        // el manifiesto deja ahí el suyo (`manifiesto.json.<pid>.tmp`), y antes
+        // se copiaba tal cual a la carpeta de datos, entre las tablas.
+        foreach ((array)glob($dir . '/*') as $ruta) {
+            $nombre = basename((string)$ruta);
+            if ($nombre === 'manifiesto.json' || substr($nombre, -4) === '.tmp') {
                 continue;
             }
+            $copia = (string)$ruta;
             // Con fsync también al devolverlas: si la luz se va a mitad de la
             // recuperación, lo restaurado tiene que estar en el disco. El
             // journal no se borra hasta el final, así que si no llega a
             // terminar, la próxima vez se repite entera.
-            $this->copiarSeguro((string)$copia, $this->dir . '/' . basename((string)$copia));
+            $this->copiarSeguro($copia, $this->dir . '/' . $nombre);
         }
         foreach ($tablas as $t) {
             if (is_string($t)) {

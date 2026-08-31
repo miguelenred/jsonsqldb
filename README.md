@@ -890,7 +890,7 @@ php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 31    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 57    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 37    every partial state a crash can leave
+php tests/f9_journal.php      → OK: 38    every partial state a crash can leave
 ```
 
 Two of these are worth knowing what they actually do.
