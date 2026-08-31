@@ -383,74 +383,122 @@ chk('5.000 inserciones y actualización masiva', function () use ($bd) {
 
 echo "\n== Coste de las escrituras masivas ==\n";
 
-chk('un UPDATE masivo crece de forma lineal, no cuadrática', function () use ($raiz) {
-    // Tres costes ocultos lo volvían cuadrático: buscar cada fila recorriendo
-    // la tabla, listar el directorio una vez por fila para ver quién
-    // referencia la tabla, y copiar el array entero en cada iteración por el
-    // copy-on-write de PHP. Con 8.000 filas eran 1,2 segundos.
-    //
-    // Se mide el coste POR FILA al doblar el tamaño: si es cuadrático, se
-    // dobla; si es lineal, se queda parecido. Un factor 2,5 deja margen de
-    // sobra para el ruido de una máquina compartida y aun así delata un O(n²),
-    // que daría 2 limpio y subiendo.
-    $porFila = [];
-    foreach ([1000, 4000] as $n) {
-        $dir = $raiz . '/masivo' . $n;
-        @mkdir($dir, 0775, true);
+/**
+ * Coste por fila de una escritura masiva, en milisegundos.
+ *
+ * Se queda con la pasada MÁS RÁPIDA de varias, y descarta la primera. Medir una
+ * sola vez no vale: la primera pasada de un proceso paga el calentamiento —
+ * carga de clases, primer contacto con la memoria, caché del disco fría— y en
+ * una máquina compartida como la de integración continua eso multiplica el
+ * tiempo por diez. Con una sola medida por tamaño, el cociente entre dos
+ * tamaños es ruido: aquí llegó a dar 12,7 sin que nada estuviera mal.
+ *
+ * El mínimo, y no la mediana, porque el ruido solo puede AÑADIR tiempo: la
+ * pasada más rápida es la que más se acerca al coste real.
+ *
+ * @param callable(Database):void $preparar  deja la tabla lista, sin cronometrar
+ * @param callable(Database):void $escritura la operación que se mide
+ */
+function costePorFila(string $raiz, string $nombre, int $filas,
+                      callable $preparar, callable $escritura): float
+{
+    $mejor = null;
+    for ($intento = 0; $intento < 4; $intento++) {   // la primera se tira
+        $dir = "$raiz/$nombre$filas";
         Database::crear('m', $dir);
         $bd = new Database('m', $dir);
+        $preparar($bd, $filas);
+
+        $t0 = microtime(true);
+        $escritura($bd);
+        $ms = (microtime(true) - $t0) * 1000;
+
+        unset($bd);
+        Database::borrar('m', $dir);
+        @rmdir($dir);
+
+        if ($intento > 0 && ($mejor === null || $ms < $mejor)) {
+            $mejor = $ms;
+        }
+    }
+    return (float)$mejor / $filas;
+}
+
+chk('un UPDATE masivo crece de forma lineal, no cuadrática', function () use ($raiz) {
+    // Tres costes ocultos lo volvían cuadrático: buscar cada fila recorriendo
+    // la tabla, listar el directorio una vez por fila para ver quién referencia
+    // la tabla, y copiar el array entero en cada iteración por el copy-on-write
+    // de PHP. Con 8.000 filas eran 1,2 segundos.
+    //
+    // Se compara el coste POR FILA al multiplicar por ocho el tamaño: si es
+    // cuadrático se multiplica por ocho; si es lineal, se queda parecido o baja,
+    // porque los costes fijos se reparten entre más filas. El umbral de 2,5 deja
+    // margen para el ruido y aun así delata un O(n²).
+    $preparar = static function (Database $bd, int $n): void {
         $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, ciudad VARCHAR(20), v INTEGER)');
         $vals = [];
         for ($i = 1; $i <= $n; $i++) { $vals[] = "($i,'Madrid',0)"; }
         foreach (array_chunk($vals, 2000) as $b) {
             $bd->consultar('INSERT INTO t VALUES ' . implode(',', $b));
         }
-        $t0 = microtime(true);
+    };
+    $escribir = static function (Database $bd): void {
         $bd->consultar("UPDATE t SET v = 1 WHERE ciudad = 'Madrid'");
-        $porFila[$n] = ((microtime(true) - $t0) * 1000) / $n;
+    };
 
-        $tocadas = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t WHERE v = 1')[0]['n'];
-        unset($bd);
-        Database::borrar('m', $dir);
-        @rmdir($dir);
-        if ($tocadas !== $n) {
-            return "el UPDATE de $n filas tocó $tocadas";
-        }
-    }
-    $factor = $porFila[1000] > 0 ? $porFila[4000] / $porFila[1000] : 0;
+    // Que además haga lo que dice
+    $dir = "$raiz/comprobacion";
+    Database::crear('m', $dir);
+    $bd = new Database('m', $dir);
+    $preparar($bd, 500);
+    $escribir($bd);
+    $tocadas = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t WHERE v = 1')[0]['n'];
+    unset($bd);
+    Database::borrar('m', $dir);
+    @rmdir($dir);
+    if ($tocadas !== 500) { return "el UPDATE tocó $tocadas filas de 500"; }
+
+    // 1.000 frente a 8.000: con 4.000 los costes fijos —reescribir las partes,
+    // rehacer los índices— tapaban el término cuadrático y la prueba dejaba
+    // pasar un O(n²) de verdad. Comprobado quitando el atajo a propósito.
+    $c1 = costePorFila($raiz, 'masivo', 1000, $preparar, $escribir);
+    $c4 = costePorFila($raiz, 'masivo', 8000, $preparar, $escribir);
+    $factor = $c1 > 0 ? $c4 / $c1 : 0;
     return $factor < 2.5
-        ?: sprintf('el coste por fila se multiplicó por %.1f al cuadruplicar (%.4f -> %.4f ms)',
-                   $factor, $porFila[1000], $porFila[4000]);
+        ?: sprintf('el coste por fila se multiplicó por %.1f al multiplicar por ocho (%.5f -> %.5f ms)',
+                   $factor, $c1, $c4);
 });
 
 chk('un DELETE masivo también', function () use ($raiz) {
-    $porFila = [];
-    foreach ([1000, 4000] as $n) {
-        $dir = $raiz . '/masivod' . $n;
-        @mkdir($dir, 0775, true);
-        Database::crear('m', $dir);
-        $bd = new Database('m', $dir);
+    $preparar = static function (Database $bd, int $n): void {
         $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, ciudad VARCHAR(20))');
         $vals = [];
         for ($i = 1; $i <= $n; $i++) { $vals[] = "($i,'Madrid')"; }
         foreach (array_chunk($vals, 2000) as $b) {
             $bd->consultar('INSERT INTO t VALUES ' . implode(',', $b));
         }
-        $t0 = microtime(true);
+    };
+    $escribir = static function (Database $bd): void {
         $bd->consultar("DELETE FROM t WHERE ciudad = 'Madrid'");
-        $porFila[$n] = ((microtime(true) - $t0) * 1000) / $n;
+    };
 
-        $quedan = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
-        unset($bd);
-        Database::borrar('m', $dir);
-        @rmdir($dir);
-        if ($quedan !== 0) {
-            return "el DELETE de $n filas dejó $quedan sin borrar";
-        }
-    }
-    $factor = $porFila[1000] > 0 ? $porFila[4000] / $porFila[1000] : 0;
+    $dir = "$raiz/comprobaciond";
+    Database::crear('m', $dir);
+    $bd = new Database('m', $dir);
+    $preparar($bd, 500);
+    $escribir($bd);
+    $quedan = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
+    unset($bd);
+    Database::borrar('m', $dir);
+    @rmdir($dir);
+    if ($quedan !== 0) { return "el DELETE dejó $quedan filas sin borrar"; }
+
+    $c1 = costePorFila($raiz, 'masivod', 1000, $preparar, $escribir);
+    $c4 = costePorFila($raiz, 'masivod', 8000, $preparar, $escribir);
+    $factor = $c1 > 0 ? $c4 / $c1 : 0;
     return $factor < 2.5
-        ?: sprintf('el coste por fila se multiplicó por %.1f al cuadruplicar', $factor);
+        ?: sprintf('el coste por fila se multiplicó por %.1f al multiplicar por ocho (%.5f -> %.5f ms)',
+                   $factor, $c1, $c4);
 });
 
 echo "\n== Escritura parcial de partes ==\n";

@@ -27,6 +27,24 @@ Faster writes on tables with indexes. Nothing breaking, no data conversion.
   cover each other; removing both does, with `sobran 396 posiciones`. That was
   checked, not assumed.
 
+### Fixed
+
+- **The scaling tests for bulk writes were unreliable, and weaker than they
+  looked.** Two separate problems, both found because CI failed on PHP 8.1 with
+  `el coste por fila se multiplicó por 12.7` while the code was fine.
+
+  They timed one run per size, and the smaller size ran first — so it paid the
+  warm-up that the larger one did not. Locally the same measurement varied
+  thirteenfold between runs. They now take the fastest of several runs and
+  discard the first: noise can only add time, so the fastest run is the one
+  closest to the real cost.
+
+  And they compared 1,000 rows against 4,000, where the fixed costs — rewriting
+  the parts, rebuilding the indexes — hid the quadratic term. Removing the
+  `posicionEn` shortcut on purpose, which makes the update quadratic again, did
+  **not** turn them red: they were passing whatever the code did. Against 8,000
+  rows it now fails with a factor of 4.7, which is the point of having them.
+
 ### Changed
 
 - **An index is extended instead of rebuilt when a write only appends.**
