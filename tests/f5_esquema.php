@@ -339,36 +339,66 @@ chk('una operación normal no deja rastro', function () use ($bd, $raiz) {
     $bd->consultar('ALTER TABLE diario RENAME TO diario2');
     return !is_dir("$raiz/tienda/.tx");
 });
-chk('un corte a mitad se deshace al volver a abrir', function () use ($raiz) {
-    // Se simula el corte: se abre el journal a mano, se destroza la tabla y se
-    // deja el .tx sin confirmar, como si el proceso hubiera muerto ahí.
-    $st = new Storage($raiz, 'tienda');
-    $st->bloquear(true);
-    $st->txIniciar('ALTER TABLE', ['diario2'], null);
-    @unlink("$raiz/tienda/diario2.json");            // la operación a medias
-    file_put_contents("$raiz/tienda/diario2.meta.json", '{"roto":true}');
-    $st->desbloquear();
-    unset($st);
+/**
+ * Simula el corte de una escritura justo después de escribir el manifiesto:
+ * los temporales están en el disco y el manifiesto dice dónde van. Es el único
+ * momento en que un corte deja trabajo pendiente: antes del manifiesto los
+ * temporales sobran y los datos siguen intactos.
+ *
+ * @param array<string,string> $ficheros nombre definitivo => contenido nuevo
+ */
+function simularCorte(string $dir, ?string $ambito, array $tablas, array $ficheros, array $borrar = []): void {
+    $renombrar = [];
+    foreach ($ficheros as $nombre => $contenido) {
+        file_put_contents("$dir/$nombre.999999.tmp", $contenido);
+        $renombrar["$nombre.999999.tmp"] = $nombre;
+    }
+    $jd = "$dir/.tx/" . ($ambito ?? '_base');
+    @mkdir($jd, 0775, true);
+    file_put_contents("$jd/manifiesto.json", json_encode([
+        'tipo' => 'redo', 'operacion' => 'ESCRITURA', 'ambito' => $ambito,
+        'tablas' => $tablas, 'renombrar' => $renombrar, 'borrar' => $borrar,
+    ]));
+}
 
-    // Al abrir de nuevo, el motor encuentra el .tx y deshace
+chk('un corte a mitad de una escritura se termina al volver a abrir', function () use ($raiz) {
+    $dir = "$raiz/tienda";
+    $rev = json_decode((string)file_get_contents("$dir/diario2.rev.json"), true);
+    simularCorte($dir, null, ['diario2'], [
+        'diario2.json'     => "{\n  \"table\": \"diario2\",\n  \"rows\": [\n    {\"id\":1,\"a\":\"uno\"},\n    {\"id\":2,\"a\":\"dos\"},\n    {\"id\":3,\"a\":\"tres\"}\n  ]\n}\n",
+        'diario2.rev.json' => json_encode(['rev' => $rev['rev'] + 1, 'chunk' => $rev['chunk'], 'rows' => 3, 'parts' => [$rev['rev'] + 1]]),
+    ]);
+
+    // Al abrir de nuevo, el motor encuentra el manifiesto y termina lo que faltaba
     $bd2 = new Database('tienda', $raiz);
     $filas = $bd2->consultar('SELECT * FROM diario2 ORDER BY id');
-    return !is_dir("$raiz/tienda/.tx") && count($filas) === 2 && $filas[0]['a'] === 'uno';
+    return !is_dir("$dir/.tx") && count($filas) === 3 && $filas[2]['a'] === 'tres'
+        && glob("$dir/*.tmp") === [];
 });
-chk('un journal ya confirmado no deshace nada', function () use ($raiz) {
-    $st = new Storage($raiz, 'tienda');
-    $st->bloquear(true);
-    $st->txIniciar('ALTER TABLE', ['diario2'], null);
-    $st->desbloquear();
-
-    // La operación terminó: se marca COMMITTED pero no da tiempo a borrar
-    file_put_contents("$raiz/tienda/.tx/_base/manifiesto.json", '{"estado":"COMMITTED"}');
-    $antes = (string)file_get_contents("$raiz/tienda/diario2.json");
+chk('un corte antes del manifiesto no toca nada: los temporales sobran', function () use ($raiz) {
+    $dir = "$raiz/tienda";
+    file_put_contents("$dir/diario2.json.999999.tmp", 'a medias');
+    @mkdir("$dir/.tx/_base", 0775, true);                // carpeta sin manifiesto
+    $antes = (string)file_get_contents("$dir/diario2.json");
 
     $bd2 = new Database('tienda', $raiz);
-    $bd2->consultar('SELECT 1 AS uno');              // basta con abrir la base
-    return !is_dir("$raiz/tienda/.tx")
-        && (string)file_get_contents("$raiz/tienda/diario2.json") === $antes;
+    $bd2->consultar('SELECT 1 AS uno');                  // basta con abrir la base
+    $bd2->consultar("INSERT INTO diario2 (id, a) VALUES (4, 'cuatro')");   // la escritura barre el temporal
+    return !is_dir("$dir/.tx") && glob("$dir/*.tmp") === []
+        && $bd2->consultar('SELECT COUNT(*) AS n FROM diario2')[0]['n'] === 4;
+});
+chk('un journal cuyos temporales ya estaban en su sitio no repite nada', function () use ($raiz) {
+    $dir   = "$raiz/tienda";
+    $antes = (string)file_get_contents("$dir/diario2.json");
+    @mkdir("$dir/.tx/_base", 0775, true);
+    file_put_contents("$dir/.tx/_base/manifiesto.json", json_encode([
+        'tipo' => 'redo', 'tablas' => ['diario2'],
+        'renombrar' => ['diario2.json.999999.tmp' => 'diario2.json'],
+    ]));
+
+    $bd2 = new Database('tienda', $raiz);
+    $bd2->consultar('SELECT 1 AS uno');
+    return !is_dir("$dir/.tx") && (string)file_get_contents("$dir/diario2.json") === $antes;
 });
 chk('el DROP de una tabla también va con journal', function () use ($raiz) {
     $bd2 = new Database('tienda', $raiz);
@@ -391,20 +421,29 @@ chk('un CASCADE que toca dos tablas se journaliza', function () use ($bd, $raiz)
     return $bd->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 1
         && !is_dir("$raiz/tienda/.tx");
 });
-chk('un corte a mitad de un CASCADE se deshace entero', function () use ($raiz) {
-    $st = new Storage($raiz, 'tienda');
-    $st->bloquear(true);
-    $st->txIniciar('ESCRITURA', ['jpadres', 'jhijas'], null);
-    // El borrado se aplicó en la tabla padre pero no llegó a la hija
-    file_put_contents("$raiz/tienda/jpadres.json",
-        '{"table":"jpadres","rows":[]}' . "\n");
-    $st->desbloquear();
-    unset($st);
+chk('un corte a mitad de un CASCADE se termina entero', function () use ($raiz) {
+    $dir = "$raiz/tienda";
+    // El borrado del padre 2 y de su hija: el padre ya estaba renombrado
+    // cuando cayó el corte, la hija todavía no
+    $rp = json_decode((string)file_get_contents("$dir/jpadres.rev.json"), true);
+    $rh = json_decode((string)file_get_contents("$dir/jhijas.rev.json"), true);
+    $padres = "{\n  \"table\": \"jpadres\",\n  \"rows\": [\n    {\"id\":1,\"n\":\"uno\"}\n  ]\n}\n";
+    simularCorte($dir, null, ['jpadres', 'jhijas'], [
+        'jpadres.rev.json' => json_encode(['rev' => $rp['rev'] + 1, 'chunk' => $rp['chunk'], 'rows' => 1, 'parts' => [$rp['rev'] + 1]]),
+        'jhijas.json'      => "{\n  \"table\": \"jhijas\",\n  \"rows\": []\n}\n",
+        'jhijas.rev.json'  => json_encode(['rev' => $rh['rev'] + 1, 'chunk' => $rh['chunk'], 'rows' => 0, 'parts' => [$rh['rev'] + 1]]),
+    ]);
+    file_put_contents("$dir/jpadres.json", $padres);       // este rename ya había ocurrido
+    file_put_contents("$dir/jpadres.json.999999.tmp", $padres);
+    $m = json_decode((string)file_get_contents("$dir/.tx/_base/manifiesto.json"), true);
+    $m['renombrar'] = ['jpadres.json.999999.tmp' => 'jpadres.json'] + $m['renombrar'];
+    file_put_contents("$dir/.tx/_base/manifiesto.json", json_encode($m));
+    @unlink("$dir/jpadres.json.999999.tmp");
 
     $bd2 = new Database('tienda', $raiz);
     return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 1
-        && $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 1
-        && !is_dir("$raiz/tienda/.tx");
+        && $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 0
+        && !is_dir("$dir/.tx") && glob("$dir/*.tmp") === [];
 });
 chk('una escritura de una sola tabla usa el journal de esa tabla, no el de la base', function () use ($raiz) {
     // Una tabla con clave primaria tiene índice, así que su escritura toca
@@ -416,39 +455,34 @@ chk('una escritura de una sola tabla usa el journal de esa tabla, no el de la ba
     return !is_dir("$raiz/tienda/.tx")
         && $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 2;
 });
-chk('el journal de una tabla se deshace solo con el bloqueo de esa tabla', function () use ($raiz) {
-    // Se simula el corte de una escritura acotada a una tabla: journal con
-    // ámbito 'jpadres', datos destrozados y muerte sin confirmar.
-    $st = new Storage($raiz, 'tienda');
-    $st->bloquear(true, 'jpadres');
-    $st->txIniciar('ESCRITURA', ['jpadres'], 'jpadres');
-    file_put_contents("$raiz/tienda/jpadres.json", '{"table":"jpadres","rows":[]}' . "\n");
-    $st->desbloquear();
-    unset($st);
+chk('el journal de una tabla se termina solo con el bloqueo de esa tabla', function () use ($raiz) {
+    // Una escritura acotada a una tabla que murió tras escribir su manifiesto
+    $dir = "$raiz/tienda";
+    $rp  = json_decode((string)file_get_contents("$dir/jpadres.rev.json"), true);
+    simularCorte($dir, 'jpadres', ['jpadres'], [
+        'jpadres.json'     => "{\n  \"table\": \"jpadres\",\n  \"rows\": [\n    {\"id\":1,\"n\":\"uno\"},\n    {\"id\":3,\"n\":\"tres\"},\n    {\"id\":4,\"n\":\"cuatro\"}\n  ]\n}\n",
+        'jpadres.rev.json' => json_encode(['rev' => $rp['rev'] + 1, 'chunk' => $rp['chunk'], 'rows' => 3, 'parts' => [$rp['rev'] + 1]]),
+    ]);
 
-    // Una lectura cualquiera lo encuentra y lo deshace sin necesitar el
+    // Una lectura cualquiera lo encuentra y lo termina sin necesitar el
     // exclusivo de la base
     $bd2 = new Database('tienda', $raiz);
-    return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 2
-        && !is_dir("$raiz/tienda/.tx");
+    return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 3
+        && !is_dir("$dir/.tx");
 });
 chk('un journal huérfano de una tabla no bloquea las lecturas de otra', function () use ($raiz) {
-    $st = new Storage($raiz, 'tienda');
-    $st->bloquear(true, 'jpadres');
-    $st->txIniciar('ESCRITURA', ['jpadres'], 'jpadres');
-    $st->desbloquear();
-    unset($st);
+    @mkdir("$raiz/tienda/.tx/jpadres", 0775, true);     // sin manifiesto: murió antes
 
     $bd2 = new Database('tienda', $raiz);
     $n = $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'];
-    return $n === 1 && !is_dir("$raiz/tienda/.tx");
+    return $n === 0 && !is_dir("$raiz/tienda/.tx");
 });
 chk('un trigger que escribe en otra tabla también se journaliza', function () use ($raiz) {
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar("CREATE TRIGGER trg_j AFTER INSERT ON jhijas
                      BEGIN UPDATE jpadres SET n = 'tocado' WHERE id = NEW.pid; END");
-    $bd2->consultar('INSERT INTO jhijas (pid) VALUES (2)');
-    return $bd2->consultar('SELECT n FROM jpadres WHERE id = 2')[0]['n'] === 'tocado'
+    $bd2->consultar('INSERT INTO jhijas (pid) VALUES (3)');
+    return $bd2->consultar('SELECT n FROM jpadres WHERE id = 3')[0]['n'] === 'tocado'
         && !is_dir("$raiz/tienda/.tx");
 });
 chk('limpiar las tablas del journal', function () use ($raiz) {

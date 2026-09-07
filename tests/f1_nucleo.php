@@ -348,7 +348,6 @@ chk('borrar base', function () use ($raiz, $base) {
     Storage::borrarBase($raiz, $base);
     return !is_dir("$raiz/$base");
 });
-@rmdir($raiz);
 
 echo "\n== Vigilancia de memoria ==\n";
 chk('corta bien y deja el proceso utilizable, con distintos límites', function () use ($raiz) {
@@ -562,6 +561,11 @@ chk('el log de una conexión directa pone ip = local', function () {
 chk('limpiar la base de la conexión directa', function () use ($raiz) {
     exec('rm -rf ' . escapeshellarg($raiz . '/directa') . ' ' . escapeshellarg($raiz . '/logs'));
     return true;
+});
+chk('la carpeta temporal queda vacía y se elimina', function () use ($raiz) {
+    clearstatcache();
+    return @rmdir($raiz) && !is_dir($raiz)
+        ?: 'quedan: ' . implode(',', array_diff((array)scandir($raiz), ['.', '..']));
 });
 
 echo "\n---------------------------------------\n";

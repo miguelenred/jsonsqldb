@@ -1,321 +1,319 @@
-# 05 — jsonSQLDBadmin (panel de administración)
+# 05 — jsonSQLDBadmin (administration panel)
 
-Panel web para administrar jsonSQLDB desde el navegador. PHP puro, sin Composer
-y sin nada de fuera: Bootstrap y los iconos están en `jsonsqldbadmin/assets/`.
+A web panel to administer jsonSQLDB from the browser. Pure PHP, no Composer and
+nothing from outside: Bootstrap and the icons are in `jsonsqldbadmin/assets/`.
 
-El panel **nunca toca el motor ni los ficheros de datos**: todo pasa por la API,
-firmado con HMAC y con parámetros ligados. Si mañana mueves la API a otro
-servidor, el panel sigue valiendo cambiando una constante.
+The panel **never touches the engine or the data files**: everything goes
+through the API, signed with HMAC and with bound parameters. If you move the
+API to another server tomorrow, the panel still works by changing one
+constant.
 
 ```
-navegador  →  jsonsqldbadmin/index.php  →  api/jsonsqldb_api.php  →  engine/  →  data/
+browser  →  jsonsqldbadmin/index.php  →  api/jsonsqldb_api.php  →  engine/  →  data/
 ```
 
-## 1. Instalación
+## 1. Installation
 
-1. Sube la carpeta `jsonsqldbadmin/` junto al resto del proyecto.
-2. Abre `jsonsqldbadmin/config.php` y comprueba que `ADMIN_API_KEY` y
-   `ADMIN_HMAC_SECRET` son **los mismos** que en `api/jsonsqldb_api_config.php`.
-   Si cambias uno, cambia el otro.
-3. Entra en `https://tuservidor/jsonsqldb/jsonsqldbadmin/`. **La primera vez que
-   se abre el panel, y solo la primera, pide crear el usuario administrador**:
-   eliges nombre y contraseña ahí mismo. No existe ninguna contraseña por
-   defecto ni ningún usuario de fábrica, así que no hay nada que cambiar después
-   ni riesgo de dejarse el `admin/admin` puesto. La contraseña se guarda con
-   bcrypt y necesita al menos 10 caracteres.
+1. Upload the `jsonsqldbadmin/` folder with the rest of the project.
+2. Open `jsonsqldbadmin/config.php` and check that `ADMIN_API_KEY` and
+   `ADMIN_HMAC_SECRET` are **the same** as in `api/jsonsqldb_api_config.php`
+   (`php configurar.php` writes both files with matching values). If you change
+   one, change the other.
+3. Open `https://yourserver/jsonsqldb/jsonsqldbadmin/`. **The first time the
+   panel is opened, and only the first, it asks you to create the administrator
+   user**: you choose the name and password right there. There is no default
+   password and no factory user, so there is nothing to change afterwards and
+   no risk of leaving `admin/admin` in place. The password is stored with bcrypt
+   and needs at least 10 characters.
 
-   En cuanto ese usuario existe, la pantalla de alta desaparece y el panel pide
-   usuario y contraseña como cualquier otro. Si algún día pierdes el acceso,
-   borra `jsonsqldbadmin/datos/usuarios.json` y el panel te volverá a pedir el
-   alta del administrador.
-4. Comprueba que `jsonsqldbadmin/datos/` tiene permiso de escritura: ahí se
-   guardan los usuarios y la auditoría.
+   Once that user exists, the sign-up screen disappears and the panel asks for
+   user and password like any other. If you ever lose access, delete
+   `jsonsqldbadmin/datos/usuarios.json` and the panel will ask you to create the
+   administrator again.
+4. Check that `jsonsqldbadmin/datos/` is writable: users and the audit trail
+   are stored there.
 
-`ADMIN_API_URL` puede quedarse vacía: el panel deduce la URL de la API a partir
-de la suya (`../api/jsonsqldb_api.php`). Rellénala solo si la API está en otro
-dominio o en otra ruta.
+`ADMIN_API_URL` can stay empty: the panel derives the API URL from its own
+(`../api/jsonsqldb_api.php`). Fill it in only if the API is on another domain or
+path.
 
-## 2. Usuarios del panel
+## 2. Panel users
 
-Son independientes de las API keys. Se guardan en `datos/usuarios.json` con
-bcrypt, y no tienen nada que ver con las claves de la API.
+They are independent of the API keys. They are stored in `datos/usuarios.json`
+with bcrypt and have nothing to do with the API keys.
 
-| Rol | Puede |
+| Role | Can |
 |---|---|
-| `admin` | todo: crear y borrar bases, tablas, columnas, claves, triggers, filas y usuarios |
-| `lectura` | ver estructura y datos, y lanzar `SELECT` y `SHOW` desde el editor SQL |
+| `admin` | everything: create and delete databases, tables, columns, keys, triggers, rows and users |
+| `lectura` | see structure and data, and run `SELECT` and `SHOW` from the SQL editor |
 
-Protecciones incluidas: sesión con caducidad por inactividad
-(`ADMIN_SESION_MINUTOS`), bloqueo por IP tras varios fallos
-(`ADMIN_LOGIN_MAX_FALLOS`), token CSRF en todos los formularios, cookie
-`HttpOnly` + `SameSite=Strict`, y `Secure` automática si entras por HTTPS.
+Included protections: session expiry on inactivity (`ADMIN_SESION_MINUTOS`), IP
+lockout after repeated failures (`ADMIN_LOGIN_MAX_FALLOS`), CSRF token on every
+form, `HttpOnly` + `SameSite=Strict` cookie, and `Secure` automatically when you
+come in over HTTPS.
 
-Todo lo que se hace queda en `datos/auditoria-AAAA-MM-DD.json`: usuario, IP,
-base, acción y detalle. Se consulta desde la pestaña **Auditoría** y se purga
-sola pasados `ADMIN_AUDIT_DIAS` días.
+Everything that is done is recorded in `datos/auditoria-YYYY-MM-DD.json`: user,
+IP, database, action and detail. It is browsed from the **Audit** tab and purged
+on its own after `ADMIN_AUDIT_DIAS` days.
 
-## 3. Qué se puede hacer
+## 3. What it can do
 
-**Bases de datos** — listar, crear, borrar y **exportar**. Borrar exige escribir
-el nombre exacto de la base. Hay dos formas de exportar:
+**Databases** — list, create, delete and **export**. Deleting requires typing
+the exact name of the database. There are two ways to export:
 
-- **Volcado SQL**: un `.sql` con `CREATE TABLE`, los `INSERT`, las claves únicas
-  y foráneas (al final, cuando ya existen todas las tablas) y los triggers. Es
-  legible y se puede reejecutar sentencia a sentencia.
-- **Copia ZIP**: los ficheros JSON tal cual están en disco, con su estructura de
-  carpetas. Se descomprime dentro de `data/` y la base queda restaurada, con sus
-  metadatos y revisiones. Es la copia fiel.
+- **SQL dump**: a `.sql` with `CREATE TABLE`, the `INSERT`s, the unique and
+  foreign keys (at the end, once every table exists) and the triggers. It is
+  readable and can be re-run statement by statement.
+- **ZIP copy**: the JSON files exactly as they are on disk, with their folder
+  structure. Unzipped into `data/` the database is restored, metadata and
+  revisions included. It is the faithful copy.
 
-Junto al de exportar hay un botón para **restaurar desde una copia ZIP**, con las
-mismas condiciones: escribe en el disco del motor, así que necesita que el panel
-y la API estén en la misma máquina. Antes de tocar nada aparta lo que hay, y si
-la restauración falla a medias lo devuelve a su sitio.
+Next to export there is a button to **restore from a ZIP copy**, with the same
+conditions: it writes to the engine's disk, so the panel and the API must be on
+the same machine. Before touching anything it sets aside what is there, and if
+the restore fails halfway it puts it back.
 
-Del ZIP solo se restauran los `.json`, más el `.htaccess` y el `web.config`;
-cualquier otra cosa se ignora. Los nombres de tabla se validan, el contenido se
-comprueba que sea JSON con la forma que espera el motor, y **si alguna ruta del
-ZIP sale de la carpeta de destino se rechaza el fichero entero sin tocar nada**:
-es el ataque clásico contra los ZIP.
+Only the `.json` files are restored from the ZIP, plus `.htaccess` and
+`web.config`; anything else is ignored. Table names are validated, the content
+is checked to be JSON of the shape the engine expects, and **if any path in the
+ZIP escapes the destination folder the whole file is rejected without touching
+anything**: the classic ZIP attack.
 
-El botón de la copia ZIP **solo aparece si el panel y la API se sirven desde la
-misma máquina**. El panel compara el host de `ADMIN_API_URL` con el suyo; si no
-coinciden, oculta el botón y explica por qué, en vez de dejarte copiar los
-ficheros de otra instalación que casualmente estuviera en el disco local.
+The ZIP copy button **only appears if the panel and the API are served from the
+same machine**. The panel compares the host of `ADMIN_API_URL` with its own; if
+they differ, it hides the button and explains why, instead of letting you copy
+the files of another installation that happened to be on the local disk.
 
-La copia ZIP es lo único del panel que lee los ficheros del motor directamente,
-y solo en lectura: un ZIP fiel necesita los `.json` tal cual, y la API devuelve
-datos, no ficheros. La ruta sale de `ADMIN_RUTA_DATOS_MOTOR`, o de `../data` si
-la dejas vacía. Si el panel está en otra máquina que el motor, la copia ZIP
-avisa de que no está disponible y te quedas con el volcado SQL. El ZIP se monta
-en un temporal que se borra siempre, también si la descarga se corta a medias.
+The ZIP copy is the only thing in the panel that reads the engine's files
+directly, and read-only: a faithful ZIP needs the `.json` files as they are, and
+the API returns data, not files. The path comes from `ADMIN_RUTA_DATOS_MOTOR`,
+or `../data` if left empty. The ZIP is built in a temporary file that is always
+deleted, even if the download is cut short.
 
-**Tablas** — listar con número de columnas y de filas, crear, renombrar, vaciar
-y borrar. El formulario de creación arranca con seis filas de columna y trae un
-botón *Añadir columna* para las que hagan falta, más una X para quitar las que
-sobren; las que queden en blanco se ignoran.
+**Tables** — list with column and row counts, create, rename, empty and delete.
+The creation form starts with six column rows and has an *Add column* button
+for more, plus an X to remove the spare ones; blank ones are ignored.
 
-**Estructura** — todo lo que admite el motor:
+**Structure** — everything the engine supports:
 
-- Columnas: añadir, **editar** y borrar. Al editar se cambia lo mismo que al
-  crear: nombre, tipo, longitud, decimales, `NOT NULL`, `UNIQUE` y `DEFAULT`.
-  Los datos se convierten, y si no aguantan el cambio no se toca nada y se
-  explica por qué. La clave primaria se gestiona desde «Claves», y el
-  `AUTOINCREMENT` no se puede cambiar: el propio formulario lo avisa. La casilla de `AUTOINCREMENT` solo se
-  puede marcar en una columna `INTEGER` que además sea clave primaria, que es lo
-  único que admite el motor.
-- Clave primaria simple o compuesta, al crear la tabla y también **después**:
-  si una tabla no tiene, el apartado «Claves» ofrece crearla marcando una o
-  varias columnas, y quitarla. Con datos nulos o repetidos se rechaza. Una clave
-  `AUTOINCREMENT` no se puede quitar: el panel lo indica.
-- Claves únicas de una o varias columnas, sobre tablas que ya tienen datos.
-- Claves foráneas con `ON DELETE` / `ON UPDATE` (`NO ACTION`, `CASCADE`,
-  `RESTRICT`, `SET NULL`, `SET DEFAULT`). El desplegable de columnas de la tabla
-  destino se rellena solo.
-- Triggers, con un asistente: nombre, desplegable de `BEFORE`/`AFTER`,
-  desplegable de `INSERT`/`UPDATE`/`DELETE`, condición opcional (el `WHEN`) y el
-  cuerpo. Debajo se ve en directo la sentencia que se va a crear. Dentro del
-  cuerpo valen `NEW.columna`, `OLD.columna` y `RAISE(ABORT, 'mensaje')`.
-- Índices de búsqueda: crear uno sobre una o varias columnas —el formulario
-  avisa de que el orden importa y de que aceleran las lecturas pero no las
-  escrituras— y borrarlo. Los automáticos de la clave primaria y de los `UNIQUE`
-  se ven marcados como tales y no se pueden borrar sueltos: se van con su
-  restricción.
-- Borrar cualquier clave única o foránea, cualquier trigger y cualquier índice
-  creado a mano.
+- Columns: add, **edit** and drop. Editing changes the same as creating: name,
+  type, length, decimals, `NOT NULL`, `UNIQUE` and `DEFAULT`. The data is
+  converted, and if it does not survive the change nothing is touched and the
+  reason is explained. The primary key is managed from «Keys», and
+  `AUTOINCREMENT` cannot be changed: the form itself says so. The
+  `AUTOINCREMENT` box can only be ticked on an `INTEGER` column that is also
+  the primary key, which is all the engine allows.
+- Simple or composite primary key, at creation and also **afterwards**: if a
+  table has none, the «Keys» section offers to create one by ticking one or
+  more columns, and to drop it. With null or duplicate data it is rejected. An
+  `AUTOINCREMENT` key cannot be dropped: the panel says so.
+- Unique keys on one or more columns, on tables that already have data.
+- Foreign keys with `ON DELETE` / `ON UPDATE` (`NO ACTION`, `CASCADE`,
+  `RESTRICT`, `SET NULL`, `SET DEFAULT`). The column dropdown of the target
+  table fills itself.
+- Triggers, with an assistant: name, `BEFORE`/`AFTER` dropdown,
+  `INSERT`/`UPDATE`/`DELETE` dropdown, optional condition (the `WHEN`) and the
+  body. Below it the statement about to be created is shown live. In the body
+  `NEW.column`, `OLD.column` and `RAISE(ABORT, 'message')` are valid.
+- Indexes: create one on one or more columns — the form warns that order
+  matters — and drop it. The automatic ones of the primary key and the
+  `UNIQUE`s are shown as such and cannot be dropped on their own: they go with
+  their constraint.
+- Drop any unique or foreign key, any trigger and any hand-made index.
 
-Al añadir una clave única o foránea se validan **los datos que ya hay**: si hay
-valores repetidos o filas huérfanas, la operación se rechaza y la estructura no
-se toca.
+When adding a unique or foreign key **the existing data** is validated: with
+duplicate values or orphan rows the operation is rejected and the structure is
+not touched.
 
-**Datos** — listado paginado, orden por cualquier columna, **filtro** que busca
-el texto en todas las columnas a la vez (se combina con el orden, la paginación
-y la exportación), e insertar, editar y borrar filas. Las columnas
-`AUTOINCREMENT` salen de solo lectura y sin casilla NULL, porque el valor lo
-pone la base; las `NOT NULL` se marcan como «obligatorio» y tampoco ofrecen la
-casilla NULL, porque no la admiten. Una casilla vacía significa «sin valor»: en las columnas
-automáticas, numéricas y de fecha la columna no se manda y el motor aplica el
-autoincremento o el `DEFAULT`; en las de texto sí se guarda la cadena vacía.
-Para guardar un nulo se marca la casilla NULL. Para editar o borrar una fila suelta la tabla necesita clave
-primaria; si no la tiene, el panel lo avisa y te manda al editor SQL.
+**Data** — paginated listing, ordering by any column, a **filter** that searches
+the text in every column at once (combined with ordering, pagination and
+export), and inserting, editing and deleting rows. `AUTOINCREMENT` columns are
+read-only and have no NULL box, because the database sets the value; `NOT NULL`
+columns are marked as «required» and offer no NULL box either. An empty box
+means «no value»: in automatic, numeric and date columns the column is not sent
+and the engine applies the autoincrement or the `DEFAULT`; in text columns the
+empty string is stored. To store a null, tick the NULL box. To edit or delete a
+single row the table needs a primary key; if it has none, the panel says so and
+sends you to the SQL editor.
 
-**Clave de solo lectura** — si configuras `ADMIN_API_KEY_LECTURA` con una clave
-de permiso `lectura`, el panel firma con ella cuando quien ha entrado no es
-administrador. Así el motor se convierte en la segunda barrera: aunque un fallo
-del panel dejara pasar un `DELETE`, la API lo rechazaría. Sin configurarla, todos
-los usuarios firman con la clave admin y la única barrera es la comprobación del
-propio panel.
+**Read-only key** — if you configure `ADMIN_API_KEY_LECTURA` with a key of
+`lectura` permission, the panel signs with it whenever the logged-in user is not
+an administrator. The engine then becomes the second barrier: even if a panel
+bug let a `DELETE` through, the API would reject it. Without it, every user
+signs with the admin key and the only barrier is the panel's own check.
 
-**Integridad** — pantalla propia que comprueba que ninguna fila apunte a un valor
-inexistente en su tabla destino, y un botón para corregir poniendo a `NULL` lo
-que se pueda. Nunca borra filas. Un usuario de solo lectura ve el informe pero no
-el botón. Útil cuando alguien ha editado un `.json` a mano o restaurado la copia
-de una tabla sin la otra.
+**Integrity** — a screen of its own that checks that no row points at a
+non-existent value in its target table, and a button to fix by setting to
+`NULL` what can be. It never deletes rows. A read-only user sees the report but
+not the button. Useful when someone has edited a `.json` by hand or restored
+the copy of one table without the other.
 
-**Vistas** — pantalla propia en el menú: listado con su consulta, creación con
-nombre y `SELECT`, y borrado. Desde el listado se salta al editor SQL con la
-consulta ya escrita. Un usuario de solo lectura las ve pero no puede crearlas ni
-borrarlas.
+**Views** — a screen of its own in the menu: a list with their query, creation
+with name and `SELECT`, and deletion. From the list you jump to the SQL editor
+with the query already written. A read-only user sees them but cannot create or
+delete them.
 
-**SQL** — cualquier sentencia, una por ejecución, con el resultado en tabla y el
-tiempo que ha tardado. Con rol `lectura` solo se admiten `SELECT` y `SHOW`.
+**SQL** — any statement, one per run, with the result as a table and the time
+it took. With the `lectura` role only `SELECT` and `SHOW` are accepted.
 
-**Exportar** — botones **CSV** e **INSERT** en la pantalla de datos (exporta la
-tabla entera, con la ordenación que tengas puesta, no solo la página visible) y
-en el resultado del editor SQL (exporta lo que ha devuelto la consulta).
+**Export** — **CSV** and **INSERT** buttons on the data screen (exports the
+whole table, with the ordering you have set, not just the visible page) and on
+the SQL editor's result (exports what the query returned).
 
-- El CSV lleva BOM UTF-8 para que Excel no rompa los acentos, y usa `;` como
-  separador (`ADMIN_CSV_SEPARADOR`, cámbialo a `,` si lo vas a abrir con otras
-  herramientas). Los nulos salen como celda vacía.
-- El INSERT genera una sentencia por fila, con los nombres entrecomillados, las
-  comillas simples duplicadas y los nulos como `NULL`. Se puede volver a
-  ejecutar tal cual en el editor SQL de otra base.
-- Al exportar el resultado de una consulta, el nombre de la tabla de los INSERT
-  se toma del primer `FROM` de la sentencia; si no hay ninguno, se llama
-  `consulta`.
-- El tope es `ADMIN_EXPORT_MAX` filas (100.000 por defecto) para no agotar la
-  memoria de PHP. Si lo superas, el panel te lo dice y acotas con `WHERE` o
-  `LIMIT`.
+- The CSV carries a UTF-8 BOM so Excel does not break accents, and uses `;` as
+  separator (`ADMIN_CSV_SEPARADOR`, change it to `,` for other tools). Nulls
+  come out as an empty cell.
+- INSERT generates one statement per row, with quoted names, single quotes
+  doubled and nulls as `NULL`. It can be re-run as it is in the SQL editor of
+  another database.
+- When exporting a query result, the table name of the INSERTs is taken from
+  the first `FROM` of the statement; if there is none, it is called `consulta`.
+- The cap is `ADMIN_EXPORT_MAX` rows (100,000 by default) so PHP does not run
+  out of memory. If you exceed it, the panel says so and you narrow it with
+  `WHERE` or `LIMIT`.
 
-## 4. Crear la primera base de datos
+## 4. Creating the first database
 
-`CREATE DATABASE` y `DROP DATABASE` son sentencias del motor, así que valen por
-las tres vías:
+`CREATE DATABASE` and `DROP DATABASE` are engine statements, so they work
+through all three routes:
 
-- **Panel**: pantalla *Bases* → *Nueva base de datos*. Es lo más cómodo cuando
-  no hay ninguna todavía.
-- **API**: manda la sentencia con el parámetro `db` **vacío**. Es el único caso
-  en el que `db` puede ir vacío, junto con `SHOW DATABASES` y `DROP DATABASE`.
-- **PHP**: `JsonSQLDB\Database::crear('mibase')`, o
-  `Database::consultarGlobal('CREATE DATABASE mibase')`.
+- **Panel**: *Databases* → *New database*. The most convenient when there is
+  none yet.
+- **API**: send the statement with an **empty** `db` parameter. It is the only
+  case where `db` may be empty, together with `SHOW DATABASES` and
+  `DROP DATABASE`.
+- **PHP**: `JsonSQLDB\Database::crear('mydb')`, or
+  `Database::consultarGlobal('CREATE DATABASE mydb')`.
 
 ```php
-$cli = new JsonSqlDbCliente($url, $apiKey, $secreto, '');   // sin base
-$cli->consultar('CREATE DATABASE mibase');
-$cli->consultar('CREATE DATABASE IF NOT EXISTS mibase');
-$bases = $cli->consultar('SHOW DATABASES');
+$cli = new JsonSqlDbCliente($url, $apiKey, $secret, '');   // no database
+$cli->consultar('CREATE DATABASE mydb');
+$cli->consultar('CREATE DATABASE IF NOT EXISTS mydb');
+$dbs = $cli->consultar('SHOW DATABASES');
 ```
 
-Una API key limitada a bases concretas (`'bases' => ['mibase']`) **no puede**
-mandar `db` vacío: para crear bases hace falta una key con `['*']`.
+An API key limited to specific databases (`'bases' => ['mydb']`) **cannot** send
+an empty `db`: creating databases needs a key with `['*']`.
 
-## 4.1. HTTPS con certificado propio
+## 4.1. HTTPS with your own certificate
 
-Si la API va por HTTPS con un certificado autofirmado o de una CA interna, cURL
-lo rechaza y verás *SSL certificate problem: self-signed certificate*. Hay dos
-salidas, en `jsonsqldbadmin/config.php`:
+If the API runs over HTTPS with a self-signed certificate or one from an
+internal CA, cURL rejects it and you see *SSL certificate problem: self-signed
+certificate*. Two ways out, in `jsonsqldbadmin/config.php`:
 
 ```php
-// 1) Recomendada: se sigue verificando, pero contra tu certificado
+// 1) Recommended: still verifies, but against your certificate
 define('ADMIN_SSL_CA', 'C:/xampp/apache/conf/ssl.crt/server.crt');
 
-// 2) Atajo: aceptar el certificado sin comprobarlo
+// 2) Shortcut: accept the certificate without checking it
 define('ADMIN_SSL_AUTOFIRMADO', true);
 ```
 
-Las dos opciones solo se aplican si `ADMIN_API_URL` es `https://`; en HTTP se
-ignoran. `ADMIN_SSL_CA` manda: si tiene valor, `ADMIN_SSL_AUTOFIRMADO` se ignora. Si el
-fichero no existe o no se puede leer, el panel lo dice claramente en vez de
-fallar con un error de red confuso.
+Both only apply if `ADMIN_API_URL` is `https://`; over HTTP they are ignored.
+`ADMIN_SSL_CA` wins: if it has a value, `ADMIN_SSL_AUTOFIRMADO` is ignored. If
+the file does not exist or cannot be read, the panel says so clearly instead of
+failing with a confusing network error.
 
-Con la opción 1, el **nombre del servidor de `ADMIN_API_URL` tiene que coincidir
-con el del certificado**. Si el certificado es para `shirka`, la URL debe ser
-`https://shirka:44311/...`, no la IP ni `localhost`. Si no coincide, cURL sigue
-protestando (ahora por el nombre, no por la firma) y toca usar la opción 2 o
-regenerar el certificado con el nombre correcto.
+With option 1, **the server name in `ADMIN_API_URL` must match the one in the
+certificate**. If the certificate is for `shirka`, the URL must be
+`https://shirka:44311/...`, not the IP nor `localhost`. If they do not match,
+cURL keeps complaining (about the name now, not the signature) and you need
+option 2 or a certificate regenerated with the right name.
 
-La opción 2 es razonable en una red interna de confianza, pero deja de
-protegerte frente a un intermediario: en una red que no controlas, usa la 1.
+Option 2 is reasonable on a trusted internal network, but stops protecting you
+against a man in the middle: on a network you do not control, use option 1.
 
-Las aplicaciones que consumen la API tienen lo mismo en `cliente_ejemplo.php`:
+The applications consuming the API have the same in `cliente_ejemplo.php`:
 
 ```php
-$cli = new JsonSqlDbCliente($url, $apiKey, $secreto, 'mibase');
+$cli = new JsonSqlDbCliente($url, $apiKey, $secret, 'mydb');
 $cli->certificado('C:/xampp/apache/conf/ssl.crt/server.crt');
-// o bien
+// or
 $cli->aceptarAutofirmado();
 ```
 
-## 5. Seguridad
+## 5. Security
 
-- `config.php`, `lib/`, `vistas/` y `datos/` están bloqueados por `.htaccess` y
-  `web.config`. Solo se sirven `index.php` y `assets/`. **En nginx esos ficheros
-  no se aplican**: hay que instalar las reglas de la carpeta `nginx/` del
-  proyecto, o las carpetas quedan accesibles desde el navegador.
-- `ADMIN_IPS_PERMITIDAS` limita quién puede abrir el panel, por IP o por rango
-  CIDR. Si solo lo usas tú desde la oficina o por VPN, es la medida más
-  efectiva: quien no esté en la lista ni siquiera ve la pantalla de acceso.
-- `ADMIN_EXIGIR_HTTPS` rechaza el acceso por HTTP. Por el panel viajan
-  contraseñas y datos, así que en producción debería estar a `true`.
-- Cabecera `Content-Security-Policy` restringida a `self`: todo lo que carga el
-  panel (Bootstrap, iconos, fuentes) es local, así que no necesita permitir
-  ningún origen externo.
-- Toda salida pasa por `h()` (`htmlspecialchars`), así que un dato con HTML
-  dentro se ve como texto y no se ejecuta.
-- Los valores de los formularios viajan como **parámetros ligados**: nunca se
-  concatenan a la SQL. Un campo con `'); DROP TABLE clientes; --` se guarda como
-  texto y no altera nada.
-- Los nombres de tabla y columna sí forman parte de la sentencia, así que se
-  validan contra `^[A-Za-z_][A-Za-z0-9_]*$` y se citan con comillas dobles.
-- Cabeceras `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` y
-  `Referrer-Policy: same-origin`.
+- `config.php`, `lib/`, `vistas/` and `datos/` are blocked by `.htaccess` and
+  `web.config`. Only `index.php` and `assets/` are served. **On nginx those
+  files do not apply**: install the rules from the project's `nginx/` folder,
+  or the folders are reachable from the browser.
+- `ADMIN_IPS_PERMITIDAS` limits who can open the panel, by IP or CIDR range. If
+  only you use it, from the office or over a VPN, it is the most effective
+  measure: whoever is not on the list does not even see the login screen.
+- `ADMIN_EXIGIR_HTTPS` rejects access over HTTP. Passwords and data travel
+  through the panel, so in production it should be `true`.
+- `Content-Security-Policy` header restricted to `self`: everything the panel
+  loads (Bootstrap, icons, fonts) is local, so it needs to allow no external
+  origin.
+- Every output goes through `h()` (`htmlspecialchars`), so a value with HTML in
+  it is shown as text and not executed.
+- Form values travel as **bound parameters**: they are never concatenated into
+  the SQL. A field with `'); DROP TABLE customers; --` is stored as text and
+  alters nothing.
+- Table and column names are part of the statement, so they are validated
+  against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted with double quotes.
+- `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: same-origin` headers.
 
-## 6. Configuración
+## 6. Configuration
 
-| Constante | Por defecto | Para qué |
+| Constant | Default | Purpose |
 |---|---|---|
-| `ADMIN_API_URL` | vacío | URL de la API; vacío = se deduce |
-| `ADMIN_API_KEY` | clave admin | API key con la que trabaja el panel |
-| `ADMIN_HMAC_SECRET` | secreto | el mismo que la API |
-| `ADMIN_SSL_CA` | vacío | ruta del `.crt`/`.pem` del servidor de la API |
-| `ADMIN_SSL_AUTOFIRMADO` | `false` | aceptar el certificado sin comprobarlo |
-| `ADMIN_TIMEOUT` | `60` | segundos de espera de la llamada |
-| `ADMIN_DATA_PATH` | `datos/` | usuarios y auditoría |
-| `ADMIN_API_KEY_LECTURA` | vacío | clave de la API para los usuarios de solo lectura |
-| `ADMIN_HMAC_SECRET_LECTURA` | vacío | su secreto |
-| `ADMIN_IPS_PERMITIDAS` | vacío | IPs o rangos CIDR que pueden abrir el panel |
-| `ADMIN_EXIGIR_HTTPS` | `false` | rechazar el acceso por HTTP |
-| `ADMIN_CONFIAR_EN_PROXY` | `false` | fiarse de X-Forwarded-For / -Proto |
-| `ADMIN_SESION_MINUTOS` | `60` | inactividad máxima |
-| `ADMIN_LOGIN_MAX_FALLOS` | `5` | intentos antes de bloquear la IP |
-| `ADMIN_LOGIN_BLOQUEO_MIN` | `15` | minutos de bloqueo |
-| `ADMIN_BCRYPT_COSTE` | `11` | coste del hash de contraseñas |
-| `ADMIN_AUDIT_DIAS` | `90` | días de auditoría (0 = siempre) |
-| `ADMIN_FILAS_PAGINA` | `50` | filas por página en el listado de datos |
-| `ADMIN_CELDA_MAX` | `120` | caracteres antes de recortar una celda |
-| `ADMIN_CSV_SEPARADOR` | `;` | separador del CSV exportado |
-| `ADMIN_EXPORT_MAX` | `100000` | tope de filas por exportación |
-| `ADMIN_RUTA_DATOS_MOTOR` | vacío | carpeta `data/` del motor, para la copia ZIP |
+| `ADMIN_API_URL` | empty | URL of the API; empty = derived |
+| `ADMIN_API_KEY` | admin key | API key the panel works with |
+| `ADMIN_HMAC_SECRET` | secret | the same as the API's |
+| `ADMIN_SSL_CA` | empty | path to the `.crt`/`.pem` of the API server |
+| `ADMIN_SSL_AUTOFIRMADO` | `false` | accept the certificate without checking it |
+| `ADMIN_TIMEOUT` | `60` | seconds to wait for the call |
+| `ADMIN_DATA_PATH` | `datos/` | users and audit |
+| `ADMIN_API_KEY_LECTURA` | empty | API key for read-only users |
+| `ADMIN_HMAC_SECRET_LECTURA` | empty | its secret |
+| `ADMIN_IPS_PERMITIDAS` | empty | IPs or CIDR ranges that may open the panel |
+| `ADMIN_EXIGIR_HTTPS` | `false` | reject access over HTTP |
+| `ADMIN_CONFIAR_EN_PROXY` | `false` | trust X-Forwarded-For / -Proto |
+| `ADMIN_SESION_NOMBRE` | `jsonsqldbadmin` | session cookie name |
+| `ADMIN_SESION_MINUTOS` | `60` | maximum inactivity |
+| `ADMIN_LOGIN_MAX_FALLOS` | `5` | attempts before locking the IP |
+| `ADMIN_LOGIN_BLOQUEO_MIN` | `15` | minutes of lockout |
+| `ADMIN_BCRYPT_COSTE` | `11` | password hash cost |
+| `ADMIN_AUDIT_DIAS` | `90` | days of audit (0 = forever) |
+| `ADMIN_FILAS_PAGINA` | `50` | rows per page in the data listing |
+| `ADMIN_CELDA_MAX` | `120` | characters before a cell is truncated |
+| `ADMIN_CSV_SEPARADOR` | `;` | separator of the exported CSV |
+| `ADMIN_EXPORT_MAX` | `100000` | row cap per export |
+| `ADMIN_RUTA_DATOS_MOTOR` | empty | the engine's `data/` folder, for the ZIP copy |
 
-## 7. Ficheros
+## 7. Files
 
-| Ruta | Qué es |
+| Path | What it is |
 |---|---|
-| `jsonsqldbadmin/index.php` | único punto de entrada: sesión, router y acciones |
-| `jsonsqldbadmin/config.php` | configuración |
-| `jsonsqldbadmin/lib/Api.php` | llamadas firmadas a la API |
-| `jsonsqldbadmin/lib/Auth.php` | usuarios, sesión, bloqueo por IP y CSRF |
-| `jsonsqldbadmin/lib/Audit.php` | auditoría |
-| `jsonsqldbadmin/lib/Exportar.php` | exportación a CSV, a sentencias INSERT y a ZIP |
-| `jsonsqldbadmin/lib/Store.php` | lectura y escritura de los JSON del panel |
-| `jsonsqldbadmin/lib/util.php` | escapado, URLs, mensajes y validaciones |
-| `jsonsqldbadmin/lib/acciones.php` | todas las acciones que modifican algo |
-| `jsonsqldbadmin/vistas/` | páginas |
-| `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 e iconos 1.11.3, en local |
-| `jsonsqldbadmin/assets/panel.js` | habilita los campos de columna según el tipo |
+| `jsonsqldbadmin/index.php` | single entry point: session, router and actions |
+| `jsonsqldbadmin/config.php` | configuration |
+| `jsonsqldbadmin/lib/Api.php` | signed calls to the API |
+| `jsonsqldbadmin/lib/Auth.php` | users, session, IP lockout and CSRF |
+| `jsonsqldbadmin/lib/Audit.php` | audit trail |
+| `jsonsqldbadmin/lib/Exportar.php` | export to CSV, INSERT statements and ZIP |
+| `jsonsqldbadmin/lib/Store.php` | reading and writing of the panel's JSON files |
+| `jsonsqldbadmin/lib/util.php` | escaping, URLs, messages and validation |
+| `jsonsqldbadmin/lib/acciones.php` | every action that changes something |
+| `jsonsqldbadmin/vistas/` | pages |
+| `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 and Icons 1.11.3, local |
+| `jsonsqldbadmin/assets/panel.js` | enables the column fields according to type |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 118 comprobaciones navegando el panel de verdad |
+| `tests/f5_admin.php` | 119 checks driving the real panel |
 
-## 8. Pruebas
+## 8. Tests
 
-`tests/f5_admin.php` levanta dos servidores propios de PHP (uno para el panel y
-otro para la API, para que no se esperen entre ellos), y navega el panel con
-cookies y tokens CSRF reales: instalación, acceso, bases, tablas, columnas,
-claves, triggers, datos, editor SQL, permisos del rol de lectura y auditoría.
-Usa una carpeta temporal, así que no toca tus datos.
+`tests/f5_admin.php` starts two PHP built-in servers (one for the panel and one
+for the API, so they do not wait for each other) and drives the panel with real
+cookies and CSRF tokens: installation, login, databases, tables, columns, keys,
+triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
+folder, so it does not touch your data.
 
 ```
 php tests/f5_admin.php     → OK: 119
 ```
 
-Necesita la extensión cURL. En Windows con XAMPP, actívala en `php.ini`
+It needs the cURL extension. On Windows with XAMPP, enable it in `php.ini`
 (`extension=curl`).

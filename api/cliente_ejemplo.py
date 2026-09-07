@@ -197,8 +197,8 @@ class JsonSqlDbCliente:
 if __name__ == "__main__":
     cli = JsonSqlDbCliente(
         "https://example.com/jsonsqldb/api/jsonsqldb_api.php",
-        "CHANGE_ME_EXAMPLE_API_KEY",
-        "CHANGE_ME_EXAMPLE_SECRET",
+        "cdb1b4c7fcad4fb21f2ec1061906e3729c37f8c21483e30e47315275eca639e9",
+        "9b355beed3343fe26a5413ac8aa2fc4f9cadba2498ab0f20da498a9c244a616e",
         "pruebas",
     )
 

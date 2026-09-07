@@ -9,7 +9,7 @@
 // ------------------------------------------------------------
 // Carpeta raíz donde vive una subcarpeta por cada base de datos.
 // Mejor fuera del webroot. Si no puede ser, el .htaccess de esa
-// carpeta la protege (ver docs/01-nucleo.md, «Configuración y protección»).
+// carpeta la protege (ver docs/01-core.md, «Configuration and protection»).
 defined('JSONSQLDB_DATA_PATH') || define('JSONSQLDB_DATA_PATH', __DIR__ . '/data');
 
 // Filas por fichero de datos antes de partir la tabla en varios ficheros.
@@ -133,31 +133,13 @@ defined('JSONSQLDB_MEMORIA_VIGILAR') || define('JSONSQLDB_MEMORIA_VIGILAR', true
 defined('JSONSQLDB_MEMORIA_MARGEN') || define('JSONSQLDB_MEMORIA_MARGEN', 0.85);
 
 // ------------------------------------------------------------
-// SEGURIDAD ANTE CORTES
+// ÍNDICES
 // ------------------------------------------------------------
-// Las operaciones de estructura (CREATE, ALTER, DROP) siempre van con journal:
-// si el proceso muere a mitad, al abrir la base se deshacen.
-//
-// Esto añade lo mismo a las escrituras de datos que tocan MÁS DE UNA TABLA: un
-// DELETE con ON DELETE CASCADE, o un trigger que escribe en otra tabla. Con una
-// sola tabla no se journaliza nunca, porque sería copiar el fichero entero en
-// cada INSERT y el coste no compensa.
-//
-// Ponlo a false solo si haces borrados en cascada enormes y prefieres velocidad
-// a que un corte de luz no te deje el borrado a medias.
-defined('JSONSQLDB_JOURNAL_DATOS') || define('JSONSQLDB_JOURNAL_DATOS', true);
-
 // Índices de búsqueda. Aceleran los SELECT que filtran por igualdad o IN sobre
 // columnas indexadas, y hacen algo más lenta cada escritura, porque una tabla
 // con índices reescribe también sus ficheros. A false no se mantienen ni se
 // usan, y los que hubiera se borran en la siguiente escritura de la tabla.
 defined('JSONSQLDB_INDICES') || define('JSONSQLDB_INDICES', true);
-
-// Tope de filas para guardar una tabla entera en caché. Por encima no se
-// cachea: serializarla la tendría dos veces en memoria un instante, y son justo
-// las tablas donde menos falta hace, porque las búsquedas puntuales van por
-// índice y leen solo su parte. 0 quita el tope.
-defined('JSONSQLDB_CACHE_MAX_FILAS') || define('JSONSQLDB_CACHE_MAX_FILAS', 20000);
 
 // ------------------------------------------------------------
 // ORDEN ALFABÉTICO (solo afecta a ORDER BY)

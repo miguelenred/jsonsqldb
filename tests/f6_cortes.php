@@ -114,6 +114,19 @@ $PADRES = (int)$bd->consultar('SELECT COUNT(*) AS n FROM padres')[0]['n'];
 $HIJAS_TOTAL = (int)$bd->consultar('SELECT COUNT(*) AS n FROM hijas')[0]['n'];
 unset($bd);
 
+/** Cuánto tarda un proceso hijo en completar su sentencia, en microsegundos. */
+function cronometrar(string $codigo): int {
+    $t0 = microtime(true);
+    $proc = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tuberias);
+    if (is_resource($proc)) {
+        foreach ($tuberias as $t) { stream_get_contents($t); @fclose($t); }
+        proc_close($proc);
+    }
+    return max(10000, (int)((microtime(true) - $t0) * 1000000));
+}
+$duracion = cronometrar($hijo);
+prepararBase($raiz, $HIJAS);
+
 for ($i = 1; $i <= $INTENTOS; $i++) {
     prepararBase($raiz, $HIJAS);
 
@@ -130,10 +143,10 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
         break;
     }
 
-    // El hijo completo tarda unos 40 ms: arrancar PHP, cargar el motor, leer las
-    // tablas y escribir. La escritura es el último tramo, así que se apunta ahí.
+    // La escritura es el último tramo del hijo, así que se apunta ahí: entre
+    // la mitad y el final de lo que tardó en completarse sin que lo mataran.
     // Muchas caerán antes o después, y no pasa nada.
-    usleep(random_int(20000, 45000));
+    usleep(random_int(intdiv($duracion, 2), $duracion));
     proc_terminate($proc, 9);          // SIGKILL: no se puede capturar
     foreach ($tuberias as $t) { @fclose($t); }
     proc_close($proc);
@@ -235,6 +248,8 @@ $hijoP = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
        . 'echo "terminado";';
 
 $dentroP = 0; $mezcladas = []; $problemas = [];
+prepararPartida($raiz, $FILAS_P);
+$duracionP = cronometrar($hijoP);
 
 for ($i = 1; $i <= $INTENTOS; $i++) {
     prepararPartida($raiz, $FILAS_P);
@@ -243,7 +258,7 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
                       [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tuberias);
     if (!is_resource($proc)) { break; }
 
-    usleep(random_int(20000, 110000));
+    usleep(random_int(intdiv($duracionP, 2), $duracionP));
     proc_terminate($proc, 9);
     foreach ($tuberias as $t) { @fclose($t); }
     proc_close($proc);
@@ -365,7 +380,7 @@ function baseVariada(string $raiz): void {
  * Lanza una sentencia en otro proceso, lo mata a mitad, reabre la base y
  * comprueba que está en un estado sano. Devuelve [dentro, problema|null].
  */
-function matarDurante(string $raiz, string $sql, callable $sano): array {
+function matarDurante(string $raiz, string $sql, callable $sano, int $duracion): array {
     baseVariada($raiz);
 
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
@@ -378,7 +393,7 @@ function matarDurante(string $raiz, string $sql, callable $sano): array {
                       [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tuberias);
     if (!is_resource($proc)) { return [false, 'no se pudo lanzar el proceso']; }
 
-    usleep(random_int(15000, 55000));
+    usleep(random_int(intdiv($duracion, 2), $duracion));
     proc_terminate($proc, 9);
     foreach ($tuberias as $t) { @fclose($t); }
     proc_close($proc);
@@ -608,8 +623,14 @@ $dentroTotal = 0; $casosProbados = 0;
 foreach ($casos as $titulo => [$sql, $sano]) {
     $fallos = [];
     $dentro = 0;
+    baseVariada($raiz);
+    $duracion = cronometrar('define("JSONSQLDB_CONEXION_DIRECTA", true);'
+        . 'define("JSONSQLDB_FILAS_POR_PARTE", 100);'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . '$bd = new JsonSQLDB\\Database("cortes", ' . var_export($raiz, true) . ');'
+        . '$bd->consultar(' . var_export($sql, true) . ');');
     for ($v = 0; $v < 4; $v++) {                  // varias muertes por caso
-        [$d, $problema] = matarDurante($raiz, $sql, $sano);
+        [$d, $problema] = matarDurante($raiz, $sql, $sano, $duracion);
         if ($d) { $dentro++; }
         if ($problema !== null) { $fallos[] = "vuelta $v: $problema"; }
     }
@@ -631,114 +652,150 @@ echo "\n  Resumen: $dentroTotal de $casosProbados muertes cayeron dentro de la v
 
 echo "\n== Journals en mal estado, montados a mano ==\n";
 
-/** Deja la base con la tabla 'art' y devuelve el contenido bueno de sus datos. */
+/**
+ * Deja la base con la tabla 'art' y un journal de rehacer a medio aplicar: los
+ * temporales con la tabla vacía están en disco y el manifiesto los señala.
+ * Devuelve la carpeta del journal y el contenido bueno de los datos.
+ */
 function baseConJournal(string $raiz, ?string $ambito): array {
     baseVariada($raiz);
-    $st = new Storage($raiz, 'cortes');
-    // Exclusivo siempre: de la base si el journal es de base, de la tabla si es suyo
-    $st->bloquear(true, $ambito);
-    $st->txIniciar('PRUEBA', ['art'], $ambito);
-    $st->desbloquear();
-    $dir = $raiz . '/cortes/.tx/' . ($ambito ?? '_base');
-    return [$dir, (string)file_get_contents($raiz . '/cortes/art.json')];
+    $dir   = "$raiz/cortes";
+    $bueno = (string)file_get_contents("$dir/art.json");
+    $rev   = json_decode((string)file_get_contents("$dir/art.rev.json"), true);
+    $nuevo = ['art.json' => "{\n  \"table\": \"art\",\n  \"rows\": []\n}\n",
+              'art.rev.json' => json_encode(['rev' => $rev['rev'] + 1, 'chunk' => 100, 'rows' => 0, 'parts' => [$rev['rev'] + 1]])];
+    $renombrar = [];
+    foreach ($nuevo as $n => $c) {
+        file_put_contents("$dir/$n.999999.tmp", $c);
+        $renombrar["$n.999999.tmp"] = $n;
+    }
+    // Las partes 2 y 3 y los índices sobran cuando la tabla se queda vacía
+    $borrar = ['art.part2.json', 'art.part3.json'];
+    foreach (glob("$dir/art.idx.*.json") as $f) { $borrar[] = basename($f); }
+
+    $jd = "$dir/.tx/" . ($ambito ?? '_base');
+    @mkdir($jd, 0775, true);
+    file_put_contents("$jd/manifiesto.json", json_encode([
+        'tipo' => 'redo', 'operacion' => 'PRUEBA', 'ambito' => $ambito, 'tablas' => ['art'],
+        'renombrar' => $renombrar, 'borrar' => $borrar,
+    ]));
+    return [$jd, $bueno];
 }
 
-chk('sin manifiesto no se restaura nada: las copias a medias se tiran', function () use ($raiz) {
-    [$dir, $bueno] = baseConJournal($raiz, null);
-
-    // Un corte mientras se copiaba: hay copias, una a medias, y ningún
-    // manifiesto porque nunca se llegó a escribir
-    @unlink("$dir/manifiesto.json");
-    file_put_contents("$dir/art.json", '{"table":"art","rows":[{"id":1,');
+chk('sin manifiesto no se toca nada: los temporales sobran', function () use ($raiz) {
+    baseVariada($raiz);
+    $bueno = (string)file_get_contents("$raiz/cortes/art.json");
+    // Un corte mientras se escribían los temporales: hay uno a medias y
+    // ningún manifiesto porque nunca se llegó a escribir
+    @mkdir("$raiz/cortes/.tx/_base", 0775, true);
+    file_put_contents("$raiz/cortes/art.json.999999.tmp", '{"table":"art","rows":[{"id":1,');
 
     $bd = new Database('cortes', $raiz);
     $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'];
+    $bd->consultar("UPDATE art SET v = v WHERE id = 1");      // barre el temporal ajeno
     return $n === 300
         && (string)file_get_contents("$raiz/cortes/art.json") === $bueno
-        && !is_dir("$raiz/cortes/.tx")
+        && !is_dir("$raiz/cortes/.tx") && glob("$raiz/cortes/*.tmp") === []
         ?: "quedaron $n filas";
 });
 
-chk('una copia truncada con manifiesto válido se detecta y no se restaura', function () use ($raiz) {
-    // Esto es lo que pasaba antes de forzar las copias a disco: la luz se iba,
-    // el manifiesto sobrevivía y la copia se quedaba a medias. Ahora el tamaño
-    // anotado no cuadra y el motor se planta en vez de destruir los datos.
-    [$dir, $bueno] = baseConJournal($raiz, null);
-    file_put_contents("$dir/art.json", 'roto');
+chk('un journal se termina al abrir: temporales en su sitio y sobrantes fuera', function () use ($raiz) {
+    [$jd, $bueno] = baseConJournal($raiz, null);
+    $bd = new Database('cortes', $raiz);
+    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
+        && !is_dir("$raiz/cortes/.tx") && glob("$raiz/cortes/*.tmp") === []
+        && glob("$raiz/cortes/art.part*.json") === [] && glob("$raiz/cortes/art.idx.*.json") === [];
+});
+
+chk('un manifiesto que señala un temporal perdido se detecta y no se sigue', function () use ($raiz) {
+    // Un temporal que no está y cuyo destino tampoco: el journal no es de fiar
+    // y lo único seguro es pararse y conservarlo para revisarlo a mano
+    [$jd, $bueno] = baseConJournal($raiz, null);
+    @unlink("$raiz/cortes/art.rev.json.999999.tmp");
+    @unlink("$raiz/cortes/art.rev.json");
 
     $error = null;
     try {
-        // La recuperación actúa al coger el bloqueo, con la primera consulta
         (new Database('cortes', $raiz))->consultar('SHOW TABLES');
     } catch (JsonSQLDB\JsonSqlDbError $e) { $error = $e; }
+    $conservado = is_dir($jd);
 
-    $intactos = (string)file_get_contents("$raiz/cortes/art.json") === $bueno;
-    // Y la carpeta sigue ahí, que es la única copia que queda de lo anterior
-    $conservado = is_dir($dir);
-
-    // Se limpia a mano para que sigan las demás pruebas
-    foreach ((array)glob("$dir/*") as $f) { @unlink($f); }
-    @rmdir($dir); @rmdir("$raiz/cortes/.tx");
+    foreach ((array)glob("$jd/*") as $f) { @unlink($f); }
+    @rmdir($jd); @rmdir("$raiz/cortes/.tx");
+    foreach ((array)glob("$raiz/cortes/*.tmp") as $f) { @unlink($f); }
 
     if ($error === null) { return 'no avisó de que el journal estaba dañado'; }
-    if (!$intactos)      { return 'los datos buenos se sobrescribieron con la copia rota'; }
     return $conservado ?: 'borró el journal dañado en vez de conservarlo';
 });
 
-chk('un manifiesto COMMITTED no deshace nada', function () use ($raiz) {
-    [$dir, $bueno] = baseConJournal($raiz, null);
-    // La operación terminó y solo faltaba limpiar
-    file_put_contents("$raiz/cortes/art.json", $bueno);
-    file_put_contents("$dir/manifiesto.json", '{"estado":"COMMITTED"}');
+chk('un journal de una versión anterior (copias para deshacer) se deshace', function () use ($raiz) {
+    baseVariada($raiz);
+    $dir   = "$raiz/cortes";
+    $bueno = (string)file_get_contents("$dir/art.json");
+    // Como lo dejaba la 2.4: copias de los ficheros y manifiesto con tamaños
+    @mkdir("$dir/.tx/_base", 0775, true);
+    $tam = [];
+    foreach (array_merge(glob("$dir/art.json"), glob("$dir/art.part*.json"), glob("$dir/art.*.json")) as $f) {
+        copy($f, "$dir/.tx/_base/" . basename($f));
+        $tam[basename($f)] = filesize($f);
+    }
+    file_put_contents("$dir/.tx/_base/manifiesto.json", json_encode([
+        'estado' => 'ACTIVA', 'operacion' => 'PRUEBA', 'tablas' => ['art'], 'ficheros' => $tam,
+    ]));
+    file_put_contents("$dir/art.json", '{"table":"art","rows":[]}' . "\n");   // la escritura a medias
+
+    $bd = new Database('cortes', $raiz);
+    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 300
+        && (string)file_get_contents("$dir/art.json") === $bueno
+        && !is_dir("$dir/.tx");
+});
+
+chk('un manifiesto COMMITTED de una versión anterior no deshace nada', function () use ($raiz) {
+    baseVariada($raiz);
+    @mkdir("$raiz/cortes/.tx/_base", 0775, true);
+    file_put_contents("$raiz/cortes/.tx/_base/manifiesto.json", '{"estado":"COMMITTED"}');
     $bd = new Database('cortes', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 300
         && !is_dir("$raiz/cortes/.tx");
 });
 
-chk('un journal de tabla se deshace sin el exclusivo de la base', function () use ($raiz) {
-    [$dir, $bueno] = baseConJournal($raiz, 'art');
-    // Se destroza la tabla como si la escritura hubiera quedado a medias
-    file_put_contents("$raiz/cortes/art.json", '{"table":"art","rows":[]}' . "\n");
-
+chk('un journal de tabla se termina sin el exclusivo de la base', function () use ($raiz) {
+    [$jd, $bueno] = baseConJournal($raiz, 'art');
     $bd = new Database('cortes', $raiz);           // una lectura basta
-    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 300
+    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
         && !is_dir("$raiz/cortes/.tx");
 });
 
 chk('la recuperación es idempotente: repetirla no rompe nada', function () use ($raiz) {
-    [$dir, $bueno] = baseConJournal($raiz, 'art');
-    file_put_contents("$raiz/cortes/art.json", '{"table":"art","rows":[]}' . "\n");
-
-    // Tres aperturas seguidas; solo la primera tiene algo que deshacer
+    [$jd, $bueno] = baseConJournal($raiz, 'art');
+    // Un corte a mitad de la propia recuperación: se reabre tres veces
     for ($i = 0; $i < 3; $i++) {
         $bd = new Database('cortes', $raiz);
         $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'];
         unset($bd);
-        if ($n !== 300) { return "en la vuelta $i quedaron $n filas"; }
+        if ($n !== 0) { return "en la vuelta $i quedaron $n filas"; }
     }
-    return true;
+    return !is_dir("$raiz/cortes/.tx");
 });
 
-chk('journals de dos tablas a la vez se deshacen los dos', function () use ($raiz) {
-    baseVariada($raiz);
-    $bd = new Database('cortes', $raiz);
-    $bd->consultar('CREATE TABLE otra (id INTEGER PRIMARY KEY, x VARCHAR(10))');
-    $bd->consultar("INSERT INTO otra VALUES (1,'a'),(2,'b')");
-    unset($bd);
-
-    foreach (['art', 'otra'] as $t) {
-        $st = new Storage($raiz, 'cortes');
-        $st->bloquear(true, $t);
-        $st->txIniciar('PRUEBA', [$t], $t);
-        file_put_contents("$raiz/cortes/$t.json", '{"table":"' . $t . '","rows":[]}' . "\n");
-        $st->desbloquear();
-        unset($st);
-    }
+chk('journals de dos tablas a la vez se terminan los dos', function () use ($raiz) {
+    [$jd, $bueno] = baseConJournal($raiz, 'art');
+    $dir = "$raiz/cortes";
+    file_put_contents("$dir/otra.json.999999.tmp", "{\n  \"table\": \"otra\",\n  \"rows\": [\n    {\"id\":1,\"x\":\"a\"}\n  ]\n}\n");
+    file_put_contents("$dir/otra.meta.json.999999.tmp", json_encode(['table' => 'otra',
+        'columns' => [['name' => 'id', 'type' => 'INTEGER'], ['name' => 'x', 'type' => 'TEXT']]]));
+    file_put_contents("$dir/otra.rev.json.999999.tmp", json_encode(['rev' => 1, 'chunk' => 100, 'rows' => 1, 'parts' => [1]]));
+    @mkdir("$dir/.tx/otra", 0775, true);
+    file_put_contents("$dir/.tx/otra/manifiesto.json", json_encode([
+        'tipo' => 'redo', 'ambito' => 'otra', 'tablas' => ['otra'],
+        'renombrar' => ['otra.json.999999.tmp' => 'otra.json', 'otra.meta.json.999999.tmp' => 'otra.meta.json',
+                        'otra.rev.json.999999.tmp' => 'otra.rev.json'],
+    ]));
 
     $bd = new Database('cortes', $raiz);
-    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 300
-        && (int)$bd->consultar('SELECT COUNT(*) AS n FROM otra')[0]['n'] === 2
-        && !is_dir("$raiz/cortes/.tx");
+    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
+        && (int)$bd->consultar('SELECT COUNT(*) AS n FROM otra')[0]['n'] === 1
+        && !is_dir("$dir/.tx") && glob("$dir/*.tmp") === [];
 });
 
 chk('la revisión sube antes que los datos: un corte solo cuesta caché', function () use ($raiz) {

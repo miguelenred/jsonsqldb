@@ -528,6 +528,7 @@ chk('reescribir solo las partes que cambian deja lo mismo que reescribirlas toda
             if (str_contains($n, '.idx.')) {
                 $j = json_decode((string)file_get_contents((string)$f), true);
                 unset($j['rev']);                  // sube en toda escritura
+                ksort($j['keys']);                 // un índice corregido no ordena igual que uno rehecho
                 $out[$n] = md5((string)json_encode($j));
                 continue;
             }

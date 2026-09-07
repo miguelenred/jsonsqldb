@@ -55,7 +55,7 @@ final class Memoria
      * Cuánto ocupa un fichero ya convertido a datos, respecto a su tamaño.
      *
      * Son dos números porque los dos formatos se expanden de forma muy distinta:
-     * medido sobre una tabla de 20.000 filas, el JSON de 1,9 MB y la caché
+     * medido sobre una tabla de 20.000 filas, el JSON de 1,9 MB y su versión
      * serializada de 8,1 MB acababan siendo los mismos 26 MB de arrays.
      */
     private const FACTOR_JSON  = 14;
@@ -248,8 +248,8 @@ final class Memoria
      * ¿Queda poca memoria libre?
      *
      * Sirve para decidir si merece la pena hacer algo que consume de golpe y no
-     * es imprescindible, como guardar una tabla entera en la caché: serializarla
-     * duplica su tamaño durante un instante, y si ya se va justo, es preferible
+     * es imprescindible, como guardar una parte en la caché: serializarla la
+     * tiene dos veces en memoria un instante, y si ya se va justo, es preferible
      * quedarse sin caché que quedarse sin memoria.
      */
     public static function apretado(): bool

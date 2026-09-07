@@ -13,8 +13,7 @@ declare(strict_types=1);
  * en vez de creérselos. Los tiempos dependen mucho del disco y de la CPU, así
  * que compara siempre contra una medida tuya, no contra la de otro.
  *
- * Mide la MEDIANA de varias repeticiones, no la media: una pausa del recolector
- * de basura o del disco dispara la media y deja de representar el caso normal.
+ * Cada operación se ejecuta varias veces y se toma la MEDIA de los tiempos.
  *
  * Usa la conexión directa al motor, sin HTTP: lo que se mide es el motor. El
  * coste de la API se suma aparte y se documenta en docs/04-api.md.
@@ -30,17 +29,16 @@ $csv    = ($argv[2] ?? '') === 'csv';
 $raiz   = sys_get_temp_dir() . '/jsonsqldb_bench_' . getmypid();
 $version = trim((string)@file_get_contents(__DIR__ . '/../VERSION')) ?: 'desconocida';
 
-/** Mediana de $n repeticiones, en milisegundos. */
+/** Media de $n repeticiones, en milisegundos. */
 function medir(callable $fn, int $n = 7): float
 {
-    $tiempos = [];
+    $total = 0.0;
     for ($i = 0; $i < $n; $i++) {
         $t0 = microtime(true);
         $fn();
-        $tiempos[] = (microtime(true) - $t0) * 1000;
+        $total += (microtime(true) - $t0) * 1000;
     }
-    sort($tiempos);
-    return $tiempos[intdiv($n, 2)];
+    return $total / $n;
 }
 
 function limpiar(string $dir): void
@@ -198,14 +196,15 @@ if ($csv) {
 } else {
     printf("\njsonSQLDB %s · PHP %s · %s filas de clientes, %s de pedidos · %.1f MB en disco\n",
         $version, PHP_VERSION, number_format($filas), number_format($pedidos), $enDisco / 1048576);
-    printf("Mediana de varias repeticiones. Mide el motor, sin HTTP.\n\n");
+    printf("Media de varias repeticiones. Mide el motor, sin HTTP.\n\n");
     printf("  %-38s %10s %9s\n", 'operación', 'ms', 'pico MB');
     echo '  ', str_repeat('-', 58), "\n";
     foreach ($resultados as $etiqueta => [$ms, $mb]) {
         printf("  %-38s %10.2f %9.1f\n", $etiqueta, $ms, $mb);
     }
-    printf("\n  Las escrituras empeoran según crece la tabla: cada una reescribe las\n");
-    printf("  partes que toca y rehace los índices. Repite con otro tamaño para verlo.\n\n");
+    printf("\n  Las escrituras crecen con el tamaño de los índices, no con el de la tabla:\n");
+    printf("  se reescriben las partes que cambian y se corrigen los índices. Repite con\n");
+    printf("  otro tamaño para verlo.\n\n");
 }
 
 limpiar($raiz);

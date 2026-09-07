@@ -9,26 +9,30 @@ namespace JsonSQLDB;
  * Un índice es un fichero aparte, `<tabla>.idx.<nombre>.json`, que asocia el
  * valor de una o varias columnas con las posiciones de las filas que lo tienen:
  *
- *   {"index":"...","columns":["email"],"rev":7,"rows":20000,"chunk":5000,
- *    "keys":{"t11:ana@ej.com":[143], ...}}
+ *   {"index":"...","columns":["email"],"rev":7,"rows":20000,"chunk":1000,
+ *    "keys":{"t11:ana@ej.com":143,"t6:Madrid":[2,9,15],...}}
+ *
+ * Una posición sola se guarda como entero y varias como lista: en una clave
+ * primaria son todas únicas y una lista de uno costaría el triple en memoria.
+ * Los índices de antes de la 2.5 guardaban siempre listas y se leen igual.
  *
  * Para qué sirve. El coste de un SELECT no está en evaluar el WHERE, está en
  * leer y decodificar los ficheros de la tabla entera. El índice dice en qué
  * posiciones están las filas buscadas, y de ahí se deduce en qué partes
  * (`<tabla>.partN.json`) viven: se decodifican solo esas. En una tabla de veinte
- * partes, buscar por una columna indexada lee una en vez de veinte.
+ * partes, buscar por una columna indexada lee una en vez de veinte. Las
+ * escrituras lo usan también: un INSERT comprueba la unicidad contra el índice
+ * y un UPDATE o DELETE por clave lee solo la parte de la fila.
  *
  * Para qué NO sirve. Solo acelera igualdades e IN. Los rangos, LIKE, ORDER BY y
- * los agregados siguen leyendo la tabla completa. Y no acelera ninguna
- * escritura: una escritura reescribe la tabla entera de todos modos, y encima
- * ahora tiene que reescribir el índice.
+ * los agregados siguen leyendo la tabla completa.
  *
- * Por qué se reconstruye entero en cada escritura. Las posiciones no son
- * estables: al guardar, las filas se reindexan desde cero y se reparten en
- * partes, así que un solo DELETE desplaza todas las filas siguientes. Mantener
- * las posiciones al día de forma incremental sería una fuente inagotable de
- * errores sutiles; reconstruir el índice desde el array de filas que ya está en
- * memoria cuesta un recorrido, que al lado del json_encode de la tabla es poco.
+ * Cómo se mantiene. Las posiciones no son estables: al guardar, las filas se
+ * reindexan desde cero y se reparten en partes, así que un DELETE desplaza
+ * todas las filas siguientes. El índice anterior se corrige cuando se puede
+ * demostrar qué cambió —filas añadidas al final, sustituidas en su sitio, o
+ * desplazadas a partir de una posición— y se rehace entero ante la menor duda
+ * (ver Storage). Un índice que no cambia no se reescribe.
  *
  * Claves. La igualdad del motor no es la de PHP: 5, '5' y '5.0' son el mismo
  * valor (ver Valor::comparar). La clave lo respeta —los valores numéricos se
@@ -254,40 +258,104 @@ final class Indexes
      * @return array<string, list<int>>
      */
     /**
-     * Añade al índice ANTERIOR solo las filas nuevas del final.
+     * Añade al índice ANTERIOR las filas que hay a partir de una posición.
      *
-     * Reconstruir el índice entero es el 67 % de lo que cuesta insertar una fila
-     * en una tabla grande: se recorren todas las filas y se calcula la clave de
-     * cada una, cuando las de antes no se han movido ni han cambiado.
+     * Reconstruir el índice entero es la mayor parte de lo que cuesta escribir
+     * una fila en una tabla grande, y casi siempre es trabajo repetido: las
+     * claves de las filas que no se han movido son las mismas. Solo vale si
+     * las posiciones anteriores a $desde siguen siendo las mismas; quien llama
+     * tiene que haberlo comprobado con rigor, porque una entrada de MÁS solo
+     * hace la consulta más lenta y una de MENOS devuelve resultados incompletos
+     * sin que nada lo delate.
      *
-     * Solo vale si las posiciones anteriores siguen siendo las mismas. Quien
-     * llama tiene que haberlo comprobado; aquí se da por cierto. Y la
-     * comprobación tiene que ser estricta, porque los dos errores no cuestan lo
-     * mismo: una entrada de MÁS solo hace la consulta más lenta —el WHERE se
-     * vuelve a aplicar sobre las filas leídas— pero una de MENOS devuelve
-     * resultados incompletos sin que nada lo delate.
-     *
-     * @param array<string, list<int>> $anterior claves del índice de antes
-     * @param list<array>              $filas    la tabla entera, ya con las nuevas
-     * @param list<string>             $columnas columnas del índice
-     * @param int                      $desde    primera posición nueva
-     * @return array<string, list<int>>
+     * @param array<string, int|list<int>> $anterior claves del índice de antes
+     * @param list<array>                  $filas    las filas desde $desde, en orden
+     * @param list<string>                 $columnas columnas del índice
+     * @param int                          $desde    posición de la primera de $filas
+     * @return array<string, int|list<int>>
      */
     public static function ampliar(array $anterior, array $filas, array $columnas, int $desde): array
     {
         $keys = $anterior;
-        $n    = count($filas);
-        for ($pos = $desde; $pos < $n; $pos++) {
+        foreach ($filas as $i => $fila) {
             $valores = [];
             foreach ($columnas as $c) {
-                $valores[] = $filas[$pos][$c] ?? null;
+                $valores[] = $fila[$c] ?? null;
             }
             $clave = self::clave($valores);
-            if ($clave === null) {
-                continue;                       // los NULL no se indexan
+            if ($clave !== null) {
+                self::anotar($keys, $clave, $desde + $i);
             }
-            $keys[$clave][] = $pos;
             Memoria::comprobar('la ampliación del índice');
+        }
+        return $keys;
+    }
+
+    /**
+     * Quita del índice todas las posiciones a partir de $desde: las que se
+     * han desplazado o desaparecido. Lo que queda son las filas de delante,
+     * que no se han movido.
+     *
+     * @param array<string, int|list<int>> $keys
+     * @return array<string, int|list<int>>
+     */
+    public static function recortar(array $keys, int $desde): array
+    {
+        foreach ($keys as $clave => $v) {
+            if (is_int($v)) {
+                if ($v >= $desde) {
+                    unset($keys[$clave]);
+                }
+                continue;
+            }
+            $quedan = [];
+            foreach ($v as $p) {
+                if ((int)$p < $desde) {
+                    $quedan[] = (int)$p;
+                }
+            }
+            if ($quedan === []) {
+                unset($keys[$clave]);
+            } elseif (count($quedan) === 1) {
+                $keys[$clave] = $quedan[0];
+            } else {
+                $keys[$clave] = $quedan;
+            }
+        }
+        return $keys;
+    }
+
+    /**
+     * Cambia la fila de una posición sin mover las demás: se quita la clave
+     * vieja y se anota la nueva. $cambio se pone a true si el índice cambió.
+     *
+     * @param array<string, int|list<int>> $keys
+     * @param list<string>                 $columnas
+     * @return array<string, int|list<int>>
+     */
+    public static function sustituir(array $keys, array $columnas, int $pos, array $vieja, array $nueva, bool &$cambio): array
+    {
+        $vv = $nv = [];
+        foreach ($columnas as $c) {
+            $vv[] = $vieja[$c] ?? null;
+            $nv[] = $nueva[$c] ?? null;
+        }
+        $cv = self::clave($vv);
+        $cn = self::clave($nv);
+        if ($cv === $cn) {
+            return $keys;
+        }
+        $cambio = true;
+        if ($cv !== null && isset($keys[$cv])) {
+            $lista = array_values(array_diff(self::posiciones($keys[$cv]), [$pos]));
+            if ($lista === []) {
+                unset($keys[$cv]);
+            } else {
+                $keys[$cv] = count($lista) === 1 ? $lista[0] : $lista;
+            }
+        }
+        if ($cn !== null) {
+            self::anotar($keys, $cn, $pos);
         }
         return $keys;
     }
@@ -304,10 +372,43 @@ final class Indexes
             if ($clave === null) {
                 continue;                       // los NULL no se indexan
             }
-            $keys[$clave][] = $pos;
+            self::anotar($keys, $clave, $pos);
             Memoria::comprobar('la construcción del índice');
         }
         return $keys;
+    }
+
+    /**
+     * Apunta una posición bajo una clave. Con una sola posición se guarda el
+     * entero a secas, no una lista de uno: en una clave primaria son todas, y
+     * en memoria una lista de un elemento cuesta tres veces lo que un entero.
+     *
+     * @param array<string, int|list<int>> $keys
+     */
+    private static function anotar(array &$keys, string $clave, int $pos): void
+    {
+        if (!isset($keys[$clave])) {
+            $keys[$clave] = $pos;
+        } elseif (is_int($keys[$clave])) {
+            $keys[$clave] = [$keys[$clave], $pos];
+        } else {
+            $keys[$clave][] = $pos;
+        }
+    }
+
+    /**
+     * Posiciones apuntadas bajo una clave, sea un entero o una lista. Los
+     * índices de antes de la 2.5 guardaban siempre listas.
+     *
+     * @param int|list<int>|mixed $v
+     * @return list<int>
+     */
+    public static function posiciones($v): array
+    {
+        if (is_int($v)) {
+            return [$v];
+        }
+        return is_array($v) ? array_map('intval', $v) : [];
     }
 
     // ------------------------------------------------------------------

@@ -38,8 +38,8 @@ final class JsonSqlDbCliente
     // La misma que usa cliente_ejemplo.ps1. Para tu aplicación, crea una clave
     // propia en api/jsonsqldb_api_config.php.
     public const EJEMPLO_URL     = 'https://example.com/jsonsqldb/api/jsonsqldb_api.php';
-    public const EJEMPLO_API_KEY = 'CHANGE_ME_EXAMPLE_API_KEY';
-    public const EJEMPLO_SECRETO = 'CHANGE_ME_EXAMPLE_SECRET';
+    public const EJEMPLO_API_KEY = 'cdb1b4c7fcad4fb21f2ec1061906e3729c37f8c21483e30e47315275eca639e9';
+    public const EJEMPLO_SECRETO = '9b355beed3343fe26a5413ac8aa2fc4f9cadba2498ab0f20da498a9c244a616e';
     public const EJEMPLO_BASE    = 'pruebas';
 
     /** Cliente ya configurado contra la base 'pruebas'. */

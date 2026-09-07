@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.3.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.5.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -34,16 +34,17 @@ back together. If your data needs that, this is not the right tool.
 with PHP's uncatchable fatal. The query still fails, but the process survives and
 the API answers properly. Data is never corrupted by it: reads write nothing,
 writes are buffered and flushed at the end, every file is written atomically, and
-multi-table operations are undone by the journal.
+multi-file writes are finished or discarded whole by the journal.
 
-Rough numbers on 20,000 customers and 30,000 orders, one core: a primary key
-lookup 3.4 ms, a filtered scan 22 ms, an aggregate join 95 ms, a single-row
-`INSERT` 39 ms. On 50,000 rows, `ORDER BY … LIMIT 20` is 169 ms and a single-row
-`INSERT` 105 ms; on 100,000 rows that `INSERT` is 221 ms. Writes scale with the
-table because each one rewrites the parts it touches and rebuilds the table's
-indexes, so these numbers get worse as the table grows and batching matters more.
-Measure on your own hardware rather than trusting these — a shared host with a
-network disk will be slower than any of this:
+Rough numbers on 20,000 customers and 30,000 orders, one core, PHP 8.3: a
+primary key lookup 1.9 ms and 7 MB, a filtered scan without an index 22 ms and
+7 MB, an aggregate join 128 ms and 43 MB, a single-row `INSERT` 18 ms and 13 MB,
+an `UPDATE` by key 13 ms and 11 MB. On 100,000 rows: primary key lookup 8 ms and
+16 MB, single-row `INSERT` 104 ms and 43 MB, `UPDATE` by key 47 ms and 33 MB.
+Writes scale with the size of the table's indexes, not with the table itself:
+a write reads and rewrites only the parts it touches and corrects the indexes
+instead of rebuilding them. Measure on your own hardware rather than trusting
+these — a shared host with a network disk will be slower than any of this:
 
 ```
 php tests/benchmark.php            # 20,000 rows
@@ -51,31 +52,33 @@ php tests/benchmark.php 50000      # any size
 php tests/benchmark.php 20000 csv  # CSV, to compare two versions
 ```
 
-It reports the median of several runs, not the mean, and uses a fixed seed so two
-runs compare the same data. SQLite is between 40 and 300 times faster at all of it, which is
-what you would expect from a B-tree over binary pages against JSON decoded into
-PHP arrays. The point of this engine is that it runs where neither MySQL nor the
-SQLite extension is available.
+It reports the mean of several runs of each query and uses a fixed seed so two
+runs compare the same data. SQLite is still many times faster at all of it,
+which is what you would expect from a B-tree over binary pages against JSON
+decoded into PHP arrays. The point of this engine is that it runs where neither
+MySQL nor the SQLite extension is available.
 
-**Writing rows one at a time is the slowest thing you can do**, because every
-statement rewrites the table's file. Two thousand rows inserted as one statement
-with many `VALUES` take about 30 ms; the same rows as two thousand separate
-statements take about 5 seconds. Batch your inserts.
+**Batch your inserts.** Every statement rewrites the last part of the table, its
+revision file and its indexes, so two thousand rows as one statement with many
+`VALUES` cost about what one row costs; the same rows as two thousand separate
+statements cost two thousand times that.
 
-**Indexes speed up reads only.** Equality and `IN` on an indexed column read
-only the parts of the table where the matching rows live. On a 50,000-row table,
-looking up a primary key goes from 107 ms and 50 MB to 17 ms and 19 MB. Ranges,
-`LIKE`, `ORDER BY` and aggregates still read everything. Writes get slower, not
-faster: a table with indexes rewrites their files too, and the index is rebuilt
-from scratch on every write because row positions shift. Primary keys and unique
-constraints get an index automatically; anything else you create by hand with
-`CREATE INDEX`. `JSONSQLDB_INDICES` turns the whole thing off if the write cost
-is not worth it for your workload.
+**Indexes speed up reads and writes.** Equality and `IN` on an indexed column
+read only the parts of the table where the matching rows live: on 100,000 rows
+a primary key lookup takes 8 ms and 16 MB instead of scanning 29 MB of JSON.
+Ranges, `LIKE`, `ORDER BY` and aggregates still read everything. Writes use them
+too: an `INSERT` checks uniqueness against the index on disk and appends to the
+last part without loading the table, and an `UPDATE` or `DELETE` by key reads
+and rewrites only the parts that hold the affected rows. What indexes cost is
+keeping them: the ones that change are corrected on every write. Primary keys
+and unique constraints get an index automatically; anything else you create by
+hand with `CREATE INDEX`. `JSONSQLDB_INDICES` turns the whole thing off.
 
-**A `LIMIT` without `WHERE` no longer loads the whole table.** `SELECT * FROM t
-LIMIT 50` over 50,000 rows went from 56 ms and 50 MB to 3.6 ms and 3.6 MB,
-because rows are read one at a time and the read stops when it has enough.
-`SELECT COUNT(*)` and `SHOW TABLES` no longer materialise the rows at all.
+**Reads stream one part at a time.** A `WHERE` scan keeps only the rows that
+pass, `SELECT * FROM t LIMIT 50` stops reading as soon as it has enough (0.5 ms
+and 5 MB on 20,000 rows), and `SELECT COUNT(*)` and `SHOW TABLES` never build
+the rows at all. Only a query that genuinely needs every row at once — `ORDER
+BY` without `LIMIT`, `GROUP BY`, the inner side of a `JOIN` — holds the table.
 
 **Be realistic about the limits.** A query result is held in memory, so this is
 built for tables in the thousands to low hundreds of thousands of rows, not
@@ -85,16 +88,17 @@ not for hundreds. A write locks only its own table when it cannot affect any
 other; anything involving foreign keys, triggers or schema changes locks the
 whole database.
 
-**Every write that touches more than one file is crash-safe.** That is most of
-them, and counting tables was not enough: a table past
-`JSONSQLDB_FILAS_POR_PARTE` rows lives in several files, a table with indexes has
-one file per index, and an `INSERT` into a table with `AUTOINCREMENT` also
-rewrites the schema file. Any of those runs under a journal, so an operation
-interrupted by a power cut is undone the next time the database is opened —
-whole or not at all, never half. The journal is scoped to whatever lock the write
-holds, so two writes to different tables still run at the same time. What is
-still not covered is grouping several statements into one unit of work — there is
-no `BEGIN`/`COMMIT`.
+**Every write that touches more than one file is crash-safe.** That is nearly
+all of them: a table past `JSONSQLDB_FILAS_POR_PARTE` rows lives in several
+files, a table with indexes has one file per index, every write rewrites the
+revision file, and an `INSERT` into a table with `AUTOINCREMENT` also rewrites
+the schema file. Every file is first written to a temporary and forced to disk;
+then a manifest lists the renames and they are applied together. A power cut
+before the manifest leaves the data untouched; one after it is finished the
+next time the database is opened — whole or not at all, never half. The journal
+is scoped to whatever lock the write holds, so two writes to different tables
+still run at the same time. What is still not covered is grouping several
+statements into one unit of work — there is no `BEGIN`/`COMMIT`.
 
 ---
 
@@ -127,7 +131,7 @@ server:**
 > entire table, unauthenticated. This is not a flaw in nginx or in the project —
 > nginx simply centralises configuration in one file instead of spreading it
 > across directories. The folder contains `jsonsqldb.conf` (ready to include) and
-> `LEEME.md` explaining the three things you need to adjust and how to verify it
+> `README.md` explaining the three things you need to adjust and how to verify it
 > is working.
 
 ### Folders that need write permission
@@ -478,7 +482,7 @@ Borrowings, where they are what people expect:
 `CONCAT`, `REGEXP`/`RLIKE` and `LIMIT n, m` come from MySQL, `CAST` and
 `FULL JOIN` are standard SQL, and `AUTO_INCREMENT` is accepted alongside
 `AUTOINCREMENT`. Anything not mentioned behaves as in SQLite. See
-[`docs/02-consultas.md`](docs/02-consultas.md) for the full table.
+[`docs/02-queries.md`](docs/02-queries.md) for the full table.
 
 ### What is not supported
 
@@ -569,50 +573,46 @@ Keep `JSONSQLDB_DATA_PATH`, `API_ESTADO_PATH`, `ADMIN_SESION_NOMBRE` and
 `ADMIN_DATA_PATH` separate — all four already default to paths inside the
 project folder.
 
-### Upgrading from 1.x
+### Upgrading from an earlier version
 
 Replace the folder and keep your two configuration files
 (`api/jsonsqldb_api_config.php` and `jsonsqldbadmin/config.php`, both gitignored).
-The data needs no conversion: an existing database is read as it is, and each
-table moves to the new layout on the first write to it — a `<table>.rev.json`
-replacing its entry in the shared `_revs.json`, and an index file for its primary
-key and unique constraints. Revision numbers carry on from where the old file
-left off rather than restarting, so a stale cache entry cannot be mistaken for a
-current one. The old `_revs.json` is left alone and stops being read; you can
-delete it once every table has been written to.
+**The data needs no conversion**: an existing database is read as it is, and each
+table moves to the current layout on the first write to it — a `<table>.rev.json`
+replacing its entry in the old shared `_revs.json` (pre-2.0), index files for its
+primary key and unique constraints (pre-2.0), and the row count and per-part and
+per-index revisions added to `rev.json` (2.5). Revision numbers carry on from
+where they were rather than restarting, so a stale cache entry cannot be mistaken
+for a current one.
 
-**Update your API clients before or at the same time**, because the HMAC formula
-changed and old signatures are rejected. The bundled PHP, Python and PowerShell
-clients and the admin panel are already updated.
+**Coming from 1.x, update your API clients before or at the same time**, because
+the HMAC formula changed in 2.0 and old signatures are rejected. The bundled PHP,
+Python and PowerShell clients and the admin panel are already updated.
 
 One thing worth doing first: **open each database with the old version once**
-before swapping the folder, so anything left half-finished gets rolled back while
-the version that wrote it is still in place. It is not required — a journal left
-pending by 1.x is recognised and undone by 2.0 as well — but it is the tidier
-order.
+before swapping the folder, so anything left half-finished is settled by the
+version that wrote it. It is not required — a journal left pending by any earlier
+version is recognised and undone by 2.5 as well — but it is the tidier order.
 
-`tests/f9_journal.php` covers all four cases: reading an old-format database
-without writing to it, the first write producing the new files without reusing
-revision numbers, a journal left pending by the previous version being undone,
-and the database still working afterwards.
+Two configuration constants were removed in 2.5 and are ignored if still
+defined: `JSONSQLDB_JOURNAL_DATOS` and `JSONSQLDB_CACHE_MAX_FILAS`.
 
 ### Storage
 
 Each database is a directory. A table is `table.json` with the rows,
 `table.meta.json` with the structure (columns, types, keys, indexes, triggers,
-autoincrement counter), `table.rev.json` with a counter that invalidates the
-cache, plus `table.partN.json` once it grows past `JSONSQLDB_FILAS_POR_PARTE`
-rows (1,000 by default) and one `table.idx.<name>.json` per index. A `_database.json` holds
-database-level metadata.
+autoincrement counter), `table.rev.json` with a revision counter and the state of
+the table's parts and indexes, plus `table.partN.json` once it grows past
+`JSONSQLDB_FILAS_POR_PARTE` rows (1,000 by default) and one `table.idx.<n>.json`
+per index. A `_database.json` holds database-level metadata. Everything is
+readable JSON, one row per line, so a file stays diffable and editable by hand.
 
-Rows are stored one JSON object per line inside the rows array, so the file stays
-readable and diffable, a corrupt line does not destroy the rest, and a query that
-only needs a few rows can read them one at a time instead of materialising the
-whole file.
-
-The revision counter is per table and not one shared file, because two writes to
+The revision file is per table and not one shared file, because two writes to
 different tables run at the same time: a single shared counter meant whichever
-finished last erased the other's bump and left its cache serving stale rows.
+finished last erased the other's bump and left its cache serving stale rows. It
+records at which revision each part and each index was last written, so a write
+that touches one part of a hundred leaves the other ninety-nine cached and
+leaves untouched indexes alone.
 
 ### Indexes
 
@@ -629,11 +629,12 @@ speed it up. Index keys follow the engine's own equality, not PHP's: `5`, `'5'`
 and `'5.0'` share a key, so looking up a number still finds the row that stored
 it as text.
 
-An index is rebuilt on writes that move rows — saving re-packs them, so one
-`DELETE` shifts every row after it — and **extended instead of rebuilt when a
-write only appends** (2.3.0). Each index file records the revision it belongs
-to; on any mismatch the engine ignores it and scans, so a stale or hand-edited
-index can make a query slower but never wrong.
+An index is **corrected rather than rebuilt** whenever the engine can prove what
+changed: rows appended at the end, rows replaced in place, or rows shifted from
+a position on by a `DELETE`. Any doubt rebuilds it from the rows. An index whose
+content does not change is not rewritten. The revision file says which revision
+each index belongs to; on any mismatch the engine ignores it and scans, so a
+stale or hand-edited index can make a query slower but never wrong.
 
 ### Concurrency
 
@@ -647,8 +648,8 @@ table — which is what makes a deadlock impossible:
 | Cascades and triggers, when the set of tables is knowable | shared | **exclusive on every table** it can reach |
 | Schema changes, views, `REPAIR KEYS`, `INSERT ... SELECT` | **exclusive** | — |
 
-So two writes to different tables run at the same time, and a write no longer
-blocks reads of other tables.
+So two writes to different tables run at the same time, and a write does not
+block reads of other tables.
 
 A write that can propagate works out the set of tables it could reach first
 (foreign keys both ways and transitively, plus wherever the triggers write),
@@ -656,7 +657,7 @@ takes every lock up front in alphabetical order — which is what makes deadlock
 impossible — and falls back to the database lock when the set cannot be
 stated. Reads take each table's shared lock, so reads run together and only
 wait for a write to that same table. The detail is in
-[`docs/01-nucleo.md`](docs/01-nucleo.md).
+[`docs/01-core.md`](docs/01-core.md).
 
 Writes are **atomic and durable**: the new content goes to a temporary file, is
 forced to disk with `fsync()`, and is then renamed over the original. A crash
@@ -665,16 +666,20 @@ never a file whose contents were still sitting in the operating system's cache.
 `fsync()` exists from PHP 8.1; on 8.0 the buffer is flushed, which is as far as
 that version goes.
 
-That covers one file. Multi-file writes are protected by a journal in
-`.tx/<scope>/`: the files about to change are copied first and a manifest is
-written last, so a crash either finds a complete copy set to restore or no
-manifest, which means nothing had been modified yet.
+That covers one file. Multi-file writes are protected by a **redo journal** in
+`.tx/<scope>/`: every file is written to its temporary first, then a manifest
+listing the renames is written in one piece, then the renames happen. A crash
+before the manifest leaves the data untouched (the temporaries are swept); a
+crash after it is finished on the next open, as many times as it takes. It
+replaced the copy-everything-first undo journal of earlier versions, which is
+where most of the write cost used to go; pending journals of the old format are
+still recognised and undone.
 
 ### Memory
 
 On cheap shared hosting memory is the binding constraint, so it gets its own
-section. **How much you need is set by the largest table a query touches, not by
-the size of the database.**
+section. **How much you need is set by the largest table a query has to hold in
+full, not by the size of the database.**
 
 #### The number that matters
 
@@ -687,29 +692,44 @@ fields.
 So the working rule is:
 
 ```
-memory_limit  ≥  20 × (the largest table a single query has to read in full)
+memory_limit  ≥  20 × (the largest table a single query has to hold in full)
 ```
 
-A 10 MB table wants 256 MB. If two tables are joined, add both. If APCu is
-enabled, its memory is separate and does not count against `memory_limit`.
+A query holds a table in full only when it needs every row at once: `ORDER BY`
+without `LIMIT`, `GROUP BY`, the inner side of a `JOIN`, `DISTINCT`. A `WHERE`
+scan does not, and neither does a write. If APCu is enabled, its memory is
+separate and does not count against `memory_limit`.
 
-**Lowering `JSONSQLDB_FILAS_POR_PARTE` does not reduce this.** Splitting a table
-into more part files only bounds the size of each individual decode; a query that
-needs every row still ends up with every row in memory. What the split does buy
-is the ability to *skip* parts, which is where indexes come in.
+**Lowering `JSONSQLDB_FILAS_POR_PARTE` does not reduce the full-table case.**
+Splitting a table into more part files only bounds the size of each individual
+decode; a query that needs every row still ends up with every row in memory.
+What the split does buy is the ability to *skip* parts, which is what indexes
+and streaming do.
 
 #### What the engine does about it
 
-| | Before | After |
-|---|---|---|
-| `SELECT * FROM t LIMIT 50` (50,000 rows) | 56 ms · 50 MB | **3.6 ms · 3.6 MB** |
-| `SELECT * FROM t WHERE id = ?` (50,000 rows) | 107 ms · 50 MB | **17 ms · 19 MB** |
-| `SELECT COUNT(*) FROM t` (50,000 rows) | 49 ms · 50 MB | **52 ms · 32 MB** |
+Measured with `php tests/benchmark.php` on 20,000 customers and 30,000 orders,
+2.4.0 against 2.5.0:
 
-Rows are read one at a time when most will be discarded, indexes decode only
-the parts where the matching rows live, `LIMIT` is pushed into the read when
-nothing filters after it, `SELECT COUNT(*)` counts lines without decoding a
-single row (2.4.0), and the cache steps aside when memory is tight.
+| | 2.4.0 | 2.5.0 |
+|---|---|---|
+| Lookup by primary key | 4.2 ms · 14 MB | **1.9 ms · 7 MB** |
+| Numeric range, no index | 35 ms · 22 MB | **22 ms · 7 MB** |
+| `LIMIT 50`, no filter | 12 ms · 22 MB | **0.5 ms · 5 MB** |
+| `JOIN` aggregated by city | 174 ms · 53 MB | **128 ms · 43 MB** |
+| `INSERT` one row | 96 ms · 32 MB | **18 ms · 13 MB** |
+| `UPDATE` one row by key | 132 ms · 31 MB | **13 ms · 11 MB** |
+| `DELETE` one row by key | 215 ms · 32 MB | **32 ms · 13 MB** |
+
+On 100,000 rows a one-row `INSERT` went from 742 ms and 140 MB to 104 ms and
+43 MB, and loading the table in batches of 2,000 from 62 s to 4 s.
+
+Rows are read one part at a time and filtered as they arrive, indexes decode
+only the parts where the matching rows live, writes read only the parts they
+touch, `LIMIT` is pushed into the read when nothing filters after it,
+`SELECT COUNT(*)` counts lines without decoding a single row, index entries are
+integers rather than one-element lists, and the cache steps aside when memory is
+tight.
 
 #### When it still will not fit
 
@@ -760,30 +780,33 @@ protection, per-IP rate limiting, and suppressing detailed error messages.
 
 ## Tests
 
-Eleven suites, no dependencies, all using temporary directories — they never touch
-your data.
+Twelve suites, no dependencies, all using temporary directories — they never
+touch your data.
 
 ```
-php tests/f1_nucleo.php       → OK: 65    storage, types, locking, direct access
+php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
 php tests/f2_select.php       → OK: 138   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 52    real requests against the API
-php tests/f5_esquema.php      → OK: 89    SHOW, ALTER, constraints, views, integrity
+php tests/f5_esquema.php      → OK: 90    SHOW, ALTER, constraints, views, integrity, journal
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
-php tests/f6_cortes.php       → OK: 31    crash recovery, killing real processes
+php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 57    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 38    every partial state a crash can leave
-php tests/f10_indices_incrementales.php → OK: 16   indexes extended instead of rebuilt
+php tests/f8_indices.php      → OK: 59    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 31    every intermediate state a crash can leave
+php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that
 every row be either the old value or the new one, never a mix. `f9_journal.php`
-is its deterministic counterpart: it builds by hand every intermediate state a
-crash could leave — sixty-six of them — and demands the exact original bytes
-back. `f8_indices.php` never asserts literal results: it compares every indexed
-query against the same condition written so the index cannot be used.
+is its deterministic counterpart: it rebuilds by hand every state a commit passes
+through — each temporary already in place or still pending — and demands the
+exact bytes of the finished write; it also blocks the journal folder to prove
+that a write which cannot journal changes nothing. `f8_indices.php` never asserts
+literal results: it compares every indexed query against the same condition
+written so the index cannot be used, and the cheap write paths against a table
+without indexes.
 
 The engine, the API and the panel pass PHPStan at level 5 with no warnings. The
 configuration is not committed — it is a development tool and the project needs
@@ -798,19 +821,19 @@ and the panel calls the API from inside its own request.
 
 ## Documentation
 
-Full documentation lives in [`docs/`](docs/), **written in Spanish**:
+Full documentation lives in [`docs/`](docs/):
 
 | | |
 |---|---|
-| [`docs/00-indice.md`](docs/00-indice.md) | Index and starting points |
-| [`docs/01-nucleo.md`](docs/01-nucleo.md) | Storage, types, locking, catalogue, logging |
-| [`docs/02-consultas.md`](docs/02-consultas.md) | `SELECT`: syntax, functions, ordering |
-| [`docs/03-escrituras.md`](docs/03-escrituras.md) | Writes, DDL, keys, triggers |
+| [`docs/00-index.md`](docs/00-index.md) | Index and starting points |
+| [`docs/01-core.md`](docs/01-core.md) | Storage, types, locking, journal, indexes, memory, configuration, upgrading |
+| [`docs/02-queries.md`](docs/02-queries.md) | `SELECT`: syntax, functions, ordering, performance |
+| [`docs/03-writes.md`](docs/03-writes.md) | Writes, DDL, keys, triggers, views, integrity |
 | [`docs/04-api.md`](docs/04-api.md) | The HTTP API, signing, bound parameters, clients |
 | [`docs/05-admin.md`](docs/05-admin.md) | jsonSQLDBadmin |
-| [`nginx/LEEME.md`](nginx/LEEME.md) | nginx setup — **required reading if you use nginx** |
+| [`nginx/README.md`](nginx/README.md) | nginx setup — **required reading if you use nginx** |
 
-Source code comments are in Spanish as well.
+Source code comments and engine messages are in Spanish.
 
 ---
 

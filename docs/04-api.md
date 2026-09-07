@@ -1,438 +1,442 @@
-# jsonSQLDB — Fase 4: la API
+# jsonSQLDB — Part 4: the API
 
-Endpoint HTTP para ejecutar SQL contra una base jsonSQLDB desde cualquier
-aplicación, con firma HMAC y permisos por clave.
+An HTTP endpoint to run SQL against a jsonSQLDB database from any application,
+with HMAC signing and per-key permissions.
 
-Fichero: `api/jsonsqldb_api.php` — Configuración: `api/jsonsqldb_api_config.php`
+File: `api/jsonsqldb_api.php` — configuration: `api/jsonsqldb_api_config.php`
 
-## 1. Petición
+## 1. Request
 
-`POST` con estos parámetros:
+`POST` with these parameters:
 
-| Parámetro | Contenido |
+| Parameter | Content |
 |---|---|
-| `api_key` | clave de la aplicación |
-| `db` | nombre de la base de datos sobre la que se ejecuta la sentencia |
-| `sql` | sentencia a ejecutar (puede ser multilínea y llevar comentarios) |
-| `params` | opcional: lista JSON con los valores de los `?` de la SQL |
-| `timestamp` | hora UNIX actual, 10 dígitos |
-| `token` | firma HMAC-SHA256 de la petición |
+| `api_key` | the application's key |
+| `db` | name of the database the statement runs against |
+| `sql` | statement to run (may be multi-line and carry comments) |
+| `params` | optional: JSON list with the values of the `?` in the SQL |
+| `timestamp` | current UNIX time, 10 digits |
+| `token` | HMAC-SHA256 signature of the request |
 
-La firma se calcula así:
+The signature is computed as:
 
 ```php
 $token = hash_hmac('sha256',
-    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $sql . $params . "¿", $secreto);
+    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $sql . $params . "¿", $secret);
 ```
 
-Donde `$secreto` es el campo `hmac_secret` de esa cuenta en
-`api/jsonsqldb_api_config.php`. **Cada cuenta tiene el suyo**, distinto del de las demás.
+where `$secret` is the `hmac_secret` field of that account in
+`api/jsonsqldb_api_config.php`. **Every account has its own**, different from the
+others.
 
-`$db` es el nombre de la base tal cual se manda en el campo `db`, o cadena vacía
-en las sentencias que no van contra ninguna (`SHOW DATABASES`,
-`CREATE DATABASE`). `$params` es el JSON tal cual se envía, o cadena vacía si no
-hay parámetros.
+`$db` is the database name exactly as sent in the `db` field, or an empty
+string for the statements that target none (`SHOW DATABASES`,
+`CREATE DATABASE`). `$params` is the JSON exactly as sent, or an empty string
+if there are no parameters.
 
-La firma cubre la clave, la base, la hora, la SQL y los parámetros, así que nada
-de eso se puede cambiar por el camino sin conocer el secreto.
+The signature covers the key, the database, the time, the SQL and the
+parameters, so none of them can be changed in transit without knowing the
+secret.
 
-> **Cambio incompatible en la 2.0.** Hasta entonces la base quedaba fuera de la
-> firma, y eso permitía coger una petición legítima, cambiarle el campo `db` y
-> reenviarla contra otra base: la firma seguía siendo válida porque no la
-> cubría. A una clave con acceso a varias bases eso le bastaba para ejecutar en
-> la que no le tocaba. **Cualquier cliente que firme con la fórmula antigua deja
-> de funcionar** y hay que actualizarlo. Los cuatro clientes de ejemplo (PHP,
-> Python, PowerShell y el panel) ya vienen con la fórmula nueva.
+> **Breaking change in 2.0.** Until then the database was outside the
+> signature, which allowed taking a legitimate request, changing its `db` field
+> and replaying it against another database: the signature stayed valid because
+> it did not cover it. For a key with access to several databases that was
+> enough to run on the wrong one. **Any client signing with the old formula
+> stops working** and must be updated. The four example clients (PHP, Python,
+> PowerShell and the panel) already use the new one.
 
-### La base de datos va en `db`, no en la SQL
+### The database goes in `db`, not in the SQL
 
-No hay `USE` ni prefijos tipo `mibase.clientes`: cada petición dice en `db`
-sobre qué base trabaja, y la API comprueba que la API key tiene acceso a esa
-base antes de ejecutar nada. Con el cliente, la base es el cuarto argumento:
+There is no `USE` and no `mydb.customers` prefix: every request says in `db`
+which database it works on, and the API checks that the key has access to that
+database before running anything. With the client, the database is the fourth
+argument:
 
 ```php
-$tienda  = new JsonSqlDbCliente($url, $apiKey, $secreto, 'tienda');
-$almacen = new JsonSqlDbCliente($url, $apiKey, $secreto, 'almacen');
+$shop      = new JsonSqlDbCliente($url, $apiKey, $secret, 'shop');
+$warehouse = new JsonSqlDbCliente($url, $apiKey, $secret, 'warehouse');
 ```
 
-Una consulta no puede cruzar dos bases: son carpetas separadas.
+A query cannot span two databases: they are separate folders.
 
-`db` solo puede ir **vacío** para `SHOW DATABASES`, `CREATE DATABASE` y
-`DROP DATABASE`, y únicamente si la API key tiene `'bases' => ['*']`.
+`db` may only be **empty** for `SHOW DATABASES`, `CREATE DATABASE` and
+`DROP DATABASE`, and only if the API key has `'bases' => ['*']`.
 
-### El secreto que usa un cliente
+### The secret a client uses
 
-Los dos clientes reciben el secreto como parámetro: es el tercer argumento del
-constructor en PHP y `-HmacSecret` en PowerShell.
-
-Ese valor es el campo **`hmac_secret` de esa misma cuenta** en
-`api/jsonsqldb_api_config.php`. No hay ningún secreto global: cada clave tiene el
-suyo.
+The clients take the secret as a parameter: the third constructor argument in
+PHP and Python, `-HmacSecret` in PowerShell. That value is the **`hmac_secret`
+of that same account** in `api/jsonsqldb_api_config.php`. There is no global
+secret: every key has its own.
 
 ```php
-$cli = new JsonSqlDbCliente($url, 'MI_API_KEY', 'EL_SECRETO_DE_ESA_KEY', 'mibase');
+$cli = new JsonSqlDbCliente($url, 'MY_API_KEY', 'THE_SECRET_OF_THAT_KEY', 'mydb');
 ```
 
-Firmar con el secreto equivocado devuelve `Token inválido`, sin más detalle: la
-API no distingue entre una firma mal calculada y una clave que no existe.
+Signing with the wrong secret returns `Token inválido`, with no further detail:
+the API does not distinguish a miscalculated signature from a key that does not
+exist.
 
-### Clave de los ejemplos
+### The example clients' key
 
-`cliente_ejemplo.php`, `cliente_ejemplo.ps1` y `cliente_ejemplo.py` vienen con
-una API key propia, **la misma en los tres**, con permiso `escritura` sobre la base `pruebas` y sobre
-ninguna más. Está dada de alta en `api/jsonsqldb_api_config.php` como
-«Clientes de ejemplo».
+`cliente_ejemplo.php`, `cliente_ejemplo.ps1` and `cliente_ejemplo.py` come with an
+API key of their own, **the same in all three**, with `escritura` permission on
+the `pruebas` database and no other. It is registered in
+`api/jsonsqldb_api_config.php` as «Clientes de ejemplo».
 
-`escritura` permite `SELECT`, `INSERT`, `UPDATE` y `DELETE`, más las sentencias
-`SHOW`. No permite `CREATE`, `ALTER`, `DROP` ni triggers: para eso hace falta
-una clave `admin`.
+`escritura` allows `SELECT`, `INSERT`, `UPDATE` and `DELETE`, plus the `SHOW`
+statements. It does not allow `CREATE`, `ALTER`, `DROP` or triggers: those need
+an `admin` key.
 
-En PHP el atajo es `JsonSqlDbCliente::pruebas()`; en PowerShell ya viene puesta
-en `$Global:JsonSqlDb`. Para tu aplicación, crea una clave propia limitada a sus
-bases en lugar de reutilizar esta.
+In PHP the shortcut is `JsonSqlDbCliente::pruebas()`; in PowerShell it is preset
+in `$Global:JsonSqlDb`. For your application, create a key of its own limited to
+its databases instead of reusing this one.
 
-### Desde Python
+### From Python
 
-`api/cliente_ejemplo.py` hace lo mismo desde Python, solo con la biblioteca
-estándar: sin `pip`, sin `requests`. Requiere Python 3.7 o superior.
+`api/cliente_ejemplo.py` does the same from Python, with the standard library
+only: no `pip`, no `requests`. Requires Python 3.7 or later.
 
 ```python
 from cliente_ejemplo import JsonSqlDbCliente
 
-cli = JsonSqlDbCliente("https://miservidor/jsonsqldb/api/jsonsqldb_api.php",
-                       "MI_API_KEY", "EL_HMAC_SECRET_DE_ESA_KEY", "mibase")
+cli = JsonSqlDbCliente("https://myserver/jsonsqldb/api/jsonsqldb_api.php",
+                       "MY_API_KEY", "THE_HMAC_SECRET_OF_THAT_KEY", "mydb")
 
-filas = cli.consultar("SELECT * FROM clientes WHERE ciudad = ?", ["Madrid"])
-cli.consultar("INSERT INTO clientes (nombre, saldo) VALUES (?, ?)", ["O'Donnell", 10.55])
-print(cli.valor("SELECT COUNT(*) FROM clientes"))
+rows = cli.consultar("SELECT * FROM customers WHERE city = ?", ["Madrid"])
+cli.consultar("INSERT INTO customers (name, balance) VALUES (?, ?)", ["O'Donnell", 10.55])
+print(cli.valor("SELECT COUNT(*) FROM customers"))
 ```
 
-Devuelve listas de diccionarios en `SELECT` y `SHOW`, y un diccionario
-`{'success': True, ...}` en las escrituras. Los errores llegan como excepción
-`JsonSqlDbError`, no como valor de retorno.
+It returns lists of dictionaries for `SELECT` and `SHOW`, and a dictionary
+`{'success': True, ...}` for writes. Errors arrive as a `JsonSqlDbError`
+exception, not as a return value.
 
-Certificado propio o autofirmado, igual que los otros:
+Own or self-signed certificate, as with the others:
 
 ```python
 cli.certificado("C:/xampp/apache/conf/ssl.crt/server.crt")
 cli.aceptar_autofirmado()
 ```
 
-Un detalle de implementación: el JSON de los parámetros se genera con
-`separators=(",", ":")`, sin espacios. El servidor firma el texto **exacto** que
-recibe, así que lo que se firma y lo que se envía tienen que ser idénticos byte a
-byte.
+An implementation detail: the parameters' JSON is generated with
+`separators=(",", ":")`, without spaces. The server signs the **exact** text it
+receives, so what is signed and what is sent must be identical byte for byte.
 
-### Desde PowerShell
+### From PowerShell
 
-`api/cliente_ejemplo.ps1` hace lo mismo desde PowerShell, con parámetros
-ligados y soporte de certificado propio:
+`api/cliente_ejemplo.ps1` does the same from PowerShell, with bound parameters
+and support for a certificate of your own:
 
 ```powershell
 Set-JsonSqlDbConexion -Url 'https://shirka:44311/jsonsqldb/api/jsonsqldb_api.php' `
                       -ApiKey '...' -HmacSecret '...' -Base 'pruebas'
 
-API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ?" @('Torrevieja')
+API-SQL-JSON "SELECT * FROM customers WHERE city = ?" @('Torrevieja')
 API-SQL-JSON "SHOW DATABASES" -Base ''
 ```
 
-Dos detalles propios de PowerShell: los decimales se convierten con
-`InvariantCulture`, para que salga `10.55` y no `10,55`; y el `¿` de la firma se
-monta desde su código `[char]0x00BF`, para que el token cuadre aunque el
-fichero .ps1 se guarde en ANSI en lugar de UTF-8.
+Two PowerShell-specific details: decimals are converted with `InvariantCulture`,
+so `10.55` comes out and not `10,55`; and the `¿` of the signature is built
+from its code `[char]0x00BF`, so the token matches even if the `.ps1` file is
+saved in ANSI instead of UTF-8.
 
-## 1.1. Parámetros ligados
+## 1.1. Bound parameters
 
-**Nunca montes la SQL concatenando valores.** Pon un `?` en cada sitio donde
-vaya un valor y manda los valores en `params`, en el mismo orden.
+**Never build the SQL by concatenating values.** Put a `?` wherever a value goes
+and send the values in `params`, in the same order.
 
-El servidor **no sustituye texto**: analiza la SQL con los `?` y coloca cada
-valor ya convertido dentro del árbol de la sentencia. Un valor no puede
-convertirse en SQL, por muy SQL que parezca. Da igual que lleve comillas,
-punto y coma o comentarios: siempre se trata como un dato.
+The server **does not substitute text**: it parses the SQL with the `?` and
+places each converted value inside the statement tree. A value cannot turn into
+SQL, however much it looks like it. Quotes, semicolons or comments make no
+difference: it is always treated as data.
 
 ```php
-// MAL — el valor forma parte de la sentencia
-$sql = "SELECT * FROM clientes WHERE nombre = '$nombre'";
+// WRONG — the value is part of the statement
+$sql = "SELECT * FROM customers WHERE name = '$name'";
 
-// BIEN — el valor viaja aparte
-$filas = $cli->consultar('SELECT * FROM clientes WHERE nombre = ?', [$nombre]);
+// RIGHT — the value travels apart
+$rows = $cli->consultar('SELECT * FROM customers WHERE name = ?', [$name]);
 ```
 
-Con `$nombre = "x' OR 1=1; DROP TABLE clientes; --"` la segunda forma busca
-literalmente un cliente que se llame así: devuelve 0 filas y la tabla no se toca.
+With `$name = "x' OR 1=1; DROP TABLE customers; --"` the second form literally
+looks for a customer with that name: it returns 0 rows and the table is not
+touched.
 
-Reglas:
+Rules:
 
-- Un `?` = un valor. Si el número no coincide, la petición se rechaza.
-- Valores admitidos: `null`, booleano (se guarda como 1/0), entero, decimal y
-  texto. Nada de listas ni objetos.
-- Los `?` van donde va un **valor**: `WHERE`, `VALUES`, `SET`, `HAVING`,
-  argumentos de funciones, `LIMIT` y `OFFSET`. No sirven para nombres de tabla
-  ni de columna: eso es estructura, no dato.
-- `IN (?, ?, ?)` necesita un `?` por elemento; monta la lista según cuántos
-  valores tengas.
-- Un `?` dentro de una cadena (`'¿de verdad?'`) es texto, no marcador.
-- Los valores quedan también en el log, en el campo `params`.
+- One `?` = one value. If the count does not match, the request is rejected.
+- Allowed values: `null`, boolean (stored as 1/0), integer, decimal and text.
+  No lists or objects.
+- The `?` go where a **value** goes: `WHERE`, `VALUES`, `SET`, `HAVING`,
+  function arguments, `LIMIT` and `OFFSET`. They cannot stand for table or
+  column names: that is structure, not data.
+- `IN (?, ?, ?)` needs one `?` per element; build the list from how many values
+  you have.
+- A `?` inside a string (`'really?'`) is text, not a placeholder.
+- The values are only logged if `JSONSQLDB_LOG_PARAMS` is on.
 
 ```php
-// Varios valores y una lista IN de tamaño variable
-$ciudades = ['Madrid', 'Valencia', 'Bilbao'];
-$huecos   = implode(',', array_fill(0, count($ciudades), '?'));
+// Several values and an IN list of variable size
+$cities = ['Madrid', 'Valencia', 'Bilbao'];
+$holes  = implode(',', array_fill(0, count($cities), '?'));
 
-$filas = $cli->consultar(
-    "SELECT nombre, saldo FROM clientes
-      WHERE ciudad IN ($huecos) AND saldo > ? AND alta >= ?
-      ORDER BY saldo DESC
+$rows = $cli->consultar(
+    "SELECT name, balance FROM customers
+      WHERE city IN ($holes) AND balance > ? AND joined >= ?
+      ORDER BY balance DESC
       LIMIT ?",
-    array_merge($ciudades, [100.50, '2026-01-01', 20])
+    array_merge($cities, [100.50, '2026-01-01', 20])
 );
 ```
 
-Desde PHP, sin pasar por la API, es igual:
+From PHP, without the API, it is the same:
 
 ```php
-$bd = new JsonSQLDB\Database('mibase');
-$bd->consultar('UPDATE clientes SET saldo = saldo + ? WHERE id = ?', [25.40, 7]);
+$db = new JsonSQLDB\Database('mydb');
+$db->consultar('UPDATE customers SET balance = balance + ? WHERE id = ?', [25.40, 7]);
 ```
 
-## 2. Respuesta
+## 2. Response
 
 ```json
 // SELECT
-[ {"id":1,"nombre":"Ana","ciudad":"Madrid"}, {"id":2,"nombre":"Luis","ciudad":"Valencia"} ]
+[ {"id":1,"name":"Ana","city":"Madrid"}, {"id":2,"name":"Luis","city":"Valencia"} ]
 
 // INSERT / UPDATE / DELETE / DDL
 {"success":true,"filas":2,"mensaje":"2 fila(s) insertada(s)"}
 
 // Error
-{"error":"Error en la consulta: CONSTRAINT: La columna 'clientes.nombre' no admite NULL"}
+{"error":"Error en la consulta: CONSTRAINT: La columna 'customers.name' no admite NULL"}
 ```
 
-Los tipos vienen ya normalizados por el motor: los números llegan como números,
-las fechas como `yyyy-MM-dd[ HH:mm[:ss[.fff]]]` y los nulos como `null`. No hace
-falta convertir nada en el cliente.
+Types come already normalised by the engine: numbers as numbers, dates as
+`yyyy-MM-dd[ HH:mm[:ss[.fff]]]` and nulls as `null`. Nothing needs converting in
+the client.
 
-> **Déjalo a `false` en producción.** Con `DEVOLVER_ERRORES = true` la respuesta
-> incluye el mensaje interno, que puede nombrar tablas y columnas: es cómodo
-> mientras desarrollas y una fuente de información gratis para quien sondea tu
-> API. La plantilla viene con `false`.
+> **Leave it at `false` in production.** With `DEVOLVER_ERRORES = true` the
+> response includes the internal message, which may name tables and columns:
+> convenient while developing and free information for whoever probes your API.
+> The template ships with `false`.
 
-Con `DEVOLVER_ERRORES = false` los errores se reducen a un mensaje genérico
-(recomendado en producción); el detalle sigue quedando en el log.
+With `DEVOLVER_ERRORES = false` errors are reduced to a generic message; the
+detail is still in the log.
 
-## 3. Permisos por API key
+## 3. Permissions per API key
 
 ```php
 $API_KEYS = [
-    'clave...' => [
-        'nombre'  => 'jsonSQLDBadmin',
-        'permiso' => 'admin',
-        'bases'   => ['*'],
+    'jsonSQLDBadmin' => [
+        'key'         => '...',
+        'permiso'     => 'admin',
+        'bases'       => ['*'],
+        'hmac_secret' => '...',
     ],
 ];
 ```
 
-| Permiso | Sentencias admitidas |
+| Permission | Allowed statements |
 |---|---|
-| `lectura` | solo `SELECT` |
-| `escritura` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
-| `admin` | todas, incluidas `CREATE`, `ALTER`, `DROP` y los triggers |
+| `lectura` | `SELECT`, `SHOW`, `CHECK KEYS` |
+| `escritura` | those plus `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS` |
+| `admin` | everything, including `CREATE`, `ALTER`, `DROP` and triggers |
 
-El permiso se comprueba **después de analizar la SQL y antes de ejecutarla**, así
-que se mira lo que la sentencia hace de verdad, no cómo esté escrita. `bases`
-limita a qué bases de datos puede acceder esa clave; `['*']` son todas.
+The permission is checked **after parsing the SQL and before running it**, so
+it looks at what the statement really does, not at how it is written. `bases`
+limits which databases the key can access; `['*']` means all.
 
-Qué puede hacer cada permiso, sin ambigüedades:
+What each permission can do, without ambiguity:
 
-| Sentencia | `lectura` | `escritura` | `admin` |
+| Statement | `lectura` | `escritura` | `admin` |
 |---|:---:|:---:|:---:|
-| `SELECT`, `UNION` | sí | sí | sí |
-| `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA` / `COLUMNS` | sí | sí | sí |
-| `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` | sí | sí | sí |
-| `SHOW DATABASES` | sí | sí | sí |
-| `CHECK KEYS` | sí | sí | sí |
-| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS` | no | sí | sí |
-| `CREATE` / `ALTER` / `DROP` de tabla, índice, vista o trigger | no | no | sí |
-| `CREATE DATABASE`, `DROP DATABASE` | no | no | sí |
+| `SELECT`, `UNION` | yes | yes | yes |
+| `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA` / `COLUMNS` | yes | yes | yes |
+| `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` | yes | yes | yes |
+| `SHOW DATABASES` | yes | yes | yes |
+| `CHECK KEYS` | yes | yes | yes |
+| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS` | no | yes | yes |
+| `CREATE` / `ALTER` / `DROP` of table, index, view or trigger | no | no | yes |
+| `CREATE DATABASE`, `DROP DATABASE` | no | no | yes |
 
-La lista se mantiene a mano en `api/jsonsqldb_api.php`, así que añadir una
-sentencia al analizador y olvidarse de ella la deja fuera. Le pasó a
-`SHOW INDEXES`, que hasta la 2.2 no podían ejecutar las claves de lectura pese a
-no revelar nada más que la estructura. `tests/f4_api.php` recorre ahora todos los
-`SHOW` con una clave de lectura para que se note.
+The list is maintained by hand in `api/jsonsqldb_api.php`, so adding a statement
+to the parser and forgetting it here leaves it out. `tests/f4_api.php` runs
+every `SHOW` with a read key so that it shows.
 
-Las claves y los secretos **no se listan aquí a propósito**: duplicar un secreto
-en la documentación es una forma estupenda de que acabe donde no debe. Están en
-`api/jsonsqldb_api_config.php`, que es su único sitio.
+Keys and secrets **are deliberately not listed here**: duplicating a secret in
+the documentation is a fine way for it to end up where it should not. They are
+in `api/jsonsqldb_api_config.php`, which is their only place. `php configurar.php`
+creates both configuration files with random keys already in place.
 
-Para generar una clave o un secreto nuevos, uno distinto cada vez:
+To generate a new key or secret, a different one each time:
 
 ```
 php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 ```
 
-La clave admin y su `hmac_secret` tienen que coincidir con `ADMIN_API_KEY` y
-`ADMIN_HMAC_SECRET` de `jsonsqldbadmin/config.php`.
+The admin key and its `hmac_secret` must match `ADMIN_API_KEY` and
+`ADMIN_HMAC_SECRET` in `jsonsqldbadmin/config.php`.
 
-## 4. Protecciones
+## 4. Protections
 
-| Control | Configuración | Por defecto |
+| Control | Configuration | Default |
 |---|---|---|
-| Solo POST | — | siempre |
-| Tamaño máximo de la petición | `MAX_POST_SIZE` | 200 KB |
-| Longitud máxima de la SQL | `MAX_SQL_LENGTH` | 100.000 caracteres |
-| Parámetros ligados por petición | `MAX_PARAMS`, `MAX_PARAMS_LENGTH` | 1.000 valores, 100 KB |
-| Desfase máximo del reloj | `RATE_TIMESTAMP_DIFF` | 300 s |
-| Anti-replay (token de un solo uso) | `ANTI_REPLAY_ACTIVO` | desactivado |
-| Límite de peticiones por IP | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **activado**, 150 / 24 h |
-| Corte por fallos de autenticación | `RATE_LIMIT_GLOBAL_MAX` | 30 |
-| Lista blanca de IPs (IP suelta o CIDR) | `IPS_PERMITIDAS` | vacía (sin filtro) |
-| Exigir HTTPS | `EXIGIR_HTTPS` | **`true`** |
-| Cabecera HSTS | `HSTS_ACTIVO` | `false` |
-| Confiar en X-Forwarded-For / -Proto | `CONFIAR_EN_PROXY` | `false` |
+| POST only | — | always |
+| Maximum request size | `MAX_POST_SIZE` | 200 KB |
+| Maximum SQL length | `MAX_SQL_LENGTH` | 100,000 characters |
+| Bound parameters per request | `MAX_PARAMS`, `MAX_PARAMS_LENGTH` | 1,000 values, 100 KB |
+| Maximum clock skew | `RATE_TIMESTAMP_DIFF` | 300 s |
+| Anti-replay (single-use token) | `ANTI_REPLAY_ACTIVO` | enabled |
+| Per-IP request limit | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **enabled**, 150 / 24 h |
+| Cut-off on authentication failures | `RATE_LIMIT_GLOBAL_MAX` | 30 |
+| IP allow-list (single IP or CIDR) | `IPS_PERMITIDAS` | empty (no filter) |
+| Require HTTPS | `EXIGIR_HTTPS` | **`true`** |
+| HSTS header | `HSTS_ACTIVO` | `false` |
+| Trust X-Forwarded-For / -Proto | `CONFIAR_EN_PROXY` | `false` |
 
-Todo el estado (contadores por IP, fallos y tokens ya usados) se guarda en
-**JSON**, en `logs/api/estado.json`, bajo bloqueo exclusivo y limpiándose solo de
-entradas caducadas. No hay ninguna base de datos externa por debajo.
+All state (per-IP counters, failures and used tokens) is kept in **JSON**, in
+`logs/api/estado.json`, under an exclusive lock and pruning only expired
+entries. There is no external database underneath.
 
-La comparación de tokens usa `hash_equals`, así que no se puede adivinar el
-secreto midiendo tiempos de respuesta.
+Token comparison uses `hash_equals`, so the secret cannot be guessed by timing
+responses.
 
-### Los valores por defecto son los seguros
+### The defaults are the safe ones
 
-Desde la 1.1.0, `EXIGIR_HTTPS`, `ANTI_REPLAY_ACTIVO` y `RATE_LIMIT_ACTIVO` vienen
-**activados** y `DEVOLVER_ERRORES` **desactivado**. Una instalación que no se
-configura queda protegida, no expuesta.
+`EXIGIR_HTTPS`, `ANTI_REPLAY_ACTIVO` and `RATE_LIMIT_ACTIVO` ship **enabled** and
+`DEVOLVER_ERRORES` **disabled**. An installation that is not configured is
+protected, not exposed.
 
-La contrapartida: si desarrollas en local por `http://localhost`, la API te
-rechazará las peticiones hasta que pongas `EXIGIR_HTTPS` a `false`. Es una línea
-en la configuración y es un aviso que prefieres recibir en tu máquina antes que
-descubrir el descuido en producción.
+The flip side: if you develop locally over `http://localhost`, the API rejects
+your requests until you set `EXIGIR_HTTPS` to `false` (`php configurar.php
+--local` does it for you). It is one line of configuration and a warning you
+would rather get on your machine than discover in production.
 
-`TIME_LIMIT` bajó de 1200 a **60 segundos** y `MEMORY_LIMIT` de 1 GB a **256 MB**.
-Una consulta cara ocupa un worker de PHP todo ese tiempo, y con unos pocos
-workers eso es una denegación de servicio hecha con peticiones legítimas. Súbelos
-solo si tienes consultas o exportaciones que de verdad lo necesiten.
+`TIME_LIMIT` is **60 seconds** and `MEMORY_LIMIT` **256 MB**. An expensive query
+occupies a PHP worker for all of that, and with a handful of workers that is a
+denial of service made of legitimate requests. Raise them only if you have
+queries or exports that really need it.
 
-### Un secreto por clave
+### One secret per key
 
-Cada entrada de `$API_KEYS` va **indexada por el nombre de la cuenta**, y lleva
-la clave en `key` y su secreto en `hmac_secret`, ambos obligatorios:
+Every entry of `$API_KEYS` is **indexed by the account name** and carries the
+key in `key` and its secret in `hmac_secret`, both mandatory:
 
 ```php
-'Mi aplicación' => [
-    'key'         => 'MI_API_KEY',
+'My application' => [
+    'key'         => 'MY_API_KEY',
     'permiso'     => 'escritura',
-    'bases'       => ['mibase'],
-    'hmac_secret' => '...',        // uno distinto por cuenta
+    'bases'       => ['mydb'],
+    'hmac_secret' => '...',        // a different one per account
 ],
 ```
 
-No hay ningún secreto global. Si varias claves compartieran secreto, **cualquier
-aplicación que lo tuviera podría firmar peticiones haciéndose pasar por otra
-clave, incluida la de administración**, y los permisos por clave dejarían de
-servir de nada.
+There is no global secret. If several keys shared a secret, **any application
+holding it could sign requests as another key, the admin one included**, and
+per-key permissions would be worth nothing.
 
-Con un secreto por clave, una aplicación comprometida solo compromete lo suyo, y
-se revoca cambiando su clave y su secreto sin tocar las demás.
+With one secret per key, a compromised application only compromises its own,
+and is revoked by changing its key and secret without touching the others.
 
-Una cuenta sin `hmac_secret` no puede firmar nada: la API responde *«Configuración
-incompleta»* diciendo qué clave es y qué le falta.
+An account without `hmac_secret` cannot sign anything: the API answers
+*«Configuración incompleta»* saying which key it is and what is missing.
 
-### Qué activar en producción
+### What to enable in production
 
-Por orden de eficacia:
+In order of effectiveness:
 
-1. **`IPS_PERMITIDAS`**. Si quien consume la API son servidores tuyos con IP
-   fija, esta es la protección más fuerte: quien no esté en la lista recibe un
-   403 antes de que se mire la firma. Admite IP suelta (`10.0.0.7`) y rango
-   CIDR (`10.0.0.0/24`, `2001:db8::/32`).
-2. **Un `hmac_secret` por cuenta**, como se explica arriba.
-3. **`HSTS_ACTIVO`**, solo con un certificado de una CA reconocida. Con uno
-   autofirmado dejarías el dominio inaccesible durante un año.
+1. **`IPS_PERMITIDAS`**. If the API's consumers are servers of yours with fixed
+   IPs, this is the strongest protection: whoever is not on the list gets a 403
+   before the signature is even looked at. Accepts single IPs (`10.0.0.7`) and
+   CIDR ranges (`10.0.0.0/24`, `2001:db8::/32`).
+2. **One `hmac_secret` per account**, as explained above.
+3. **`HSTS_ACTIVO`**, only with a certificate from a recognised CA. With a
+   self-signed one you would make the domain unreachable for a year.
 
-`EXIGIR_HTTPS`, `RATE_LIMIT_ACTIVO`, `ANTI_REPLAY_ACTIVO` y `DEVOLVER_ERRORES`
-ya vienen en su valor seguro: no hay que activarlos, solo no desactivarlos.
+`EXIGIR_HTTPS`, `RATE_LIMIT_ACTIVO`, `ANTI_REPLAY_ACTIVO` and `DEVOLVER_ERRORES`
+already ship at their safe value: nothing to enable, only not to disable.
 
-`CONFIAR_EN_PROXY` merece un aviso aparte: actívalo **solo** si delante hay un
-proxy o balanceador de confianza. Con él puesto, la API cree lo que digan las
-cabeceras `X-Forwarded-For` y `X-Forwarded-Proto`; si nadie las está fijando,
-cualquiera puede falsear su IP y saltarse `IPS_PERMITIDAS` y el rate limit.
+`CONFIAR_EN_PROXY` deserves a warning of its own: enable it **only** if a trusted
+proxy or load balancer sits in front. With it on, the API believes the
+`X-Forwarded-For` and `X-Forwarded-Proto` headers; if nobody is setting them,
+anyone can fake their IP and bypass `IPS_PERMITIDAS` and the rate limit.
 
-## 5. Registro
+## 5. Logging
 
-Cada petición deja dos rastros:
+Every request leaves two traces:
 
-- `logs/api/peticiones-AAAA-MM-DD.json` — la petición: fecha, IP, user-agent,
-  base, etiqueta de la API key, operación, filas, milisegundos y error.
-- `logs/consultas-AAAA-MM-DD.json` — la consulta ejecutada por el motor, con la
-  SQL completa.
+- `logs/api/peticiones-YYYY-MM-DD.json` — the request: date, IP, user agent,
+  database, API key label, operation, rows, milliseconds and error.
+- `logs/consultas-YYYY-MM-DD.json` — the query run by the engine, with the full
+  SQL.
 
-Los dos son un fichero por día, rotan por tamaño y se purgan según
-`JSONSQLDB_LOG_DIAS` (0 = conservarlos siempre).
+Both are one file per day, rotate by size and are purged according to
+`JSONSQLDB_LOG_DIAS` (0 = keep forever).
 
-## 6. Cliente
+## 6. Client
 
-`api/cliente_ejemplo.php` es un cliente listo para copiar en la aplicación que
-vaya a consumir la API. Firma la petición, la envía y devuelve el resultado ya
-decodificado:
+`api/cliente_ejemplo.php` is a client ready to copy into the application that
+will consume the API. It signs the request, sends it and returns the decoded
+result:
 
 ```php
 require 'cliente_ejemplo.php';
 
 $cli = new JsonSqlDbCliente(
-    'https://miservidor/jsonsqldb/api/jsonsqldb_api.php',
-    'MI_API_KEY',
-    'EL_SECRETO_DE_ESA_KEY',
-    'mibase'
+    'https://myserver/jsonsqldb/api/jsonsqldb_api.php',
+    'MY_API_KEY',
+    'THE_SECRET_OF_THAT_KEY',
+    'mydb'
 );
 
-$filas = $cli->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Madrid']);
-$cli->consultar('INSERT INTO clientes (nombre, ciudad) VALUES (?, ?)', ["O'Donnell", 'Logroño']);
+$rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Madrid']);
+$cli->consultar('INSERT INTO customers (name, city) VALUES (?, ?)', ["O'Donnell", 'Logroño']);
 ```
 
-Los valores viajan en `params` y el servidor los liga a los `?` (ver 1.1). El
-cliente no escapa nada ni toca la SQL.
+Values travel in `params` and the server binds them to the `?` (see 1.1). The
+client escapes nothing and does not touch the SQL.
 
-Con certificado autofirmado hay que poner `CURLOPT_SSL_VERIFYPEER` y
-`CURLOPT_SSL_VERIFYHOST` a `false` en el cliente.
+With a self-signed certificate use `$cli->certificado('/path/to/server.crt')`
+or `$cli->aceptarAutofirmado()`.
 
-## 7. Instalación
+## 7. Installation
 
-1. Sube la carpeta al servidor. Lo ideal es dejar accesible por web solo `api/`.
-2. En `config.php` ajusta `JSONSQLDB_DATA_PATH` y `JSONSQLDB_LOG_PATH`; si puedes,
-   apúntalos a carpetas **fuera del webroot**.
-3. En `api/jsonsqldb_api_config.php` cambia las API keys y el `hmac_secret` de cada una.
-4. Comprueba que la carpeta de datos y la de logs tienen permiso de escritura.
-5. Lanza las pruebas para validar el entorno: `php tests/f4_api.php`.
+1. Upload the folder to the server. Ideally only `api/` is reachable from the
+   web.
+2. In `config.php` adjust `JSONSQLDB_DATA_PATH` and `JSONSQLDB_LOG_PATH`; if you
+   can, point them to folders **outside the web root**.
+3. In `api/jsonsqldb_api_config.php` set the API keys and each one's
+   `hmac_secret` (`php configurar.php` generates them).
+4. Check that the data and log folders are writable.
+5. Run the tests to validate the environment: `php tests/f4_api.php`.
 
-Si no puedes mover `data/` y `logs/` fuera del webroot, los `.htaccess` y
-`web.config` incluidos ya bloquean el acceso por navegador.
+If you cannot move `data/` and `logs/` out of the web root, the bundled
+`.htaccess` and `web.config` already block browser access (nginx: see
+[`../nginx/README.md`](../nginx/README.md)).
 
-También puedes mover los dos ficheros de configuración fuera del webroot y
-apuntarlos con las constantes `JSONSQLDB_CONFIG` y `JSONSQLDB_API_CONFIG`.
+You can also move both configuration files out of the web root and point at
+them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 
-## 8. Ficheros
+## 8. Files
 
-| Fichero | Responsabilidad |
+| File | Responsibility |
 |---|---|
-| `api/jsonsqldb_api.php` | endpoint: valida, autoriza, ejecuta y registra |
-| `api/jsonsqldb_api_config.php` | secreto HMAC, API keys con permisos y límites |
-| `api/cliente_ejemplo.php` | cliente PHP para las aplicaciones |
-| `api/cliente_ejemplo.ps1` | cliente PowerShell, con los mismos parámetros ligados |
-| `api/cliente_ejemplo.py` | cliente Python, solo con la biblioteca estándar |
-| `engine/ApiStore.php` | estado de la API en JSON: rate limit, fallos, nonces, histórico |
-| `tests/f4_api.php` | 50 comprobaciones lanzando peticiones reales |
+| `api/jsonsqldb_api.php` | endpoint: validates, authorises, runs and logs |
+| `api/jsonsqldb_api_config.php` | API keys with permissions, secrets and limits |
+| `api/cliente_ejemplo.php` | PHP client for applications |
+| `api/cliente_ejemplo.ps1` | PowerShell client, with the same bound parameters |
+| `api/cliente_ejemplo.py` | Python client, standard library only |
+| `engine/ApiStore.php` | API state in JSON: rate limit, failures, nonces, history |
+| `tests/f4_api.php` | 52 checks sending real requests |
 
-## 9. Pruebas
+## 9. Tests
 
 ```
-php tests/f1_nucleo.php       → OK: 65
+php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 138
 php tests/f3_escrituras.php   → OK: 59
 php tests/f4_api.php          → OK: 52
-php tests/f5_esquema.php      → OK: 89
+php tests/f5_esquema.php      → OK: 90
 php tests/f5_admin.php        → OK: 119
 ```

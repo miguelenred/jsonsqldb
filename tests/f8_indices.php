@@ -461,6 +461,87 @@ chk('JSONSQLDB_INDICES a false da los mismos resultados', function () use ($raiz
     return $salida === '1|0' ?: $salida;
 });
 
+echo "\n== Escrituras que no leen la tabla entera ==\n";
+
+chk('UPDATE y DELETE por índice dan lo mismo que recorriendo la tabla', function () use ($raiz) {
+    // Con clave primaria y UNIQUE, un UPDATE o DELETE cuyo WHERE resuelve un
+    // índice lee y reescribe solo las partes afectadas. Sin índices se recorre
+    // y reescribe la tabla entera. Las dos tablas tienen que quedar iguales
+    // después de cada sentencia, y el índice de acuerdo con los datos.
+    $dir = $raiz . '/parcial2';
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE ci (id INTEGER PRIMARY KEY, u VARCHAR(20) UNIQUE, v VARCHAR(10))');
+    $bd->consultar('CREATE TABLE si (id INTEGER, u VARCHAR(20), v VARCHAR(10))');
+    $vals = [];
+    for ($i = 1; $i <= 280; $i++) { $vals[] = "($i,'u$i','c" . ($i % 5) . "')"; }
+    foreach (['ci', 'si'] as $t) {
+        $bd->consultar("INSERT INTO $t (id,u,v) VALUES " . implode(',', $vals));
+    }
+    $ops = [
+        "UPDATE %s SET v = 'x' WHERE id = 150",
+        "UPDATE %s SET u = 'cambiada' WHERE id = 150",
+        "UPDATE %s SET v = 'z' WHERE id IN (1, 120, 279)",
+        "UPDATE %s SET v = 'w' WHERE id = 3 AND v = 'no existe'",
+        "UPDATE %s SET id = 999 WHERE id = 5",
+        "DELETE FROM %s WHERE id IN (2, 140, 278)",
+        "DELETE FROM %s WHERE id = 999",
+        "DELETE FROM %s WHERE u = 'u200'",
+        "INSERT INTO %s (id,u,v) VALUES (5,'u5','c0'), (2,'u2','c2')",
+        "UPDATE %s SET v = 'q' WHERE id = 2",
+        "DELETE FROM %s WHERE id = 1",
+        "DELETE FROM %s WHERE id = 280",
+    ];
+    foreach ($ops as $op) {
+        foreach (['ci', 'si'] as $t) {
+            $bd->consultar(sprintf($op, $t));
+        }
+        $a = $bd->consultar('SELECT * FROM ci ORDER BY id');
+        $b = $bd->consultar('SELECT * FROM si ORDER BY id');
+        if ($a !== $b) {
+            return "tras '" . sprintf($op, 'ci') . "' las tablas difieren (" . count($a) . ' y ' . count($b) . ' filas)';
+        }
+        // Índice contra recorrido, y caché contra disco
+        foreach (['x', 'z', 'q', 'c1'] as $v) {
+            $i = (int)$bd->consultar("SELECT COUNT(*) AS n FROM ci WHERE u = 'cambiada' OR v = '$v'")[0]['n'];
+            $e = (int)$bd->consultar("SELECT COUNT(*) AS n FROM si WHERE u = 'cambiada' OR v = '$v'")[0]['n'];
+            if ($i !== $e) { return "tras '$op' el índice dice $i y la tabla $e para v = '$v'"; }
+        }
+        $r1 = $bd->consultar('SELECT id FROM ci WHERE id = 150');
+        $r2 = $bd->consultar('SELECT id FROM ci WHERE id + 0 = 150');
+        if ($r1 !== $r2) { return "tras '$op' la clave primaria indexada y el escaneo no coinciden"; }
+        $st = new Storage($dir, 'p');
+        $st->bloquear(false);
+        $conCache = $st->leerFilas('ci');
+        $sinCache = $st->leerFilas('ci', true);
+        $st->desbloquear();
+        if ($conCache !== $sinCache) { return "tras '$op' la caché no coincide con el disco"; }
+    }
+    unset($bd);
+    Database::borrar('p', $dir);
+    @rmdir($dir);
+    return true;
+});
+
+esperaError('UPDATE por índice que viola la clave primaria', 'CONSTRAINT', function () use ($raiz) {
+    $dir = $raiz . '/parcial3';
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE ci (id INTEGER PRIMARY KEY, v VARCHAR(10))');
+    $bd->consultar("INSERT INTO ci VALUES (1,'a'),(2,'b')");
+    try {
+        $bd->consultar('UPDATE ci SET id = 2 WHERE id = 1');
+    } finally {
+        $intacta = $bd->consultar('SELECT id FROM ci ORDER BY id') === [['id' => 1], ['id' => 2]];
+        unset($bd);
+        Database::borrar('p', $dir);
+        @rmdir($dir);
+        if (!$intacta) { throw new RuntimeException('la tabla cambió'); }
+    }
+});
+
 echo "\n== Limpieza ==\n";
 chk('borrar la base de pruebas', function () use ($raiz) {
     borrarArbol($raiz);

@@ -20,6 +20,9 @@ final class Writer
 
     private Catalog $cat;
     private array $datos      = [];   // tabla => filas en memoria
+    private array $anexo      = [];   // tabla => filas añadidas al final sin leer la tabla
+    private array $cambios    = [];   // tabla => posición => fila cambiada sin leer la tabla
+    private array $borradas   = [];   // tabla => posición => true, borrada sin leer la tabla
     private array $metas      = [];   // tabla => estructura en memoria
     private array $sucioDatos = [];
     private array $sucioMeta  = [];
@@ -52,70 +55,17 @@ final class Writer
             );
         }
 
-        // Las operaciones de estructura tocan varios ficheros: van con journal,
-        // para que un corte a mitad no deje la base a medias. Llevan siempre el
-        // bloqueo exclusivo de la base, así que el ámbito del journal es la base.
-        $tablasTx = $this->tablasDelDdl($ast);
-        if ($tablasTx !== []) {
-            $st = $this->cat->storage();
-            $st->txIniciar(Database::operacion($ast), $tablasTx, null);
-            try {
-                $r = $this->despachar($ast);
-            } catch (\Throwable $e) {
-                throw $e;                 // el journal se deshará al abrir la base
-            }
-            $st->txConfirmar();
-            return $r;
+        // El DML abre su escritura en volcar(), con el ámbito del bloqueo que
+        // tiene. Todo lo demás lleva siempre el exclusivo de la base y puede
+        // tocar varias tablas: una sola escritura de base para todo ello.
+        if (in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+            return $this->despachar($ast);
         }
-        return $this->despachar($ast);
-    }
-
-    /**
-     * Tablas que toca una operación de estructura, o [] si no lo es.
-     *
-     * @return string[]
-     */
-    private function tablasDelDdl(array $ast): array
-    {
-        if ($ast['k'] === 'drop_index') {
-            // El nombre de la tabla puede no venir en la sentencia: se busca
-            // ahora, que ya se tiene el bloqueo y lo leído no puede cambiar
-            $tabla = $this->tablaDelIndice($ast);
-            return $tabla === null ? [] : [$tabla];
-        }
-
-        $tabla = (string)($ast['tabla'] ?? '');
-        if ($tabla === '') {
-            return [];
-        }
-        switch ($ast['k']) {
-            case 'create_table':
-            case 'drop_table':
-            case 'create_index':
-                return [$tabla];
-            case 'alter_table':
-                // El renombrado escribe con el nombre nuevo: hay que copiar los dos
-                return $ast['accion'] === 'rename' ? [$tabla, (string)$ast['nuevo']] : [$tabla];
-        }
-        return [];
-    }
-
-    /** Tabla dueña del índice de un DROP INDEX, o null si no se encuentra. */
-    private function tablaDelIndice(array $ast): ?string
-    {
-        $nombre = (string)$ast['nombre'];
-        $donde  = $ast['tabla'] === null ? $this->cat->tablas() : [(string)$ast['tabla']];
-        foreach ($donde as $t) {
-            if (!$this->cat->existe($t)) {
-                continue;
-            }
-            foreach ($this->cat->meta($t)['indexes'] as $idx) {
-                if (strcasecmp((string)$idx['name'], $nombre) === 0) {
-                    return $t;
-                }
-            }
-        }
-        return null;
+        $st = $this->cat->storage();
+        $st->txIniciar(Database::operacion($ast));
+        $r = $this->despachar($ast);
+        $st->txConfirmar();
+        return $r;
     }
 
     private function despachar(array $ast): array
@@ -195,7 +145,28 @@ final class Writer
 
     public function filas(string $tabla): array
     {
-        return $this->datos[$tabla] ??= $this->cat->storage()->leerFilas($tabla, false, null, false);
+        if (!isset($this->datos[$tabla])) {
+            // Lo cambiado sin leer la tabla pasa a estar en ella, como si se
+            // hubiera hecho de la forma normal
+            $this->datos[$tabla] = $this->cat->storage()->leerFilas($tabla);
+            foreach ($this->cambios[$tabla] ?? [] as $pos => $fila) {
+                $this->datos[$tabla][$pos] = $fila;
+                $this->marcarSuelta($tabla, $pos);
+            }
+            foreach ($this->anexo[$tabla] ?? [] as $fila) {
+                $this->marcarDesde($tabla, count($this->datos[$tabla]));
+                $this->datos[$tabla][] = $fila;
+            }
+            foreach (array_keys($this->borradas[$tabla] ?? []) as $pos) {
+                unset($this->datos[$tabla][$pos]);
+                $this->marcarDesde($tabla, $pos);
+            }
+            if (isset($this->borradas[$tabla])) {
+                $this->compactar($tabla);
+            }
+            unset($this->cambios[$tabla], $this->anexo[$tabla], $this->borradas[$tabla]);
+        }
+        return $this->datos[$tabla];
     }
 
     /**
@@ -246,6 +217,28 @@ final class Writer
         } else {
             $this->marcarDesde($tabla, $desde);
         }
+        foreach (array_keys($this->idxPadre) as $clave) {
+            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
+                unset($this->idxPadre[$clave]);
+            }
+        }
+    }
+
+    /**
+     * Añade una fila al final. Nada de lo anterior se mueve, así que solo
+     * cambia la última parte. Si la tabla no está en memoria y se puede, la
+     * fila se apunta aparte y la tabla no se lee.
+     */
+    private function anadirFila(string $tabla, array $fila, bool $sinLeer): void
+    {
+        if ($sinLeer && !isset($this->datos[$tabla])) {
+            $this->anexo[$tabla][] = $fila;
+        } else {
+            $this->filas($tabla);
+            $this->marcarDesde($tabla, count($this->datos[$tabla]));
+            $this->datos[$tabla][] = $fila;
+        }
+        $this->sucioDatos[$tabla] = true;
         foreach (array_keys($this->idxPadre) as $clave) {
             if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
                 unset($this->idxPadre[$clave]);
@@ -346,114 +339,66 @@ final class Writer
     }
 
     /**
-     * Vuelca a disco todo lo modificado.
-     *
-     * Cada fichero se guarda de forma atómica, pero el conjunto no: un corte
-     * entre dos deja el cambio a medias. Y una escritura casi nunca toca un solo
-     * fichero, ni siquiera cuando toca una sola tabla:
-     *
-     *   - una tabla de más de JSONSQLDB_FILAS_POR_PARTE filas vive repartida en
-     *     varias partes, y todas se reescriben;
-     *   - una tabla con índices reescribe además el fichero de cada uno;
-     *   - un INSERT en una tabla con AUTOINCREMENT reescribe también el fichero
-     *     de estructura, para guardar el siguiente valor;
-     *   - un DELETE con ON DELETE CASCADE o un trigger que escribe en otra
-     *     tabla tocan varias tablas.
-     *
-     * Antes se miraba solo lo último y se contaban tablas, no ficheros. Con una
-     * tabla partida en dos, un corte de corriente entre el rename de la primera
-     * parte y el de la segunda dejaba media tabla nueva y media vieja; como el
-     * reparto en partes es por posición, no se perdían «unas filas», se
-     * descuadraba todo a partir del corte.
-     *
-     * Así que se journaliza en cuanto haya más de un fichero en juego. El ámbito
-     * del journal es el bloqueo que se tiene: con una sola tabla se tiene su
-     * exclusivo y basta con el suyo, que es lo que permite que dos escrituras en
-     * tablas distintas sigan yendo a la vez.
+     * Vuelca a disco todo lo modificado, en una sola escritura: cada tabla
+     * puede ocupar varios ficheros y un corte entre dos no debe dejarla a
+     * medias. El ámbito de la escritura es el bloqueo que se tiene: si es el
+     * exclusivo de TODAS las tablas tocadas, basta con el de una de ellas,
+     * que es lo que permite que escrituras en tablas distintas vayan a la vez;
+     * si no, se entró con el exclusivo de la base y la escritura es de base.
      */
     private function volcar(): void
     {
         $st     = $this->cat->storage();
         $tablas = array_keys($this->sucioDatos + $this->sucioMeta);
-
-        // txAbierta(): si venimos de una operación de estructura, el journal ya
-        // está abierto y no hay que anidar otro
-        $conJournal = $tablas !== [] && Config::journalDatos() && !$st->txAbierta()
-                   && (count($tablas) > 1 || $this->variosFicheros((string)$tablas[0]));
-
-        if ($conJournal) {
-            // El ámbito del journal es el bloqueo que se tiene, y dice cuál hará
-            // falta para deshacerlo. Que la escritura acabe tocando una sola
-            // tabla no basta: si se entró con el exclusivo de la base —porque la
-            // tabla tiene claves foráneas, triggers, o alguien la referencia— el
-            // journal es de base, no suyo.
-            // El ámbito es una tabla concreta solo si se tiene el exclusivo de
-            // TODAS las que toca la escritura: al deshacer harán falta todos.
-            // Si alguna no está bloqueada, se entró con el exclusivo de la base
-            // y el journal es de base.
-            $conBloqueo = true;
+        if ($tablas === []) {
+            return;
+        }
+        $ambito = null;
+        if (!$st->txAbierta()) {
+            sort($tablas, SORT_STRING);
+            $ambito = (string)$tablas[0];
             foreach ($tablas as $t) {
                 if (!$st->tieneExclusivoDe((string)$t)) {
-                    $conBloqueo = false;
+                    $ambito = null;
                     break;
                 }
             }
-            $ordenadas = $tablas;
-            sort($ordenadas, SORT_STRING);
-            $ambito = $conBloqueo ? (string)$ordenadas[0] : null;
-            $st->txIniciar('ESCRITURA', $tablas, $ambito);
+            $st->txIniciar('ESCRITURA', $ambito);
         }
 
         foreach ($tablas as $tabla) {
+            $meta = isset($this->sucioMeta[$tabla]) ? Catalog::compactar($this->metas[$tabla]) : null;
+            $defs = Indexes::definiciones($this->metas[$tabla] ?? $this->cat->meta($tabla));
+            if (isset($this->anexo[$tabla])) {
+                $st->anadirFilas($tabla, $this->anexo[$tabla], $meta, $defs);
+                continue;
+            }
+            if (isset($this->cambios[$tabla]) || isset($this->borradas[$tabla])) {
+                $st->modificarFilas($tabla, $this->cambios[$tabla] ?? [],
+                    array_keys($this->borradas[$tabla] ?? []), $meta, $defs);
+                continue;
+            }
             $st->guardarTabla(
                 $tabla,
                 isset($this->sucioDatos[$tabla]) ? $this->datos[$tabla] : null,
-                isset($this->sucioMeta[$tabla]) ? Catalog::compactar($this->metas[$tabla]) : null,
-                Indexes::definiciones($this->metas[$tabla] ?? $this->cat->meta($tabla)),
+                $meta,
+                $defs,
                 $this->desde[$tabla] ?? null,
                 array_keys($this->sueltas[$tabla] ?? []),
                 ($this->sabe[$tabla] ?? false) === true
             );
         }
+        $st->txConfirmar();
 
-        if ($conJournal) {
-            $st->txConfirmar();
-        }
-
+        $this->anexo      = [];
+        $this->cambios    = [];
+        $this->borradas   = [];
         $this->sucioDatos = [];
         $this->sucioMeta  = [];
         $this->desde      = [];
         $this->sueltas    = [];
         $this->sabe       = [];
         $this->cat->olvidar();
-    }
-
-    /**
-     * ¿La escritura de esta tabla va a tocar más de un fichero?
-     *
-     * Basta con que tenga índices, con que cambien datos y estructura a la vez,
-     * o con que las filas no quepan en una sola parte. Se mira sobre las filas
-     * que se van a escribir, no sobre las que hay: una tabla que ahora ocupa una
-     * parte y va a ocupar dos también necesita journal.
-     */
-    private function variosFicheros(string $tabla): bool
-    {
-        if (isset($this->sucioDatos[$tabla]) && isset($this->sucioMeta[$tabla])) {
-            return true;
-        }
-        $meta = $this->metas[$tabla] ?? $this->cat->meta($tabla);
-        if ($this->cat->storage()->indicesActivos()
-            && (Indexes::definiciones($meta) !== [] || $this->cat->storage()->tieneIndices($tabla))) {
-            return true;
-        }
-        $st = $this->cat->storage();
-        if ($st->partes($tabla) > 1) {
-            return true;                  // ya está repartida: se reescribe entera
-        }
-        if (!isset($this->sucioDatos[$tabla])) {
-            return false;                 // solo cambia la estructura: un fichero
-        }
-        return count($this->datos[$tabla]) > Config::filasPorParte();
     }
 
     // ==================================================================
@@ -498,8 +443,12 @@ final class Writer
             }
         }
 
-        $filas   = $this->filas($tabla);
-        $indices = $this->indicesUnicos($meta, $filas);
+        // Si la tabla no está en memoria y nada obliga a leerla, las filas
+        // nuevas se apuntan aparte y se añaden al final al volcar: la unicidad
+        // se comprueba contra los índices de disco y una tabla de cien mil
+        // filas no pasa por la memoria para insertar una.
+        $anexar  = $this->sinLeer($tabla, $meta);
+        $indices = $this->indicesUnicos($tabla, $meta);
         $puestas = 0;
 
         foreach ($origen as $valores) {
@@ -524,17 +473,12 @@ final class Writer
             $this->lanzarTriggers($tabla, 'BEFORE', 'INSERT', $nueva, null);
             $this->comprobarUnicos($tabla, $meta, $nueva, $indices, null);
             $this->comprobarForaneas($tabla, $meta, $nueva);
-
-            // Se añade al final: nada de lo anterior se mueve, así que solo
-            // cambia la última parte
-            $posNueva = count($filas);
-            $filas[] = $nueva;
             $this->anadirAIndices($meta, $nueva, $indices);
-            $this->ponerFilas($tabla, $filas, $posNueva);
+
+            $this->anadirFila($tabla, $nueva, $anexar);
             $puestas++;
 
             $this->lanzarTriggers($tabla, 'AFTER', 'INSERT', $nueva, null);
-            $filas = $this->filas($tabla);          // un trigger puede haber tocado la tabla
         }
 
 
@@ -564,12 +508,15 @@ final class Writer
                 : Evaluator::resolver($s['expr'], $mapa)];
         }
 
-        $filas   = $this->filas($tabla);
-        $indices = $this->indicesUnicos($meta, $filas);
+        // Con un WHERE que resuelve un índice y nada que obligue a leer la
+        // tabla, se leen solo las partes de las filas candidatas y al volcar se
+        // reescriben solo esas partes
+        $parcial = $this->sinLeer($tabla, $meta) ? $this->porIndice($tabla, $where) : null;
+        $indices = $this->indicesUnicos($tabla, $meta);
         $sub     = fn(array $s, int $sid): array => $this->seleccionar($s);
         $tocadas = 0;
 
-        foreach ($filas as $pos0 => $vieja) {
+        foreach ($parcial ?? $this->candidatas($tabla, $where) as $pos0 => $vieja) {
             $ctx = ['fila' => $vieja, 'sub' => $sub];
             if ($where !== null && !self::cumple($where, $simple, $vieja, $ctx)) {
                 continue;
@@ -588,15 +535,20 @@ final class Writer
             $this->comprobarForaneas($tabla, $meta, $nueva);
             $this->propagarHijos($tabla, $meta, $vieja, $nueva);
 
-            // Sin variable local con la tabla: una segunda referencia viva
-            // obligaría a PHP a copiarla entera en cada fila
-            $pos = self::posicionEn($this->datos[$tabla], $vieja, $pos0);
-            if ($pos === null) {
-                continue;                        // un trigger ya la había borrado
+            if ($parcial !== null && !isset($this->datos[$tabla])) {
+                $this->cambios[$tabla][$pos0] = $nueva;
+                $this->sucioDatos[$tabla]     = true;
+            } else {
+                // Sin variable local con la tabla: una segunda referencia viva
+                // obligaría a PHP a copiarla entera en cada fila
+                $pos = self::posicionEn($this->datos[$tabla], $vieja, $pos0);
+                if ($pos === null) {
+                    continue;                    // un trigger ya la había borrado
+                }
+                $this->ponerFilaEn($tabla, $pos, $nueva);
             }
             $this->quitarDeIndices($meta, $vieja, $indices);
             $this->anadirAIndices($meta, $nueva, $indices);
-            $this->ponerFilaEn($tabla, $pos, $nueva);
             $tocadas++;
 
             $this->lanzarTriggers($tabla, 'AFTER', 'UPDATE', $nueva, $vieja);
@@ -621,8 +573,9 @@ final class Writer
         // Se guarda la posición de cada fila: casi siempre sigue ahí, y
         // encontrarla otra vez recorriendo la tabla era lo que volvía cuadrático
         // un borrado masivo
+        $parcial  = $this->sinLeer($tabla, $meta) ? $this->porIndice($tabla, $where) : null;
         $objetivo = [];
-        foreach ($this->filas($tabla) as $pos => $fila) {
+        foreach ($parcial ?? $this->candidatas($tabla, $where) as $pos => $fila) {
             if ($where === null
                 || self::cumple($where, $simple, $fila, ['fila' => $fila, 'sub' => $sub])) {
                 $objetivo[$pos] = $fila;
@@ -634,16 +587,23 @@ final class Writer
             $this->lanzarTriggers($tabla, 'BEFORE', 'DELETE', null, $vieja);
             $this->propagarHijos($tabla, $meta, $vieja, null);
 
-            $pos = self::posicionEn($this->datos[$tabla], $vieja, $pos0);
-            if ($pos === null) {
-                continue;                        // ya la había borrado una cascada o un trigger
+            if ($parcial !== null && !isset($this->datos[$tabla])) {
+                $this->borradas[$tabla][$pos0] = true;
+                $this->sucioDatos[$tabla]      = true;
+            } else {
+                $pos = self::posicionEn($this->datos[$tabla], $vieja, $pos0);
+                if ($pos === null) {
+                    continue;                    // ya la había borrado una cascada o un trigger
+                }
+                $this->quitarFilaEn($tabla, $pos);
             }
-            $this->quitarFilaEn($tabla, $pos);
             $quitadas++;
 
             $this->lanzarTriggers($tabla, 'AFTER', 'DELETE', null, $vieja);
         }
-        $this->compactar($tabla);
+        if (isset($this->datos[$tabla])) {
+            $this->compactar($tabla);
+        }
 
         return $quitadas;
     }
@@ -703,16 +663,126 @@ final class Writer
         $this->ponerMeta($tabla, $meta);
     }
 
-    /** @return array<string,array<string,bool>> conjunto único => claves ocupadas */
-    private function indicesUnicos(array $meta, array $filas): array
+    /**
+     * ¿Se puede insertar en esta tabla sin leerla? Hace falta que no esté ya
+     * en memoria, que no tenga triggers —que podrían consultarla—, que no se
+     * referencie a sí misma, y que cada conjunto único tenga índice en disco
+     * para comprobar la unicidad contra él.
+     */
+    private function sinLeer(string $tabla, array $meta): bool
+    {
+        if (isset($this->datos[$tabla]) || $meta['triggers'] !== []) {
+            return false;
+        }
+        foreach ($meta['foreign_keys'] as $fk) {
+            if (strcasecmp($fk['table'], $tabla) === 0) {
+                return false;
+            }
+        }
+        foreach (Catalog::conjuntosUnicos($meta) as $uq) {
+            if ($this->clavesDeIndice($tabla, $meta, $uq['columns']) === null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Claves de un índice de disco de la tabla sobre esas columnas, si lo hay
+     * y sirve: exige que la tabla no tenga cambios en memoria, porque el
+     * índice no los conoce.
+     *
+     * @return array<string, int|list<int>>|null
+     */
+    private function clavesDeIndice(string $tabla, array $meta, array $cols): ?array
+    {
+        if (isset($this->sucioDatos[$tabla])) {
+            return null;
+        }
+        foreach (Indexes::definiciones($meta) as $def) {
+            if ($def['columns'] === $cols) {
+                return $this->cat->storage()->clavesDeIndice($tabla, $def);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Filas que pueden cumplir un WHERE de igualdad sobre una columna
+     * indexada, leídas de sus partes y sin pasar por la tabla entera. Null si
+     * no hay índice que sirva.
+     *
+     * @return array<int,array>|null posición => fila
+     */
+    private function porIndice(string $tabla, ?array $where): ?array
+    {
+        if ($where === null) {
+            return null;
+        }
+        $predicados = Indexes::predicados($where, strtolower($tabla));
+        $elegido    = Indexes::elegir($this->cat->indicesDe($tabla), $predicados[strtolower($tabla)] ?? []);
+        if ($elegido === null) {
+            return null;
+        }
+        $keys = $this->clavesDeIndice($tabla, $this->meta($tabla), $elegido['def']['columns']);
+        if ($keys === null) {
+            return null;
+        }
+        $posiciones = [];
+        foreach ($elegido['claves'] as $c) {
+            if ($elegido['prefijo']) {
+                foreach ($keys as $k => $lista) {
+                    if (strncmp((string)$k, $c, strlen($c)) === 0) {
+                        foreach (Indexes::posiciones($lista) as $p) { $posiciones[$p] = true; }
+                    }
+                }
+            } elseif (isset($keys[$c])) {
+                foreach (Indexes::posiciones($keys[$c]) as $p) { $posiciones[$p] = true; }
+            }
+        }
+        return $this->cat->storage()->filasEnPosiciones($tabla, array_keys($posiciones));
+    }
+
+    /**
+     * Las filas sobre las que evaluar un WHERE: las que acota un índice, o la
+     * tabla entera.
+     *
+     * @return array<int,array> posición => fila
+     */
+    private function candidatas(string $tabla, ?array $where): array
+    {
+        $porIndice = isset($this->datos[$tabla]) ? null : $this->porIndice($tabla, $where);
+        $filas     = $this->filas($tabla);
+        if ($porIndice === null) {
+            return $filas;
+        }
+        $out = [];
+        foreach (array_keys($porIndice) as $p) {
+            if (isset($filas[$p])) {
+                $out[$p] = $filas[$p];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Claves ocupadas de cada conjunto único: del índice de disco si sirve,
+     * y si no, recorriendo la tabla.
+     *
+     * @return array<string,array<string,bool|int|list<int>>> conjunto único => claves ocupadas
+     */
+    private function indicesUnicos(string $tabla, array $meta): array
     {
         $indices = [];
         foreach (Catalog::conjuntosUnicos($meta) as $uq) {
-            $mapa = [];
-            foreach ($filas as $fila) {
-                $clave = self::claveDe($fila, $uq['columns']);
-                if ($clave !== null) {
-                    $mapa[$clave] = true;
+            $mapa = $this->clavesDeIndice($tabla, $meta, $uq['columns']);
+            if ($mapa === null) {
+                $mapa = [];
+                foreach ($this->filas($tabla) as $fila) {
+                    $clave = self::claveDe($fila, $uq['columns']);
+                    if ($clave !== null) {
+                        $mapa[$clave] = true;
+                    }
                 }
             }
             $indices[$uq['name']] = $mapa;
@@ -758,18 +828,17 @@ final class Writer
         }
     }
 
-    /** Clave compuesta de una fila; null si alguna columna es NULL. */
+    /**
+     * Clave compuesta de una fila; null si alguna columna es NULL. Es la misma
+     * clave que usan los índices de disco, para poder comprobar contra ellos.
+     */
     private static function claveDe(array $fila, array $cols): ?string
     {
-        $k = '';
+        $valores = [];
         foreach ($cols as $c) {
-            $v = $fila[$c] ?? null;
-            if ($v === null) {
-                return null;
-            }
-            $k .= Valor::clave($v) . "\0";
+            $valores[] = $fila[$c] ?? null;
         }
-        return $k;
+        return Indexes::clave($valores);
     }
 
     // ==================================================================
@@ -804,6 +873,10 @@ final class Writer
         $clave = $tabla . '|' . implode(',', $cols);
         if (isset($this->idxPadre[$clave])) {
             return $this->idxPadre[$clave];
+        }
+        $idx = $this->clavesDeIndice($tabla, $this->meta($tabla), $cols);
+        if ($idx !== null) {
+            return $this->idxPadre[$clave] = $idx;
         }
         $idx = [];
         foreach ($this->filas($tabla) as $fila) {
@@ -1138,13 +1211,7 @@ final class Writer
     /** Las consultas internas ven también los cambios todavía en memoria. */
     private function seleccionar(array $ast): array
     {
-        // El $tope se declara porque lo exige la firma del lector, y se ignora a
-        // propósito: aquí las filas salen de lo que el Writer lleva en memoria,
-        // no de un fichero, así que no hay lectura que cortar antes de tiempo.
-        return (new Select(
-            $this->cat,
-            fn(string $t, ?int $tope = null): array => $this->filas($t)
-        ))->ejecutar($ast);
+        return (new Select($this->cat, fn(string $t): array => $this->filas($t)))->ejecutar($ast);
     }
 
     /** 'col' => 'col' y 'tabla.col' => 'col' */

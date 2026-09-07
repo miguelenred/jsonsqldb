@@ -14,7 +14,7 @@ namespace JsonSQLDB;
 final class Select
 {
     private Catalog $cat;
-    /** @var callable(string,?int):array lector de filas; permite ver cambios aún no volcados a disco */
+    /** @var callable(string):iterable<array> lector de filas; permite ver cambios aún no volcados a disco */
     private $lector;
 
     /**
@@ -49,8 +49,7 @@ final class Select
     {
         $this->cat       = $cat;
         $this->indexable = $lector === null;
-        $this->lector    = $lector
-            ?? static fn(string $t, ?int $tope = null): array => $cat->storage()->leerFilas($t, false, $tope);
+        $this->lector    = $lector ?? static fn(string $t): iterable => $cat->storage()->filas($t);
     }
 
     /** Ejecuta la consulta y devuelve las filas de salida. */
@@ -177,8 +176,8 @@ final class Select
                 }
             }
             $filas = $filtradas;
-        } elseif ($tope !== null && count($filas) > $tope) {
-            $filas = array_slice($filas, 0, $tope);
+        } elseif (!is_array($filas)) {
+            $filas = iterator_to_array($filas, false);    // el tope ya se aplicó al leer
         }
 
         // Columnas de salida (expandiendo * )
@@ -717,19 +716,30 @@ final class Select
         // últimas, y quedarse con las primeras daría un resultado distinto.
         $topeLectura = $where === null && count($from) === 1 ? $tope : null;
 
+        // El primer origen se recorre sin materializarlo: con un solo origen,
+        // el WHERE va descartando filas según llegan y en memoria solo quedan
+        // las que pasan. Los demás son el lado interno del cruce y hacen falta
+        // enteros.
         $primero = $this->cargar($from[0], $predicados, $topeLectura);
         $filas   = $primero['filas'];
         $claves  = $primero['claves'];
 
         for ($i = 1, $n = count($from); $i < $n; $i++) {
-            $der    = $this->cargar($from[$i], $predicados);
+            $der          = $this->cargar($from[$i], $predicados);
+            $der['filas'] = iterator_to_array($der['filas'], false);
             $filas  = $this->unir($filas, $claves, $der, $from[$i]);
             $claves = array_merge($claves, $der['claves']);
         }
         return [$filas, $claves];
     }
 
-    /** Carga una tabla o subconsulta como filas planas con prefijo de alias. */
+    /**
+     * Carga una tabla o subconsulta como filas planas con prefijo de alias.
+     * Las filas salen de un generador: se aplanan según se recorren, así que
+     * la tabla leída y la aplanada no conviven enteras en memoria.
+     *
+     * @return array{alias: string, cols: list<string>, claves: list<string>, filas: \Generator}
+     */
     private function cargar(array $o, array $predicados = [], ?int $tope = null): array
     {
         if ($o['tipo'] === 'sub') {
@@ -778,36 +788,48 @@ final class Select
                 $cols[] = $c['name'];
             }
             // Con un índice aprovechable se leen solo las partes donde están las
-            // filas buscadas; si no lo hay, o no compensa, se lee la tabla.
+            // filas buscadas; si no lo hay, o no compensa, se recorre la tabla.
             $origen = $this->porIndice($nombre, $predicados[strtolower($alias)] ?? [])
-                   ?? ($this->lector)($nombre, $tope);
+                   ?? ($this->lector)($nombre);
         }
 
         $claves = [];
         foreach ($cols as $c) {
             $claves[] = $alias . '.' . $c;
         }
-
-        // Aquí cada fila se copia con las claves prefijadas por el alias, y eso
-        // llegaba a tener la tabla dos veces en memoria: la leída y la aplanada.
-        // Se va soltando cada fila original según se convierte, así que solo hay
-        // una copia y media a medio camino en vez de dos enteras.
-        $filas = [];
-        foreach (array_keys($origen) as $k) {
-            $plana = [];
-            foreach ($cols as $i => $c) {
-                $plana[$claves[$i]] = $origen[$k][$c] ?? null;
-            }
-            unset($origen[$k]);
-            $filas[] = $plana;
-            Memoria::comprobar('la carga de la tabla');
-        }
-
-        return ['alias' => $alias, 'cols' => $cols, 'claves' => $claves, 'filas' => $filas];
+        return ['alias' => $alias, 'cols' => $cols, 'claves' => $claves,
+                'filas' => self::aplanar($origen, $cols, $claves, $tope)];
     }
 
-    /** Une el acumulado de la izquierda con un nuevo origen. */
-    private function unir(array $izq, array $clavesIzq, array $der, array $o): array
+    /**
+     * Copia cada fila con las claves prefijadas por el alias, según se pide.
+     *
+     * @param iterable<array> $origen
+     * @param list<string>    $cols
+     * @param list<string>    $claves
+     */
+    private static function aplanar(iterable $origen, array $cols, array $claves, ?int $tope): \Generator
+    {
+        $n = 0;
+        foreach ($origen as $fila) {
+            if ($tope !== null && $n++ >= $tope) {
+                return;
+            }
+            $plana = [];
+            foreach ($cols as $i => $c) {
+                $plana[$claves[$i]] = $fila[$c] ?? null;
+            }
+            Memoria::comprobar('la carga de la tabla');
+            yield $plana;
+        }
+    }
+
+    /**
+     * Une el acumulado de la izquierda con un nuevo origen.
+     *
+     * @param iterable<array> $izq
+     */
+    private function unir(iterable $izq, array $clavesIzq, array $der, array $o): array
     {
         $tipo = $o['join'] ?? 'CROSS';
 
@@ -826,8 +848,12 @@ final class Select
         $on   = Evaluator::resolver($o['on'], $mapa, [], $this->externo['mapa'] ?? []);
         [$pares, $resto] = $this->igualdades($on, array_flip($der['claves']));
 
-        // RIGHT JOIN = mismo algoritmo con los papeles cambiados
+        // RIGHT JOIN = mismo algoritmo con los papeles cambiados. El lado
+        // interno se recorre varias veces y se indexa por posición: entero.
         $derecho     = $tipo === 'RIGHT';
+        if ($derecho && !is_array($izq)) {
+            $izq = iterator_to_array($izq, false);
+        }
         $externas    = $derecho ? $der['filas'] : $izq;
         $internas    = $derecho ? $izq : $der['filas'];
         $clavesExt   = [];

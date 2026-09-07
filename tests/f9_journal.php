@@ -104,81 +104,115 @@ chk('la tabla ocupa varios ficheros', function () use ($dir) {
 
 echo "\n== Todos los estados intermedios de una escritura de tabla ==\n";
 
+/** Contenido de todos los ficheros de datos de la base, por nombre. */
+function instantanea(string $dir): array {
+    $out = [];
+    foreach ((array)glob("$dir/*.json") as $f) {
+        $out[basename((string)$f)] = (string)file_get_contents((string)$f);
+    }
+    return $out;
+}
+
+/** Deja la carpeta de datos exactamente con estos ficheros. */
+function reponer(string $dir, array $ficheros): void {
+    foreach ((array)glob("$dir/*.json") as $f) { @unlink((string)$f); }
+    foreach ((array)glob("$dir/*.tmp") as $f) { @unlink((string)$f); }
+    foreach ($ficheros as $n => $c) { file_put_contents("$dir/$n", $c); }
+    borrarArbol("$dir/.cache");
+    borrarArbol("$dir/.tx");
+}
+
 /**
- * Abre un journal de ámbito $ambito, rompe los $k primeros ficheros de la
- * tabla del modo que diga $como, y comprueba que la recuperación devuelve
- * exactamente el contenido original.
+ * Ejecuta una escritura de verdad y se queda con los ficheros de antes y de
+ * después. Después reconstruye, uno a uno, cada estado por el que pasa la
+ * confirmación: los k primeros temporales ya en su sitio (o ficheros ya
+ * borrados) y el resto todavía pendientes, con el manifiesto que los señala.
+ * Para cada uno se abre la base y se exige que quede EXACTAMENTE como después
+ * de la escritura, byte a byte, y que la tabla siga cuadrando con sus índices.
  */
-function probarEstado(string $raiz, ?string $ambito, int $k, string $como): bool|string {
+function estadosIntermedios(string $raiz, ?string $ambito, callable $escritura, int $filasEsperadas): bool|string {
     $dir = "$raiz/j";
-    // La referencia se toma AQUÍ, sobre esta base concreta: cada preparación
-    // escribe sus propias marcas de tiempo, así que una huella de otra vuelta
-    // no serviría para comparar.
-    $original = preparar($raiz);
+    preparar($raiz);
+    $antes = instantanea($dir);
+    $escritura(new Database('j', $raiz));
+    $despues = instantanea($dir);
 
-    $st = new Storage($raiz, 'j');
-    $st->bloquear(true, $ambito);
-    $st->txIniciar('PRUEBA', ['t'], $ambito);
-    $st->desbloquear();
-    unset($st);
-
-    // Simular que la escritura llegó hasta el fichero k-ésimo
-    $ficheros = ficherosDeT($dir);
-    for ($i = 0; $i < $k && $i < count($ficheros); $i++) {
-        if ($como === 'reemplazado') {
-            file_put_contents($ficheros[$i], '{"table":"t","rows":[]}' . "\n");
-        } elseif ($como === 'truncado') {
-            file_put_contents($ficheros[$i], '{"table":"t","rows":[{"id":1,');
-        } elseif ($como === 'borrado') {
-            @unlink($ficheros[$i]);
-        }
+    // Qué hizo la confirmación: qué ficheros cambiaron o nacieron, y cuáles sobran
+    $pasos = [];
+    foreach ($despues as $n => $c) {
+        if (($antes[$n] ?? null) !== $c) { $pasos[] = ['renombrar', $n]; }
     }
-    // Y que además había dejado partes de más, como haría una tabla que crece
-    if ($como === 'reemplazado' && $k > 0) {
-        file_put_contents("$dir/t.part99.json", '{"table":"t","rows":[]}' . "\n");
+    foreach ($antes as $n => $c) {
+        if (!isset($despues[$n])) { $pasos[] = ['borrar', $n]; }
     }
+    if (count($pasos) < 4) { return 'la escritura tocó ' . count($pasos) . ' ficheros: la prueba no valdría'; }
 
-    // Abrir la base: aquí es donde tiene que actuar la recuperación
-    $bd = new Database('j', $raiz);
-    $bd->consultar('SHOW TABLES');
-
-    $ahora = huella($dir);
-    if ($ahora !== $original) {
-        $dif = [];
-        foreach ($original as $f => $md5) {
-            if (($ahora[$f] ?? null) !== $md5) { $dif[] = $f . (isset($ahora[$f]) ? ' distinto' : ' falta'); }
+    for ($k = 0; $k <= count($pasos); $k++) {
+        reponer($dir, $antes);
+        $renombrar = [];
+        $borrar    = [];
+        foreach ($pasos as $i => [$que, $n]) {
+            if ($que === 'renombrar') {
+                $renombrar["$n.999999.tmp"] = $n;
+                if ($i < $k) {
+                    file_put_contents("$dir/$n", $despues[$n]);       // ya renombrado
+                } else {
+                    file_put_contents("$dir/$n.999999.tmp", $despues[$n]);
+                }
+            } else {
+                $borrar[] = $n;
+                if ($i < $k) { @unlink("$dir/$n"); }
+            }
         }
-        foreach ($ahora as $f => $md5) {
-            if (!isset($original[$f])) { $dif[] = $f . ' sobra'; }
-        }
-        return "k=$k ($como, $ambito): " . implode(', ', array_slice($dif, 0, 4));
-    }
-    if (is_dir("$dir/.tx")) { return "k=$k ($como): quedó journal sin deshacer"; }
+        $jd = "$dir/.tx/" . ($ambito ?? '_base');
+        @mkdir($jd, 0775, true);
+        file_put_contents("$jd/manifiesto.json", json_encode([
+            'tipo' => 'redo', 'operacion' => 'PRUEBA', 'ambito' => $ambito, 'tablas' => ['t'],
+            'renombrar' => $renombrar, 'borrar' => $borrar,
+        ]));
 
-    // Y que la tabla siga siendo usable y coherente con sus índices
-    $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
-    if ($n !== 200) { return "k=$k ($como): quedaron $n filas de 200"; }
-    $viejas = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE v = 'viejo'")[0]['n'];
-    if ($viejas !== 200) { return "k=$k ($como): solo $viejas filas con el valor original"; }
-    $porIndice  = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE cat = 'c1'")[0]['n'];
-    $porEscaneo = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE cat = 'c1' OR 1 = 0")[0]['n'];
-    if ($porIndice !== $porEscaneo) {
-        return "k=$k ($como): el índice dice $porIndice y la tabla $porEscaneo";
+        $bd = new Database('j', $raiz);
+        $bd->consultar('SHOW TABLES');
+        $ahora = instantanea($dir);
+        if ($ahora !== $despues) {
+            $dif = [];
+            foreach ($despues as $f => $c) {
+                if (($ahora[$f] ?? null) !== $c) { $dif[] = $f . (isset($ahora[$f]) ? ' distinto' : ' falta'); }
+            }
+            foreach ($ahora as $f => $c) {
+                if (!isset($despues[$f])) { $dif[] = "$f sobra"; }
+            }
+            return "k=$k: " . implode(', ', array_slice($dif, 0, 4));
+        }
+        if (is_dir("$dir/.tx")) { return "k=$k: quedó journal sin aplicar"; }
+        if (glob("$dir/*.tmp") !== []) { return "k=$k: quedaron temporales"; }
+
+        $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
+        if ($n !== $filasEsperadas) { return "k=$k: quedaron $n filas de $filasEsperadas"; }
+        $porIndice  = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE cat = 'c1'")[0]['n'];
+        $porEscaneo = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE cat = 'c1' OR 1 = 0")[0]['n'];
+        if ($porIndice !== $porEscaneo) { return "k=$k: el índice dice $porIndice y la tabla $porEscaneo"; }
+        unset($bd);
     }
     return true;
 }
 
-$total = count(ficherosDeT($dir));
-foreach (['reemplazado', 'truncado', 'borrado'] as $como) {
+$escrituras = [
+    'UPDATE de todas las filas (todas las partes y los índices)' =>
+        [fn(Database $bd) => $bd->consultar("UPDATE t SET v = 'nuevo'"), 200],
+    'DELETE que deja partes de sobra' =>
+        [fn(Database $bd) => $bd->consultar('DELETE FROM t WHERE id > 60'), 60],
+    'INSERT que añade partes nuevas' =>
+        [function (Database $bd) {
+            $v = [];
+            for ($i = 1000; $i < 1100; $i++) { $v[] = "($i,'N$i','c1','x')"; }
+            $bd->consultar('INSERT INTO t (id, ref, cat, v) VALUES ' . implode(',', $v));
+        }, 300],
+];
+foreach ($escrituras as $titulo => [$fn, $filas]) {
     foreach ([null, 't'] as $ambito) {
-        $fallos = [];
-        for ($k = 0; $k <= $total; $k++) {
-            $r = probarEstado($raiz, $ambito, $k, $como);
-            if ($r !== true) { $fallos[] = (string)$r; }
-        }
         $et = $ambito === null ? 'journal de base' : 'journal de tabla';
-        chk(($total + 1) . " estados con ficheros $como, $et",
-            fn() => $fallos === [] ?: implode(' | ', array_slice($fallos, 0, 3)));
+        chk("$titulo, $et", fn() => estadosIntermedios($raiz, $ambito, $fn, $filas));
     }
 }
 
@@ -186,53 +220,46 @@ foreach (['reemplazado', 'truncado', 'borrado'] as $como) {
 // El journal a medio construir
 // ----------------------------------------------------------------------
 
-echo "\n== La escritura murió mientras se hacían las copias ==\n";
+echo "\n== La escritura murió antes del manifiesto ==\n";
 
-chk('sin manifiesto no se toca nada, sea cual sea el estado de las copias', function () use ($raiz) {
+chk('sin manifiesto no se toca nada, sea cual sea el estado de los temporales', function () use ($raiz) {
     $dir = "$raiz/j";
-    // El manifiesto se escribe el último. Si no está, es que las copias no
-    // terminaron; y como se copia ANTES de modificar, no se modificó nada.
-    foreach (['ninguna', 'algunas', 'todas_rotas'] as $caso) {
+    // El manifiesto se escribe el último, cuando todos los temporales están en
+    // el disco. Si no está, los datos no se han tocado: los temporales sobran.
+    foreach (['ninguno', 'algunos', 'rotos'] as $caso) {
         $original = preparar($raiz);
-        $st = new Storage($raiz, 'j');
-        $st->bloquear(true, null);
-        $st->txIniciar('PRUEBA', ['t'], null);
-        $st->desbloquear();
-        unset($st);
-
-        $jd = "$dir/.tx/_base";
-        @unlink("$jd/manifiesto.json");
-        if ($caso === 'ninguna') {
-            foreach ((array)glob("$jd/*") as $f) { @unlink((string)$f); }
-        } elseif ($caso === 'algunas') {
-            $copias = (array)glob("$jd/*");
-            for ($i = 0; $i < intdiv(count($copias), 2); $i++) { @unlink((string)$copias[$i]); }
-        } else {
-            foreach ((array)glob("$jd/*") as $f) { file_put_contents((string)$f, 'basura'); }
+        @mkdir("$dir/.tx/_base", 0775, true);
+        if ($caso === 'algunos') {
+            file_put_contents("$dir/t.json.999999.tmp", '{"table":"t","rows":[]}');
+            file_put_contents("$dir/t.rev.json.999999.tmp", '{"rev":99}');
+        } elseif ($caso === 'rotos') {
+            file_put_contents("$dir/t.json.999999.tmp", '{"table":"t","rows":[{"id":1,');
+            file_put_contents("$dir/.tx/_base/manifiesto.json.999999.tmp", 'a medias');
         }
 
         $bd = new Database('j', $raiz);
         $bd->consultar('SHOW TABLES');
         if (huella($dir) !== $original) { return "caso '$caso': los datos cambiaron"; }
         if (is_dir("$dir/.tx")) { return "caso '$caso': no se limpió la carpeta"; }
+        // La siguiente escritura barre los temporales ajenos
+        $bd->consultar("UPDATE t SET v = v WHERE id = 1");
+        if (glob("$dir/*.tmp") !== []) { return "caso '$caso': quedaron temporales"; }
         unset($bd);
     }
     return true;
 });
 
-chk('una copia truncada con manifiesto válido detiene la recuperación', function () use ($raiz) {
+chk('un manifiesto que señala un temporal perdido detiene la recuperación', function () use ($raiz) {
     $dir = "$raiz/j";
     $original = preparar($raiz);
-    $st = new Storage($raiz, 'j');
-    $st->bloquear(true, null);
-    $st->txIniciar('PRUEBA', ['t'], null);
-    $st->desbloquear();
-    unset($st);
-
-    // Esto es lo que pasaba antes de forzar las copias a disco con fsync: el
-    // manifiesto sobrevivía al corte y la copia se quedaba a medias
-    file_put_contents("$dir/.tx/_base/t.json", 'roto');
-    file_put_contents("$dir/t.json", '{"table":"t","rows":[]}' . "\n");
+    // Un temporal que no está y cuyo destino tampoco: no se puede rehacer y
+    // lo único seguro es pararse y conservar el journal para revisarlo a mano
+    @unlink("$dir/t.part2.json");
+    @mkdir("$dir/.tx/_base", 0775, true);
+    file_put_contents("$dir/.tx/_base/manifiesto.json", json_encode([
+        'tipo' => 'redo', 'tablas' => ['t'],
+        'renombrar' => ['t.part2.json.999999.tmp' => 't.part2.json'],
+    ]));
 
     $error = null;
     try {
@@ -240,12 +267,7 @@ chk('una copia truncada con manifiesto válido detiene la recuperación', functi
     } catch (JsonSQLDB\JsonSqlDbError $e) { $error = $e; }
 
     if ($error === null) { return 'no avisó de que el journal estaba dañado'; }
-    // Lo importante: no ha tocado NADA. Ni restaurado con basura, ni borrado la
-    // única copia que queda de lo anterior.
     if (!is_dir("$dir/.tx/_base")) { return 'borró el journal dañado'; }
-    if (md5_file("$dir/.tx/_base/t.part2.json") !== ($original['t.part2.json'] ?? '')) {
-        return 'las copias buenas del journal no se conservaron intactas';
-    }
     return true;
 });
 
@@ -257,104 +279,38 @@ chk('un journal a medias de otra tabla no estorba', function () use ($raiz) {
     $bd->consultar("INSERT INTO otra VALUES (1,'a'),(2,'b')");
     unset($bd);
 
-    // Journal huérfano de 'otra', con 't' intacta
-    $st = new Storage($raiz, 'j');
-    $st->bloquear(true, 'otra');
-    $st->txIniciar('PRUEBA', ['otra'], 'otra');
-    file_put_contents("$dir/otra.json", '{"table":"otra","rows":[]}' . "\n");
-    $st->desbloquear();
-    unset($st);
+    // Journal de 'otra' a medio aplicar, con 't' intacta
+    file_put_contents("$dir/otra.json.999999.tmp", "{\n  \"table\": \"otra\",\n  \"rows\": [\n    {\"id\":1,\"x\":\"a\"}\n  ]\n}\n");
+    @mkdir("$dir/.tx/otra", 0775, true);
+    file_put_contents("$dir/.tx/otra/manifiesto.json", json_encode([
+        'tipo' => 'redo', 'ambito' => 'otra', 'tablas' => ['otra'],
+        'renombrar' => ['otra.json.999999.tmp' => 'otra.json'],
+    ]));
 
     $bd = new Database('j', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'] === 200
-        && (int)$bd->consultar('SELECT COUNT(*) AS n FROM otra')[0]['n'] === 2
+        && (int)$bd->consultar('SELECT COUNT(*) AS n FROM otra')[0]['n'] === 1
         && !is_dir("$dir/.tx");
-});
-
-// ----------------------------------------------------------------------
-// Recuperación interrumpida a su vez
-// ----------------------------------------------------------------------
-
-echo "\n== La recuperación interrumpida se repite entera ==\n";
-
-chk('un temporal olvidado dentro del journal no acaba en la carpeta de datos', function () use ($raiz) {
-    // La recuperación restauraba TODO lo que hubiera en la carpeta del journal.
-    // Un proceso muerto mientras escribía el manifiesto deja ahí su temporal
-    // (manifiesto.json.<pid>.tmp), y ese fichero acababa copiado a la carpeta de
-    // datos, entre las tablas. Lo cazó la CI en un corte de doce, así que se
-    // monta a mano en vez de esperar a que la suerte vuelva a dar.
-    $dir = "$raiz/j";
-    $original = preparar($raiz, 120);
-
-    $st = new Storage($raiz, 'j');
-    $st->bloquear(true, null);
-    $st->txIniciar('PRUEBA', ['t'], null);
-    $st->desbloquear();
-    unset($st);
-
-    file_put_contents("$dir/.tx/_base/manifiesto.json.999999.tmp", 'a medias');
-    file_put_contents("$dir/t.json", '{"table":"t","rows":[]}' . "\n");
-
-    $bd = new Database('j', $raiz);
-    $bd->consultar('SHOW TABLES');
-    $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
-    unset($bd);
-
-    $restos = glob("$dir/*.tmp");
-    if ($restos !== []) {
-        return 'la recuperación soltó ' . implode(', ', array_map('basename', $restos))
-             . ' en la carpeta de datos';
-    }
-    if ($n !== 120) { return "quedaron $n filas de 120"; }
-    return huella($dir) === $original ?: 'los ficheros no quedaron como estaban';
-});
-
-chk('un corte a mitad de restaurar se arregla en la siguiente apertura', function () use ($raiz) {
-    $dir = "$raiz/j";
-    // Se simula: journal válido, algunos ficheros ya devueltos y otros no,
-    // porque la luz se fue también durante la recuperación
-    for ($corte = 1; $corte <= 4; $corte++) {
-        $original = preparar($raiz);
-        $st = new Storage($raiz, 'j');
-        $st->bloquear(true, null);
-        $st->txIniciar('PRUEBA', ['t'], null);
-        $st->desbloquear();
-        unset($st);
-
-        $ficheros = ficherosDeT($dir);
-        // Todos rotos (la escritura interrumpida) y luego unos pocos ya
-        // restaurados a mano (la recuperación interrumpida)
-        foreach ($ficheros as $f) { file_put_contents($f, 'roto'); }
-        for ($i = 0; $i < $corte && $i < count($ficheros); $i++) {
-            $copia = "$dir/.tx/_base/" . basename($ficheros[$i]);
-            if (is_file($copia)) { copy($copia, $ficheros[$i]); }
-        }
-
-        $bd = new Database('j', $raiz);
-        $bd->consultar('SHOW TABLES');
-        if (huella($dir) !== $original) { return "corte $corte: no quedó como estaba"; }
-        if ((int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'] !== 200) {
-            return "corte $corte: faltan filas";
-        }
-        unset($bd);
-    }
-    return true;
 });
 
 chk('repetir la recuperación muchas veces no degrada nada', function () use ($raiz) {
     $dir = "$raiz/j";
-    $original = preparar($raiz);
+    preparar($raiz);
+    $bd = new Database('j', $raiz);
+    $bd->consultar("UPDATE t SET v = 'nuevo'");
+    unset($bd);
+    $despues = huella($dir);
+    // El mismo journal, ya aplicado, se encuentra cinco veces seguidas
     for ($v = 0; $v < 5; $v++) {
-        $st = new Storage($raiz, 'j');
-        $st->bloquear(true, 't');
-        $st->txIniciar('PRUEBA', ['t'], 't');
-        file_put_contents("$dir/t.json", 'roto');
-        $st->desbloquear();
-        unset($st);
-
+        @mkdir("$dir/.tx/t", 0775, true);
+        file_put_contents("$dir/.tx/t/manifiesto.json", json_encode([
+            'tipo' => 'redo', 'ambito' => 't', 'tablas' => ['t'],
+            'renombrar' => ['t.json.999999.tmp' => 't.json', 't.part2.json.999999.tmp' => 't.part2.json'],
+        ]));
         $bd = new Database('j', $raiz);
         $bd->consultar('SHOW TABLES');
-        if (huella($dir) !== $original) { return "vuelta $v: no quedó como estaba"; }
+        if (huella($dir) !== $despues) { return "vuelta $v: no quedó como estaba"; }
+        if (is_dir("$dir/.tx")) { return "vuelta $v: no se limpió el journal"; }
         unset($bd);
     }
     return true;
@@ -364,117 +320,19 @@ chk('repetir la recuperación muchas veces no degrada nada', function () use ($r
 // La invariante de fondo
 // ----------------------------------------------------------------------
 
-echo "\n== El journal copia todo lo que la escritura toca ==\n";
+echo "\n== Toda escritura de varios ficheros pasa por el journal ==\n";
 
 /**
- * Si una escritura modifica o borra un fichero que el journal no copió, la
- * recuperación no puede devolverlo: eso sería perder datos sin que nada avise.
+ * Si una escritura cambiara un fichero fuera del journal, un corte podría
+ * dejarlo nuevo junto a otros viejos. Para comprobar que no lo hace sin tener
+ * que adivinar, se deja un FICHERO llamado `.tx` donde iría la carpeta del
+ * journal: confirmar es imposible. Entonces la escritura tiene que fallar y,
+ * sobre todo, no haber tocado NADA: ni un fichero cambiado, ni un temporal
+ * suelto.
  *
- * Aquí se abre un journal igual que lo abre el motor, se apunta qué copió, se
- * ejecuta la escritura de verdad, y se comprueba que todo lo que cambió estaba
- * en esa lista. Los ficheros NUEVOS no hacen falta: al deshacer se borra lo que
- * haya y luego se restauran las copias, así que sobran solos.
- */
-function copiaCompleta(string $raiz, array $tablas, callable $escritura): bool|string {
-    $dir = "$raiz/j";
-
-    // Qué habría copiado el journal, con la base exactamente en este estado
-    $st = new Storage($raiz, 'j');
-    $st->bloquear(true, null);
-    $st->txIniciar('SONDEO', $tablas, null);
-    $copiados = [];
-    foreach ((array)glob("$dir/.tx/_base/*") as $f) {
-        $copiados[basename((string)$f)] = true;
-    }
-    $st->txConfirmar();
-    $st->desbloquear();
-    unset($st);
-    unset($copiados['manifiesto.json']);
-
-    $antes = [];
-    foreach ((array)glob("$dir/*.json") as $f) { $antes[basename((string)$f)] = md5_file((string)$f); }
-
-    $escritura(new Database('j', $raiz));
-
-    $despues = [];
-    foreach ((array)glob("$dir/*.json") as $f) { $despues[basename((string)$f)] = md5_file((string)$f); }
-
-    foreach ($antes as $f => $md5) {
-        $cambiado = !isset($despues[$f]) || $despues[$f] !== $md5;
-        if ($cambiado && !isset($copiados[$f])) {
-            return "'$f' cambió y el journal no lo había copiado";
-        }
-    }
-    return true;
-}
-
-$escenarios = [
-    'INSERT que añade partes nuevas' => function (Database $bd) {
-        $v = [];
-        for ($i = 1000; $i < 1300; $i++) { $v[] = "($i,'N$i','c1','x')"; }
-        $bd->consultar('INSERT INTO t (id, ref, cat, v) VALUES ' . implode(',', $v));
-    },
-    'DELETE que deja partes de sobra' => function (Database $bd) {
-        $bd->consultar('DELETE FROM t WHERE id > 60');
-    },
-    'UPDATE de todas las filas' => function (Database $bd) {
-        $bd->consultar("UPDATE t SET v = 'nuevo'");
-    },
-    'INSERT de una fila con AUTOINCREMENT' => function (Database $bd) {
-        $bd->consultar("INSERT INTO t (ref, cat, v) VALUES ('Z1','c2','y')");
-    },
-    'CREATE INDEX' => function (Database $bd) {
-        $bd->consultar('CREATE INDEX idx_v ON t (v)');
-    },
-    'DROP INDEX' => function (Database $bd) {
-        $bd->consultar('DROP INDEX idx_cat');
-    },
-    'ALTER TABLE ADD COLUMN' => function (Database $bd) {
-        $bd->consultar("ALTER TABLE t ADD COLUMN extra VARCHAR(5) DEFAULT 'x'");
-    },
-    'ALTER TABLE DROP COLUMN' => function (Database $bd) {
-        $bd->consultar('ALTER TABLE t DROP COLUMN v');
-    },
-    'ALTER TABLE ADD UNIQUE (índice automático nuevo)' => function (Database $bd) {
-        $bd->consultar('ALTER TABLE t ADD CONSTRAINT uq_cv UNIQUE (cat, ref)');
-    },
-    'ALTER TABLE RENAME COLUMN' => function (Database $bd) {
-        $bd->consultar('ALTER TABLE t RENAME COLUMN cat TO categoria');
-    },
-    'REPAIR KEYS tras meter una huérfana' => function (Database $bd) {
-        $bd->consultar('CREATE TABLE h (id INTEGER PRIMARY KEY, tid INTEGER)');
-        $bd->consultar('INSERT INTO h VALUES (1, 5)');
-        $bd->consultar('ALTER TABLE h ADD CONSTRAINT fk FOREIGN KEY (tid) REFERENCES t(id) ON DELETE SET NULL');
-        $bd->consultar('DELETE FROM t WHERE id = 5');
-        $bd->consultar('REPAIR KEYS');
-    },
-];
-
-foreach ($escenarios as $titulo => $fn) {
-    chk("copia completa: $titulo", function () use ($raiz, $fn) {
-        preparar($raiz);
-        return copiaCompleta($raiz, ['t', 'h'], $fn);
-    });
-}
-
-// ----------------------------------------------------------------------
-// El camino SIN journal
-// ----------------------------------------------------------------------
-
-echo "\n== Las escrituras que no journalizan tocan un solo fichero ==\n";
-
-/**
- * No toda escritura abre journal: cuando toca un fichero solo, el `rename`
- * atómico basta y copiar sería tirar el tiempo. Pero esa excepción es segura
- * únicamente si de verdad es un fichero.
- *
- * Para saber si una escritura journaliza sin adivinarlo, se deja un FICHERO
- * llamado `.tx` donde iría la carpeta: cualquier intento de journalizar falla
- * al no poder crearla. Si la escritura pasa, es que no lo intentó.
- *
- * Y el de revisión no cuenta, porque se escribe ANTES que los datos: un corte
- * entre los dos deja una revisión nueva sobre datos viejos, que nadie tiene
- * cacheada, así que la siguiente lectura va al fichero y ve lo correcto.
+ * Las escrituras que tocan un solo fichero no pasan por el journal: el rename
+ * atómico basta. Esas tienen que pasar aunque `.tx` esté bloqueado, y
+ * cambiar exactamente un fichero.
  */
 function caminoDeEscritura(string $raiz, string $esperado, callable $preparaBase, callable $escritura): bool|string {
     $dir = "$raiz/j";
@@ -484,10 +342,8 @@ function caminoDeEscritura(string $raiz, string $esperado, callable $preparaBase
     Database::crear('j', $raiz);
     $preparaBase(new Database('j', $raiz));
 
-    $antes = [];
-    foreach ((array)glob("$dir/*.json") as $f) { $antes[basename((string)$f)] = md5_file((string)$f); }
+    $antes = instantanea($dir);
 
-    // Un fichero donde debería ir la carpeta del journal: si lo intenta, falla
     file_put_contents("$dir/.tx", '');
     $journalizo = false;
     try {
@@ -506,54 +362,36 @@ function caminoDeEscritura(string $raiz, string $esperado, callable $preparaBase
             ? 'journalizó y no hacía falta'
             : 'NO journalizó, y esta escritura toca varios ficheros';
     }
-    if ($journalizo) {
-        return true;                       // journalizó: la seguridad es cosa del journal
-    }
+    if (glob("$dir/*.tmp") !== []) { return 'quedaron temporales sueltos'; }
 
-    $despues = [];
-    foreach ((array)glob("$dir/*.json") as $f) { $despues[basename((string)$f)] = md5_file((string)$f); }
-
+    $despues   = instantanea($dir);
     $cambiados = [];
-    foreach ($antes as $f => $md5) {
-        if (!isset($despues[$f]) || $despues[$f] !== $md5) { $cambiados[] = $f; }
+    foreach ($antes as $f => $c) {
+        if (($despues[$f] ?? null) !== $c) { $cambiados[] = $f; }
     }
-    foreach ($despues as $f => $md5) {
-        if (!isset($antes[$f])) { $cambiados[] = $f . ' (nuevo)'; }
+    foreach ($despues as $f => $c) {
+        if (!isset($antes[$f])) { $cambiados[] = "$f (nuevo)"; }
     }
-    $sinRev = array_values(array_filter($cambiados, fn($f) => !str_ends_with($f, '.rev.json')));
-
-    return count($sinRev) <= 1
-        ?: 'sin journal cambiaron ' . count($sinRev) . ' ficheros: ' . implode(', ', $sinRev);
+    if ($journalizo) {
+        return $cambiados === [] ?: 'sin poder journalizar cambió: ' . implode(', ', $cambiados);
+    }
+    return count($cambiados) === 1 ?: 'sin journal cambiaron ' . count($cambiados) . ' ficheros: ' . implode(', ', $cambiados);
 }
 
 $caminos = [
-    'tabla sin clave primaria, una parte' => ['sin',
-        function (Database $bd) {
-            $bd->consultar('CREATE TABLE s (a VARCHAR(10), b INTEGER)');
-            $bd->consultar("INSERT INTO s VALUES ('x', 1)");
-        },
-        fn(Database $bd) => $bd->consultar("INSERT INTO s VALUES ('y', 2)"),
-    ],
-    'UPDATE en tabla sin clave primaria' => ['sin',
-        function (Database $bd) {
-            $bd->consultar('CREATE TABLE s (a VARCHAR(10), b INTEGER)');
-            $bd->consultar("INSERT INTO s VALUES ('x', 1), ('y', 2)");
-        },
-        fn(Database $bd) => $bd->consultar("UPDATE s SET a = 'z'"),
-    ],
-    'DELETE en tabla sin clave primaria' => ['sin',
-        function (Database $bd) {
-            $bd->consultar('CREATE TABLE s (a VARCHAR(10), b INTEGER)');
-            $bd->consultar("INSERT INTO s VALUES ('x', 1), ('y', 2)");
-        },
-        fn(Database $bd) => $bd->consultar('DELETE FROM s WHERE b = 1'),
-    ],
     'tabla con clave primaria (tiene índice)' => ['con',
         function (Database $bd) {
             $bd->consultar('CREATE TABLE s (id INTEGER PRIMARY KEY, a VARCHAR(10))');
             $bd->consultar("INSERT INTO s VALUES (1, 'x')");
         },
         fn(Database $bd) => $bd->consultar("INSERT INTO s VALUES (2, 'y')"),
+    ],
+    'tabla sin clave primaria: datos y revisión' => ['con',
+        function (Database $bd) {
+            $bd->consultar('CREATE TABLE s (a VARCHAR(10), b INTEGER)');
+            $bd->consultar("INSERT INTO s VALUES ('x', 1)");
+        },
+        fn(Database $bd) => $bd->consultar("INSERT INTO s VALUES ('y', 2)"),
     ],
     'tabla que pasa a dos partes' => ['con',
         function (Database $bd) {
@@ -577,12 +415,48 @@ $caminos = [
         },
         fn(Database $bd) => $bd->consultar('DELETE FROM s WHERE n > 10'),
     ],
+    'CREATE TABLE' => ['con',
+        fn(Database $bd) => null,
+        fn(Database $bd) => $bd->consultar('CREATE TABLE s (id INTEGER PRIMARY KEY)'),
+    ],
+    'ALTER TABLE RENAME TO' => ['con',
+        fn(Database $bd) => $bd->consultar('CREATE TABLE s (a VARCHAR(10))'),
+        fn(Database $bd) => $bd->consultar('ALTER TABLE s RENAME TO s2'),
+    ],
+    'DROP TABLE' => ['con',
+        fn(Database $bd) => $bd->consultar('CREATE TABLE s (a VARCHAR(10))'),
+        fn(Database $bd) => $bd->consultar('DROP TABLE s'),
+    ],
+    'CREATE INDEX' => ['con',
+        function (Database $bd) {
+            $bd->consultar('CREATE TABLE s (a VARCHAR(10))');
+            $bd->consultar("INSERT INTO s VALUES ('x')");
+        },
+        fn(Database $bd) => $bd->consultar('CREATE INDEX ix ON s (a)'),
+    ],
+    'REPAIR KEYS con una huérfana' => ['con',
+        function (Database $bd) {
+            $bd->consultar('CREATE TABLE p (id INTEGER PRIMARY KEY)');
+            $bd->consultar('CREATE TABLE h (id INTEGER PRIMARY KEY, pid INTEGER)');
+            $bd->consultar('INSERT INTO p VALUES (1), (7)');
+            $bd->consultar('INSERT INTO h VALUES (1, 1), (2, 7)');
+            $bd->consultar('ALTER TABLE h ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p(id) ON DELETE SET NULL');
+            // La huérfana se mete por detrás, como haría una restauración a medias
+            $dir = sys_get_temp_dir() . '/jsonsqldb_test_journal/j';
+            file_put_contents("$dir/p.json", "{\n  \"table\": \"p\",\n  \"rows\": [\n    {\"id\":1}\n  ]\n}\n");
+            borrarArbol("$dir/.cache");
+        },
+        fn(Database $bd) => $bd->consultar('REPAIR KEYS'),
+    ],
+    'CREATE VIEW (un solo fichero)' => ['sin',
+        fn(Database $bd) => $bd->consultar('CREATE TABLE s (a VARCHAR(10))'),
+        fn(Database $bd) => $bd->consultar('CREATE VIEW v AS SELECT a FROM s'),
+    ],
 ];
 
 foreach ($caminos as $titulo => [$esperado, $prep, $esc]) {
     $et = $esperado === 'con' ? 'journaliza' : 'un solo fichero';
-    chk("$et: $titulo",
-        fn() => caminoDeEscritura($raiz, $esperado, $prep, $esc));
+    chk("$et: $titulo", fn() => caminoDeEscritura($raiz, $esperado, $prep, $esc));
 }
 
 // ----------------------------------------------------------------------
@@ -840,6 +714,20 @@ chk('un fichero de revisión de la 2.1, sin recuento, se acepta y reescribe todo
     // Las bases escritas con 2.1.x no tienen 'rows' ni 'chunk'
     return conRevisionTocada($raiz, static function (array $j): array {
         return ['rev' => $j['rev']];
+    });
+});
+
+chk('un fichero de revisión de la 2.4, sin estado de las partes, se acepta', function () use ($raiz) {
+    // Las bases escritas con 2.2 a 2.4 tienen 'chunk' pero ni 'rows' ni 'parts'
+    return conRevisionTocada($raiz, static function (array $j): array {
+        return ['rev' => $j['rev'], 'chunk' => $j['chunk']];
+    });
+});
+
+chk('un estado de las partes que no cuadra con los ficheros no rompe la tabla', function () use ($raiz) {
+    return conRevisionTocada($raiz, static function (array $j): array {
+        $j['parts'] = [1];                              // dice una parte y hay cinco
+        return $j;
     });
 });
 

@@ -9,6 +9,138 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.5.0] - 2026-09-04
+
+Memory and speed release: writes stop reading the table, reads stream one part
+at a time, and the journal stops copying files. Nothing breaking in SQL or in
+the API; no data conversion. Two configuration constants removed.
+
+### Changed
+
+- **The journal is a redo log, not a copy set.** Up to 2.4 every write copied
+  every file of the table (all parts, all indexes, structure and revision) into
+  `.tx/` with an `fsync` each, before touching anything, so that a crash could
+  be undone. Now every file the write produces goes to its temporary first,
+  forced to disk; when all are written, a manifest listing the renames and
+  deletions is written in one piece, and only then are the renames applied. A
+  crash before the manifest leaves the data untouched (the temporaries are
+  swept by the next write); a crash after it is finished on the next open, as
+  many times as it takes. The cost went from copying the whole table to one
+  small file and a couple of directory syncs. On a 20,000-row table a one-row
+  `INSERT` went from 96 ms to 18 ms; on 100,000 rows from 742 ms to 104 ms.
+  Journals of the previous format (copies plus a manifest with `estado`), and
+  the pre-2.0 flat layout, are still recognised and undone, so a database left
+  with a pending journal by an earlier version recovers correctly.
+  `tests/f9_journal.php` now rebuilds every intermediate state of a commit —
+  each temporary already renamed or still pending, each surplus file already
+  deleted or not — and demands the exact bytes of the finished write; and it
+  blocks the journal folder to prove that a write which cannot journal changes
+  nothing at all. `tests/f6_cortes.php` times each child process first so the
+  `SIGKILL` lands inside the commit window, which is much narrower now.
+
+- **`<table>.rev.json` records the state of the table**: `rows` (row count),
+  `parts` (the revision at which each part was last written) and `indexes` (the
+  same per index), on top of `rev` and `chunk`. Files from 2.0–2.4 are read as
+  they are and completed on the first write; the first write of each table
+  rebuilds its indexes once, since without `rows` the engine cannot prove that
+  the old ones are still valid.
+
+- **The cache is per part, keyed by the revision of that part.** A write that
+  touches one part of a hundred leaves the other ninety-nine cached, and the
+  whole-table serialised entry — which every write used to regenerate — is
+  gone. Reading a table streams its parts; a query never holds the whole table
+  unless it needs every row at once.
+
+- **`SELECT` streams from its first source.** Rows are read part by part and
+  flattened and filtered as they arrive; a `WHERE` scan keeps only the rows
+  that pass. `LIMIT` is applied while reading. Only the inner side of a `JOIN`,
+  `ORDER BY` without `LIMIT`, `GROUP BY` and `DISTINCT` materialise. A numeric
+  range on 20,000 rows went from 22 MB to 7 MB of peak memory; `LIMIT 50` from
+  12 ms and 22 MB to 0.5 ms and 5 MB.
+
+- **Indexes are corrected instead of rebuilt** whenever the engine can prove
+  what changed: rows appended at the end (as before), rows replaced in place by
+  an `UPDATE` (the old key is removed using the old row, read from the part
+  that has not been replaced yet), and rows shifted from a position on by a
+  `DELETE` (entries from that position are cut and the rows behind re-added).
+  An index whose content does not change — an `UPDATE` of a column it does not
+  cover, an `ALTER TABLE` that only touches the structure — is not rewritten
+  at all; `rev.json` records that it is still current. Any doubt rebuilds it
+  from the rows, as before.
+
+- **Index entries with a single position are stored as an integer**, not a
+  one-element list: `"keys":{"n1:5":3}`. On a primary key that is every entry,
+  and in memory a list of one costs three times what an integer does. Indexes
+  written before 2.5 (always lists) are read the same way and rewritten in the
+  new form when they next change. `tests/f3_escrituras.php` and
+  `tests/f10_indices_incrementales.php` compare indexes as maps, since a
+  corrected index does not list its keys in the same order as a rebuilt one.
+
+- **Writes no longer read the table when nothing forces them to.**
+  - An `INSERT` into a table with no triggers, whose primary key and unique
+    constraints have their index on disk, checks uniqueness against the index,
+    reads only the last part and appends to it. Foreign keys are checked against
+    the parent's index when it has one on the referenced columns.
+  - An `UPDATE` or `DELETE` whose `WHERE` an index can answer reads only the
+    parts of the candidate rows and rewrites only those; a delete shifts every
+    row after it, so from the first deleted position on the parts are redone.
+  - A trigger on the table, a self-referencing foreign key, an index that
+    cannot be trusted or a `WHERE` no index can answer fall back to loading the
+    table, which is what every write did before.
+
+  On 20,000 rows an `UPDATE` by key went from 132 ms and 31 MB to 13 ms and
+  11 MB, a `DELETE` by key from 215 ms and 32 MB to 32 ms and 13 MB; on 100,000
+  rows an `INSERT` from 140 MB to 43 MB and an `UPDATE` by key from 936 ms and
+  135 MB to 47 ms and 33 MB. `tests/f8_indices.php` runs the same sequence of
+  `UPDATE`s and `DELETE`s by key against a table with indexes and one without
+  and demands identical results after every statement, index against scan and
+  cache against disk. Uniqueness checks in the writer now use the same key
+  function as the indexes (`Indexes::clave`), so `5` and `5.0` in a numeric
+  unique column are the same key in both places.
+
+- **`tests/benchmark.php` reports the mean** of several runs of each query
+  (seven per read, five per write and per heavy query), not the median. The
+  documentation numbers were remeasured with it.
+- `tests/f1_nucleo.php` no longer leaves its empty temporary folder behind:
+  the final `rmdir` ran before the memory tests that still used the folder. It
+  now runs last and is checked.
+
+- **All documentation is in English** and the files were renamed:
+  `docs/00-index.md`, `01-core.md`, `02-queries.md`, `03-writes.md`,
+  `04-api.md`, `05-admin.md` and `nginx/README.md`. Every section touched by
+  this release (journal, revision file, cache, indexes, writes, memory,
+  upgrading) was rewritten to match the code. Source code comments and engine
+  messages remain in Spanish.
+
+### Removed
+
+- `JSONSQLDB_JOURNAL_DATOS`: the journal is always on. It used to be optional
+  because copying the table on every write was expensive; it is not any more,
+  and turning it off was the one way to lose data on a power cut. Still defined
+  in an old `config.php`, it is ignored.
+- `JSONSQLDB_CACHE_MAX_FILAS`: there is no whole-table cache entry to cap. Ignored
+  if defined.
+- `Storage::tieneIndices()`, `Storage::leerFilas()`'s `$tope` and `$guardarCache`
+  arguments, and `Storage::txIniciar()`'s table list: internal API, superseded
+  by the redo journal and the streaming reads. `Storage::filas()` (a generator),
+  `anadirFilas()`, `modificarFilas()`, `filasEnPosiciones()` and
+  `clavesDeIndice()` are new.
+
+### PHP versions
+
+Nothing new is required beyond 8.0. `fsync()` (8.1) is used when available for
+the temporaries, the manifest and the directory entries; on 8.0 the buffer is
+flushed, as before. `array_is_list()` (8.1) is not used. CI runs 8.0 to 8.5.
+
+### Upgrading
+
+Replace the folder and keep the two configuration files. No data conversion:
+`rev.json` and the indexes are completed on the first write of each table.
+Open each database once with the previous version before replacing the folder
+if it may have a pending journal — not required, since 2.5 undoes the old
+format, but tidier. If your `config.php` defines `JSONSQLDB_JOURNAL_DATOS` or
+`JSONSQLDB_CACHE_MAX_FILAS`, remove the lines.
+
 ## [2.4.0] - 2026-08-31
 
 `SELECT COUNT(*)` no longer reads the table. Nothing breaking, no data conversion.

@@ -144,14 +144,23 @@ function cuadraConRehacerlo(string $raiz): bool|string
         if (($hay['rows'] ?? null) !== $esperado['rows']) {
             return "$nombre dice tener {$hay['rows']} filas y son {$esperado['rows']}";
         }
-        if (($hay['keys'] ?? null) !== $esperado['keys']) {
+        // Un índice corregido no lleva las claves en el mismo orden que uno
+        // rehecho, y una posición suelta se guarda como entero: se normaliza
+        $normal = static function (array $keys): array {
+            foreach ($keys as $k => $p) { $keys[$k] = (array)$p; sort($keys[$k]); }
+            ksort($keys);
+            return $keys;
+        };
+        $hayKeys = $normal((array)($hay['keys'] ?? []));
+        $espKeys = $normal($esperado['keys']);
+        if ($hayKeys !== $espKeys) {
             // Qué falta y qué sobra, que es lo que hace falta para depurarlo
             $faltan = $sobran = 0;
-            foreach ($esperado['keys'] as $k => $posiciones) {
-                $faltan += count(array_diff($posiciones, (array)($hay['keys'][$k] ?? [])));
+            foreach ($espKeys as $k => $posiciones) {
+                $faltan += count(array_diff($posiciones, $hayKeys[$k] ?? []));
             }
-            foreach ((array)($hay['keys'] ?? []) as $k => $posiciones) {
-                $sobran += count(array_diff((array)$posiciones, (array)($esperado['keys'][$k] ?? [])));
+            foreach ($hayKeys as $k => $posiciones) {
+                $sobran += count(array_diff($posiciones, $espKeys[$k] ?? []));
             }
             return "$nombre no cuadra: faltan $faltan posiciones, sobran $sobran";
         }
