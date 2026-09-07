@@ -696,7 +696,7 @@ final class Select
     // Orígenes de datos y JOIN
     // ==================================================================
 
-    /** @return array{0: array, 1: string[]} filas planas y lista de claves "alias.columna" */
+    /** @return array{0: iterable<array>, 1: string[]} filas planas y lista de claves "alias.columna" */
     private function origenes(array $from, ?array $where = null, ?int $tope = null): array
     {
         if ($from === []) {

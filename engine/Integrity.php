@@ -106,7 +106,7 @@ final class Integrity
                 // —sin índice se recorre la tabla— pero reparar unas claves no
                 // tiene por qué dejar la tabla más lenta.
                 $this->cat->storage()->guardarFilas(
-                    $t, array_values($filas), Indexes::definiciones($this->cat->meta($t))
+                    $t, $filas, Indexes::definiciones($this->cat->meta($t))
                 );
             }
         }

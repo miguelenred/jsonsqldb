@@ -1378,6 +1378,7 @@ final class Storage
         $this->txTablas[$tabla] = true;
 
         $indices = $this->indicesEnDisco($tabla);
+        $partes  = $this->partes($tabla);
         $this->limpiarCache($tabla, $this->estado($tabla), ['rev' => -1, 'parts' => [], 'indexes' => []], array_keys($indices));
 
         $this->borrarFichero($this->ficheroMeta($tabla));
