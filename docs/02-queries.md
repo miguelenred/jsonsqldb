@@ -245,45 +245,59 @@ Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``.
 ## 5. Performance
 
 Measured with `php tests/benchmark.php` (PHP 8.3, 20,000 customers and 30,000
-orders; mean of several repetitions):
+orders, on-disk cache; mean of several repetitions):
 
 | Query | Time · peak memory |
 |---|---|
-| Lookup by primary key | 1.9 ms · 7 MB |
+| Lookup by primary key | 2.3 ms · 7 MB |
 | Equality on an indexed column (2,000 matches) | 17 ms · 7 MB |
-| Numeric range, no index | 22 ms · 7 MB |
-| `LIKE` by prefix | 26 ms · 11 MB |
-| `LIMIT 50`, no filter | 0.5 ms · 5 MB |
-| `COUNT(*)` of a 30,000-row table | 4 ms · 5 MB |
-| `GROUP BY` + `SUM` + `ORDER BY` | 34 ms · 15 MB |
-| `ORDER BY ... LIMIT 20` | 47 ms · 18 MB |
-| `JOIN` 30,000 × 20,000 with aggregation | 128 ms · 43 MB |
-| `IN (SELECT ...)` subquery | 81 ms · 9 MB |
+| Numeric range, no index | 18 ms · 6 MB |
+| `LIKE` by prefix | 18 ms · 6 MB |
+| `LIMIT 50`, no filter | 0.5 ms · 6 MB |
+| `COUNT(*)` of a 30,000-row table | 5 ms · 5 MB |
+| `GROUP BY` + `SUM` + `ORDER BY` | 21 ms · 6 MB |
+| `ORDER BY ... LIMIT 20` | 21 ms · 6 MB |
+| `ORDER BY`, whole table | 31 ms · 21 MB |
+| `JOIN` 30,000 × 20,000 with aggregation | 111 ms · 22 MB |
+| `IN (SELECT ...)` subquery | 64 ms · 9 MB |
+| Any of the above repeated on unchanged data | < 0.5 ms · 4 MB |
 
 Decisions that make this possible:
 
-1. **Flat rows**: during execution each row is an array keyed `alias.column`;
-   reading a column is a direct array access.
+1. **Rows straight from the cache**: a single-table query works on the rows
+   exactly as the storage returns them, without copying them. Only a `JOIN`
+   copies rows, with the alias in front of each column name so two tables
+   with a column of the same name do not collide, and it copies only the
+   columns the query names.
 2. **Names resolved once**: every column reference (ambiguities included) is
    resolved before the rows are visited and the exact key is stored in the
    query tree. No names are resolved per row.
-3. **Streaming from the first source**: rows are read one part at a time and
-   flattened and filtered as they arrive. A `WHERE` scan keeps only the rows
-   that pass; the decoded part and the flattened rows never coexist in full.
-   Only the inner side of a `JOIN` and anything that needs every row at once
-   (`ORDER BY` without `LIMIT`, `GROUP BY`, `DISTINCT`) is materialised.
-4. **Hash `JOIN`**: if the `ON` contains equalities (`a.id = b.a_id`), the
+3. **Compiled `WHERE`**: comparisons, `AND`/`OR`/`NOT`, `BETWEEN`, `IN` with
+   literals, `LIKE`, `IS NULL` and arithmetic are compiled into PHP closures
+   once per query; the general expression evaluator only runs for what cannot
+   be compiled (functions, subqueries, columns of an outer query).
+4. **Streaming from the first source**: rows are read one part at a time and
+   filtered as they arrive. A `WHERE` scan keeps only the rows that pass.
+5. **Accumulated aggregates**: `GROUP BY`, `COUNT`, `SUM`, `AVG`, `MIN` and
+   `MAX` keep one accumulator per group as the rows go by, never the rows of
+   the group. Memory is proportional to the number of groups.
+6. **`ORDER BY … LIMIT n` keeps only the n rows in the lead**; a full sort uses
+   `array_multisort` when every key is all numbers or all text, computing the
+   collation key once per row rather than once per comparison.
+7. **Hash `JOIN`**: if the `ON` contains equalities (`a.id = b.a_id`), the
    inner side is indexed and looked up directly instead of comparing every row
-   against every row. Conditions that are not equalities are applied afterwards,
-   only to the candidates.
-5. **Subqueries executed once**: `IN (SELECT ...)` and scalar subqueries run
+   against every row, and the joined rows stream into the `WHERE` and the
+   grouping. Conditions that are not equalities are applied afterwards, only
+   to the candidates.
+8. **Subqueries executed once**: `IN (SELECT ...)` and scalar subqueries run
    once per query and their result is reused.
-6. **Per-part cache**: parts already read are reused while nobody writes them
-   (see [01-core.md](01-core.md)).
-7. **Indexes**: an equality on an indexed column decodes only the parts that
-   hold the matching rows.
-8. **`LIMIT` pushed into the read** when there is no `WHERE` and no `JOIN`, and
-   **`COUNT(*)` counting lines** instead of decoding rows.
+9. **Per-part cache**: parts already read are reused while nobody writes them;
+   and a **result cache** serves a repeated `SELECT` on unchanged data without
+   running it (see [01-core.md](01-core.md)).
+10. **Indexes**: an equality on an indexed column decodes only the parts that
+    hold the matching rows.
+11. **`LIMIT` pushed into the read** when there is no `WHERE` and no `JOIN`,
+    and **`COUNT(*)` counting lines** instead of decoding rows.
 
 ## 6. Not supported yet
 
@@ -311,13 +325,13 @@ silently wrong result.
 | `engine/Config.php` | reads `config.php` with defaults |
 | `engine/Logger.php` | query log |
 | `tests/f2_parser.php` | 70 checks of the parser |
-| `tests/f2_select.php` | 138 checks of the executor, with real data |
+| `tests/f2_select.php` | 144 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
 php tests/f1_nucleo.php     → OK: 66
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 138
+php tests/f2_select.php     → OK: 144
 php tests/f8_indices.php    → OK: 59
 ```

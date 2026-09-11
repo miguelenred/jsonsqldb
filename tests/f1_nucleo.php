@@ -483,24 +483,27 @@ chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz)
           . 'for ($i = 0; $i < 12; $i++) { $bd->consultar("INSERT INTO t (v) VALUES $v", $p); }';
     shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
 
-    // COUNT(v) y no COUNT(*): desde 2.4.0 el COUNT(*) cuenta líneas sin cargar
-    // nada, así que ya no sirve de sonda para el corte. COUNT(v) sigue el
-    // camino normal y materializa la tabla, que es lo que se quiere cortar.
-    $sonda = static fn(string $sql): string => 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
-          . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
-          . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
-          . 'try { echo $bd->consultar(' . var_export($sql, true) . ')[0]["n"]; }'
-          . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }';
+    // Un ORDER BY sin LIMIT y no un COUNT: desde 2.4.0 el COUNT(*) cuenta
+    // líneas sin cargar nada, y desde 2.6.0 los agregados se acumulan sin
+    // tener la tabla en memoria, así que ya no sirven de sonda para el corte.
+    // Ordenar entero sí obliga a tener todas las filas a la vez.
+    // La sonda imprime cuántas filas salen (o el valor de COUNT(*)), o el
+    // estado del error si la consulta se corta
+    $sonda = static fn(string $sql, string $limite): string => trim((string)shell_exec(
+        escapeshellarg(PHP_BINARY) . " -d memory_limit=$limite -r " . escapeshellarg(
+            'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
+            . 'try { $r = $bd->consultar(' . var_export($sql, true) . '); echo $r[0]["n"] ?? count($r); }'
+            . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }'
+        ) . ' 2>&1'));
 
     // Con poca memoria: corte explicado. Con suficiente: la consulta sale.
-    $poco  = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=12M -r '
-           . escapeshellarg($sonda('SELECT COUNT(v) AS n FROM t')) . ' 2>&1'));
-    $mucho = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=256M -r '
-           . escapeshellarg($sonda('SELECT COUNT(v) AS n FROM t')) . ' 2>&1'));
+    $poco  = $sonda('SELECT v FROM t ORDER BY v', '12M');
+    $mucho = $sonda('SELECT v FROM t ORDER BY v', '256M');
     // Y el COUNT(*) de 2.4.0 tiene que salir justo donde la tabla no cabe:
     // cuenta líneas, no depende del memory_limit ni de lo que haya en caché.
-    $atajo = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=12M -r '
-           . escapeshellarg($sonda('SELECT COUNT(*) AS n FROM t')) . ' 2>&1'));
+    $atajo = $sonda('SELECT COUNT(*) AS n FROM t', '12M');
 
     exec('rm -rf ' . escapeshellarg($base));
     return ($poco === 'MEMORIA' && $mucho === '10800' && $atajo === '10800')

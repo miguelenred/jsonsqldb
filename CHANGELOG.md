@@ -9,6 +9,144 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.6.0] - 2026-09-11
+
+Speed and memory release, reads and writes. Nothing breaking in SQL or in the
+API; no data conversion. One configuration constant added. One bug fixed that
+silently disabled the cache in CLI scripts.
+
+### Fixed
+
+- **With APCu installed but disabled for the command line** (`apc.enable_cli=0`,
+  the default), the engine believed APCu was available and used it, so
+  `apcu_store` did nothing and `apcu_fetch` never hit: scripts and cron jobs ran
+  with **no cache at all**, decoding every part on every read. Web requests
+  (Apache, PHP-FPM) were not affected. Detection now uses `apcu_enabled()`,
+  which answers for the SAPI in use.
+- **A table dropped and recreated under the same name could be served the old
+  table's cache** from APCu, where entries cannot be deleted by table: the new
+  table starts again at revision 1, and its cache keys collided with the old
+  one's. `rev.json` now carries `creada`, a random number fixed at the table's
+  first write, and every cache key includes it. Added on the first write of a
+  table from an earlier version; its cache entries are regenerated once.
+
+### Changed
+
+- **Single-table queries use the rows as they come out of the cache**, without
+  copying them with the alias in front of each column name. The copy was
+  needed only to keep two tables' columns apart in a `JOIN`, and it cost a
+  full second copy of the table in time and memory. Now only a `JOIN` copies,
+  and it copies only the columns the query names.
+
+- **`WHERE` conditions are compiled into PHP closures** once per query:
+  comparisons, `AND`/`OR`/`NOT`, `BETWEEN`, `IS NULL`, `LIKE` with a literal
+  pattern, concatenation and arithmetic. The tree-walking evaluator runs only
+  for what cannot be compiled (functions, subqueries, columns of an outer
+  query), with exactly the same three-valued results.
+  `tests/f2_select.php` runs eighteen predicates through both paths and demands
+  identical rows.
+
+- **Aggregates are accumulated as the rows go by, not collected.** `GROUP BY`,
+  `COUNT`, `SUM`, `AVG`, `MIN` and `MAX` keep one accumulator per group and the
+  first row of the group; the rows themselves are never kept. `DISTINCT` inside
+  an aggregate and `GROUP_CONCAT` keep the values of that column only.
+  Memory is proportional to the number of groups: a `GROUP BY` over 100,000
+  rows went from 58 MB to 6 MB. The same aggregate written twice shares an
+  accumulator; aggregates in `HAVING` and `ORDER BY` are accumulated with the
+  rest. `tests/f2_select.php` checks every aggregate, with and without
+  `DISTINCT` and with `NULL`s, against the same figures computed by hand from
+  the rows.
+
+- **A `JOIN` streams.** Joined rows flow into the `WHERE` and the grouping as
+  they are produced instead of being materialised first; each side is loaded
+  with only the columns the query names; and the hash index stores a single
+  position as an integer. The aggregated `JOIN` of the benchmark went from
+  43 MB to 22 MB on 20,000 customers and from 193 MB to 85 MB on 100,000.
+
+- **`ORDER BY … LIMIT n` keeps only the n rows in the lead** while it reads:
+  memory no longer depends on the size of the table (69 MB to 6 MB on 100,000
+  rows). A full `ORDER BY` sorts with `asort` (one numeric key) or
+  `array_multisort` (several keys, or text) when every key is all numbers or
+  all text — with the collation key computed once per row instead of once per
+  comparison, which is what made sorting 20,000 rows by name take 444 ms — and
+  falls back to the comparator otherwise. Same result as before in every
+  case: `NULL`s first (last with `DESC`), text by collation key then byte by
+  byte, ties by position. `tests/f2_select.php` compares every path against
+  the reference comparator on 600 rows with ties, `NULL`s, accents and mixed
+  case, and every `LIMIT`/`OFFSET` against cutting the whole ordered result.
+
+- **Output columns that are plain table columns are copied directly**, and
+  when the `ORDER BY` uses table columns the sort happens before the
+  projection: with `LIMIT`, only the rows that go out are built.
+
+- **A repeated `SELECT` on unchanged data is served from a result cache.** The
+  key is the SQL text, the bound parameters and the revision (and `creada`) of
+  every table the query touches, views included, so any write to one of them
+  makes the cached result stop matching; on disk the file is deleted at that
+  moment, in APCu it expires after an hour. Queries that depend on the moment
+  (`RANDOM()`, `DATE('now')` and the date functions with no argument) are not
+  cached, nor are results over `JSONSQLDB_CACHE_RESULTADOS` rows (5,000 by
+  default; `0` turns the result cache off). Queries run inside a trigger never
+  use it. `tests/benchmark.php` switches it off for the run and measures it
+  separately at the end: the aggregated `JOIN`, 111 ms the first time, takes
+  0.2 ms the second.
+
+- **Indexes are stored in one piece per part of the table**:
+  `<table>.idx.<name>.json` for part 1, `<table>.idx.<name>.part2.json` for
+  part 2 and so on, each with the keys of the rows of that part (positions
+  counted from the start of the table, as before). `rev.json` records one
+  revision per piece (`"indexes": {"auto_id": [3, 3, 7]}`). A write rewrites
+  only the pieces of the parts it touched — appending a row to a table of a
+  hundred parts rewrites one piece of each index, not the whole index — and
+  checks the header of every other piece so a damaged or hand-edited file is
+  rebuilt at the next write. A lookup reads every piece, since the key can be
+  in any of them; the total is what it was. A one-row `INSERT` went from
+  20 ms and 13 MB to 10 ms and 9 MB on 20,000 rows, and from 95 ms and 43 MB to
+  30 ms and 22 MB on 100,000; a `DELETE` by key from 153 ms to 53 ms on
+  100,000. Indexes written before 2.6 (one file, one revision) are read as
+  they are and split on the next write of the table. Uniqueness and foreign
+  key checks in the writer ask the pieces directly instead of loading a merged
+  key map. `tests/f8_indices.php`, `f10_indices_incrementales.php` and
+  `f6_cortes.php` were adapted to the pieces; `f10` also checks that every
+  piece is numbered right and holds only positions of its part.
+
+- **Sort keys are kept by column, not by row**: one list per `ORDER BY`
+  expression instead of one small array per row, which cost ten times the
+  value it held.
+
+### Added
+
+- `litespeed/README.md`: LiteSpeed Enterprise works like Apache (it reads the
+  bundled `.htaccess`); OpenLiteSpeed applies `.htaccess` only for rewrite
+  rules and only at startup, so the access rules go in the virtual host — the
+  file has them, plus the checks to run after deploying on either edition.
+  The `nginx/` and `litespeed/` folders are now blocked from the browser by
+  the root `.htaccess`, `web.config` and `nginx/jsonsqldb.conf` like the other
+  internal folders.
+- `JSONSQLDB_CACHE_RESULTADOS` in `config.php`: maximum rows of a `SELECT`
+  result to keep in the result cache; `0` disables it. Default 5000.
+- `rev.json`: `creada`, and `indexes` as a list of revisions per index.
+- `Storage::posicionesPorIndice()`, `claveEnIndice()`, `indiceValido()`,
+  `claveResultado()`, `resultadoCacheado()`, `guardarResultado()`;
+  `Select::tablasDe()`; `Evaluator::compilar()` and `marcarAgregados()`;
+  `Indexes::anotar()` is public. Internal API.
+- `tests/f5_esquema.php`: the result cache — repeated query, invalidation by a
+  write, through a view, `RANDOM()` not cached, a recreated table not
+  inheriting results.
+
+### Removed
+
+- `Storage::clavesDeIndice()`, `leerIndice()` and `filasPorIndice()`'s reliance
+  on a single index file; `Evaluator`'s per-group evaluation of aggregates
+  (`$ctx['grupo']`), superseded by the accumulators. Internal API.
+
+### Upgrading
+
+Replace the folder and keep the two configuration files. No data conversion:
+`creada` and the index pieces appear on the first write of each table. If you
+run the engine from cron or the command line with APCu installed, note that
+until now it was running without cache; nothing to change, it just gets faster.
+
 ## [2.5.0] - 2026-09-04
 
 Memory and speed release: writes stop reading the table, reads stream one part

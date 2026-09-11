@@ -235,8 +235,9 @@ $cli->aceptarAutofirmado();
 ## 5. Security
 
 - `config.php`, `lib/`, `vistas/` and `datos/` are blocked by `.htaccess` and
-  `web.config`. Only `index.php` and `assets/` are served. **On nginx those
-  files do not apply**: install the rules from the project's `nginx/` folder,
+  `web.config`. Only `index.php` and `assets/` are served. **On nginx and
+  OpenLiteSpeed those files do not apply**: install the rules from the
+  project's `nginx/` or `litespeed/` folder,
   or the folders are reachable from the browser.
 - `ADMIN_IPS_PERMITIDAS` limits who can open the panel, by IP or CIDR range. If
   only you use it, from the office or over a VPN, it is the most effective

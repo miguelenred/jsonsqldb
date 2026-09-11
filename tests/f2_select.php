@@ -760,6 +760,124 @@ error('función inexistente', 'SYNTAX', 'SELECT NOEXISTE(1)');
 error('argumentos de más', 'SYNTAX', 'SELECT LENGTH(1, 2)');
 error('sintaxis rota', 'SYNTAX', 'SELECT FROM WHERE');
 
+echo "\n== Orden, corte y agregados: lo mismo por cualquier camino ==\n";
+
+// Una tabla con empates, NULL y textos con acentos y mayúsculas, para que
+// cada camino de ordenación —el nativo, el de comparador y el de las primeras
+// n filas— tenga que decidir lo mismo
+chk('preparar la tabla de orden', function () use ($bd) {
+    $bd->consultar('CREATE TABLE ord (id INTEGER PRIMARY KEY, n INTEGER, f DOUBLE, s VARCHAR(20), d DATETIME)');
+    mt_srand(7);
+    $pal = ["'árbol'", "'Zeta'", "'ñu'", "'abc'", "'ABC'", "'abc'", "'Émile'", "'emile'", "'12'", "'9'", 'NULL', "'zz'"];
+    $vals = [];
+    for ($i = 1; $i <= 600; $i++) {
+        $n = mt_rand(0, 3) === 0 ? 'NULL' : mt_rand(0, 20);
+        $f = mt_rand(0, 5) === 0 ? 'NULL' : mt_rand(0, 1000) / 10;
+        $vals[] = "($i,$n,$f,{$pal[mt_rand(0, 11)]},'2026-0" . mt_rand(1, 9) . '-1' . mt_rand(0, 9) . "')";
+    }
+    $bd->consultar('INSERT INTO ord VALUES ' . implode(',', $vals));
+    return (int)$bd->consultar('SELECT COUNT(*) AS n FROM ord')[0]['n'] === 600;
+});
+
+chk('ORDER BY coincide con compararOrden y ORDER BY LIMIT con cortar el resultado entero', function () use ($bd) {
+    $casos = ['ORDER BY n', 'ORDER BY n DESC', 'ORDER BY f, id DESC', 'ORDER BY s', 'ORDER BY s DESC, n',
+              'ORDER BY d DESC, s, n DESC', 'ORDER BY n, f DESC, s'];
+    $ref = $bd->consultar('SELECT id, n, f, s, d FROM ord');
+    foreach ($casos as $c) {
+        $todo = $bd->consultar("SELECT id, n, f, s, d FROM ord $c");
+        // La referencia: el comparador general sobre las mismas filas
+        $cols = [];
+        foreach (explode(',', substr($c, 9)) as $k) {
+            $p = explode(' ', trim($k));
+            $cols[] = [$p[0], $p[1] ?? 'ASC'];
+        }
+        $idx = array_keys($ref);
+        usort($idx, static function (int $a, int $b) use ($ref, $cols): int {
+            foreach ($cols as [$col, $dir]) {
+                $x = JsonSQLDB\Valor::compararOrden($ref[$a][$col], $ref[$b][$col]);
+                if ($x !== 0) { return $dir === 'DESC' ? -$x : $x; }
+            }
+            return $a <=> $b;
+        });
+        $esperado = [];
+        foreach ($idx as $i) { $esperado[] = $ref[$i]; }
+        if ($esperado !== $todo) { return "$c no coincide con el comparador"; }
+        foreach ([1, 7, 50, 599, 600] as $lim) {
+            foreach ([0, 3] as $off) {
+                $corto = $bd->consultar("SELECT id, n, f, s, d FROM ord $c LIMIT $lim OFFSET $off");
+                if ($corto !== array_slice($todo, $off, $lim)) { return "$c LIMIT $lim OFFSET $off"; }
+            }
+        }
+    }
+    return true;
+});
+
+chk('el WHERE compilado decide lo mismo que el evaluador general', function () use ($bd) {
+    // AND LENGTH('x') = 1 impide compilar la condición sin cambiar qué filas
+    // cumplen: así se comparan los dos caminos sobre la misma tabla
+    $predicados = [
+        "n BETWEEN 5 AND 10", "NOT (n BETWEEN 5 AND 10)", "n NOT BETWEEN 5 AND 10", "f > 50 OR n IS NULL",
+        "NOT (f > 50 OR n IS NULL)", "s LIKE 'a%'", "s NOT LIKE '%c'", "s LIKE 'z_'", "s IS NOT NULL AND n < 3",
+        "n = 3 OR f = 12.5 OR s = 'zz'", "n * 2 + 1 > f", "s || 'x' = 'abcx'", "n % 3 = 0", "f / 0 IS NULL",
+        "NOT n IS NULL", "-n < -5", "n <> 4 AND NOT s = 'abc'", "d >= '2026-05-01' AND d < '2026-08-01'",
+    ];
+    foreach ($predicados as $p) {
+        $a = $bd->consultar("SELECT id FROM ord WHERE $p");
+        $b = $bd->consultar("SELECT id FROM ord WHERE ($p) AND LENGTH('x') = 1");
+        if ($a !== $b) { return "difieren en: $p (" . count($a) . ' frente a ' . count($b) . ')'; }
+    }
+    return true;
+});
+
+chk('los agregados acumulados dan lo mismo que calcularlos sobre las filas', function () use ($bd) {
+    $filas = $bd->consultar('SELECT n, f, s FROM ord');
+    $grupos = [];
+    foreach ($filas as $r) { $grupos[$r['s'] ?? "\0"][] = $r; }
+    $r = $bd->consultar('SELECT s, COUNT(*) AS c, COUNT(f) AS cf, SUM(f) AS sf, ROUND(AVG(n), 4) AS an, MIN(n) AS mn, MAX(f) AS mf,
+                                COUNT(DISTINCT n) AS dn, SUM(DISTINCT n) AS sdn, GROUP_CONCAT(DISTINCT n) AS gc
+                         FROM ord GROUP BY s HAVING COUNT(*) > 1 ORDER BY SUM(f) DESC, s');
+    foreach ($r as $fila) {
+        $g = $grupos[$fila['s'] ?? "\0"];
+        $f = array_values(array_filter(array_column($g, 'f'), static fn($v) => $v !== null));
+        $n = array_values(array_filter(array_column($g, 'n'), static fn($v) => $v !== null));
+        $dist = array_values(array_unique($n));
+        $esperado = [
+            'c' => count($g), 'cf' => count($f), 'sf' => $f === [] ? null : array_sum($f),
+            'an' => $n === [] ? null : round(array_sum($n) / count($n), 4), 'mn' => $n === [] ? null : min($n),
+            'mf' => $f === [] ? null : max($f), 'dn' => count($dist), 'sdn' => $dist === [] ? null : array_sum($dist),
+            'gc' => $dist === [] ? null : implode(',', $dist),
+        ];
+        foreach ($esperado as $k => $v) {
+            if ($fila[$k] != $v) { return "grupo '{$fila['s']}': $k = " . var_export($fila[$k], true) . ' y debía ser ' . var_export($v, true); }
+        }
+        if (count($g) <= 1) { return 'HAVING dejó pasar un grupo de una fila'; }
+    }
+    $sumas = array_column($r, 'sf');
+    $orden = $sumas; rsort($orden);
+    return $sumas === $orden ?: 'no está ordenado por SUM(f) DESC';
+});
+
+chk('un agregado total sin filas y un JOIN agrupado en streaming', function () use ($bd) {
+    $v = $bd->consultar('SELECT COUNT(*) AS c, SUM(n) AS s, MAX(s) AS m FROM ord WHERE id > 100000')[0];
+    if ($v !== ['c' => 0, 's' => null, 'm' => null]) { return 'agregado total sin filas: ' . json_encode($v); }
+    $j = $bd->consultar('SELECT u.nombre, COUNT(*) AS n, MIN(o.n) AS mn FROM ord o JOIN usuarios u ON u.id = o.n
+                         WHERE o.f IS NOT NULL GROUP BY u.nombre ORDER BY u.nombre');
+    $esperado = [];
+    foreach ($bd->consultar('SELECT o.n, u.nombre FROM ord o JOIN usuarios u ON u.id = o.n WHERE o.f IS NOT NULL') as $f) {
+        $esperado[$f['nombre']] = ($esperado[$f['nombre']] ?? 0) + 1;
+    }
+    ksort($esperado);
+    $visto = [];
+    foreach ($j as $f) { $visto[$f['nombre']] = $f['n']; }
+    ksort($visto);
+    return $visto === $esperado ?: 'el JOIN agrupado no cuadra';
+});
+
+chk('limpiar la tabla de orden', function () use ($bd) {
+    $bd->consultar('DROP TABLE ord');
+    return true;
+});
+
 echo "\n== Rendimiento ==\n";
 chk('10.000 filas: filtro, agrupación y join', function () use ($st, $cat, $bd) {
     $st->bloquear(true);

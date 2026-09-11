@@ -34,6 +34,12 @@ defined('JSONSQLDB_FILAS_POR_PARTE') || define('JSONSQLDB_FILAS_POR_PARTE', 1000
 // Se invalida sola en cada escritura. Ponerlo a false solo para depurar.
 defined('JSONSQLDB_CACHE_ACTIVA') || define('JSONSQLDB_CACHE_ACTIVA', true);
 
+// Caché de resultados de SELECT: una consulta repetida sobre datos que no han
+// cambiado no se vuelve a ejecutar. Es el máximo de filas de un resultado para
+// guardarlo (los grandes no compensan); 0 la desactiva. Requiere la caché de
+// tablas y se invalida con la misma revisión.
+defined('JSONSQLDB_CACHE_RESULTADOS') || define('JSONSQLDB_CACHE_RESULTADOS', 5000);
+
 // ------------------------------------------------------------
 // LOG DE CONSULTAS
 // ------------------------------------------------------------

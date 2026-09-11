@@ -27,7 +27,7 @@ final class Writer
     private array $sucioDatos = [];
     private array $sucioMeta  = [];
     private array $astCache   = [];   // sql de trigger => árbol ya analizado
-    private array $idxPadre   = [];   // índice de claves de las tablas padre
+    private array $idxPadre   = [];   // tabla|cols => definición de índice, o claves recogidas
     private int   $anidamiento = 0;
 
     public function __construct(Catalog $cat)
@@ -680,7 +680,7 @@ final class Writer
             }
         }
         foreach (Catalog::conjuntosUnicos($meta) as $uq) {
-            if ($this->clavesDeIndice($tabla, $meta, $uq['columns']) === null) {
+            if ($this->indiceDe($tabla, $meta, $uq['columns']) === null) {
                 return false;
             }
         }
@@ -688,20 +688,20 @@ final class Writer
     }
 
     /**
-     * Claves de un índice de disco de la tabla sobre esas columnas, si lo hay
-     * y sirve: exige que la tabla no tenga cambios en memoria, porque el
-     * índice no los conoce.
+     * Definición del índice de disco de la tabla sobre esas columnas, si lo
+     * hay y está al día: exige que la tabla no tenga cambios en memoria,
+     * porque el índice no los conoce.
      *
-     * @return array<string, int|list<int>>|null
+     * @return array{name: string, columns: list<string>, auto: bool}|null
      */
-    private function clavesDeIndice(string $tabla, array $meta, array $cols): ?array
+    private function indiceDe(string $tabla, array $meta, array $cols): ?array
     {
         if (isset($this->sucioDatos[$tabla])) {
             return null;
         }
         foreach (Indexes::definiciones($meta) as $def) {
             if ($def['columns'] === $cols) {
-                return $this->cat->storage()->clavesDeIndice($tabla, $def);
+                return $this->cat->storage()->indiceValido($tabla, $def) ? $def : null;
             }
         }
         return null;
@@ -724,23 +724,12 @@ final class Writer
         if ($elegido === null) {
             return null;
         }
-        $keys = $this->clavesDeIndice($tabla, $this->meta($tabla), $elegido['def']['columns']);
-        if ($keys === null) {
-            return null;
+        if (isset($this->sucioDatos[$tabla])) {
+            return null;                             // el índice no conoce los cambios en memoria
         }
-        $posiciones = [];
-        foreach ($elegido['claves'] as $c) {
-            if ($elegido['prefijo']) {
-                foreach ($keys as $k => $lista) {
-                    if (strncmp((string)$k, $c, strlen($c)) === 0) {
-                        foreach (Indexes::posiciones($lista) as $p) { $posiciones[$p] = true; }
-                    }
-                }
-            } elseif (isset($keys[$c])) {
-                foreach (Indexes::posiciones($keys[$c]) as $p) { $posiciones[$p] = true; }
-            }
-        }
-        return $this->cat->storage()->filasEnPosiciones($tabla, array_keys($posiciones));
+        $st         = $this->cat->storage();
+        $posiciones = $st->posicionesPorIndice($tabla, $elegido['def'], $elegido['claves'], $elegido['prefijo']);
+        return $posiciones === null ? null : $st->filasEnPosiciones($tabla, $posiciones);
     }
 
     /**
@@ -766,17 +755,21 @@ final class Writer
     }
 
     /**
-     * Claves ocupadas de cada conjunto único: del índice de disco si sirve,
-     * y si no, recorriendo la tabla.
+     * Estado de cada conjunto único de la tabla durante la sentencia. Las
+     * claves que ya están en la tabla se consultan al índice de disco, trozo
+     * a trozo, si lo hay y sirve; si no, se recorre la tabla una vez y se
+     * guardan en `mapa`. Lo que la sentencia añade y quita va aparte, en
+     * `nuevas` y `quitadas`, porque el índice de disco no lo sabe.
      *
-     * @return array<string,array<string,bool|int|list<int>>> conjunto único => claves ocupadas
+     * @return array<string,array{def: ?array, mapa: ?array<string,true>, nuevas: array<string,true>, quitadas: array<string,true>}>
      */
     private function indicesUnicos(string $tabla, array $meta): array
     {
         $indices = [];
         foreach (Catalog::conjuntosUnicos($meta) as $uq) {
-            $mapa = $this->clavesDeIndice($tabla, $meta, $uq['columns']);
-            if ($mapa === null) {
+            $def  = $this->indiceDe($tabla, $meta, $uq['columns']);
+            $mapa = null;
+            if ($def === null) {
                 $mapa = [];
                 foreach ($this->filas($tabla) as $fila) {
                     $clave = self::claveDe($fila, $uq['columns']);
@@ -785,9 +778,24 @@ final class Writer
                     }
                 }
             }
-            $indices[$uq['name']] = $mapa;
+            $indices[$uq['name']] = ['def' => $def, 'mapa' => $mapa, 'nuevas' => [], 'quitadas' => []];
         }
         return $indices;
+    }
+
+    /** ¿Hay una fila con esta clave en un conjunto único, contando lo hecho en esta sentencia? */
+    private function claveOcupada(string $tabla, array $indice, string $clave): bool
+    {
+        if (isset($indice['nuevas'][$clave])) {
+            return true;
+        }
+        if (isset($indice['quitadas'][$clave])) {
+            return false;
+        }
+        if ($indice['def'] !== null) {
+            return $this->cat->storage()->claveEnIndice($tabla, $indice['def'], $clave) === true;
+        }
+        return isset($indice['mapa'][$clave]);
     }
 
     private function comprobarUnicos(string $tabla, array $meta, array $nueva, array &$indices, ?array $vieja): void
@@ -800,7 +808,7 @@ final class Writer
             if ($vieja !== null && self::claveDe($vieja, $uq['columns']) === $clave) {
                 continue;                       // no ha cambiado
             }
-            if (isset($indices[$uq['name']][$clave])) {
+            if ($this->claveOcupada($tabla, $indices[$uq['name']], $clave)) {
                 $cols = implode(', ', $uq['columns']);
                 $etiqueta = $uq['name'] === 'PRIMARY' ? 'clave primaria' : "restricción UNIQUE '{$uq['name']}'";
                 throw JsonSqlDbError::constraint("Valor duplicado en $etiqueta de '$tabla' ($cols)");
@@ -813,7 +821,8 @@ final class Writer
         foreach (Catalog::conjuntosUnicos($meta) as $uq) {
             $clave = self::claveDe($fila, $uq['columns']);
             if ($clave !== null) {
-                $indices[$uq['name']][$clave] = true;
+                $indices[$uq['name']]['nuevas'][$clave] = true;
+                unset($indices[$uq['name']]['quitadas'][$clave]);
             }
         }
     }
@@ -823,7 +832,8 @@ final class Writer
         foreach (Catalog::conjuntosUnicos($meta) as $uq) {
             $clave = self::claveDe($fila, $uq['columns']);
             if ($clave !== null) {
-                unset($indices[$uq['name']][$clave]);
+                $indices[$uq['name']]['quitadas'][$clave] = true;
+                unset($indices[$uq['name']]['nuevas'][$clave]);
             }
         }
     }
@@ -853,8 +863,7 @@ final class Writer
             if ($clave === null) {
                 continue;                       // con NULL no se comprueba
             }
-            $idx = $this->indicePadre($fk['table'], $fk['references']);
-            if (!isset($idx[$clave])) {
+            if (!$this->padreTiene($fk['table'], $fk['references'], $clave)) {
                 $valores = [];
                 foreach ($fk['columns'] as $c) {
                     $valores[] = Valor::aTexto($fila[$c]);
@@ -867,25 +876,33 @@ final class Writer
         }
     }
 
-    /** Claves existentes en una tabla padre, para no recorrerla en cada comprobación. */
-    private function indicePadre(string $tabla, array $cols): array
+    /**
+     * ¿Existe esta clave en una tabla padre? Contra su índice de disco si lo
+     * hay; si no, sus claves se recogen una vez recorriéndola.
+     */
+    private function padreTiene(string $tabla, array $cols, string $clave): bool
     {
-        $clave = $tabla . '|' . implode(',', $cols);
-        if (isset($this->idxPadre[$clave])) {
-            return $this->idxPadre[$clave];
-        }
-        $idx = $this->clavesDeIndice($tabla, $this->meta($tabla), $cols);
-        if ($idx !== null) {
-            return $this->idxPadre[$clave] = $idx;
-        }
-        $idx = [];
-        foreach ($this->filas($tabla) as $fila) {
-            $k = self::claveDe($fila, $cols);
-            if ($k !== null) {
-                $idx[$k] = true;
+        $id = $tabla . '|' . implode(',', $cols);
+        if (!isset($this->idxPadre[$id])) {
+            $def = $this->indiceDe($tabla, $this->meta($tabla), $cols);
+            if ($def !== null) {
+                $this->idxPadre[$id] = $def;
+            } else {
+                $idx = [];
+                foreach ($this->filas($tabla) as $fila) {
+                    $k = self::claveDe($fila, $cols);
+                    if ($k !== null) {
+                        $idx[$k] = true;
+                    }
+                }
+                $this->idxPadre[$id] = $idx;
             }
         }
-        return $this->idxPadre[$clave] = $idx;
+        $idx = $this->idxPadre[$id];
+        if (isset($idx['name'])) {
+            return $this->cat->storage()->claveEnIndice($tabla, $idx, $clave) === true;
+        }
+        return isset($idx[$clave]);
     }
 
     /**

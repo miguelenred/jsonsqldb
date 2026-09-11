@@ -342,13 +342,20 @@ chk('añadir un UNIQUE compuesto crea su índice automático', function () use (
                       "SELECT id FROM gente WHERE ciudad LIKE 'Madrid' AND dni LIKE 'D0104'");
 });
 chk('los ficheros de índice en disco son los que dice SHOW INDEXES', function () use ($bd, $raiz) {
+    // Cada índice va en trozos, uno por parte de la tabla: tantos ficheros
+    // como partes de datos, y ninguno de un índice que no exista
+    $partes  = count(glob("$raiz/idx/gente.json")) + count(glob("$raiz/idx/gente.part*.json"));
     $enDisco = [];
     foreach (glob("$raiz/idx/gente.idx.*.json") as $f) {
-        $enDisco[] = substr(basename($f, '.json'), strlen('gente.idx.'));
+        $nombre = preg_replace('/\\.part\\d+$/', '', substr(basename($f, '.json'), strlen('gente.idx.')));
+        $enDisco[$nombre] = ($enDisco[$nombre] ?? 0) + 1;
     }
     $declarados = array_column($bd->consultar('SHOW INDEXES FROM gente'), 'indice');
-    sort($enDisco); sort($declarados);
-    return $enDisco === $declarados;
+    sort($declarados);
+    $nombres = array_keys($enDisco);
+    sort($nombres);
+    return $nombres === $declarados && array_values(array_unique($enDisco)) === [$partes]
+        ?: 'ficheros por índice: ' . json_encode($enDisco) . " con $partes partes";
 });
 chk('un índice manipulado a mano no da resultados falsos', function () use ($bd, $raiz) {
     // Se ensucia el fichero con una revisión que no es la de la tabla: el motor

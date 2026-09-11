@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.5.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.6.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -37,14 +37,16 @@ writes are buffered and flushed at the end, every file is written atomically, an
 multi-file writes are finished or discarded whole by the journal.
 
 Rough numbers on 20,000 customers and 30,000 orders, one core, PHP 8.3: a
-primary key lookup 1.9 ms and 7 MB, a filtered scan without an index 22 ms and
-7 MB, an aggregate join 128 ms and 43 MB, a single-row `INSERT` 18 ms and 13 MB,
-an `UPDATE` by key 13 ms and 11 MB. On 100,000 rows: primary key lookup 8 ms and
-16 MB, single-row `INSERT` 104 ms and 43 MB, `UPDATE` by key 47 ms and 33 MB.
-Writes scale with the size of the table's indexes, not with the table itself:
-a write reads and rewrites only the parts it touches and corrects the indexes
-instead of rebuilding them. Measure on your own hardware rather than trusting
-these — a shared host with a network disk will be slower than any of this:
+primary key lookup 2 ms and 7 MB, a filtered scan without an index 18 ms and
+6 MB, a `GROUP BY` 21 ms and 6 MB, an aggregate join 111 ms and 22 MB, a
+single-row `INSERT` 10 ms and 9 MB, an `UPDATE` by key 12 ms and 10 MB, and
+any of those repeated on unchanged data under half a millisecond. On 100,000
+rows: primary key lookup 8 ms and 13 MB, `GROUP BY` 105 ms and 6 MB,
+single-row `INSERT` 30 ms and 22 MB. A write reads and rewrites only the parts
+it touches and the pieces of the indexes that cover them; a read holds the
+whole table only when the query genuinely needs every row at once. Measure on
+your own hardware rather than trusting these — a shared host with a network
+disk will be slower than any of this:
 
 ```
 php tests/benchmark.php            # 20,000 rows
@@ -53,7 +55,8 @@ php tests/benchmark.php 20000 csv  # CSV, to compare two versions
 ```
 
 It reports the mean of several runs of each query and uses a fixed seed so two
-runs compare the same data. SQLite is still many times faster at all of it,
+runs compare the same data; the result cache is switched off for the run so
+what it measures is the engine, and measured on its own at the end. SQLite is still many times faster at all of it,
 which is what you would expect from a B-tree over binary pages against JSON
 decoded into PHP arrays. The point of this engine is that it runs where neither
 MySQL nor the SQLite extension is available.
@@ -65,20 +68,29 @@ statements cost two thousand times that.
 
 **Indexes speed up reads and writes.** Equality and `IN` on an indexed column
 read only the parts of the table where the matching rows live: on 100,000 rows
-a primary key lookup takes 8 ms and 16 MB instead of scanning 29 MB of JSON.
+a primary key lookup takes 8 ms and 13 MB instead of scanning 29 MB of JSON.
 Ranges, `LIKE`, `ORDER BY` and aggregates still read everything. Writes use them
 too: an `INSERT` checks uniqueness against the index on disk and appends to the
 last part without loading the table, and an `UPDATE` or `DELETE` by key reads
-and rewrites only the parts that hold the affected rows. What indexes cost is
-keeping them: the ones that change are corrected on every write. Primary keys
-and unique constraints get an index automatically; anything else you create by
-hand with `CREATE INDEX`. `JSONSQLDB_INDICES` turns the whole thing off.
+and rewrites only the parts that hold the affected rows. An index is stored in
+one piece per part of the table, so a write rewrites the pieces it touched, not
+the whole index. Primary keys and unique constraints get an index automatically;
+anything else you create by hand with `CREATE INDEX`. `JSONSQLDB_INDICES` turns
+the whole thing off.
 
-**Reads stream one part at a time.** A `WHERE` scan keeps only the rows that
-pass, `SELECT * FROM t LIMIT 50` stops reading as soon as it has enough (0.5 ms
-and 5 MB on 20,000 rows), and `SELECT COUNT(*)` and `SHOW TABLES` never build
-the rows at all. Only a query that genuinely needs every row at once — `ORDER
-BY` without `LIMIT`, `GROUP BY`, the inner side of a `JOIN` — holds the table.
+**Reads stream one part at a time and hold as little as they can.** A `WHERE`
+scan keeps only the rows that pass, `GROUP BY` and the aggregates keep one
+accumulator per group rather than the rows, `ORDER BY … LIMIT n` keeps only the
+n rows in the lead, `SELECT * FROM t LIMIT 50` stops reading as soon as it has
+enough, and `SELECT COUNT(*)` and `SHOW TABLES` never build the rows at all.
+Only a query that genuinely needs every row at once — `ORDER BY` without
+`LIMIT`, the inner side of a `JOIN`, `DISTINCT` — holds the table.
+
+**A repeated `SELECT` on unchanged data is not run again.** Its result is
+cached under the SQL, the parameters and the revision of every table it
+touches; any write to one of them changes the revision and the cached result
+stops matching. Queries that depend on the moment (`RANDOM()`, `DATE('now')`)
+and results over `JSONSQLDB_CACHE_RESULTADOS` rows are never cached.
 
 **Be realistic about the limits.** A query result is held in memory, so this is
 built for tables in the thousands to low hundreds of thousands of rows, not
@@ -110,7 +122,7 @@ statements into one unit of work — there is no `BEGIN`/`COMMIT`.
 | **PHP extensions** | Only the standard ones (`json`, `pcre`, `hash`, `filter`). **No** mbstring, **no** intl, **no** PDO |
 | **cURL** | Required by **jsonSQLDBadmin** and by the test suite, because the panel talks to the API over HTTP. Not needed by the engine itself |
 | **zip** | Optional. Only for the panel's "ZIP backup" button |
-| **Web server** | Apache, IIS or nginx — see below |
+| **Web server** | Apache, LiteSpeed, IIS or nginx — see below |
 | **Composer** | Optional. Only to install this project; it pulls in nothing else |
 
 ### Web server compatibility
@@ -122,17 +134,20 @@ server:**
 | Server | Status | What you have to do |
 |---|---|---|
 | **Apache** 2.2 / 2.4 | Works out of the box | Nothing. Each folder ships an `.htaccess`. Requires `AllowOverride` to be enabled, which it is on virtually every shared host |
+| **LiteSpeed Enterprise** | Works out of the box | Nothing. It reads the same `.htaccess` files Apache does. See [`litespeed/`](litespeed/) |
 | **IIS** 7+ | Works out of the box | Nothing. Each folder ships a `web.config` |
 | **nginx** | **Needs manual setup** | nginx does not read `.htaccess` or `web.config`. **You must install the rules in [`nginx/`](nginx/)** |
+| **OpenLiteSpeed** | **Needs manual setup** | OpenLiteSpeed applies `.htaccess` only for rewrite rules, and only at startup. **Put the rules in the virtual host as described in [`litespeed/`](litespeed/)** |
 
-> **nginx users, read this.** Without the rules from the [`nginx/`](nginx/)
-> folder, anyone can request
+> **nginx and OpenLiteSpeed users, read this.** Without the rules from the
+> [`nginx/`](nginx/) or [`litespeed/`](litespeed/) folder, anyone can request
 > `https://yourserver/jsonsqldb/data/mydb/customers.json` and download your
 > entire table, unauthenticated. This is not a flaw in nginx or in the project —
 > nginx simply centralises configuration in one file instead of spreading it
-> across directories. The folder contains `jsonsqldb.conf` (ready to include) and
-> `README.md` explaining the three things you need to adjust and how to verify it
-> is working.
+> across directories. The `nginx/` folder contains `jsonsqldb.conf` (ready to
+> include) and a `README.md` explaining the three things you need to adjust and
+> how to verify it is working; `litespeed/README.md` does the same for
+> OpenLiteSpeed, and says what to check on LiteSpeed Enterprise.
 
 ### Folders that need write permission
 
@@ -144,7 +159,7 @@ logs/                    query log and API state (rate limiting, nonces)
 jsonsqldbadmin/datos/    panel users, failed-login counters, audit trail
 ```
 
-On Linux with Apache or nginx:
+On Linux with Apache, LiteSpeed or nginx:
 
 ```bash
 sudo chown -R www-data:www-data data logs jsonsqldbadmin/datos
@@ -206,7 +221,8 @@ credentials like any other. If you ever lose access, delete
 `jsonsqldbadmin/datos/usuarios.json` and the panel will ask you to create the
 administrator again.
 
-If you are on nginx, do [`nginx/`](nginx/) **before** exposing anything.
+If you are on nginx or OpenLiteSpeed, do [`nginx/`](nginx/) or
+[`litespeed/`](litespeed/) **before** exposing anything.
 
 ---
 
@@ -581,7 +597,8 @@ Replace the folder and keep your two configuration files
 table moves to the current layout on the first write to it — a `<table>.rev.json`
 replacing its entry in the old shared `_revs.json` (pre-2.0), index files for its
 primary key and unique constraints (pre-2.0), and the row count and per-part and
-per-index revisions added to `rev.json` (2.5). Revision numbers carry on from
+per-index revisions added to `rev.json` (2.5), and the index split into one
+piece per part plus a `creada` marker in `rev.json` (2.6). Revision numbers carry on from
 where they were rather than restarting, so a stale cache entry cannot be mistaken
 for a current one.
 
@@ -595,7 +612,9 @@ version that wrote it. It is not required — a journal left pending by any earl
 version is recognised and undone by 2.5 as well — but it is the tidier order.
 
 Two configuration constants were removed in 2.5 and are ignored if still
-defined: `JSONSQLDB_JOURNAL_DATOS` and `JSONSQLDB_CACHE_MAX_FILAS`.
+defined: `JSONSQLDB_JOURNAL_DATOS` and `JSONSQLDB_CACHE_MAX_FILAS`. One was
+added in 2.6, `JSONSQLDB_CACHE_RESULTADOS`, with a working default; nothing to
+change unless you want the result cache off.
 
 ### Storage
 
@@ -603,16 +622,19 @@ Each database is a directory. A table is `table.json` with the rows,
 `table.meta.json` with the structure (columns, types, keys, indexes, triggers,
 autoincrement counter), `table.rev.json` with a revision counter and the state of
 the table's parts and indexes, plus `table.partN.json` once it grows past
-`JSONSQLDB_FILAS_POR_PARTE` rows (1,000 by default) and one `table.idx.<n>.json`
-per index. A `_database.json` holds database-level metadata. Everything is
-readable JSON, one row per line, so a file stays diffable and editable by hand.
+`JSONSQLDB_FILAS_POR_PARTE` rows (1,000 by default) and one
+`table.idx.<n>.json` / `table.idx.<n>.partN.json` per index and part. A
+`_database.json` holds database-level metadata. Everything is readable JSON,
+one row per line, so a file stays diffable and editable by hand.
 
 The revision file is per table and not one shared file, because two writes to
 different tables run at the same time: a single shared counter meant whichever
 finished last erased the other's bump and left its cache serving stale rows. It
-records at which revision each part and each index was last written, so a write
-that touches one part of a hundred leaves the other ninety-nine cached and
-leaves untouched indexes alone.
+records at which revision each part and each piece of each index was last
+written, so a write that touches one part of a hundred leaves the other
+ninety-nine cached and leaves the untouched index pieces alone. It also carries
+a random number fixed when the table was first written, so a table dropped and
+recreated under the same name cannot be served the old table's cache.
 
 ### Indexes
 
@@ -629,12 +651,15 @@ speed it up. Index keys follow the engine's own equality, not PHP's: `5`, `'5'`
 and `'5.0'` share a key, so looking up a number still finds the row that stored
 it as text.
 
-An index is **corrected rather than rebuilt** whenever the engine can prove what
-changed: rows appended at the end, rows replaced in place, or rows shifted from
-a position on by a `DELETE`. Any doubt rebuilds it from the rows. An index whose
-content does not change is not rewritten. The revision file says which revision
-each index belongs to; on any mismatch the engine ignores it and scans, so a
-stale or hand-edited index can make a query slower but never wrong.
+An index is stored in **one piece per part of the table** and **corrected
+rather than rebuilt** whenever the engine can prove what changed: rows appended
+at the end, rows replaced in place, or rows shifted from a position on by a
+`DELETE`. Only the pieces that cover the positions concerned are read and
+rewritten; the header of every other piece is checked so a damaged file is
+rebuilt at the next write. Any doubt rebuilds the index from the rows. The
+revision file says which revision each piece belongs to; on any mismatch the
+engine ignores the index and scans, so a stale or hand-edited index can make a
+query slower but never wrong.
 
 ### Concurrency
 
@@ -708,28 +733,32 @@ and streaming do.
 
 #### What the engine does about it
 
-Measured with `php tests/benchmark.php` on 20,000 customers and 30,000 orders,
-2.4.0 against 2.5.0:
+Measured with `php tests/benchmark.php` on 20,000 customers and 30,000 orders
+(on-disk cache), 2.5.0 against 2.6.0, run one after the other:
 
-| | 2.4.0 | 2.5.0 |
+| | 2.5.0 | 2.6.0 |
 |---|---|---|
-| Lookup by primary key | 4.2 ms · 14 MB | **1.9 ms · 7 MB** |
-| Numeric range, no index | 35 ms · 22 MB | **22 ms · 7 MB** |
-| `LIMIT 50`, no filter | 12 ms · 22 MB | **0.5 ms · 5 MB** |
-| `JOIN` aggregated by city | 174 ms · 53 MB | **128 ms · 43 MB** |
-| `INSERT` one row | 96 ms · 32 MB | **18 ms · 13 MB** |
-| `UPDATE` one row by key | 132 ms · 31 MB | **13 ms · 11 MB** |
-| `DELETE` one row by key | 215 ms · 32 MB | **32 ms · 13 MB** |
+| Numeric range, no index | 30 ms · 7 MB | **18 ms · 6 MB** |
+| `GROUP BY` with `SUM` | 33 ms · 15 MB | **21 ms · 6 MB** |
+| `ORDER BY … LIMIT 20` | 45 ms · 18 MB | **21 ms · 6 MB** |
+| `ORDER BY`, whole table | 128 ms · 20 MB | **31 ms · 21 MB** |
+| `JOIN` aggregated by city | 146 ms · 43 MB | **111 ms · 22 MB** |
+| `INSERT` one row | 20 ms · 13 MB | **10 ms · 9 MB** |
+| `DELETE` one row by key | 28 ms · 13 MB | **16 ms · 8 MB** |
 
-On 100,000 rows a one-row `INSERT` went from 742 ms and 140 MB to 104 ms and
-43 MB, and loading the table in batches of 2,000 from 62 s to 4 s.
+On 100,000 rows: `GROUP BY` from 211 ms and 58 MB to 105 ms and 6 MB, `ORDER BY
+… LIMIT 20` from 307 ms and 69 MB to 100 ms and 6 MB, the aggregated `JOIN` from
+927 ms and 193 MB to 676 ms and 85 MB, a one-row `INSERT` from 95 ms and 43 MB
+to 30 ms and 22 MB.
 
-Rows are read one part at a time and filtered as they arrive, indexes decode
-only the parts where the matching rows live, writes read only the parts they
-touch, `LIMIT` is pushed into the read when nothing filters after it,
-`SELECT COUNT(*)` counts lines without decoding a single row, index entries are
-integers rather than one-element lists, and the cache steps aside when memory is
-tight.
+Rows are read one part at a time and filtered as they arrive, and used as they
+come out of the cache without copying; aggregates are accumulated instead of
+collecting the rows of each group; `ORDER BY … LIMIT` keeps only the leading
+rows; a `JOIN` streams and loads only the columns the query names; `WHERE`
+conditions are compiled once; indexes decode only the parts where the matching
+rows live and are stored in pieces so a write rewrites one; `LIMIT` is pushed
+into the read when nothing filters after it; `SELECT COUNT(*)` counts lines
+without decoding a single row; and the cache steps aside when memory is tight.
 
 #### When it still will not fit
 
@@ -786,10 +815,10 @@ touch your data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 138   SELECT execution and collation
+php tests/f2_select.php       → OK: 144   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 52    real requests against the API
-php tests/f5_esquema.php      → OK: 90    SHOW, ALTER, constraints, views, integrity, journal
+php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
@@ -832,6 +861,7 @@ Full documentation lives in [`docs/`](docs/):
 | [`docs/04-api.md`](docs/04-api.md) | The HTTP API, signing, bound parameters, clients |
 | [`docs/05-admin.md`](docs/05-admin.md) | jsonSQLDBadmin |
 | [`nginx/README.md`](nginx/README.md) | nginx setup — **required reading if you use nginx** |
+| [`litespeed/README.md`](litespeed/README.md) | LiteSpeed Enterprise and OpenLiteSpeed — what applies and what to configure |
 
 Source code comments and engine messages are in Spanish.
 

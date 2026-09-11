@@ -411,8 +411,9 @@ or `$cli->aceptarAutofirmado()`.
 5. Run the tests to validate the environment: `php tests/f4_api.php`.
 
 If you cannot move `data/` and `logs/` out of the web root, the bundled
-`.htaccess` and `web.config` already block browser access (nginx: see
-[`../nginx/README.md`](../nginx/README.md)).
+`.htaccess` and `web.config` already block browser access on Apache, LiteSpeed
+Enterprise and IIS (nginx: see [`../nginx/README.md`](../nginx/README.md);
+OpenLiteSpeed: [`../litespeed/README.md`](../litespeed/README.md)).
 
 You can also move both configuration files out of the web root and point at
 them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
@@ -434,9 +435,9 @@ them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 ```
 php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
-php tests/f2_select.php       → OK: 138
+php tests/f2_select.php       → OK: 144
 php tests/f3_escrituras.php   → OK: 59
 php tests/f4_api.php          → OK: 52
-php tests/f5_esquema.php      → OK: 90
+php tests/f5_esquema.php      → OK: 91
 php tests/f5_admin.php        → OK: 119
 ```

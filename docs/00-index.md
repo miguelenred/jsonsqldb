@@ -33,13 +33,16 @@ data/             one folder per database, one .json per table
 | [04-api.md](04-api.md) | HTTP endpoint, HMAC signature, bound parameters, clients |
 | [05-admin.md](05-admin.md) | jsonSQLDBadmin: installation, users, what it can do |
 | [../nginx/README.md](../nginx/README.md) | **Required if you use nginx**: the equivalent of the `.htaccess` rules |
+| [../litespeed/README.md](../litespeed/README.md) | LiteSpeed Enterprise (works as Apache) and OpenLiteSpeed (**needs the rules in the vhost**) |
 
 ## Where to start
 
-**If your server is nginx**, read `nginx/README.md` first. The project ships
-`.htaccess` and `web.config`, which nginx does not read: without the rules in
-that folder, `data/` is reachable from the browser and anyone can download your
-tables.
+**If your server is nginx or OpenLiteSpeed**, read `nginx/README.md` or
+`litespeed/README.md` first. The project ships `.htaccess` and `web.config`,
+which nginx does not read and OpenLiteSpeed only reads in part: without the
+rules in those folders, `data/` is reachable from the browser and anyone can
+download your tables. LiteSpeed Enterprise reads `.htaccess` like Apache and
+needs nothing.
 
 **Install**: upload the folder to the server, run `php configurar.php` to
 create both configuration files with random keys (or `--local` for plain HTTP
@@ -84,10 +87,10 @@ data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 138   SELECT execution and collation
+php tests/f2_select.php       → OK: 144   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 52    real requests against the API
-php tests/f5_esquema.php      → OK: 90    SHOW, ALTER, constraints, views, integrity, journal
+php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking

@@ -88,7 +88,9 @@ function preparar(string $raiz, int $n): Database
 }
 
 /**
- * Los índices tal y como están en disco, sin la revisión (que sube siempre).
+ * Los índices tal y como están en disco, juntando los trozos de cada uno
+ * (uno por parte de la tabla) y sin las revisiones, que suben siempre. Cada
+ * trozo tiene que decir qué parte cubre y solo posiciones de esa parte.
  *
  * @return array<string, array>
  */
@@ -97,8 +99,27 @@ function indicesEnDisco(string $raiz): array
     $out = [];
     foreach ((array)glob("$raiz/x/t.idx.*.json") as $f) {
         $j = json_decode((string)file_get_contents((string)$f), true);
-        unset($j['rev']);
-        $out[basename((string)$f)] = $j;
+        $nombre = preg_replace('/\.part\d+$/', '', basename((string)$f, '.json'));
+        if (!is_array($j) || !is_array($j['keys'] ?? null)) {
+            $out[$nombre . '.json'] = ['error' => 'trozo ilegible: ' . basename((string)$f)];
+            continue;
+        }
+        $parte  = (int)($j['part'] ?? 0);
+        if (preg_match('/\.part(\d+)\.json$/', (string)$f, $m) ? (int)$m[1] !== $parte : $parte !== 1) {
+            $out[$nombre . '.json'] = ['error' => 'trozo mal numerado: ' . basename((string)$f)];
+            continue;
+        }
+        $desde = ($parte - 1) * (int)JSONSQLDB_FILAS_POR_PARTE;
+        $hasta = $desde + (int)JSONSQLDB_FILAS_POR_PARTE;
+        $out[$nombre . '.json'] ??= ['index' => $j['index'], 'columns' => $j['columns'], 'chunk' => $j['chunk'], 'keys' => []];
+        foreach ($j['keys'] as $k => $p) {
+            foreach ((array)$p as $pos) {
+                if ($pos < $desde || $pos >= $hasta) {
+                    $out[$nombre . '.json']['error'] = "posición $pos fuera de su trozo (" . basename((string)$f) . ')';
+                }
+                Indexes::anotar($out[$nombre . '.json']['keys'], (string)$k, (int)$pos);
+            }
+        }
     }
     ksort($out);
     return $out;
@@ -119,10 +140,9 @@ function indicesRehechos(string $raiz): array
     foreach (Indexes::definiciones($meta) as $def) {
         $out["t.idx.{$def['name']}.json"] = [
             'index'   => $def['name'],
-            'table'   => 't',
             'columns' => $def['columns'],
-            'rows'    => count($filas),
             'chunk'   => (int)JSONSQLDB_FILAS_POR_PARTE,
+            'rows'    => count($filas),
             'keys'    => Indexes::construir($filas, $def['columns']),
         ];
     }
@@ -141,8 +161,11 @@ function cuadraConRehacerlo(string $raiz): bool|string
     }
     foreach ($rehechos as $nombre => $esperado) {
         $hay = $enDisco[$nombre];
-        if (($hay['rows'] ?? null) !== $esperado['rows']) {
-            return "$nombre dice tener {$hay['rows']} filas y son {$esperado['rows']}";
+        if (isset($hay['error'])) {
+            return "$nombre: {$hay['error']}";
+        }
+        if ($hay['columns'] !== $esperado['columns'] || $hay['chunk'] !== $esperado['chunk']) {
+            return "$nombre no describe las columnas o el tamaño de parte esperados";
         }
         // Un índice corregido no lleva las claves en el mismo orden que uno
         // rehecho, y una posición suelta se guarda como entero: se normaliza

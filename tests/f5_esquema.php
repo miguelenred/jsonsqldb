@@ -627,6 +627,51 @@ chk('SHOW TRIGGERS de una tabla y de toda la base', function () use ($bd) {
         && count($bd->consultar('SHOW TRIGGERS')) === 1;
 });
 
+echo "\n== Caché de resultados ==\n";
+
+chk('una consulta repetida se sirve de la caché y una escritura la invalida', function () use ($raiz) {
+    $dir = "$raiz/rc";
+    @mkdir($dir, 0775, true);
+    Database::crear('c', $dir);
+    $bd = new Database('c', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a VARCHAR(10), n INTEGER)');
+    $bd->consultar("INSERT INTO t VALUES (1,'x',5),(2,'y',7),(3,'z',9)");
+    $bd->consultar('CREATE VIEW v AS SELECT a FROM t WHERE n > 6');
+    $sql = 'SELECT * FROM t WHERE n > ?';
+
+    $r1 = $bd->consultar($sql, [6]);
+    $r2 = $bd->consultar($sql, [6]);
+    if ($r1 !== $r2 || count($r1) !== 2) { return 'la segunda ejecución no devuelve lo mismo'; }
+    $conApcu = function_exists('apcu_enabled') && apcu_enabled();
+    if (!$conApcu && count(glob("$dir/c/.cache/q.*.cache")) !== 1) { return 'no se guardó el resultado en disco'; }
+
+    $bd->consultar('UPDATE t SET n = 1 WHERE id = 2');
+    if (count($bd->consultar($sql, [6])) !== 1) { return 'tras escribir se sirvió el resultado viejo'; }
+    if (!$conApcu && count(glob("$dir/c/.cache/q.*.cache")) !== 1) { return 'el resultado viejo no se borró del disco'; }
+    if (count($bd->consultar($sql, [0])) !== 3) { return 'otros parámetros son otra consulta'; }
+
+    // Una vista depende de sus tablas: escribir en ellas invalida su resultado
+    if (count($bd->consultar('SELECT * FROM v')) !== 1) { return 'vista'; }
+    $bd->consultar('UPDATE t SET n = 9 WHERE id = 2');
+    if (count($bd->consultar('SELECT * FROM v')) !== 2) { return 'la vista sirvió el resultado viejo'; }
+
+    // Lo que depende del momento no se guarda
+    $a = $bd->consultar('SELECT RANDOM() AS r FROM t LIMIT 1')[0]['r'];
+    $b = $bd->consultar('SELECT RANDOM() AS r FROM t LIMIT 1')[0]['r'];
+    if ($a === $b) { return 'RANDOM() se sirvió de la caché'; }
+
+    // Una tabla borrada y creada de nuevo con el mismo nombre no hereda resultados
+    $bd->consultar('DROP VIEW v');
+    $bd->consultar('DROP TABLE t');
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a VARCHAR(10), n INTEGER)');
+    $bd->consultar("INSERT INTO t VALUES (9,'q',50)");
+    if ($bd->consultar($sql, [0]) !== [['id' => 9, 'a' => 'q', 'n' => 50]]) { return 'la tabla nueva heredó un resultado de la antigua'; }
+    unset($bd);
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    return true;
+});
+
 echo "\n== Limpieza ==\n";
 chk('borrar las bases de prueba', function () use ($raiz) {
     Storage::borrarBase($raiz, 'tienda');

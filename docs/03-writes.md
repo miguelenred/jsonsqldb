@@ -188,15 +188,20 @@ What a write reads and rewrites, since 2.5:
 
 | Statement | Reads | Rewrites |
 |---|---|---|
-| `INSERT` (no triggers, unique constraints indexed) | the last part and the unique indexes | the last part (plus new parts), the indexes, `rev.json` |
-| `UPDATE ... WHERE key = ?` (no triggers) | the parts of the candidate rows | those parts, the indexes whose columns changed, `rev.json` |
-| `DELETE ... WHERE key = ?` (no triggers) | the parts from the first deleted row on | those parts, the indexes, `rev.json` |
-| anything else (`WHERE` without index, triggers, self-referencing key, `UPDATE`/`DELETE` without `WHERE`) | the whole table | the parts that changed, the indexes that changed, `rev.json` |
+| `INSERT` (no triggers, unique constraints indexed) | the last part and the unique indexes | the last part (plus new parts), the last piece of each index, `rev.json` |
+| `UPDATE ... WHERE key = ?` (no triggers) | the parts of the candidate rows | those parts, the matching pieces of the indexes whose columns changed, `rev.json` |
+| `DELETE ... WHERE key = ?` (no triggers) | the parts from the first deleted row on | those parts, the index pieces from that part on, `rev.json` |
+| anything else (`WHERE` without index, triggers, self-referencing key, `UPDATE`/`DELETE` without `WHERE`) | the whole table | the parts that changed, the index pieces that changed, `rev.json` |
 
-Measured on 20,000 rows (`php tests/benchmark.php`, mean of several runs): a
-one-row `INSERT` 18 ms and 13 MB, an `UPDATE` by key 13 ms and 11 MB, a `DELETE`
-by key 32 ms and 13 MB. On 100,000 rows: 104 ms / 43 MB, 47 ms / 33 MB and
-182 ms / 45 MB. The cost grows with the size of the indexes, not of the table.
+An index is stored in one piece per part of the table (2.6), so a write
+rewrites the pieces of the parts it touched and leaves the rest alone.
+
+Measured on 20,000 rows (`php tests/benchmark.php`, mean of several runs,
+on-disk cache): a one-row `INSERT` 10 ms and 9 MB, an `UPDATE` by key 12 ms and
+10 MB, a `DELETE` by key 16 ms and 8 MB. On 100,000 rows: 30 ms / 22 MB,
+34 ms / 22 MB and 53 ms / 21 MB. The cost of a write no longer grows with the
+size of the table nor with the size of its indexes; what remains is checking
+uniqueness against every piece of the unique indexes.
 
 The comparison to keep in mind: one `INSERT` with 2,000 `VALUES` costs about
 the same as one `INSERT` with one row. Batch them.
@@ -218,7 +223,7 @@ the same as one `INSERT` with one row. Batch them.
 ```
 php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
-php tests/f2_select.php       → OK: 138
+php tests/f2_select.php       → OK: 144
 php tests/f3_escrituras.php   → OK: 59
 php tests/f8_indices.php      → OK: 59
 php tests/f10_indices_incrementales.php → OK: 16

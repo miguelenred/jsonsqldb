@@ -58,6 +58,80 @@ final class Select
         return $this->correr($ast)['filas'];
     }
 
+    /**
+     * Tablas de las que depende una consulta —las del FROM, las de sus
+     * subconsultas y las de las vistas que use—, o null si su resultado no
+     * se puede guardar: porque no es determinista (RANDOM(), la fecha de
+     * ahora) o porque nombra una tabla que no existe.
+     *
+     * @return list<string>|null
+     */
+    public static function tablasDe(array $ast, Catalog $cat, int $nivel = 0): ?array
+    {
+        if ($nivel > self::MAX_VISTAS) {
+            return null;
+        }
+        $tablas = [];
+        $cte    = [];
+        if (!self::recorrer($ast, $cat, $nivel, $tablas, $cte)) {
+            return null;
+        }
+        $tablas = array_keys($tablas);
+        sort($tablas, SORT_STRING);
+        return $tablas;
+    }
+
+    /**
+     * Recorre el árbol entero de la consulta anotando las tablas.
+     *
+     * @param array<string,true> $tablas
+     * @param array<string,true> $cte  nombres del WITH, que no son tablas
+     */
+    private static function recorrer(array $n, Catalog $cat, int $nivel, array &$tablas, array &$cte): bool
+    {
+        if (isset($n['with']) && is_array($n['with'])) {
+            foreach (array_keys($n['with']) as $nombre) {
+                $cte[strtolower((string)$nombre)] = true;
+            }
+        }
+        if (($n['k'] ?? null) === 'fn' && isset($n['nombre'])) {
+            $f = strtoupper((string)$n['nombre']);
+            if ($f === 'RANDOM') {
+                return false;
+            }
+            if (in_array($f, ['DATE', 'TIME', 'DATETIME', 'STRFTIME'], true)) {
+                $arg = $f === 'STRFTIME' ? ($n['args'][1] ?? null) : ($n['args'][0] ?? null);
+                if ($arg === null || ($arg['k'] === 'lit' && is_string($arg['v']) && strtolower($arg['v']) === 'now')) {
+                    return false;                     // depende del momento
+                }
+            }
+        }
+        if (($n['tipo'] ?? null) === 'tabla' && isset($n['nombre'])) {
+            $nombre = (string)$n['nombre'];
+            if (!isset($cte[strtolower($nombre)])) {
+                if ($cat->esVista($nombre)) {
+                    $de = self::tablasDe(Parser::analizar((string)$cat->vista($nombre)['sql']), $cat, $nivel + 1);
+                    if ($de === null) {
+                        return false;
+                    }
+                    foreach ($de as $t) {
+                        $tablas[$t] = true;
+                    }
+                } elseif ($cat->existe($nombre)) {
+                    $tablas[$nombre] = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        foreach ($n as $v) {
+            if (is_array($v) && !self::recorrer($v, $cat, $nivel, $tablas, $cte)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** @return array{cols: string[], filas: array} */
     private function correr(array $ast): array
     {
@@ -90,8 +164,8 @@ final class Select
         // sin ORDER BY, sin agrupar, sin agregados y sin DISTINCT.
         $tope = $this->topeTemprano($ast);
 
-        [$filas, $claves] = $this->origenes($ast['from'], $ast['where'], $tope);
-        $mapa = $this->mapaColumnas($claves);
+        [$filas, $fuentes] = $this->origenes($ast, $tope);
+        $mapa = $this->mapaColumnas($fuentes);
         $externa = $this->externo['fila'] ?? [];
         $sub  = function (array $sel, int $sid, array $filaExterna = []) use ($mapa): array {
             // Una subconsulta que no mira hacia fuera da siempre lo mismo: se
@@ -149,39 +223,15 @@ final class Select
             return $c;
         };
 
-        // WHERE
+        // WHERE: las filas que pasan salen según se recorren; las que no, se
+        // sueltan al momento
         if ($ast['where'] !== null) {
             $where = Evaluator::resolver($ast['where'], $mapa, [], $this->externo['mapa'] ?? []);
-
-            // Camino rápido para  columna = valor  y demás comparaciones simples:
-            // evita pasar por el evaluador general en cada una de las filas.
-            $simple = self::comparacionSimple($where);
-
-            $filtradas = [];
-            foreach ($filas as $fila) {
-                if ($simple !== null) {
-                    $v    = $fila[$simple['clave']] ?? null;
-                    $vale = $v === null ? false : self::compara($simple['op'], $v, $simple['valor']);
-                } else {
-                    $vale = Valor::verdadero(Evaluator::evaluar(
-                        $where, ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
-                                 'filaExterna' => $externa])) === true;
-                }
-                if ($vale) {
-                    Memoria::comprobar('el filtrado del WHERE');
-                    $filtradas[] = $fila;
-                    if ($tope !== null && count($filtradas) >= $tope) {
-                        break;                      // ya no hacen falta más
-                    }
-                }
-            }
-            $filas = $filtradas;
-        } elseif (!is_array($filas)) {
-            $filas = iterator_to_array($filas, false);    // el tope ya se aplicó al leer
+            $filas = $this->filtrar($filas, $where, $sub, $conjunto, $externa, $tope);
         }
 
         // Columnas de salida (expandiendo * )
-        $salida = $this->columnasSalida($ast['cols'], $claves, $mapa);
+        $salida = $this->columnasSalida($ast['cols'], $fuentes, $mapa);
 
         // ¿Hay agrupación?
         $grupoExprs = [];
@@ -194,6 +244,7 @@ final class Select
 
         $having = $ast['having'] === null ? null : Evaluator::resolver($ast['having'], $mapa, [], $this->externo['mapa'] ?? []);
 
+
         // Alias de salida utilizables en ORDER BY
         $aliasSalida = [];
         foreach ($salida as $c) {
@@ -204,16 +255,26 @@ final class Select
             $orden[] = ['expr' => Evaluator::resolver($o['expr'], $mapa, $aliasSalida, $this->externo['mapa'] ?? []), 'dir' => $o['dir']];
         }
 
-        // Grupos: cada elemento es [fila representativa, filas del grupo|null]
-        $bloques = $agrupar ? $this->agrupar($filas, $grupoExprs, $sub, $conjunto) : null;
-
         // Proyección + claves de ordenación
         $resultado = [];
         $clavesOrden = [];
 
-        if ($bloques !== null) {
-            foreach ($bloques as $grupo) {
-                $ctx = ['fila' => $grupo[0] ?? [], 'grupo' => $grupo, 'sub' => $sub,
+        if ($agrupar) {
+            // Los agregados de la salida, el HAVING y el ORDER BY se acumulan
+            // recorriendo las filas una vez; después cada grupo es su fila
+            // representativa y los resultados de sus acumuladores
+            $defs = [];
+            foreach ($salida as $i => $c) {
+                $salida[$i]['expr'] = Evaluator::marcarAgregados($c['expr'], $defs);
+            }
+            if ($having !== null) {
+                $having = Evaluator::marcarAgregados($having, $defs);
+            }
+            foreach ($orden as $i => $o) {
+                $orden[$i]['expr'] = Evaluator::marcarAgregados($o['expr'], $defs);
+            }
+            foreach ($this->agrupar($filas, $grupoExprs, $defs, $sub, $conjunto, $externa) as [$fila, $agregados]) {
+                $ctx = ['fila' => $fila, 'agregados' => $agregados, 'sub' => $sub,
                         'conjunto' => $conjunto, 'filaExterna' => $externa];
                 if ($having !== null && Valor::verdadero(Evaluator::evaluar($having, $ctx)) !== true) {
                     continue;
@@ -225,27 +286,77 @@ final class Select
                 Memoria::comprobar('la construcción del resultado');
                 $resultado[] = $fila;
                 if ($orden !== []) {
-                    $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
+                    $this->anotarClaves($clavesOrden, $orden, $ctx, $fila);
                 }
             }
         } else {
-            // Se va soltando cada fila de origen según se proyecta. Si no, la
-            // tabla leída y el resultado conviven enteros hasta el final del
-            // bucle, o sea dos copias de lo mismo en el pico.
-            foreach (array_keys($filas) as $k) {
-                Memoria::comprobar('la construcción del resultado');
-                $ctx  = ['fila' => $filas[$k], 'sub' => $sub, 'conjunto' => $conjunto,
-                         'filaExterna' => $externa];
+            // Una columna de salida que es una columna de la tabla se copia sin
+            // pasar por el evaluador, que es lo corriente en un SELECT *
+            $directas = [];
+            foreach ($salida as $i => $c) {
+                $directas[$i] = $c['expr']['k'] === 'col' && isset($c['expr']['clave']) && !isset($c['expr']['externa'])
+                    ? $c['expr']['clave'] : null;
+            }
+            $proyectar = static function (array $origen, array $ctx) use ($salida, $directas): array {
                 $fila = [];
-                foreach ($salida as $c) {
-                    $fila[$c['nombre']] = Evaluator::evaluar($c['expr'], $ctx);
+                foreach ($salida as $i => $c) {
+                    $fila[$c['nombre']] = $directas[$i] !== null
+                        ? ($origen[$directas[$i]] ?? null)
+                        : Evaluator::evaluar($c['expr'], $ctx);
                 }
-                unset($filas[$k]);
-                $resultado[] = $fila;
-                // Sin ORDER BY no hay nada que ordenar: construir las claves
-                // sería un array más por fila para tirarlo enseguida
-                if ($orden !== []) {
-                    $clavesOrden[] = $this->clavesOrden($orden, $ctx, $fila);
+                return $fila;
+            };
+
+            // Con ORDER BY sobre columnas de la tabla se ordena antes de
+            // proyectar: con LIMIT solo se construyen las filas que salen, y
+            // solo esas viven en memoria; sin él la tabla y el resultado no
+            // conviven enteros
+            $clavesDirectas = $orden === [] || $ast['distinct'] ? null : $this->ordenDirecto($orden, $salida);
+            if ($clavesDirectas !== null) {
+                $cuantas = self::cuantasHacenFalta($ast);
+                if ($cuantas !== null) {
+                    [$filas, $indices] = self::primerasDe($filas, $clavesDirectas, $orden, $cuantas);
+                } else {
+                    if (!is_array($filas)) {
+                        $filas = iterator_to_array($filas, false);
+                    }
+                    $clavesOrden = array_fill(0, count($clavesDirectas), []);
+                    foreach ($filas as $k => $fila) {
+                        foreach ($clavesDirectas as $i => $clave) {
+                            $clavesOrden[$i][$k] = $fila[$clave] ?? null;
+                        }
+                    }
+                    $indices = self::ordenNativo($orden, $clavesOrden, array_keys($filas))
+                            ?? self::todasOrdenadas(array_keys($filas), self::comparadorDe($orden, $clavesOrden));
+                    $clavesOrden = [];
+                }
+                foreach ($indices as $k) {
+                    Memoria::comprobar('la construcción del resultado');
+                    $resultado[] = $proyectar($filas[$k], ['fila' => $filas[$k], 'sub' => $sub,
+                                                            'conjunto' => $conjunto, 'filaExterna' => $externa]);
+                    unset($filas[$k]);                       // cada fila de origen se usa una vez
+                }
+                unset($filas);
+                $orden = [];                                 // ya está ordenado
+            } else {
+                if (!is_array($filas)) {
+                    $filas = iterator_to_array($filas, false);
+                }
+                // Se va soltando cada fila de origen según se proyecta. Si no, la
+                // tabla leída y el resultado conviven enteros hasta el final del
+                // bucle, o sea dos copias de lo mismo en el pico.
+                foreach (array_keys($filas) as $k) {
+                    Memoria::comprobar('la construcción del resultado');
+                    $ctx  = ['fila' => $filas[$k], 'sub' => $sub, 'conjunto' => $conjunto,
+                             'filaExterna' => $externa];
+                    $fila = $proyectar($filas[$k], $ctx);
+                    unset($filas[$k]);
+                    $resultado[] = $fila;
+                    // Sin ORDER BY no hay nada que ordenar: construir las claves
+                    // sería un array más por fila para tirarlo enseguida
+                    if ($orden !== []) {
+                        $this->anotarClaves($clavesOrden, $orden, $ctx, $fila);
+                    }
                 }
             }
         }
@@ -254,7 +365,7 @@ final class Select
         if ($ast['distinct']) {
             $vistos = [];
             $r = [];
-            $k = [];
+            $k = array_fill(0, count($orden), []);
             foreach ($resultado as $i => $fila) {
                 $clave = '';
                 foreach ($fila as $v) {
@@ -265,8 +376,8 @@ final class Select
                 }
                 $vistos[$clave] = true;
                 $r[] = $fila;
-                if ($orden !== []) {
-                    $k[] = $clavesOrden[$i];
+                foreach ($k as $j => $_) {
+                    $k[$j][] = $clavesOrden[$j][$i];
                 }
             }
             $resultado   = $r;
@@ -275,31 +386,8 @@ final class Select
 
         // ORDER BY
         if ($orden !== []) {
-            $comparar = static function (int $a, int $b) use ($clavesOrden, $orden): int {
-                foreach ($orden as $i => $o) {
-                    $c = Valor::compararOrden($clavesOrden[$a][$i], $clavesOrden[$b][$i]);
-                    if ($c !== 0) {
-                        return $o['dir'] === 'DESC' ? -$c : $c;
-                    }
-                }
-                return $a <=> $b;                        // orden estable
-            };
-
-            // Con LIMIT no hace falta ordenarlo todo: basta con quedarse con las
-            // primeras. Ordenar un millón de filas para devolver diez es tirar
-            // el trabajo, y además obliga a tener el resultado entero ordenado
-            // en memoria a la vez.
-            //
-            // El desempate por posición original es el mismo que usa el orden
-            // estable de arriba, así que las filas que salen y su orden son
-            // EXACTAMENTE los mismos que ordenando entero y cortando después.
-            $cuantas = self::cuantasHacenFalta($ast);
-            $indices = $cuantas !== null && $cuantas < count($resultado)
-                ? self::primeras(array_keys($resultado), $cuantas, $comparar)
-                : self::todasOrdenadas(array_keys($resultado), $comparar);
-
             $ordenadas = [];
-            foreach ($indices as $i) {
+            foreach ($this->indicesOrdenados($ast, $orden, $clavesOrden, array_keys($resultado)) as $i) {
                 $ordenadas[] = $resultado[$i];
             }
             $resultado = $ordenadas;
@@ -315,6 +403,243 @@ final class Select
             $cols[] = $c['nombre'];
         }
         return ['cols' => $cols, 'filas' => $resultado];
+    }
+
+    /**
+     * Claves de ordenación que son columnas de la tabla —directamente o a
+     * través de un alias de salida que lo es—, o null si alguna es otra cosa.
+     *
+     * @return list<string>|null
+     */
+    private function ordenDirecto(array $orden, array $salida): ?array
+    {
+        $porAlias = [];
+        foreach ($salida as $c) {
+            $porAlias[$c['nombre']] = $c['expr'];
+        }
+        $claves = [];
+        foreach ($orden as $o) {
+            $e = $o['expr'];
+            if ($e['k'] === 'col' && isset($e['alias'])) {
+                $e = $porAlias[$e['alias']] ?? $e;
+            }
+            if ($e['k'] !== 'col' || !isset($e['clave']) || isset($e['externa'])) {
+                return null;
+            }
+            $claves[] = $e['clave'];
+        }
+        return $claves;
+    }
+
+    /**
+     * Índices de las filas en el orden pedido. Con LIMIT no hace falta
+     * ordenarlo todo: basta con quedarse con las primeras. Ordenar un millón
+     * de filas para devolver diez es tirar el trabajo, y además obliga a tener
+     * el resultado entero ordenado en memoria a la vez. El desempate por
+     * posición original es el mismo que usa el orden estable, así que las filas
+     * que salen y su orden son EXACTAMENTE los mismos que ordenando entero y
+     * cortando después.
+     *
+     * Las claves van por columnas —una lista por expresión del ORDER BY,
+     * indexada por fila— y no por filas: un array por fila para guardar un
+     * valor costaba diez veces lo que el valor.
+     *
+     * @param array<int, array<int, mixed>> $clavesOrden
+     * @param list<int>               $indices  índices de las filas a ordenar
+     * @return list<int>
+     */
+    private function indicesOrdenados(array $ast, array $orden, array $clavesOrden, array $indices): array
+    {
+        $cuantas = self::cuantasHacenFalta($ast);
+        if ($cuantas !== null && $cuantas < count($indices)) {
+            return self::primeras($indices, $cuantas, self::comparadorDe($orden, $clavesOrden));
+        }
+        return self::ordenNativo($orden, $clavesOrden, $indices)
+            ?? self::todasOrdenadas($indices, self::comparadorDe($orden, $clavesOrden));
+    }
+
+    /**
+     * Ordena con array_multisort() cuando cada clave es toda de números o
+     * toda de textos: sin llamar a un comparador de PHP por cada pareja, que
+     * es lo que hace lento ordenar decenas de miles de filas. El resultado es
+     * el mismo que con compararOrden(): los NULL van primero (últimos con
+     * DESC), los números como números, y los textos por su clave de colación
+     * desempatando byte a byte y después por posición. Con una clave mixta,
+     * o con textos que parecen números, se devuelve null y se ordena como
+     * siempre.
+     *
+     * @param array<int, array<int, mixed>> $clavesOrden
+     * @param list<int>               $indices
+     * @return list<int>|null
+     */
+    private static function ordenNativo(array $orden, array &$clavesOrden, array $indices): ?array
+    {
+        // Qué hay en cada columna. Se decide antes de tocar nada: si alguna no
+        // sirve, las claves tienen que seguir enteras para compararOrden()
+        $tipos = [];
+        foreach ($orden as $i => $o) {
+            $numeros = $textos = $nulos = 0;
+            foreach ($clavesOrden[$i] as $v) {
+                if ($v === null) {
+                    $nulos++;
+                } elseif (is_int($v) || is_float($v)) {
+                    $numeros++;
+                } elseif (is_string($v) && !is_numeric(trim($v))) {
+                    $textos++;
+                } else {
+                    return null;                         // booleanos, textos numéricos...
+                }
+            }
+            if ($numeros > 0 && $textos > 0) {
+                return null;                             // mezcla: solo compararOrden() sabe
+            }
+            $tipos[$i] = [$textos > 0, $nulos > 0];
+        }
+
+        // Una sola clave numérica: asort() en su sitio, sin más arrays. Es el
+        // caso corriente (ORDER BY id, por fecha, por importe) y el más barato
+        if (count($orden) === 1 && !$tipos[0][0]) {
+            $col = $clavesOrden[0];
+            unset($clavesOrden[0]);
+            $nulos = [];
+            if ($tipos[0][1]) {
+                foreach ($col as $k => $v) {
+                    if ($v === null) {
+                        $nulos[] = $k;
+                        unset($col[$k]);
+                    }
+                }
+            }
+            $orden[0]['dir'] === 'DESC' ? arsort($col, SORT_NUMERIC) : asort($col, SORT_NUMERIC);
+            $indices = array_keys($col);
+            unset($col);
+            // Los NULL van primero; con DESC, los últimos
+            return $orden[0]['dir'] === 'DESC' ? array_merge($indices, $nulos) : array_merge($nulos, $indices);
+        }
+
+        // Las columnas se sacan de $clavesOrden según se usan, para que
+        // array_multisort() las ordene en su sitio sin copiarlas
+        $args = [];
+        foreach ($orden as $i => $o) {
+            [$texto, $hayNulos] = $tipos[$i];
+            $col = $clavesOrden[$i];
+            unset($clavesOrden[$i]);
+            $dir = $o['dir'] === 'DESC' ? SORT_DESC : SORT_ASC;
+            if ($hayNulos) {
+                $nulos = array_fill(0, count($col), 1);
+                foreach ($col as $k => $v) {
+                    if ($v === null) {
+                        $nulos[$k] = 0;
+                        $col[$k]   = $texto ? '' : 0;
+                    }
+                }
+                $args[] = $nulos;
+                $args[] = $dir;
+                $args[] = SORT_NUMERIC;
+            }
+            if ($texto && Collation::activa()) {
+                $claves = [];
+                foreach ($col as $k => $v) {
+                    $claves[$k] = $v === '' ? '' : Collation::clave($v);
+                }
+                $args[] = $claves;
+                $args[] = $dir;
+                $args[] = SORT_STRING;
+            }
+            $args[] = $col;
+            $args[] = $dir;
+            $args[] = $texto ? SORT_STRING : SORT_NUMERIC;
+        }
+        $args[] = &$indices;                              // el desempate final: la posición
+        $args[] = SORT_ASC;
+        $args[] = SORT_NUMERIC;
+        array_multisort(...$args);
+        return $indices;
+    }
+
+    /**
+     * Comparador de dos índices de fila según las claves de ordenación (por
+     * columnas). Las claves se toman por referencia: en la ordenación en
+     * streaming van cambiando mientras se compara.
+     *
+     * @param array<int, array<int, mixed>> $clavesOrden
+     */
+    private static function comparadorDe(array $orden, array &$clavesOrden): \Closure
+    {
+        return static function (int $a, int $b) use (&$clavesOrden, $orden): int {
+            foreach ($orden as $i => $o) {
+                $c = Valor::compararOrden($clavesOrden[$i][$a], $clavesOrden[$i][$b]);
+                if ($c !== 0) {
+                    return $o['dir'] === 'DESC' ? -$c : $c;
+                }
+            }
+            return $a <=> $b;                        // orden estable
+        };
+    }
+
+    /**
+     * Las $cuantas primeras filas según el ORDER BY, recorriendo el origen
+     * una vez y sin tenerlo entero: en memoria solo viven las filas que van
+     * ganando. Devuelve esas filas por su índice de llegada y los índices en
+     * el orden pedido. Mismo resultado que ordenar todo y cortar (ver
+     * primeras()).
+     *
+     * @param iterable<array> $filas
+     * @param list<string>    $claves  columna de cada expresión del ORDER BY
+     * @return array{0: array<int, array>, 1: list<int>}
+     */
+    private static function primerasDe(iterable $filas, array $claves, array $orden, int $cuantas): array
+    {
+        if ($cuantas <= 0) {
+            return [[], []];
+        }
+        $clavesOrden = array_fill(0, count($claves), []);
+        $comparar    = self::comparadorDe($orden, $clavesOrden);
+        $monton      = new class ($comparar) extends \SplHeap {
+            /** @var callable */
+            private $comparar;
+
+            public function __construct(callable $comparar)
+            {
+                $this->comparar = $comparar;
+            }
+
+            protected function compare($a, $b): int
+            {
+                return ($this->comparar)($a, $b);
+            }
+        };
+        $vivas = [];
+        $k     = 0;
+        foreach ($filas as $fila) {
+            foreach ($claves as $i => $clave) {
+                $clavesOrden[$i][$k] = $fila[$clave] ?? null;
+            }
+            if ($monton->count() < $cuantas) {
+                $vivas[$k] = $fila;
+                $monton->insert($k);
+            } elseif ($comparar($k, $monton->top()) < 0) {
+                $fuera = $monton->extract();
+                unset($vivas[$fuera]);
+                foreach ($clavesOrden as $i => $_) {
+                    unset($clavesOrden[$i][$fuera]);
+                }
+                $vivas[$k] = $fila;
+                $monton->insert($k);
+            } else {
+                foreach ($clavesOrden as $i => $_) {
+                    unset($clavesOrden[$i][$k]);
+                }
+            }
+            $k++;
+            Memoria::comprobar('la ordenación');
+        }
+        $elegidos = [];
+        foreach ($monton as $i) {
+            $elegidos[] = $i;
+        }
+        usort($elegidos, $comparar);              // son pocas: ordenarlas es barato
+        return [$vivas, $elegidos];
     }
 
     /**
@@ -696,9 +1021,18 @@ final class Select
     // Orígenes de datos y JOIN
     // ==================================================================
 
-    /** @return array{0: iterable<array>, 1: string[]} filas planas y lista de claves "alias.columna" */
-    private function origenes(array $from, ?array $where = null, ?int $tope = null): array
+    /**
+     * Las filas del FROM y sus columnas. Cada columna es [alias, nombre,
+     * clave], donde la clave es con la que está en la fila: el nombre a secas
+     * si hay un solo origen, y `alias.nombre` si hay varios, para que dos
+     * tablas con una columna igual no se pisen.
+     *
+     * @return array{0: iterable<array>, 1: list<array{0: string, 1: string, 2: string}>}
+     */
+    private function origenes(array $ast, ?int $tope = null): array
     {
+        $from  = $ast['from'];
+        $where = $ast['where'];
         if ($from === []) {
             return [[[]], []];                            // SELECT sin FROM: una fila vacía
         }
@@ -720,27 +1054,71 @@ final class Select
         // el WHERE va descartando filas según llegan y en memoria solo quedan
         // las que pasan. Los demás son el lado interno del cruce y hacen falta
         // enteros.
-        $primero = $this->cargar($from[0], $predicados, $topeLectura);
+        $varios  = count($from) > 1;
+        $usadas  = $varios ? self::columnasUsadas($ast) : null;
+        $primero = $this->cargar($from[0], $predicados, $topeLectura, $varios, $usadas);
         $filas   = $primero['filas'];
-        $claves  = $primero['claves'];
+        $fuentes = $primero['fuentes'];
 
         for ($i = 1, $n = count($from); $i < $n; $i++) {
-            $der          = $this->cargar($from[$i], $predicados);
+            $der          = $this->cargar($from[$i], $predicados, null, true, $usadas);
             $der['filas'] = iterator_to_array($der['filas'], false);
-            $filas  = $this->unir($filas, $claves, $der, $from[$i]);
-            $claves = array_merge($claves, $der['claves']);
+            $filas   = $this->unir($filas, $fuentes, $der, $from[$i]);
+            $fuentes = array_merge($fuentes, $der['fuentes']);
         }
-        return [$filas, $claves];
+        return [$filas, $fuentes];
     }
 
     /**
-     * Carga una tabla o subconsulta como filas planas con prefijo de alias.
-     * Las filas salen de un generador: se aplanan según se recorren, así que
-     * la tabla leída y la aplanada no conviven enteras en memoria.
+     * Columnas que nombra la consulta, por alias (en minúsculas) y sin
+     * cualificar, para cargar de cada origen de un cruce solo las que se
+     * usan. Se recorre el árbol entero, subconsultas incluidas: de más nunca
+     * hace daño. Null si hay un `*` sin tabla, que las quiere todas.
      *
-     * @return array{alias: string, cols: list<string>, claves: list<string>, filas: \Generator}
+     * @return array{0: array<string,array<string,true>>, 1: array<string,true>, 2: array<string,true>}|null
+     *         [por alias, sin cualificar, alias con `alias.*`]
      */
-    private function cargar(array $o, array $predicados = [], ?int $tope = null): array
+    private static function columnasUsadas(array $ast): ?array
+    {
+        $porAlias = [];
+        $sueltas  = [];
+        $todas    = [];
+        $ok = self::recorrerColumnas($ast, $porAlias, $sueltas, $todas);
+        return $ok ? [$porAlias, $sueltas, $todas] : null;
+    }
+
+    private static function recorrerColumnas(array $n, array &$porAlias, array &$sueltas, array &$todas): bool
+    {
+        if (!empty($n['star'])) {
+            if (($n['tabla'] ?? null) === null) {
+                return false;
+            }
+            $todas[strtolower((string)$n['tabla'])] = true;
+        } elseif (($n['k'] ?? null) === 'col' && isset($n['nombre'])) {
+            if (($n['tabla'] ?? null) === null) {
+                $sueltas[strtolower((string)$n['nombre'])] = true;
+            } else {
+                $porAlias[strtolower((string)$n['tabla'])][strtolower((string)$n['nombre'])] = true;
+            }
+        }
+        foreach ($n as $v) {
+            if (is_array($v) && !self::recorrerColumnas($v, $porAlias, $sueltas, $todas)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Carga una tabla o subconsulta. Con $prefijar, cada fila se copia con
+     * las claves `alias.columna`, que es lo que necesita un cruce, y solo
+     * con las columnas que la consulta usa ($usadas); sin él, las filas salen
+     * tal como están en la tabla, sin copiarlas, y en memoria son las mismas
+     * que ya tiene la caché.
+     *
+     * @return array{fuentes: list<array{0: string, 1: string, 2: string}>, filas: iterable<array>}
+     */
+    private function cargar(array $o, array $predicados, ?int $tope, bool $prefijar, ?array $usadas): array
     {
         if ($o['tipo'] === 'sub') {
             $r      = $this->correr($o['select']);
@@ -793,12 +1171,22 @@ final class Select
                    ?? ($this->lector)($nombre);
         }
 
-        $claves = [];
-        foreach ($cols as $c) {
-            $claves[] = $alias . '.' . $c;
+        if ($prefijar && $usadas !== null && !isset($usadas[2][strtolower($alias)])) {
+            [$porAlias, $sueltas] = $usadas;
+            $suyas = $porAlias[strtolower($alias)] ?? [];
+            $cols  = array_values(array_filter($cols,
+                static fn(string $c): bool => isset($suyas[strtolower($c)]) || isset($sueltas[strtolower($c)])));
         }
-        return ['alias' => $alias, 'cols' => $cols, 'claves' => $claves,
-                'filas' => self::aplanar($origen, $cols, $claves, $tope)];
+        $fuentes = [];
+        foreach ($cols as $c) {
+            $fuentes[] = [$alias, $c, $prefijar ? $alias . '.' . $c : $c];
+        }
+        if ($prefijar) {
+            $origen = self::aplanar($origen, $cols, $alias);
+        } elseif ($tope !== null) {
+            $origen = self::acotar($origen, $tope);
+        }
+        return ['fuentes' => $fuentes, 'filas' => $origen];
     }
 
     /**
@@ -806,18 +1194,13 @@ final class Select
      *
      * @param iterable<array> $origen
      * @param list<string>    $cols
-     * @param list<string>    $claves
      */
-    private static function aplanar(iterable $origen, array $cols, array $claves, ?int $tope): \Generator
+    private static function aplanar(iterable $origen, array $cols, string $alias): \Generator
     {
-        $n = 0;
         foreach ($origen as $fila) {
-            if ($tope !== null && $n++ >= $tope) {
-                return;
-            }
             $plana = [];
-            foreach ($cols as $i => $c) {
-                $plana[$claves[$i]] = $fila[$c] ?? null;
+            foreach ($cols as $c) {
+                $plana[$alias . '.' . $c] = $fila[$c] ?? null;
             }
             Memoria::comprobar('la carga de la tabla');
             yield $plana;
@@ -825,28 +1208,48 @@ final class Select
     }
 
     /**
-     * Une el acumulado de la izquierda con un nuevo origen.
+     * Las filas tal cual, parando en el tope.
+     *
+     * @param iterable<array> $origen
+     */
+    private static function acotar(iterable $origen, int $tope): \Generator
+    {
+        $n = 0;
+        foreach ($origen as $fila) {
+            if ($n++ >= $tope) {
+                return;
+            }
+            yield $fila;
+        }
+    }
+
+    /**
+     * Une el acumulado de la izquierda con un nuevo origen. Las filas
+     * cruzadas salen según se producen: quien las consume —el WHERE, la
+     * agrupación— no necesita el cruce entero en memoria.
      *
      * @param iterable<array> $izq
+     * @return \Generator<int, array>
      */
-    private function unir(iterable $izq, array $clavesIzq, array $der, array $o): array
+    private function unir(iterable $izq, array $fuentesIzq, array $der, array $o): \Generator
     {
-        $tipo = $o['join'] ?? 'CROSS';
+        $tipo      = $o['join'] ?? 'CROSS';
+        $clavesIzq = array_column($fuentesIzq, 2);
+        $clavesDer = array_column($der['fuentes'], 2);
 
         if ($tipo === 'CROSS' || $o['on'] === null) {
-            $salida = [];
             foreach ($izq as $a) {
                 foreach ($der['filas'] as $b) {
                     Memoria::comprobar('el producto cartesiano');
-                    $salida[] = $a + $b;
+                    yield $a + $b;
                 }
             }
-            return $salida;
+            return;
         }
 
-        $mapa = $this->mapaColumnas(array_merge($clavesIzq, $der['claves']));
+        $mapa = $this->mapaColumnas(array_merge($fuentesIzq, $der['fuentes']));
         $on   = Evaluator::resolver($o['on'], $mapa, [], $this->externo['mapa'] ?? []);
-        [$pares, $resto] = $this->igualdades($on, array_flip($der['claves']));
+        [$pares, $resto] = $this->igualdades($on, array_flip($clavesDer));
 
         // RIGHT JOIN = mismo algoritmo con los papeles cambiados. El lado
         // interno se recorre varias veces y se indexa por posición: entero.
@@ -862,7 +1265,7 @@ final class Select
             $clavesExt[] = $derecho ? $kd : $ki;
             $clavesInt[] = $derecho ? $ki : $kd;
         }
-        $nulos = array_fill_keys($derecho ? $clavesIzq : $der['claves'], null);
+        $nulos = array_fill_keys($derecho ? $clavesIzq : $clavesDer, null);
         $sub   = function (array $sel, int $sid): array {
             return $this->subs[$sid] ??= $this->correr($sel)['filas'];
         };
@@ -886,7 +1289,16 @@ final class Select
             $indice = [];
             foreach ($internas as $i => $fila) {
                 $clave = $this->claveHash($fila, $clavesInt);
-                if ($clave !== null) {
+                if ($clave === null) {
+                    continue;
+                }
+                // Una posición sola se guarda como entero: en una clave única
+                // son todas, y una lista de uno por fila cuesta el triple
+                if (!isset($indice[$clave])) {
+                    $indice[$clave] = $i;
+                } elseif (is_int($indice[$clave])) {
+                    $indice[$clave] = [$indice[$clave], $i];
+                } else {
                     $indice[$clave][] = $i;
                 }
             }
@@ -902,7 +1314,6 @@ final class Select
         // de veinte mil claves para no usarlo.
         $todas = $indice === null ? array_keys($internas) : [];
 
-        $salida = [];
         foreach ($externas as $ext) {
             if ($indice === null) {
                 $candidatas = $todas;
@@ -910,6 +1321,9 @@ final class Select
                 // Una sola llamada: claveHash() recorre la fila y no es gratis
                 $clave      = $this->claveHash($ext, $clavesExt);
                 $candidatas = $clave === null ? [] : ($indice[$clave] ?? []);
+                if (is_int($candidatas)) {
+                    $candidatas = [$candidatas];
+                }
             }
 
             $encontrada = false;
@@ -922,14 +1336,14 @@ final class Select
                     continue;
                 }
                 Memoria::comprobar('el JOIN');
-                $salida[]   = $fila;
+                yield $fila;
                 $encontrada = true;
                 if ($completo) {
                     $casadas[$i] = true;
                 }
             }
             if (!$encontrada && $tipo !== 'INNER') {
-                $salida[] = $ext + $nulos;
+                yield $ext + $nulos;
             }
         }
 
@@ -941,12 +1355,10 @@ final class Select
             $nulosExt = array_fill_keys($clavesIzq, null);
             foreach ($internas as $i => $int) {
                 if (!isset($casadas[$i])) {
-                    $salida[] = $int + $nulosExt;
+                    yield $int + $nulosExt;
                 }
             }
         }
-
-        return $salida;
     }
 
     /** Clave de igualdad de una fila; null si algún valor es NULL (NULL nunca casa). */
@@ -1006,13 +1418,17 @@ final class Select
     // Columnas, agrupación y orden
     // ==================================================================
 
-    /** 'alias.col' => 'alias.col', y 'col' => 'alias.col' (false si es ambigua) */
-    private function mapaColumnas(array $claves): array
+    /**
+     * 'alias.col' => clave, y 'col' => clave (false si es ambigua).
+     *
+     * @param list<array{0: string, 1: string, 2: string}> $fuentes
+     */
+    private function mapaColumnas(array $fuentes): array
     {
         $mapa = [];
-        foreach ($claves as $clave) {
-            $mapa[strtolower($clave)] = $clave;
-            $corto = strtolower(substr($clave, strrpos($clave, '.') + 1));
+        foreach ($fuentes as [$alias, $col, $clave]) {
+            $mapa[strtolower($alias . '.' . $col)] = $clave;
+            $corto = strtolower($col);
             if (array_key_exists($corto, $mapa)) {
                 if ($mapa[$corto] !== $clave) {
                     $mapa[$corto] = false;
@@ -1024,8 +1440,12 @@ final class Select
         return $mapa;
     }
 
-    /** Expande * y calcula el nombre de salida de cada columna. */
-    private function columnasSalida(array $cols, array $claves, array $mapa): array
+    /**
+     * Expande * y calcula el nombre de salida de cada columna.
+     *
+     * @param list<array{0: string, 1: string, 2: string}> $fuentes
+     */
+    private function columnasSalida(array $cols, array $fuentes, array $mapa): array
     {
         $salida = [];
         $usados = [];
@@ -1043,10 +1463,7 @@ final class Select
         foreach ($cols as $c) {
             if (!empty($c['star'])) {
                 $encontradas = 0;
-                foreach ($claves as $clave) {
-                    $punto = strrpos($clave, '.');
-                    $alias = substr($clave, 0, $punto);
-                    $corto = substr($clave, $punto + 1);
+                foreach ($fuentes as [$alias, $corto, $clave]) {
                     if ($c['tabla'] !== null && strcasecmp($alias, $c['tabla']) !== 0) {
                         continue;
                     }
@@ -1083,36 +1500,150 @@ final class Select
         return false;
     }
 
-    /** @return array<int,array> lista de grupos; cada grupo es una lista de filas */
-    private function agrupar(array $filas, array $exprs, callable $sub, callable $conjunto): array
+    /**
+     * Las filas que cumplen el WHERE, según se recorren. Con una comparación
+     * simple o una condición compilable no se pasa por el evaluador general
+     * en cada fila, que es lo que domina el coste en tablas grandes.
+     *
+     * @param iterable<array> $filas
+     */
+    private function filtrar(iterable $filas, array $where, callable $sub, callable $conjunto, array $externa, ?int $tope): \Generator
     {
-        if ($exprs === []) {
-            return [$filas];        // agregación total: una sola fila aunque no haya datos
-        }
-        $grupos = [];
+        $simple    = self::comparacionSimple($where);
+        $compilado = $simple === null ? Evaluator::compilar($where) : null;
+        $n = 0;
         foreach ($filas as $fila) {
-            $ctx   = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
-                      'filaExterna' => $this->externo['fila'] ?? []];
-            $clave = '';
-            foreach ($exprs as $e) {
-                $clave .= Valor::clave(Evaluator::evaluar($e, $ctx)) . "\0";
+            if ($simple !== null) {
+                $v    = $fila[$simple['clave']] ?? null;
+                $vale = $v === null ? false : self::compara($simple['op'], $v, $simple['valor']);
+            } elseif ($compilado !== null) {
+                $vale = Valor::verdadero($compilado($fila)) === true;
+            } else {
+                $vale = Valor::verdadero(Evaluator::evaluar(
+                    $where, ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
+                             'filaExterna' => $externa])) === true;
             }
-            $grupos[$clave][] = $fila;
+            if ($vale) {
+                Memoria::comprobar('el filtrado del WHERE');
+                yield $fila;
+                if ($tope !== null && ++$n >= $tope) {
+                    return;                             // ya no hacen falta más
+                }
+            }
         }
-        return array_values($grupos);
     }
 
-    private function clavesOrden(array $orden, array $ctx, array $proyectada): array
+    /**
+     * Agrupa las filas acumulando sus agregados, sin guardar las filas: de
+     * cada grupo queda su primera fila —contra la que se evalúan las columnas
+     * sin agregar— y el resultado de cada acumulador de $defs.
+     *
+     * COUNT, SUM, AVG, MIN y MAX sin DISTINCT se acumulan sobre la marcha con
+     * el mismo cálculo que hace Functions::agregado() sobre la lista entera.
+     * Con DISTINCT, y en GROUP_CONCAT, se guardan los valores (solo los de esa
+     * columna) y se delega en él al final.
+     *
+     * @param iterable<array>      $filas
+     * @param array<string,array>  $defs   ver Evaluator::marcarAgregados()
+     * @return list<array{0: array, 1: array<string,mixed>}> [fila representativa, agregados]
+     */
+    private function agrupar(iterable $filas, array $exprs, array $defs, callable $sub, callable $conjunto, array $externa): array
     {
-        if ($orden === []) {
-            return [];
+        $args = [];
+        foreach ($defs as $id => $d) {
+            $args[$id] = $d['arg'] === null ? null : (Evaluator::compilar($d['arg']) ?? $d['arg']);
         }
-        $ctx['fila'] = $ctx['fila'] + $proyectada;        // permite ORDER BY por alias de salida
         $claves = [];
-        foreach ($orden as $o) {
-            $claves[] = Evaluator::evaluar($o['expr'], $ctx);
+        foreach ($exprs as $e) {
+            $claves[] = Evaluator::compilar($e) ?? $e;
         }
-        return $claves;
+
+        // Por grupo: la primera fila, cuántas filas, y por acumulador la suma
+        // y el recuento de no nulos (SUM, AVG, COUNT), el mejor valor visto
+        // (MIN, MAX) o la lista de valores (DISTINCT, GROUP_CONCAT)
+        $grupos = [];
+        foreach ($filas as $fila) {
+            $ctx   = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa];
+            $clave = '';
+            foreach ($claves as $e) {
+                $clave .= Valor::clave($e instanceof \Closure ? $e($fila) : Evaluator::evaluar($e, $ctx)) . "\0";
+            }
+            if (!isset($grupos[$clave])) {
+                $grupos[$clave] = ['fila' => $fila, 'n' => 0, 'suma' => [], 'cuenta' => [], 'mejor' => [], 'lista' => []];
+                Memoria::comprobar('la agrupación');
+            }
+            $grupos[$clave]['n']++;
+            foreach ($defs as $id => $d) {
+                if ($d['star']) {
+                    continue;                           // COUNT(*): basta con contar filas
+                }
+                $a = $args[$id];
+                $v = $a instanceof \Closure ? $a($fila) : Evaluator::evaluar($a, $ctx);
+                if ($v === null) {
+                    continue;                           // los agregados ignoran los NULL
+                }
+                if ($d['distinct'] || $d['nombre'] === 'GROUP_CONCAT') {
+                    $grupos[$clave]['lista'][$id][] = $v;
+                } elseif ($d['nombre'] === 'MIN' || $d['nombre'] === 'MAX') {
+                    if (!array_key_exists($id, $grupos[$clave]['mejor'])) {
+                        $grupos[$clave]['mejor'][$id] = $v;
+                    } else {
+                        $c = Valor::comparar($v, $grupos[$clave]['mejor'][$id]);
+                        if ($c !== null && (($d['nombre'] === 'MIN' && $c < 0) || ($d['nombre'] === 'MAX' && $c > 0))) {
+                            $grupos[$clave]['mejor'][$id] = $v;
+                        }
+                    }
+                } else {                                // COUNT(x), SUM, AVG
+                    $grupos[$clave]['suma'][$id]   = ($grupos[$clave]['suma'][$id] ?? 0) + Valor::aNumero($v);
+                    $grupos[$clave]['cuenta'][$id] = ($grupos[$clave]['cuenta'][$id] ?? 0) + 1;
+                }
+            }
+        }
+        if ($exprs === [] && $grupos === []) {
+            // Agregación total: una fila aunque no haya datos
+            $grupos[''] = ['fila' => [], 'n' => 0, 'suma' => [], 'cuenta' => [], 'mejor' => [], 'lista' => []];
+        }
+
+        $out = [];
+        foreach ($grupos as $g) {
+            $valores = [];
+            foreach ($defs as $id => $d) {
+                $cuenta = $g['cuenta'][$id] ?? 0;
+                if ($d['star']) {
+                    $valores[$id] = $g['n'];
+                } elseif ($d['distinct'] || $d['nombre'] === 'GROUP_CONCAT') {
+                    $sep = ',';
+                    if ($d['sep'] !== null) {
+                        $s   = Evaluator::evaluar($d['sep'], ['fila' => $g['fila'], 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa]);
+                        $sep = $s === null ? '' : Valor::aTexto($s);
+                    }
+                    $valores[$id] = Functions::agregado($d['nombre'], $g['lista'][$id] ?? [], $g['n'], $d['distinct'], $sep);
+                } elseif ($d['nombre'] === 'COUNT') {
+                    $valores[$id] = $cuenta;
+                } elseif ($d['nombre'] === 'SUM') {
+                    $valores[$id] = $cuenta === 0 ? null : $g['suma'][$id];
+                } elseif ($d['nombre'] === 'AVG') {
+                    $valores[$id] = $cuenta === 0 ? null : $g['suma'][$id] / $cuenta;
+                } else {
+                    $valores[$id] = $g['mejor'][$id] ?? null;   // MIN / MAX
+                }
+            }
+            $out[] = [$g['fila'], $valores];
+        }
+        return $out;
+    }
+
+    /**
+     * Añade a las claves de ordenación (por columnas) las de una fila.
+     *
+     * @param array<int, array<int, mixed>> $clavesOrden
+     */
+    private function anotarClaves(array &$clavesOrden, array $orden, array $ctx, array $proyectada): void
+    {
+        $ctx['fila'] = $ctx['fila'] + $proyectada;        // permite ORDER BY por alias de salida
+        foreach ($orden as $i => $o) {
+            $clavesOrden[$i][] = Evaluator::evaluar($o['expr'], $ctx);
+        }
     }
 
     /** Nombre por defecto de una columna calculada, parecido al que da SQLite. */

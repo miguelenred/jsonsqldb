@@ -54,6 +54,34 @@ final class Database
     // ------------------------------------------------------------------
 
     /**
+     * Ejecuta un SELECT pasando por la caché de resultados: la clave lleva la
+     * SQL, los parámetros y la revisión de cada tabla implicada, así que un
+     * resultado guardado solo vale mientras nadie escriba en ninguna de ellas.
+     * No se guardan las consultas que no son deterministas (RANDOM(), la
+     * fecha actual) ni los resultados grandes, que no compensan.
+     *
+     * @return list<array>
+     */
+    private function seleccionar(array $ast, string $sql, array $params): array
+    {
+        $tope   = Config::cacheResultados();
+        $tablas = $tope > 0 ? Select::tablasDe($ast, $this->cat) : null;
+        if ($tablas === null) {
+            return (new Select($this->cat))->ejecutar($ast);
+        }
+        $clave = $this->st->claveResultado($tablas, $sql, $params);
+        $filas = $this->st->resultadoCacheado($clave);
+        if ($filas !== null) {
+            return $filas;
+        }
+        $filas = (new Select($this->cat))->ejecutar($ast);
+        if (count($filas) <= $tope) {
+            $this->st->guardarResultado($clave, $tablas, $filas);
+        }
+        return $filas;
+    }
+
+    /**
      * Ejecuta una sentencia SQL.
      *
      * SELECT devuelve la lista de filas.
@@ -106,7 +134,7 @@ final class Database
                 if ($escritura) {
                     $res = (new Writer($this->cat))->ejecutar($ast);
                 } elseif ($ast['k'] === 'select' || $ast['k'] === 'union') {
-                    $filas = (new Select($this->cat))->ejecutar($ast);
+                    $filas = $this->seleccionar($ast, $sql, $params);
                 } elseif ($ast['k'] === 'check_keys') {
                     $filas = (new Integrity($this->cat))->claves($ast['tabla'], false);
                 } else {

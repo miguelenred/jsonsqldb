@@ -47,6 +47,13 @@ final class Config
         return !defined('JSONSQLDB_CACHE_ACTIVA') || (bool)JSONSQLDB_CACHE_ACTIVA;
     }
 
+    /** Máximo de filas de un resultado de SELECT para guardarlo en caché; 0 la desactiva. */
+    public static function cacheResultados(): int
+    {
+        $n = defined('JSONSQLDB_CACHE_RESULTADOS') ? (int)JSONSQLDB_CACHE_RESULTADOS : 5000;
+        return max(0, $n);
+    }
+
     public static function logActivo(): bool
     {
         return defined('JSONSQLDB_LOG_ACTIVO') && (bool)JSONSQLDB_LOG_ACTIVO;

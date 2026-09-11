@@ -15,8 +15,10 @@ namespace JsonSQLDB;
  *   <raiz>/<base>/<tabla>.meta.json   estructura de la tabla
  *   <raiz>/<base>/<tabla>.json        datos (una fila por línea, legible)
  *   <raiz>/<base>/<tabla>.part2.json  siguientes partes (JSONSQLDB_FILAS_POR_PARTE)
- *   <raiz>/<base>/<tabla>.idx.<n>.json  índices de búsqueda (ver Indexes)
- *   <raiz>/<base>/.cache/             caché serializada por parte (regenerable)
+ *   <raiz>/<base>/<tabla>.idx.<n>.json  índice de búsqueda, trozo de la parte 1
+ *   <raiz>/<base>/<tabla>.idx.<n>.part2.json  trozo de la parte 2 (ver Indexes)
+ *   <raiz>/<base>/.cache/             caché serializada (partes, trozos de índice,
+ *                                     estructura y resultados; regenerable)
  *   <raiz>/<base>/.tx/<ámbito>/       journal de una escritura en curso
  *   <raiz>/<base>/.lock               fichero de bloqueo de la base
  *   <raiz>/<base>/.<tabla>.lock       fichero de bloqueo de una tabla
@@ -94,7 +96,7 @@ final class Storage
         $this->dirCache = $dir . '/.cache';
         $this->dirTx    = $dir . '/.tx';
         $this->cache    = Config::cacheActiva();
-        $this->apcu     = function_exists('apcu_fetch') && ini_get('apc.enabled') !== '0';
+        $this->apcu     = function_exists('apcu_enabled') && apcu_enabled();
         $this->prefijo  = 'jsq:' . substr(md5($dir), 0, 12) . ':';
         $this->filasPorParte = Config::filasPorParte();
         $this->indices       = Config::indices();
@@ -672,7 +674,8 @@ final class Storage
         // La caché en disco puede tener entradas de la revisión deshecha
         foreach ($tablas as $t) {
             if (is_string($t)) {
-                foreach ((array)glob($this->dirCache . '/' . md5($this->prefijo . $t) . '.*.cache') as $f) {
+                unset($this->estados[$t]);
+                foreach ((array)glob($this->dirCache . '/' . md5($this->prefijo . $this->etiqueta($t)) . '.*.cache') as $f) {
                     @unlink((string)$f);
                 }
             }
@@ -1257,7 +1260,6 @@ final class Storage
         array $sueltas,
         int $partesAntes
     ): void {
-        $filas = null;                                  // todas las filas, si algún índice las pide
         $definiciones = $this->indices ? $definiciones : [];
         $estado       = $this->estado($tabla);
         $revAntes     = $estado['rev'];
@@ -1266,6 +1268,12 @@ final class Storage
         $total        = max(1, (int)ceil($nFilas / $this->filasPorParte));
         $revsPartes   = array_slice(array_pad($revsAntes, $total, $rev), 0, $total);
         $revsIndices  = [];
+        $filas        = null;                           // todas las filas, si algún índice las pide
+
+        // Lo que se escriba ahora va a la caché con la etiqueta nueva de la
+        // tabla (ver etiqueta()); lo de antes se borra con la de antes
+        $creada = (int)($estado['creada'] ?? random_int(1, 2147483647));
+        $this->estados[$tabla]['creada'] = $creada;
 
         // Las filas viejas de las posiciones sueltas, para quitarlas del índice:
         // las partes todavía son las de antes, porque nada se ha renombrado
@@ -1296,45 +1304,28 @@ final class Storage
             $this->txCache[] = [$this->claveCache($tabla, 'm', $rev), $meta];
         }
 
-        // Los índices: se rehacen, se corrigen o, si no cambian, se dejan
-        // como están y solo se anota que siguen valiendo
+        // Los índices, trozo a trozo: uno por parte de la tabla. De cada
+        // índice se reescriben solo los trozos que cambian y se anota en qué
+        // revisión quedó cada uno; los demás siguen valiendo tal cual
         $vigentes = [];
         foreach ($definiciones as $def) {
             $vigentes[$def['name']] = true;
-            $viejo = $desde === null ? null : $this->leerIndice($tabla, $def);
-            if ($desde === null || $viejo === null || !isset($viejo['rows']) || (int)$viejo['rows'] < $desde) {
-                $filas ??= $todas();
-                $keys = Indexes::construir($filas, $def['columns']);
-            } else {
-                $keys = $this->clavesDelIndice($def, $viejo, $nFilas, $desde, $cola, $sueltas, $viejas);
-            }
-            if ($keys === null) {
-                $revsIndices[$def['name']] = (int)$viejo['rev'];
-                continue;
-            }
-            $idx = [
-                'index'   => $def['name'],
-                'table'   => $tabla,
-                'columns' => $def['columns'],
-                'rev'     => $rev,
-                'rows'    => $nFilas,
-                'chunk'   => $this->filasPorParte,
-                'keys'    => $keys,
-            ];
-            unset($keys, $viejo);
-            $this->escribirAtomico($this->ficheroIndice($tabla, $def['name']), json_encode($idx, self::JSON_FILA) . "\n");
-            $this->txCache[]           = [$this->claveCache($tabla, 'x' . $def['name'], $rev), $idx];
-            $revsIndices[$def['name']] = $rev;
-            unset($idx);
+            $revsIndices[$def['name']] = $this->escribirIndice(
+                $tabla, $def, $rev, $total, $nFilas, $desde, $cola, $sueltas, $viejas, $todas, $filas);
         }
-        foreach ($indicesAntes as $nombre => $fichero) {
+        foreach ($indicesAntes as $nombre => $ficheros) {
             if (!isset($vigentes[$nombre])) {
-                $this->borrarFichero($fichero);
+                foreach ($ficheros as $fichero) {
+                    $this->borrarFichero($fichero);
+                }
             }
         }
 
-        // La revisión y el estado de partes e índices: es lo que invalida la caché
-        $nuevo = ['rev' => $rev, 'chunk' => $this->filasPorParte, 'rows' => $nFilas,
+        // La revisión y el estado de partes e índices: es lo que invalida la
+        // caché. `creada` distingue esta tabla de otra que se llamó igual y se
+        // borró: sus revisiones empiezan de cero y un resultado guardado en
+        // APCu, que no se puede borrar por tabla, la confundiría con ella.
+        $nuevo = ['rev' => $rev, 'chunk' => $this->filasPorParte, 'rows' => $nFilas, 'creada' => $creada,
                   'parts' => array_values($revsPartes), 'indexes' => (object)$revsIndices];
         $this->escribirAtomico($this->ficheroRev($tabla), json_encode($nuevo, self::JSON_META) . "\n");
         $nuevo['indexes'] = $revsIndices;
@@ -1385,8 +1376,10 @@ final class Storage
         for ($parte = 1; $parte <= $partes; $parte++) {
             $this->borrarFichero($this->ficheroDatos($tabla, $parte));
         }
-        foreach ($indices as $fichero) {
-            $this->borrarFichero($fichero);
+        foreach ($indices as $ficheros) {
+            foreach ($ficheros as $fichero) {
+                $this->borrarFichero($fichero);
+            }
         }
         $this->borrarFichero($this->ficheroRev($tabla));
         unset($this->estados[$tabla], $this->indicesMemo[$tabla]);
@@ -1583,15 +1576,20 @@ final class Storage
     // Índices
     // ------------------------------------------------------------------
 
-    private function ficheroIndice(string $tabla, string $indice): string
+    /**
+     * Fichero de un trozo de índice: el primero va sin sufijo y los demás
+     * con `.partN`, igual que las partes de datos. Un índice de antes de la
+     * 2.6 es un solo fichero sin sufijo con todas las claves.
+     */
+    private function ficheroIndice(string $tabla, string $indice, int $parte = 1): string
     {
-        return $this->dir . '/' . $tabla . '.idx.' . $indice . '.json';
+        return $this->dir . '/' . $tabla . '.idx.' . $indice . ($parte > 1 ? '.part' . $parte : '') . '.json';
     }
 
     /**
-     * Índices que hay ahora mismo en disco: nombre => ruta.
+     * Índices que hay ahora mismo en disco: nombre => rutas de sus trozos.
      *
-     * @return array<string, string>
+     * @return array<string, list<string>>
      */
     private function indicesEnDisco(string $tabla): array
     {
@@ -1599,102 +1597,350 @@ final class Storage
         $inicio = strlen($tabla) + 5;                 // '<tabla>.idx.'
         foreach ((array)glob($this->dir . '/' . $tabla . '.idx.*.json') as $f) {
             $nombre = substr(basename((string)$f, '.json'), $inicio);
+            if (preg_match('/^(.+)\.part\d+$/', $nombre, $m)) {
+                $nombre = $m[1];
+            }
             if ($nombre !== '') {
-                $out[$nombre] = (string)$f;
+                $out[$nombre][] = (string)$f;
             }
         }
         return $out;
     }
 
     /**
-     * Las claves de un índice corrigiendo el anterior, que quien llama ha
-     * comprobado que sirve: de estas columnas, válido para la revisión
-     * anterior y con tantas filas como posiciones había antes de $desde. Una
-     * entrada de menos no da un error, da una consulta que devuelve de menos.
+     * Escribe lo que cambia de un índice y devuelve la revisión de cada uno
+     * de sus trozos. Un trozo cubre las posiciones de una parte de la tabla,
+     * así que una escritura que toca una parte toca un trozo de cada índice,
+     * y el resto queda como estaba.
      *
-     * Las posiciones anteriores a $desde no cambiaron: se cortan las que hay
-     * a partir de ahí y se añaden las de $cola. Las sueltas (por debajo de
-     * $desde) se sustituyen una a una.
+     * Con $desde se corrigen los trozos: los que contienen posiciones sueltas
+     * se actualizan una a una, y del que contiene $desde en adelante se
+     * cortan las posiciones desplazadas y se añaden las de $cola. Sin $desde,
+     * o si algún trozo que hace falta no está al día, el índice se rehace
+     * entero desde las filas, que se leen solo entonces.
      *
-     * Devuelve null si el índice anterior sigue valiendo tal cual.
-     *
-     * @param array<int,array> $sueltas posición => fila nueva
-     * @param array<int,array> $viejas  posición => fila de antes
-     * @return array<string, int|list<int>>|null
+     * @param callable():list<array> $todas
+     * @param list<array>|null       $filas todas las filas, si ya se han leído
+     * @param array<int,array>       $sueltas posición => fila nueva
+     * @param array<int,array>       $viejas  posición => fila de antes
+     * @return list<int>
      */
-    private function clavesDelIndice(array $def, array $viejo, int $nFilas, int $desde, ?array $cola, array $sueltas, array $viejas): ?array
-    {
-        $keys   = $viejo['keys'];
-        $habia  = (int)$viejo['rows'];
-        $cambio = false;
-        foreach ($sueltas as $pos => $fila) {
-            $keys = Indexes::sustituir($keys, $def['columns'], $pos, $viejas[$pos], $fila, $cambio);
+    private function escribirIndice(
+        string $tabla,
+        array $def,
+        int $rev,
+        int $total,
+        int $nFilas,
+        ?int $desde,
+        ?array $cola,
+        array $sueltas,
+        array $viejas,
+        callable $todas,
+        ?array &$filas
+    ): array {
+        $nombre = $def['name'];
+        $revs   = $this->estado($tabla)['indexes'][$nombre] ?? null;
+        $chunk  = $this->filasPorParte;
+
+        // Qué trozos hay que tocar, y si los que se corrigen están al día.
+        // Los que se rehacen enteros desde la cola no necesitan el de antes.
+        $tocar = [];
+        if ($desde !== null && is_array($revs) && count($revs) >= (int)ceil($desde / $chunk)) {
+            foreach (array_keys($sueltas) as $pos) {
+                if ($pos < $desde) {
+                    $tocar[intdiv((int)$pos, $chunk)] = true;
+                }
+            }
+            for ($p = intdiv($desde, $chunk); $p < $total; $p++) {
+                $tocar[$p] = true;
+            }
+            // Los trozos que se corrigen se leen enteros; los que se dejan
+            // como están solo se miran por encima, para que un fichero
+            // dañado o editado a mano no se quede así para siempre
+            for ($p = 0; $p < min($total, count($revs)); $p++) {
+                $sano = isset($tocar[$p])
+                    ? $p * $chunk >= $desde || $this->trozoIndice($tabla, $def, $p + 1) !== null
+                    : $this->trozoSano($tabla, $def, $p + 1, (int)$revs[$p]);
+                if (!$sano) {
+                    $desde = null;
+                    break;
+                }
+            }
+        } else {
+            $desde = null;
         }
-        if ($habia > $desde) {
-            $keys   = Indexes::recortar($keys, $desde);      // las de detrás se movieron o ya no están
-            $cambio = true;
+
+        $salida = [];
+        if ($desde === null) {
+            // Entero, desde las filas: se reparten por trozos según su posición
+            $filas ??= $todas();
+            $trozos = [];
+            foreach (Indexes::construir($filas, $def['columns']) as $clave => $pos) {
+                foreach (Indexes::posiciones($pos) as $p) {
+                    $trozos[intdiv($p, $chunk)] ??= [];
+                    Indexes::anotar($trozos[intdiv($p, $chunk)], $clave, $p);
+                }
+            }
+            for ($p = 0; $p < $total; $p++) {
+                $this->escribirTrozo($tabla, $def, $p + 1, $rev, $trozos[$p] ?? []);
+                $salida[$p] = $rev;
+            }
+        } else {
+            for ($p = 0; $p < $total; $p++) {
+                if (!isset($tocar[$p])) {
+                    $salida[$p] = (int)$revs[$p];
+                    continue;
+                }
+                $inicio = $p * $chunk;
+                $fin    = $inicio + $chunk;               // exclusivo
+                $keys   = $inicio >= $desde ? [] : (array)$this->trozoIndice($tabla, $def, $p + 1);
+                $cambio = $inicio >= $desde;
+                foreach ($sueltas as $pos => $fila) {
+                    if ($pos >= $inicio && $pos < $fin && $pos < $desde) {
+                        $keys = Indexes::sustituir($keys, $def['columns'], $pos, $viejas[$pos], $fila, $cambio);
+                    }
+                }
+                if ($fin > $desde) {
+                    if ($inicio < $desde) {
+                        $keys   = Indexes::recortar($keys, $desde);
+                        $cambio = true;
+                    }
+                    // Las filas nuevas de este trozo: la cola empieza en $desde
+                    $primera = max($inicio, $desde);
+                    $ultima  = min($fin, $nFilas);
+                    if ($primera < $ultima) {
+                        $keys   = Indexes::ampliar($keys, array_slice($cola ?? [], $primera - $desde, $ultima - $primera), $def['columns'], $primera);
+                        $cambio = true;
+                    }
+                }
+                if ($cambio) {
+                    $this->escribirTrozo($tabla, $def, $p + 1, $rev, $keys);
+                    $salida[$p] = $rev;
+                } else {
+                    $salida[$p] = (int)$revs[$p];
+                }
+            }
         }
-        if ($desde < $nFilas) {
-            $keys   = Indexes::ampliar($keys, $cola ?? [], $def['columns'], $desde);
-            $cambio = true;
+        // Trozos de sobra de cuando la tabla era más grande
+        for ($p = $total + 1; is_file($this->ficheroIndice($tabla, $nombre, $p)); $p++) {
+            $this->borrarFichero($this->ficheroIndice($tabla, $nombre, $p));
         }
-        return $cambio ? $keys : null;
+        return array_values($salida);
     }
 
     /**
-     * Claves de un índice válido para la revisión actual, o null si no lo
-     * hay. Sirve para comprobar unicidad o existencia sin leer la tabla.
+     * ¿Tiene el fichero de un trozo la cabecera que debería? Se leen sus
+     * primeros bytes y se comprueban índice, columnas, parte y revisión, sin
+     * decodificar las claves: cuesta lo mismo tenga mil o cien mil.
+     */
+    private function trozoSano(string $tabla, array $def, int $parte, int $rev): bool
+    {
+        $fh = @fopen($this->ficheroIndice($tabla, $def['name'], $parte), 'rb');
+        if ($fh === false) {
+            return false;
+        }
+        $cabecera = (string)fread($fh, 512);
+        fclose($fh);
+        $esperada = substr(json_encode([
+            'index' => $def['name'], 'table' => $tabla, 'columns' => $def['columns'],
+            'part' => $parte, 'rev' => $rev,
+        ], self::JSON_FILA), 1, -1);
+        return strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0;
+    }
+
+    /** @param array<string, int|list<int>> $keys */
+    private function escribirTrozo(string $tabla, array $def, int $parte, int $rev, array $keys): void
+    {
+        $idx = [
+            'index'   => $def['name'],
+            'table'   => $tabla,
+            'columns' => $def['columns'],
+            'part'    => $parte,
+            'rev'     => $rev,
+            'chunk'   => $this->filasPorParte,
+            'keys'    => $keys,
+        ];
+        $this->escribirAtomico($this->ficheroIndice($tabla, $def['name'], $parte), json_encode($idx, self::JSON_FILA) . "\n");
+        $this->txCache[] = [$this->claveCache($tabla, 'x' . $def['name'] . 'p' . $parte, $rev), $idx];
+    }
+
+    /**
+     * Claves de un trozo de índice, o null si no sirve: el fichero de
+     * revisión dice en qué revisión se escribió cada trozo y el trozo tiene
+     * que decir la misma, y ser de estas columnas. Un trozo desfasado o
+     * tocado a mano se ignora y la consulta recorre la tabla: más lento,
+     * nunca equivocado.
      *
-     * @param array{name: string, columns: list<string>} $def
+     * Dentro de un bloqueo se guarda lo leído: una escritura pregunta por el
+     * mismo trozo varias veces.
+     *
      * @return array<string, int|list<int>>|null
      */
-    public function clavesDeIndice(string $tabla, array $def): ?array
+    private function trozoIndice(string $tabla, array $def, int $parte): ?array
+    {
+        $nombre = $def['name'];
+        if (isset($this->indicesMemo[$tabla][$nombre][$parte])) {
+            return $this->indicesMemo[$tabla][$nombre][$parte];
+        }
+        $revs = $this->estado($tabla)['indexes'][$nombre] ?? null;
+        if (!is_array($revs) || !isset($revs[$parte - 1])) {
+            return null;
+        }
+        $rev   = (int)$revs[$parte - 1];
+        $clave = $this->claveCache($tabla, 'x' . $nombre . 'p' . $parte, $rev);
+        $idx   = $this->cacheLeer($clave);
+        if ($idx === null) {
+            $fichero = $this->ficheroIndice($tabla, $nombre, $parte);
+            if (!is_file($fichero)) {
+                return null;
+            }
+            Memoria::comprobarFichero($fichero);
+            $idx = json_decode((string)file_get_contents($fichero), true);
+            if (!is_array($idx) || !is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev
+                || (int)($idx['part'] ?? 0) !== $parte) {
+                return null;
+            }
+            $this->cacheGuardar($clave, $idx);
+        }
+        if (($idx['columns'] ?? null) !== $def['columns']) {
+            return null;
+        }
+        return $this->indicesMemo[$tabla][$nombre][$parte] = $idx['keys'];
+    }
+
+    /**
+     * Todos los trozos de un índice, o null si alguno no sirve. Un índice de
+     * antes de la 2.6 —un solo fichero con todas las claves, y su revisión
+     * anotada como número— sale como un solo trozo. Quedan en memoria
+     * mientras dure el bloqueo: una escritura de muchas filas pregunta por
+     * ellos una vez por fila.
+     *
+     * @return list<array<string, int|list<int>>>|null
+     */
+    private function trozosIndice(string $tabla, array $def): ?array
+    {
+        $nombre = $def['name'];
+        if (isset($this->indicesMemo[$tabla][$nombre]['*'])) {
+            return $this->indicesMemo[$tabla][$nombre]['*'];
+        }
+        $estado = $this->estado($tabla);
+        $revs   = $estado['indexes'][$nombre] ?? $estado['rev'];
+        if (!is_array($revs)) {
+            $legado = $this->indiceLegado($tabla, $def, (int)$revs);
+            return $legado === null ? null : [$legado];
+        }
+        $partes = max(1, $this->partes($tabla));
+        if (count($revs) < $partes) {
+            return null;
+        }
+        $trozos = [];
+        for ($p = 1; $p <= $partes; $p++) {
+            $keys = $this->trozoIndice($tabla, $def, $p);
+            if ($keys === null) {
+                return null;
+            }
+            $trozos[] = $keys;
+        }
+        return $this->indicesMemo[$tabla][$nombre]['*'] = $trozos;
+    }
+
+    /**
+     * Un índice de antes de la 2.6: un solo fichero cuya revisión tiene que
+     * ser la anotada (o la de la tabla, si el fichero de revisión es anterior
+     * a la 2.5).
+     *
+     * @return array<string, int|list<int>>|null
+     */
+    private function indiceLegado(string $tabla, array $def, int $rev): ?array
+    {
+        $nombre = $def['name'];
+        if (isset($this->indicesMemo[$tabla][$nombre][0])) {
+            return $this->indicesMemo[$tabla][$nombre][0];
+        }
+        $fichero = $this->ficheroIndice($tabla, $nombre);
+        if (!is_file($fichero)) {
+            return null;
+        }
+        Memoria::comprobarFichero($fichero);
+        $idx = json_decode((string)file_get_contents($fichero), true);
+        if (!is_array($idx) || !is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev
+            || isset($idx['part']) || ($idx['columns'] ?? null) !== $def['columns']) {
+            return null;
+        }
+        return $this->indicesMemo[$tabla][$nombre][0] = $idx['keys'];
+    }
+
+    /**
+     * Posiciones de las filas cuya clave de índice es una de las dadas (o
+     * empieza por una, con $prefijo: un índice sobre (a, b) usado para
+     * buscar solo por a; las claves llevan la longitud por delante, así que
+     * el prefijo es inequívoco). Null si el índice no sirve.
+     *
+     * @param list<string> $claves
+     * @return list<int>|null ordenadas
+     */
+    public function posicionesPorIndice(string $tabla, array $def, array $claves, bool $prefijo): ?array
     {
         self::validarTabla($tabla);
         if (!$this->indices) {
             return null;
         }
         $this->bloquearLectura($tabla);
-        $idx = $this->leerIndice($tabla, $def);
-        return $idx === null ? null : $idx['keys'];
+        $trozos = $this->trozosIndice($tabla, $def);
+        if ($trozos === null) {
+            return null;
+        }
+        $posiciones = [];
+        foreach ($trozos as $keys) {
+            if ($prefijo) {
+                foreach ($keys as $k => $lista) {
+                    foreach ($claves as $c) {
+                        if (strncmp((string)$k, $c, strlen($c)) === 0) {
+                            foreach (Indexes::posiciones($lista) as $p) { $posiciones[$p] = true; }
+                            break;
+                        }
+                    }
+                }
+            } else {
+                foreach ($claves as $c) {
+                    if (isset($keys[$c])) {
+                        foreach (Indexes::posiciones($keys[$c]) as $p) { $posiciones[$p] = true; }
+                    }
+                }
+            }
+        }
+        $posiciones = array_keys($posiciones);
+        sort($posiciones);
+        return $posiciones;
     }
 
     /**
-     * Lee un índice vigente, o null si no sirve: el fichero de revisión de la
-     * tabla dice en qué revisión se escribió cada índice (desde la 2.5) y el
-     * índice tiene que decir la misma; antes, tenía que ser la de la tabla.
-     * Las columnas tienen que ser las esperadas. Un índice desfasado o tocado
-     * a mano se ignora y la consulta recorre la tabla: más lento, nunca
-     * equivocado.
-     *
-     * Dentro de un bloqueo se guarda lo leído: una escritura pregunta por el
-     * mismo índice varias veces.
-     *
-     * @param array{name: string, columns: list<string>} $def
+     * ¿Hay alguna fila con esta clave de índice? Null si el índice no sirve.
+     * Recorre los trozos y para en cuanto la encuentra.
      */
-    private function leerIndice(string $tabla, array $def): ?array
+    public function claveEnIndice(string $tabla, array $def, string $clave): ?bool
     {
-        $estado = $this->estado($tabla);
-        $rev    = (int)($estado['indexes'][$def['name']] ?? $estado['rev']);
-        $idx    = $this->indicesMemo[$tabla][$def['name']] ?? null;
-        if ($idx === null) {
-            $clave = $this->claveCache($tabla, 'x' . $def['name'], $rev);
-            $idx   = $this->cacheLeer($clave);
-            if ($idx === null) {
-                $fichero = $this->ficheroIndice($tabla, $def['name']);
-                if (!is_file($fichero)) {
-                    return null;
-                }
-                Memoria::comprobarFichero($fichero);
-                $idx = json_decode((string)file_get_contents($fichero), true);
-                if (!is_array($idx) || !is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev) {
-                    return null;
-                }
-                $this->cacheGuardar($clave, $idx);
-            }
-            $this->indicesMemo[$tabla][$def['name']] = $idx;
+        self::validarTabla($tabla);
+        if (!$this->indices) {
+            return null;
         }
-        return ($idx['columns'] ?? null) === $def['columns'] ? $idx : null;
+        $this->bloquearLectura($tabla);
+        $trozos = $this->trozosIndice($tabla, $def);
+        if ($trozos === null) {
+            return null;
+        }
+        foreach ($trozos as $keys) {
+            if (isset($keys[$clave])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** ¿Está el índice al día en todos sus trozos? */
+    public function indiceValido(string $tabla, array $def): bool
+    {
+        return $this->claveEnIndice($tabla, $def, "\0") !== null;
     }
 
     /**
@@ -1709,44 +1955,15 @@ final class Storage
      */
     public function filasPorIndice(string $tabla, array $def, array $claves, bool $prefijo): ?array
     {
-        self::validarTabla($tabla);
-        if (!$this->indices) {
+        $posiciones = $this->posicionesPorIndice($tabla, $def, $claves, $prefijo);
+        if ($posiciones === null) {
             return null;
         }
-        $this->bloquearLectura($tabla);
-
-        $idx = $this->leerIndice($tabla, $def);
-        if ($idx === null) {
-            return null;
-        }
-
-        $posiciones = [];
-        if ($prefijo) {
-            // Índice sobre (a, b) usado para buscar solo por a: las claves
-            // llevan la longitud por delante, así que el prefijo es inequívoco
-            foreach ($idx['keys'] as $k => $lista) {
-                foreach ($claves as $c) {
-                    if (strncmp((string)$k, $c, strlen($c)) === 0) {
-                        foreach (Indexes::posiciones($lista) as $p) { $posiciones[$p] = true; }
-                        break;
-                    }
-                }
-            }
-        } else {
-            foreach ($claves as $c) {
-                if (isset($idx['keys'][$c])) {
-                    foreach (Indexes::posiciones($idx['keys'][$c]) as $p) { $posiciones[$p] = true; }
-                }
-            }
-        }
-
-        $chunk = max(1, (int)($idx['chunk'] ?? $this->filasPorParte));
-        $total = max(0, (int)($idx['rows'] ?? 0));
-        $todas = $total === 0 ? 1 : (int)ceil($total / $chunk);
-        unset($idx);
+        $chunk = max(1, (int)($this->estado($tabla)['chunk'] ?? $this->filasPorParte));
+        $todas = max(1, $this->partes($tabla));
 
         $necesarias = [];
-        foreach (array_keys($posiciones) as $p) {
+        foreach ($posiciones as $p) {
             $necesarias[intdiv($p, $chunk) + 1] = true;
         }
         // Leer más de la mitad de las partes no ahorra bastante respecto a
@@ -1755,6 +1972,7 @@ final class Storage
         if ($necesarias !== [] && count($necesarias) * 2 > $todas) {
             return null;
         }
+        $buscadas = array_fill_keys($posiciones, true);
 
         $filas = [];
         foreach (array_keys($necesarias) as $parte) {
@@ -1764,14 +1982,13 @@ final class Storage
             }
             $base = ($parte - 1) * $chunk;
             foreach ($this->parte($tabla, $parte, $fichero) as $desfase => $fila) {
-                if (isset($posiciones[$base + $desfase])) {
-                    $filas[$base + $desfase] = $fila;
+                if (isset($buscadas[$base + $desfase])) {
+                    $filas[] = $fila;
                     Memoria::comprobar('la lectura por índice');
                 }
             }
         }
-        ksort($filas);
-        return array_values($filas);
+        return $filas;
     }
 
     // ------------------------------------------------------------------
@@ -1805,6 +2022,7 @@ final class Storage
      *   rows     cuántas filas tiene (desde la 2.5)
      *   parts    revisión en que se escribió cada parte (desde la 2.5)
      *   indexes  revisión en que se escribió cada índice (desde la 2.5)
+     *   creada   número aleatorio fijo desde la primera escritura (desde la 2.6)
      *
      * Cada tabla guarda el suyo: dos escrituras en tablas distintas van a la
      * vez y un fichero común lo reescribirían las dos enteras.
@@ -1840,9 +2058,74 @@ final class Storage
         return (int)($this->revsLegadas[$tabla] ?? 0);
     }
 
+    /**
+     * Clave de caché de un resultado de consulta: la SQL con sus parámetros y
+     * la revisión de cada tabla implicada. Cambiar cualquiera de ellas es otra
+     * clave, así que un resultado guardado nunca sobrevive a una escritura.
+     *
+     * @param list<string> $tablas
+     */
+    public function claveResultado(array $tablas, string $sql, array $params): string
+    {
+        $revs = '';
+        foreach ($tablas as $t) {
+            self::validarTabla($t);
+            $this->bloquearLectura($t);
+            $estado = $this->estado($t);
+            $revs  .= $t . ':' . (int)($estado['creada'] ?? 0) . ':' . $estado['rev'] . ';';
+        }
+        return $this->prefijo . '_q:r:' . md5($sql . "\0" . serialize($params) . "\0" . $revs);
+    }
+
+    /** @return list<array>|null */
+    public function resultadoCacheado(string $clave): ?array
+    {
+        $v = $this->cacheLeer($clave);
+        return is_array($v) ? $v : null;
+    }
+
+    /**
+     * Guarda un resultado. En disco el nombre del fichero dice de qué tablas
+     * depende, para que la siguiente escritura en cualquiera de ellas lo
+     * tire. En APCu no se puede buscar por nombre: caduca solo.
+     *
+     * @param list<string> $tablas
+     * @param list<array>  $filas
+     */
+    public function guardarResultado(string $clave, array $tablas, array $filas): void
+    {
+        if (!$this->cache || Memoria::apretado()) {
+            return;
+        }
+        if ($this->apcu) {
+            apcu_store($clave, $filas, 3600);
+            return;
+        }
+        if (!is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {
+            return;
+        }
+        $nombre = 'q';
+        foreach ($tablas as $t) {
+            $nombre .= '.' . md5($this->prefijo . $t);
+        }
+        @file_put_contents($this->dirCache . '/' . $nombre . '.' . substr($clave, -32) . '.cache', serialize($filas));
+    }
+
+    /**
+     * Etiqueta de una tabla en la caché: su nombre y el número `creada` de
+     * su fichero de revisión. Una tabla borrada y creada de nuevo con el
+     * mismo nombre empieza otra vez en la revisión 1, y sin la etiqueta sus
+     * entradas se confundirían con las de la anterior, que en APCu no se
+     * pueden borrar por tabla.
+     */
+    private function etiqueta(string $tabla): string
+    {
+        return $tabla . '@' . (int)($this->estado($tabla)['creada'] ?? 0);
+    }
+
     private function claveCache(string $tabla, string $tipo, ?int $rev = null): string
     {
-        return $this->prefijo . $tabla . ':' . $tipo . ':' . ($rev ?? $this->rev($tabla));
+        return $this->prefijo . $this->etiqueta($tabla) . ':' . $tipo . ':' . ($rev ?? $this->rev($tabla));
     }
 
     /**
@@ -1856,7 +2139,7 @@ final class Storage
             $estado = $this->estado($tabla);
             $rev    = (int)($estado['parts'][$parte - 1] ?? $estado['rev']);
         }
-        return $this->prefijo . $tabla . ':p' . $parte . ':' . $rev;
+        return $this->prefijo . $this->etiqueta($tabla) . ':p' . $parte . ':' . $rev;
     }
 
     private function cacheLeer(string $clave)
@@ -1870,7 +2153,7 @@ final class Storage
             return $ok ? $val : null;
         }
         $fichero = $this->ficheroCache($clave);
-        if (!is_file($fichero)) {
+        if ($fichero === null || !is_file($fichero)) {
             return null;
         }
         Memoria::comprobarFichero($fichero);
@@ -1923,31 +2206,46 @@ final class Storage
             }
         }
         foreach ($indices as $n) {
-            $r = (int)($antes['indexes'][$n] ?? $revAntes);
-            if (($despues['indexes'][$n] ?? null) === $r) {
-                $conservar['x' . $n . $r] = true;
-            } else {
-                $sobran[] = 'x' . $n . ':' . $r;
+            $ra = $antes['indexes'][$n] ?? $revAntes;
+            if (!is_array($ra)) {
+                $sobran[] = 'x' . $n . ':' . (int)$ra;      // un índice de antes de la 2.6
+                continue;
+            }
+            foreach ($ra as $i => $r) {
+                if (($despues['indexes'][$n][$i] ?? null) === (int)$r) {
+                    $conservar['x' . $n . 'p' . ($i + 1) . (int)$r] = true;
+                } else {
+                    $sobran[] = 'x' . $n . 'p' . ($i + 1) . ':' . (int)$r;
+                }
             }
         }
+        $etiqueta = $tabla . '@' . (int)($antes['creada'] ?? 0);
         if ($this->apcu) {
             foreach ($sobran as $s) {
-                apcu_delete($this->prefijo . $tabla . ':' . $s);
+                apcu_delete($this->prefijo . $etiqueta . ':' . $s);
             }
             return;
         }
-        $md5 = md5($this->prefijo . $tabla);
+        $md5 = md5($this->prefijo . $etiqueta);
         foreach ((array)glob($this->dirCache . '/' . $md5 . '.*.cache') as $f) {
             if (!isset($conservar[substr(basename((string)$f, '.cache'), strlen($md5) + 1)])) {
                 @unlink((string)$f);
             }
         }
+        foreach ((array)glob($this->dirCache . '/q.*' . md5($this->prefijo . $tabla) . '*.cache') as $f) {
+            @unlink((string)$f);                      // los resultados que dependían de la tabla
+        }
     }
 
-    private function ficheroCache(string $clave): string
+    /** Fichero de una entrada de caché; null si es un resultado que no está. */
+    private function ficheroCache(string $clave): ?string
     {
-        // md5(prefijo+tabla) agrupa las entradas de una misma tabla para poder borrarlas juntas
-        [, , $tabla, $tipo, $rev] = explode(':', $clave);
-        return $this->dirCache . '/' . md5($this->prefijo . $tabla) . '.' . $tipo . $rev . '.cache';
+        // md5(prefijo+etiqueta) agrupa las entradas de una misma tabla para poder borrarlas juntas
+        [, , $etiqueta, $tipo, $rev] = explode(':', $clave);
+        if ($etiqueta === '_q') {
+            $hay = glob($this->dirCache . '/q.*.' . $rev . '.cache');
+            return $hay === false || $hay === [] ? null : (string)$hay[0];
+        }
+        return $this->dirCache . '/' . md5($this->prefijo . $etiqueta) . '.' . $tipo . $rev . '.cache';
     }
 }

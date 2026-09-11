@@ -20,6 +20,9 @@ declare(strict_types=1);
  */
 
 define('JSONSQLDB_CONEXION_DIRECTA', true);
+// Sin caché de resultados: repetir la misma consulta la serviría de la caché y
+// lo que se quiere medir es el motor. Su efecto se mide aparte, al final.
+define('JSONSQLDB_CACHE_RESULTADOS', 0);
 require __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Database;
@@ -178,6 +181,21 @@ $correr('DELETE de una fila', static function () use ($bd, &$nuevo) {
     $bd->consultar('INSERT INTO clientes VALUES (?,?,?,?,?,?)',
         [$nuevo, "z$nuevo@ejemplo.es", 'Nueva', 'Madrid', 30, 1.0]);
 }, 5);
+
+// La caché de resultados, en un proceso aparte porque aquí está desactivada:
+// el JOIN de arriba, repetido sobre datos que no han cambiado
+$codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+        . 'require ' . var_export(__DIR__ . '/../engine/bootstrap.php', true) . ';'
+        . '$bd = new JsonSQLDB\\Database("bench", ' . var_export($raiz, true) . ');'
+        . '$sql = "SELECT c.ciudad, COUNT(*) AS n, SUM(p.total) AS t FROM pedidos p JOIN clientes c ON c.id = p.cid GROUP BY c.ciudad ORDER BY c.ciudad";'
+        . '$bd->consultar($sql); memory_reset_peak_usage(); $t0 = microtime(true);'
+        . 'for ($i = 0; $i < 7; $i++) { $bd->consultar($sql); }'
+        . 'echo (microtime(true) - $t0) * 1000 / 7, " ", memory_get_peak_usage() / 1048576;';
+$salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d apc.enable_cli=' . (int)(function_exists('apcu_enabled') && apcu_enabled())
+        . ' -r ' . escapeshellarg($codigo) . ' 2>/dev/null'));
+if (preg_match('/^([\d.]+) ([\d.]+)$/', $salida, $m)) {
+    $resultados['JOIN repetido (caché de resultados)'] = [(float)$m[1], (float)$m[2]];
+}
 
 // ----------------------------------------------------------------------
 // Salida

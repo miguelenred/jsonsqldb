@@ -33,7 +33,7 @@ DirectoryIndex index.php
 # --- Bloquear las carpetas internas aunque falten sus .htaccess ---
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteRule ^(engine|data|logs|docs|tests)(/|$) - [F,L]
+    RewriteRule ^(engine|data|logs|docs|tests|nginx|litespeed)(/|$) - [F,L]
 </IfModule>
 
 # --- Sin firma del servidor en las páginas de error ---

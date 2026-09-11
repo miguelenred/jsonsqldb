@@ -6,15 +6,19 @@ namespace JsonSQLDB;
 /**
  * Índices de búsqueda.
  *
- * Un índice es un fichero aparte, `<tabla>.idx.<nombre>.json`, que asocia el
- * valor de una o varias columnas con las posiciones de las filas que lo tienen:
+ * Un índice va en ficheros aparte, uno por parte de la tabla —
+ * `<tabla>.idx.<nombre>.json`, `<tabla>.idx.<nombre>.part2.json`, ...—, y cada
+ * uno asocia el valor de una o varias columnas con las posiciones de las filas
+ * de esa parte que lo tienen:
  *
- *   {"index":"...","columns":["email"],"rev":7,"rows":20000,"chunk":1000,
- *    "keys":{"t11:ana@ej.com":143,"t6:Madrid":[2,9,15],...}}
+ *   {"index":"...","table":"...","columns":["email"],"part":2,"rev":7,"chunk":1000,
+ *    "keys":{"t11:ana@ej.com":1143,"t6:Madrid":[1002,1009,1015],...}}
  *
  * Una posición sola se guarda como entero y varias como lista: en una clave
  * primaria son todas únicas y una lista de uno costaría el triple en memoria.
- * Los índices de antes de la 2.5 guardaban siempre listas y se leen igual.
+ * Los índices de antes de la 2.6 eran un solo fichero con todas las claves
+ * (y antes de la 2.5 con listas siempre); se leen igual y se reparten en
+ * trozos en la siguiente escritura.
  *
  * Para qué sirve. El coste de un SELECT no está en evaluar el WHERE, está en
  * leer y decodificar los ficheros de la tabla entera. El índice dice en qué
@@ -29,10 +33,11 @@ namespace JsonSQLDB;
  *
  * Cómo se mantiene. Las posiciones no son estables: al guardar, las filas se
  * reindexan desde cero y se reparten en partes, así que un DELETE desplaza
- * todas las filas siguientes. El índice anterior se corrige cuando se puede
- * demostrar qué cambió —filas añadidas al final, sustituidas en su sitio, o
- * desplazadas a partir de una posición— y se rehace entero ante la menor duda
- * (ver Storage). Un índice que no cambia no se reescribe.
+ * todas las filas siguientes. Los trozos anteriores se corrigen cuando se
+ * puede demostrar qué cambió —filas añadidas al final, sustituidas en su
+ * sitio, o desplazadas a partir de una posición— y solo se reescriben los
+ * trozos afectados; ante la menor duda el índice se rehace entero (ver
+ * Storage). Un trozo que no cambia no se reescribe.
  *
  * Claves. La igualdad del motor no es la de PHP: 5, '5' y '5.0' son el mismo
  * valor (ver Valor::comparar). La clave lo respeta —los valores numéricos se
@@ -385,7 +390,7 @@ final class Indexes
      *
      * @param array<string, int|list<int>> $keys
      */
-    private static function anotar(array &$keys, string $clave, int $pos): void
+    public static function anotar(array &$keys, string $clave, int $pos): void
     {
         if (!isset($keys[$clave])) {
             $keys[$clave] = $pos;

@@ -13,7 +13,7 @@ namespace JsonSQLDB;
  * y no una vez por fila.
  *
  * Contexto de evaluación:
- *   ['fila' => array, 'grupo' => ?array de filas, 'sub' => callable(AST): filas]
+ *   ['fila' => array, 'agregados' => ?array de resultados por agid, 'sub' => callable(AST): filas]
  */
 final class Evaluator
 {
@@ -171,6 +171,82 @@ final class Evaluator
         return $n['star'] || (count($n['args']) >= 1 && count($n['args']) <= $maximo);
     }
 
+    /**
+     * Sustituye cada función de agregación del árbol por una referencia a un
+     * acumulador —`agid`—, y devuelve en $defs qué acumula cada uno. Así una
+     * consulta agrupada no guarda las filas de cada grupo: las recorre una vez
+     * alimentando los acumuladores, y las expresiones de salida se evalúan
+     * después contra sus resultados (ver Select::agrupar). El mismo agregado
+     * escrito dos veces comparte acumulador.
+     *
+     * @param array<string,array> $defs por firma: ['nombre', 'arg', 'star', 'distinct', 'sep']
+     */
+    public static function marcarAgregados(array $n, array &$defs): array
+    {
+        if ($n['k'] === 'fn' && self::esAgregado($n)) {
+            $firma = md5(serialize($n));
+            $defs[$firma] ??= [
+                'nombre'   => $n['nombre'],
+                'star'     => $n['star'],
+                'arg'      => $n['star'] ? null : $n['args'][0],
+                'distinct' => $n['distinct'],
+                'sep'      => $n['args'][1] ?? null,
+            ];
+            $n['agid'] = $firma;
+            return $n;
+        }
+        switch ($n['k']) {
+            case 'bin':
+                $n['i'] = self::marcarAgregados($n['i'], $defs);
+                $n['d'] = self::marcarAgregados($n['d'], $defs);
+                break;
+            case 'un':
+            case 'null':
+            case 'cast':
+                $n['e'] = self::marcarAgregados($n['e'], $defs);
+                break;
+            case 'fn':
+                foreach ($n['args'] as $i => $a) {
+                    $n['args'][$i] = self::marcarAgregados($a, $defs);
+                }
+                break;
+            case 'between':
+                $n['e']   = self::marcarAgregados($n['e'], $defs);
+                $n['min'] = self::marcarAgregados($n['min'], $defs);
+                $n['max'] = self::marcarAgregados($n['max'], $defs);
+                break;
+            case 'like':
+                $n['e']      = self::marcarAgregados($n['e'], $defs);
+                $n['patron'] = self::marcarAgregados($n['patron'], $defs);
+                if ($n['escape'] !== null) {
+                    $n['escape'] = self::marcarAgregados($n['escape'], $defs);
+                }
+                break;
+            case 'regexp':
+                $n['e']      = self::marcarAgregados($n['e'], $defs);
+                $n['patron'] = self::marcarAgregados($n['patron'], $defs);
+                break;
+            case 'in':
+                $n['e'] = self::marcarAgregados($n['e'], $defs);
+                foreach ($n['lista'] ?? [] as $i => $e) {
+                    $n['lista'][$i] = self::marcarAgregados($e, $defs);
+                }
+                break;
+            case 'case':
+                if ($n['base'] !== null) {
+                    $n['base'] = self::marcarAgregados($n['base'], $defs);
+                }
+                foreach ($n['when'] as $i => [$c, $r]) {
+                    $n['when'][$i] = [self::marcarAgregados($c, $defs), self::marcarAgregados($r, $defs)];
+                }
+                if ($n['else'] !== null) {
+                    $n['else'] = self::marcarAgregados($n['else'], $defs);
+                }
+                break;
+        }
+        return $n;
+    }
+
     /** @return array<int,array> subexpresiones directas (sin entrar en subconsultas) */
     private static function hijos(array $n): array
     {
@@ -283,6 +359,181 @@ final class Evaluator
         throw JsonSqlDbError::syntax("Expresión no evaluable: {$n['k']}");
     }
 
+    /**
+     * Compila una expresión en una función PHP que la evalúa sobre una fila,
+     * con el mismo resultado que evaluar(). Recorrer el árbol con evaluar()
+     * cuesta un switch y varias llamadas por nodo y fila; compilada, cada
+     * nodo es una llamada a una clausura ya especializada. En un WHERE sobre
+     * cien mil filas es varias veces más rápido.
+     *
+     * Devuelve null si algún nodo no se compila (funciones, subconsultas,
+     * columnas de la consulta exterior...): entonces se evalúa como siempre.
+     *
+     * @return (\Closure(array): mixed)|null
+     */
+    public static function compilar(array $n): ?\Closure
+    {
+        switch ($n['k']) {
+            case 'lit':
+                $v = $n['v'];
+                return static fn(array $f) => $v;
+
+            case 'col':
+                if (isset($n['externa']) || !isset($n['clave'])) {
+                    return null;
+                }
+                $c = $n['clave'];
+                return static fn(array $f) => $f[$c] ?? null;
+
+            case 'bin':
+                return self::compilarBinaria($n);
+
+            case 'un':
+                $e = self::compilar($n['e']);
+                if ($e === null) {
+                    return null;
+                }
+                if ($n['op'] === 'NOT') {
+                    return static function (array $f) use ($e) {
+                        $v = Valor::verdadero($e($f));
+                        return $v === null ? null : ($v ? 0 : 1);
+                    };
+                }
+                return static function (array $f) use ($e) {
+                    $v = $e($f);
+                    return $v === null ? null : -Valor::aNumero($v);
+                };
+
+            case 'null':
+                $e = self::compilar($n['e']);
+                if ($e === null) {
+                    return null;
+                }
+                $not = $n['not'];
+                return static fn(array $f) => ($e($f) === null) !== $not ? 1 : 0;
+
+            case 'between':
+                $e   = self::compilar($n['e']);
+                $min = self::compilar($n['min']);
+                $max = self::compilar($n['max']);
+                if ($e === null || $min === null || $max === null) {
+                    return null;
+                }
+                $not = $n['not'];
+                return static function (array $f) use ($e, $min, $max, $not) {
+                    $v = $e($f);
+                    if ($v === null) { return null; }
+                    $a = Valor::comparar($v, $min($f));
+                    $b = Valor::comparar($v, $max($f));
+                    if ($a === null || $b === null) { return null; }
+                    return (($a >= 0 && $b <= 0) !== $not) ? 1 : 0;
+                };
+
+            case 'like':
+                // Solo con patrón (y escape) literales: la expresión regular se
+                // calcula una vez, no una por fila
+                $e = self::compilar($n['e']);
+                if ($e === null || $n['patron']['k'] !== 'lit' || $n['patron']['v'] === null
+                    || ($n['escape'] !== null && $n['escape']['k'] !== 'lit')) {
+                    return null;
+                }
+                $escape = $n['escape'] === null ? null : Valor::aTexto($n['escape']['v']);
+                $regex  = self::patronALike(Valor::aTexto($n['patron']['v']), $escape);
+                $not    = $n['not'];
+                return static function (array $f) use ($e, $regex, $not) {
+                    $v = $e($f);
+                    if ($v === null) { return null; }
+                    return ((bool)preg_match($regex, Valor::aTexto($v)) !== $not) ? 1 : 0;
+                };
+        }
+        return null;
+    }
+
+    private static function compilarBinaria(array $n): ?\Closure
+    {
+        $i = self::compilar($n['i']);
+        $d = self::compilar($n['d']);
+        if ($i === null || $d === null) {
+            return null;
+        }
+        switch ($n['op']) {
+            case 'AND':
+                return static function (array $f) use ($i, $d) {
+                    $a = Valor::verdadero($i($f));
+                    if ($a === false) { return 0; }
+                    $b = Valor::verdadero($d($f));
+                    if ($b === false) { return 0; }
+                    return ($a === null || $b === null) ? null : 1;
+                };
+            case 'OR':
+                return static function (array $f) use ($i, $d) {
+                    $a = Valor::verdadero($i($f));
+                    if ($a === true) { return 1; }
+                    $b = Valor::verdadero($d($f));
+                    if ($b === true) { return 1; }
+                    return ($a === null || $b === null) ? null : 0;
+                };
+            case '=':
+                return static function (array $f) use ($i, $d) {
+                    $c = Valor::comparar($i($f), $d($f));
+                    return $c === null ? null : ($c === 0 ? 1 : 0);
+                };
+            case '<>':
+                return static function (array $f) use ($i, $d) {
+                    $c = Valor::comparar($i($f), $d($f));
+                    return $c === null ? null : ($c !== 0 ? 1 : 0);
+                };
+            case '<':
+                return static function (array $f) use ($i, $d) {
+                    $c = Valor::comparar($i($f), $d($f));
+                    return $c === null ? null : ($c < 0 ? 1 : 0);
+                };
+            case '<=':
+                return static function (array $f) use ($i, $d) {
+                    $c = Valor::comparar($i($f), $d($f));
+                    return $c === null ? null : ($c <= 0 ? 1 : 0);
+                };
+            case '>':
+                return static function (array $f) use ($i, $d) {
+                    $c = Valor::comparar($i($f), $d($f));
+                    return $c === null ? null : ($c > 0 ? 1 : 0);
+                };
+            case '>=':
+                return static function (array $f) use ($i, $d) {
+                    $c = Valor::comparar($i($f), $d($f));
+                    return $c === null ? null : ($c >= 0 ? 1 : 0);
+                };
+            case '||':
+                return static function (array $f) use ($i, $d) {
+                    $a = $i($f);
+                    $b = $d($f);
+                    return ($a === null || $b === null) ? null : Valor::aTexto($a) . Valor::aTexto($b);
+                };
+            case '+':
+            case '-':
+            case '*':
+            case '/':
+            case '%':
+                $op = $n['op'];
+                return static function (array $f) use ($i, $d, $op) {
+                    $a = $i($f);
+                    $b = $d($f);
+                    if ($a === null || $b === null) { return null; }
+                    $x = Valor::aNumero($a);
+                    $y = Valor::aNumero($b);
+                    switch ($op) {
+                        case '+': return $x + $y;
+                        case '-': return $x - $y;
+                        case '*': return $x * $y;
+                        case '/': return $y == 0 ? null : $x / $y;
+                    }
+                    $di = (int)$y;
+                    return $di === 0 ? null : (int)$x % $di;
+                };
+        }
+        return null;
+    }
+
     private static function binaria(array $n, array $ctx)
     {
         $op = $n['op'];
@@ -344,28 +595,9 @@ final class Evaluator
 
     private static function funcion(array $n, array $ctx)
     {
-        if (isset($ctx['grupo']) && self::esAgregado($n)) {
-            if ($n['star']) {
-                return Functions::agregado($n['nombre'], null, count($ctx['grupo']), false);
-            }
-            $valores = [];
-            $arg     = $n['args'][0];
-            foreach ($ctx['grupo'] as $fila) {
-                $valores[] = self::evaluar($arg, ['fila' => $fila] + $ctx);
-            }
-
-            // El separador de GROUP_CONCAT se evalúa una vez, no por fila
-            $separador = ',';
-            if (isset($n['args'][1])) {
-                $primera   = $ctx['grupo'][array_key_first($ctx['grupo'])] ?? [];
-                $sep       = self::evaluar($n['args'][1], ['fila' => $primera] + $ctx);
-                $separador = $sep === null ? '' : Valor::aTexto($sep);
-            }
-
-            return Functions::agregado($n['nombre'], $valores, count($ctx['grupo']),
-                                       $n['distinct'], $separador);
+        if (isset($n['agid']) && isset($ctx['agregados'])) {
+            return $ctx['agregados'][$n['agid']];   // ya acumulado (ver marcarAgregados)
         }
-
         if (self::esAgregado($n)) {
             throw JsonSqlDbError::syntax("{$n['nombre']}() solo puede usarse en el SELECT, HAVING u ORDER BY");
         }

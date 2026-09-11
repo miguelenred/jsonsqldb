@@ -521,9 +521,9 @@ $casos = [
             $decl = array_column($bd->consultar('SHOW INDEXES FROM art'), 'indice');
             $disco = [];
             foreach (glob("$raiz/cortes/art.idx.*.json") as $f) {
-                $disco[] = substr(basename($f, '.json'), strlen('art.idx.'));
+                $disco[] = preg_replace('/\.part\d+$/', '', substr(basename($f, '.json'), strlen('art.idx.')));
             }
-            sort($decl); sort($disco);
+            sort($decl); $disco = array_values(array_unique($disco)); sort($disco);
             if ($decl !== $disco) {
                 return 'los índices en disco no son los declarados: '
                      . implode(',', $disco) . ' vs ' . implode(',', $decl);
@@ -588,9 +588,9 @@ $casos = [
             $decl = array_column($bd->consultar('SHOW INDEXES FROM art'), 'indice');
             $disco = [];
             foreach (glob("$raiz/cortes/art.idx.*.json") as $f) {
-                $disco[] = substr(basename($f, '.json'), strlen('art.idx.'));
+                $disco[] = preg_replace('/\.part\d+$/', '', substr(basename($f, '.json'), strlen('art.idx.')));
             }
-            sort($decl); sort($disco);
+            sort($decl); $disco = array_values(array_unique($disco)); sort($disco);
             return $decl === $disco ?: 'índices en disco distintos de los declarados';
         },
     ],
