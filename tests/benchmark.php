@@ -201,10 +201,22 @@ if (preg_match('/^([\d.]+) ([\d.]+)$/', $salida, $m)) {
 // Salida
 // ----------------------------------------------------------------------
 
-$enDisco = 0;
-foreach ((array)glob("$raiz/bench/*.json") as $f) {
-    $enDisco += (int)filesize((string)$f);
-}
+// Huella en disco: datos e índices por un lado y la caché por otro, que en
+// disco ocupa cerca del doble que los datos (ver docs/01-core.md)
+$huella = static function (string $patron): array {
+    $n = 0;
+    $bytes = 0;
+    foreach ((array)glob($patron) as $f) {
+        $n++;
+        $bytes += (int)filesize((string)$f);
+    }
+    return [$n, $bytes / 1048576];
+};
+[$fIdx, $mbIdx]   = $huella("$raiz/bench/*.idx.*.json");
+[$fTodo, $mbTodo] = $huella("$raiz/bench/*.json");
+[$fCache, $mbCache] = $huella("$raiz/bench/.cache/*.cache");
+$fDatos  = $fTodo - $fIdx;
+$mbDatos = $mbTodo - $mbIdx;
 
 if ($csv) {
     echo "version,filas,operacion,ms,mb\n";
@@ -212,8 +224,11 @@ if ($csv) {
         printf("%s,%d,\"%s\",%.2f,%.1f\n", $version, $filas, $etiqueta, $ms, $mb);
     }
 } else {
-    printf("\njsonSQLDB %s · PHP %s · %s filas de clientes, %s de pedidos · %.1f MB en disco\n",
-        $version, PHP_VERSION, number_format($filas), number_format($pedidos), $enDisco / 1048576);
+    printf("\njsonSQLDB %s · PHP %s · %s filas de clientes, %s de pedidos\n",
+        $version, PHP_VERSION, number_format($filas), number_format($pedidos));
+    printf("En disco: datos %.1f MB en %d ficheros, índices %.1f MB en %d, caché %.1f MB en %d (%s)\n",
+        $mbDatos, $fDatos, $mbIdx, $fIdx, $mbCache, $fCache,
+        function_exists('apcu_enabled') && apcu_enabled() ? 'y APCu' : 'en disco');
     printf("Media de varias repeticiones. Mide el motor, sin HTTP.\n\n");
     printf("  %-38s %10s %9s\n", 'operación', 'ms', 'pico MB');
     echo '  ', str_repeat('-', 58), "\n";

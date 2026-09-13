@@ -22,6 +22,7 @@ namespace JsonSQLDB;
  *   <raiz>/<base>/.tx/<ámbito>/       journal de una escritura en curso
  *   <raiz>/<base>/.lock               fichero de bloqueo de la base
  *   <raiz>/<base>/.<tabla>.lock       fichero de bloqueo de una tabla
+ *   <raiz>/<base>/.turno, .<tabla>.turno  su torno (ver abrirLock())
  *
  * Concurrencia: dos niveles de bloqueo con flock, siempre pedidos en este orden
  * —primero la base, después la tabla—, que es lo que hace imposible un
@@ -58,6 +59,7 @@ final class Storage
     /** @var array<string,int>|null _revs.json de versiones anteriores a la 2.0 */
     private ?array $revsLegadas = null;
     private bool   $cache;
+    private bool   $cacheDisco;
     private bool   $apcu;
     private string $prefijo;
     private int    $filasPorParte;
@@ -95,8 +97,9 @@ final class Storage
         $this->base     = $base;
         $this->dirCache = $dir . '/.cache';
         $this->dirTx    = $dir . '/.tx';
-        $this->cache    = Config::cacheActiva();
-        $this->apcu     = function_exists('apcu_enabled') && apcu_enabled();
+        $this->apcu       = function_exists('apcu_enabled') && apcu_enabled();
+        $this->cacheDisco = Config::cacheActiva() === true;
+        $this->cache      = $this->cacheDisco || (Config::cacheActiva() === 'apcu' && $this->apcu);
         $this->prefijo  = 'jsq:' . substr(md5($dir), 0, 12) . ':';
         $this->filasPorParte = Config::filasPorParte();
         $this->indices       = Config::indices();
@@ -274,14 +277,42 @@ final class Storage
         $this->locksTabla[$tabla] = $this->abrirLock($this->dir . '/.' . $tabla . '.lock', false, "la tabla '$tabla'");
     }
 
-    /** @return resource */
+    /**
+     * Coge un bloqueo pasando antes por su torno.
+     *
+     * flock no da preferencia a nadie: un exclusivo espera a que no quede
+     * ningún compartido, y con lectores que se van solapando sin parar ese
+     * momento puede no llegar nunca, y una escritura se queda esperando
+     * segundos. El torno lo arregla: todo el mundo lo cruza antes de pedir el
+     * bloqueo y lo suelta nada más tenerlo. Un escritor que espera se queda
+     * con el torno, así que los lectores nuevos se paran en él; los que ya
+     * están dentro terminan, el escritor entra, y al soltar el torno pasan
+     * los que esperaban. Cuesta dos llamadas más por bloqueo y no cambia
+     * nada más: el orden de bloqueo sigue siendo el mismo para todos.
+     *
+     * @return resource
+     */
     private function abrirLock(string $fichero, bool $exclusivo, string $queEs)
     {
+        $torno = @fopen(substr($fichero, 0, -5) . '.turno', 'c');
+        if ($torno !== false && !flock($torno, $exclusivo ? LOCK_EX : LOCK_SH)) {
+            fclose($torno);
+            $torno = false;
+        }
         $fh = @fopen($fichero, 'c');
         if ($fh === false) {
+            if ($torno !== false) {
+                flock($torno, LOCK_UN);
+                fclose($torno);
+            }
             throw JsonSqlDbError::io("No se puede abrir el fichero de bloqueo de $queEs");
         }
-        if (!flock($fh, $exclusivo ? LOCK_EX : LOCK_SH)) {
+        $ok = flock($fh, $exclusivo ? LOCK_EX : LOCK_SH);
+        if ($torno !== false) {
+            flock($torno, LOCK_UN);
+            fclose($torno);
+        }
+        if (!$ok) {
             fclose($fh);
             throw JsonSqlDbError::lock("No se puede bloquear $queEs");
         }
@@ -2101,7 +2132,7 @@ final class Storage
             apcu_store($clave, $filas, 3600);
             return;
         }
-        if (!is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {
+        if (!$this->cacheDisco || !is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {
             return;
         }
         $nombre = 'q';
@@ -2170,6 +2201,9 @@ final class Storage
         }
         if ($this->apcu) {
             apcu_store($clave, $valor);
+            return;
+        }
+        if (!$this->cacheDisco) {
             return;
         }
         if (!is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {

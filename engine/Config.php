@@ -42,9 +42,21 @@ final class Config
         return $n > 0 ? $n : 1000;
     }
 
-    public static function cacheActiva(): bool
+    /**
+     * true: caché en APCu si lo hay y si no en disco; 'apcu': solo en memoria
+     * compartida, nunca en disco; false: sin caché.
+     *
+     * @return bool|string
+     */
+    public static function cacheActiva()
     {
-        return !defined('JSONSQLDB_CACHE_ACTIVA') || (bool)JSONSQLDB_CACHE_ACTIVA;
+        if (!defined('JSONSQLDB_CACHE_ACTIVA')) {
+            return true;
+        }
+        if (is_string(JSONSQLDB_CACHE_ACTIVA) && strtolower(JSONSQLDB_CACHE_ACTIVA) === 'apcu') {
+            return 'apcu';
+        }
+        return (bool)JSONSQLDB_CACHE_ACTIVA;
     }
 
     /** Máximo de filas de un resultado de SELECT para guardarlo en caché; 0 la desactiva. */

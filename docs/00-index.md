@@ -20,14 +20,14 @@ data/             one folder per database, one .json per table
 ## Documentation
 
 > **Coming from an earlier version?** Read
-> [Upgrading from an earlier version](01-core.md#10-upgrading-from-an-earlier-version)
+> [Upgrading from an earlier version](01-core.md#11-upgrading-from-an-earlier-version)
 > before replacing the folder. The data needs no conversion, but if you come
 > from 1.x **the HMAC signature of the API changed** and your own clients stop
 > working until they are updated.
 
 | Document | What it covers |
 |---|---|
-| [01-core.md](01-core.md) | storage, types, locking, journal, indexes, memory, configuration, log, upgrading |
+| [01-core.md](01-core.md) | storage, types, locking, journal, indexes, memory, files and space (tuning for a hosting plan), configuration, log, upgrading |
 | [02-queries.md](02-queries.md) | `SELECT`: syntax, functions, alphabetical order, performance |
 | [03-writes.md](03-writes.md) | `INSERT`/`UPDATE`/`DELETE`, DDL, keys, triggers, views, integrity |
 | [04-api.md](04-api.md) | HTTP endpoint, HMAC signature, bound parameters, clients |
@@ -78,6 +78,9 @@ $rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja']
   the table is created. See [03-writes.md](03-writes.md).
 - **Batch your `INSERT`s.** One statement with many `VALUES` is far cheaper
   than many statements; see [02-queries.md](02-queries.md).
+- **On a hosting with an inode quota**, read
+  [01-core.md §9](01-core.md#9-files-space-and-how-to-tune-them): what makes
+  files, and which settings trade files for speed.
 
 ## Tests
 
@@ -93,7 +96,7 @@ php tests/f4_api.php          → OK: 52    real requests against the API
 php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
+php tests/f7_concurrencia.php → OK: 24    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 59    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 31    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
@@ -105,4 +108,6 @@ request at a time and the panel calls the API from inside its own request.
 
 `php tests/benchmark.php [rows]` measures the engine on a generated dataset
 (mean of several repetitions of each query) so you can repeat the numbers
-quoted in the documentation on your own machine.
+quoted in the documentation on your own machine;
+`php tests/benchmark_concurrencia.php` measures readers and writers on one
+table in real processes.

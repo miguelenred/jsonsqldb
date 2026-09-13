@@ -9,6 +9,58 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.6.1] - 2026-09-12
+
+A locking fix found by measuring, plus documentation and one setting prompted
+by a review of 2.6.0 that measured what the release notes had not said: the
+on-disk cache costs space and files.
+
+### Fixed
+
+- **A writer could starve behind readers that never stop.** `flock` grants an
+  exclusive lock only when no shared lock is held; with readers overlapping
+  continuously that moment may never come. Measured: three processes reading
+  one table without pause let a fourth insert 49 rows in two seconds (690
+  alone); four readers let it insert two rows in eight seconds. Every lock is
+  now taken through a turnstile — a second `flock` file (`.turno`,
+  `.<table>.turno`) crossed before asking for the lock and released as soon
+  as it is held — so a waiting writer stops new readers, the readers already
+  inside finish, and the writer gets in: 305 rows in the same test, 44 % of
+  its rate alone. Two extra system calls per lock (6 µs); lock order unchanged,
+  so deadlock is still impossible. `tests/f7_concurrencia.php` now checks it
+  against the writer's own rate on the machine. Reads without any lock — read,
+  then verify that nothing changed and repeat if it did — were built and
+  measured first and discarded: they fix the starvation too, but a read that
+  overlaps a commit is thrown away and repeated, and long scans got noticeably
+  slower under ten writes per second for a gain readers could not feel.
+
+### Added
+
+- `tests/benchmark_concurrencia.php`: readers and writers on the same table in
+  real processes; prints writes per second and read latency percentiles.
+
+- **`JSONSQLDB_CACHE_ACTIVA` accepts `'apcu'`**: cache in shared memory only,
+  never in `.cache/` on disk. Without APCu the engine keeps a serialised copy
+  of every part, index piece and query result, which takes about twice the
+  space of the data and index files and as many files as they have — on a
+  100,000-row benchmark, 41 MB and 707 files next to 29 MB and 709 files of
+  data and indexes. Until now the only way to avoid it was to disable the
+  cache altogether.
+- **`php tests/benchmark.php` reports data, indexes and cache separately**,
+  in megabytes and files, instead of a single figure that counted the `.json`
+  files and left the cache out.
+- **`docs/01-core.md` §9, "Files, space and how to tune them"**: where every
+  file comes from, with the counts and sizes measured on the benchmark; which
+  settings trade files for speed and by how much (the cache setting, the part
+  size, the number of indexes), with the effect of 5,000 rows per part
+  measured operation by operation; why compressing the cache does not pay;
+  and how to measure it on your own data. A short version is in the README.
+
+### Changed
+
+- Nothing in the engine beyond reading the new value of the constant; the
+  default is unchanged.
+
 ## [2.6.0] - 2026-09-11
 
 Speed and memory release, reads and writes. Nothing breaking in SQL or in the

@@ -40,7 +40,7 @@ One **folder per database** inside the data root:
 
 Databases created before 2.0 have a `_revs.json` with the revisions of all
 tables together and no index files; see
-[Upgrading from an earlier version](#10-upgrading-from-an-earlier-version).
+[Upgrading from an earlier version](#11-upgrading-from-an-earlier-version).
 
 Allowed names: database `[A-Za-z0-9_-]{1,64}`, table/column
 `[A-Za-z_][A-Za-z0-9_]{0,63}`. Nothing else is accepted, so there is no way to
@@ -239,6 +239,79 @@ lock is needed because a table can span several files: the write puts them in
 place one after another, and without it a concurrent read could take the first
 part already new and the second still old.
 
+### Writers do not starve
+
+The obvious cost of the locks is that a read of a table waits for a write in
+progress on it: 10 ms on a table of 20,000 rows, 30 ms on one of 100,000, and
+only when the two coincide. Measuring it turned up the real problem, which is
+the other way round: **the writer waits for the readers, and can wait
+forever.** `flock` gives nobody preference: an exclusive lock is granted only
+when no shared lock is held, and with readers that keep overlapping — a busy
+page served by several PHP workers — that moment may never come.
+
+`php tests/benchmark_concurrencia.php [readers] [writers] [seconds] [pause_ms]`
+runs readers and writers on the same table in real processes: the readers
+alternate a primary-key lookup and a `WHERE` scan, the writer inserts one row
+at a time with an optional pause between rows. Measured on a one-core
+machine, 20,000 rows and three indexes:
+
+| Readers / writer / pause between inserts | Length | Writes done, 2.6.0 | Writes done, 2.6.1 (turnstile) |
+|---|---|---|---|
+| no readers, the writer alone | 5 s | 620 | — |
+| 1 reader, no pause | 5 s | 275 | — |
+| 2 readers, 100 ms pause | 6 s | 28 | **45** |
+| 2 readers, 30 ms pause | 6 s | 39 | **104** |
+| 2 readers, no pause | 6 s | 39 | **170** |
+| 4 readers, no pause | 8 s | **2** | **123** |
+| 4 readers, 50 ms pause | 8 s | **1** | — |
+
+With two readers the writer manages a sixteenth of what it does alone; with
+four it manages two rows in eight seconds. For a website that is a form's
+`INSERT` taking seconds to get in while the page is being read.
+
+Since 2.6.1 every lock is taken through a **turnstile**: a second `flock`
+file (`.turno`, `.<table>.turno`) that everyone crosses before asking for
+the lock and releases as soon as they have it. A writer that is waiting keeps
+the turnstile, so new readers stop at it; the readers already inside finish,
+the writer gets in, and when it releases the turnstile the waiting readers go
+through. It costs two extra system calls per lock (measured: a read lock goes
+from 0.018 ms to 0.024 ms, a write lock from 0.006 to 0.012) and changes
+nothing else: the order in which locks are taken is the same for everyone,
+so a deadlock is still impossible. What readers pay is that a read arriving
+while a write waits queues behind it — it waits for that one write, 10 ms —
+instead of the writer waiting for every reader:
+
+| 2 readers, 1 writer; read latency, p95 | 2.6.0 | 2.6.1 (turnstile) |
+|---|---|---|
+| writer pausing 100 ms — key lookup | 9.6 ms | 11.1 ms |
+| writer pausing 100 ms — `WHERE` scan | 44.0 ms | 49.0 ms |
+| writer pausing 30 ms — key lookup | 10.3 ms | 16.7 ms |
+| writer pausing 30 ms — `WHERE` scan | 44.2 ms | 53.3 ms |
+| writer never pausing — key lookup | 10.5 ms | 26.5 ms |
+| writer never pausing — `WHERE` scan | 45.6 ms | 59.9 ms |
+
+(Alone, with no writer at all: 2.5 ms and 19.5 ms.) The read latencies are
+inflated on both sides by the single core: five processes share one CPU, and
+every write that now gets in takes CPU from the readers. On a server with
+several cores the readers barely notice the writer, and the starvation
+without the turnstile is if anything worse, because readers overlap more
+perfectly. `tests/f7_concurrencia.php` checks it: three readers holding the
+lock in a loop for two seconds, and a writer inserting in a loop, which must
+keep at least 30 % of its rate alone (it kept 7 % without the turnstile and
+44 % with it on the machine above).
+
+**What was considered and not done: reads without any lock.** Since every
+file is replaced atomically, a read could skip the lock, read, and check at
+the end that nothing changed, repeating if it did. It was built and
+measured: it removes the starvation too, but a read that overlaps a write's
+commit has to be thrown away and repeated, and long scans paid for it — in
+the table above, the `WHERE` scan's p95 went from 44 ms to 72, 87 and 101 ms
+in the three writer settings, while the writer got in less than with the
+turnstile (38, 61 and 81 writes). The gain readers were supposed to get was
+not there to begin with: a read that does not overlap a write does not wait
+today either. The turnstile fixes the real problem at no cost, so that is
+what shipped.
+
 The lock is **re-entrant** (a trigger writing inside an `INSERT` does not ask
 again) and upgrading from read to write is forbidden, so each statement decides
 its mode before starting.
@@ -253,7 +326,8 @@ value.
 > be unreliable; do not put the data root on NFS.
 
 `tests/f7_concurrencia.php` checks this with real processes, measuring what
-overlaps and what waits.
+overlaps and what waits, and that a writer gets in against readers that never
+stop.
 
 ---
 
@@ -292,7 +366,16 @@ The cache steps aside when memory is tight (see [Memory](#8-memory)), and
 `INTEGRITY CHECK` and `COUNT(*)` bypass it on purpose: they need to see what is
 really in the files.
 
-Deleting `.cache/` by hand is safe at any time.
+### What the on-disk cache costs
+
+Without APCu the cache lives in `.cache/` as PHP-serialised copies, and that
+is not free: it takes about twice the space of the data and index files it
+mirrors, and as many files as they have. What that means for a hosting plan,
+and what you can do about it, is in
+[Files, space and how to tune them](#9-files-space-and-how-to-tune-them).
+
+Deleting `.cache/` by hand is safe at any time: everything in it is
+regenerated on the next read.
 
 ---
 
@@ -637,7 +720,119 @@ released by the operating system when the process dies.
 
 ---
 
-## 9. Configuration and protection
+## 9. Files, space and how to tune them
+
+A database is a folder of files, and cheap hosting limits two things about
+files: **how many** (the inode quota, typically 100,000–300,000 per account,
+shown on the first page of the control panel) and **how much space** (tens of
+gigabytes on entry plans). For this engine the number of files is the one that
+can matter; the space almost never does. This section says where each file
+comes from and which settings trade files for speed, with the numbers measured
+on the bundled benchmark, so you can decide for your own plan.
+
+### Where the files come from
+
+For a table with *R* rows, *P* = ⌈*R* / `JSONSQLDB_FILAS_POR_PARTE`⌉ parts and
+*I* indexes (the primary key and each `UNIQUE` count as one each, plus the ones
+you create):
+
+| Files | How many | Size |
+|---|---|---|
+| Data (`table.json`, `table.partN.json`) | *P* | the rows as readable JSON, one per line |
+| Structure and revision (`table.meta.json`, `table.rev.json`) | 2 | a few KB |
+| Index pieces (`table.idx.<name>.json`, `.partN.json`) | *P* × *I* | about 40 % of the data for a three-index table |
+| On-disk cache (`.cache/`, without APCu) | *P* + *P* × *I* + 1, plus one per cached query result | about 1.4 × the file it mirrors |
+
+On the bundled benchmark (`php tests/benchmark.php 100000`, 100,000 customers
+and 150,000 orders, three indexes on customers and one on orders, default
+settings, no APCu):
+
+| | Files | Space |
+|---|---|---|
+| Data | 256 | 21 MB |
+| Indexes | 453 | 8 MB |
+| Cache | 707 | 41 MB |
+| **Total** | **1,416** | **70 MB** |
+
+The benchmark prints these three lines for whatever size you give it. For
+20,000 customers and 30,000 orders it is 56 + 93 + 147 files and
+4 + 1.4 + 8 MB. Space is not the problem: a base has to hold millions of rows
+before it fills a cheap plan, and by then this engine is the wrong tool. Files
+can be, if the account is already busy with something like a WordPress
+(30,000–60,000 files on its own).
+
+### The three settings that move it
+
+**1. `JSONSQLDB_CACHE_ACTIVA` — the cache.** The largest share of both files
+and space is the cache, and it exists only for speed: a cached part decodes in
+half the time of its JSON and a cached index piece in a third. Three values:
+
+| Value | Files and space | Speed |
+|---|---|---|
+| `true` (default) | APCu if the host has it (then the cache lives in shared memory and **costs nothing on disk**); otherwise `.cache/` on disk, the figures above | full |
+| `'apcu'` | shared memory only; `.cache/` is never written. **Without APCu this means no cache at all** | full with APCu; without it, reads decode JSON every time: a full scan of 100,000 rows goes from ~65 ms to ~100 ms, a primary key lookup from 8 ms to 13 ms |
+| `false` | no cache | as above, without cache; only for debugging |
+
+So the first thing to check on a shared host is whether APCu is available for
+your PHP version (most control panels offer it as a tick box). With it, the
+disk question disappears: the table above becomes 709 files and 29 MB, all of
+them data and indexes.
+
+**2. `JSONSQLDB_FILAS_POR_PARTE` — the part size** (1,000 by default). A
+bigger part means fewer parts, and since index pieces and cache entries follow
+the parts, fewer of everything: at 5,000 rows per part the 1,416 files above
+become about 285, and the space stays the same. What it costs, measured on
+20,000 customers (296 files at 1,000 per part, 70 at 5,000), same machine,
+one run after the other:
+
+| | 1,000 rows per part | 5,000 rows per part |
+|---|---|---|
+| Lookup by primary key | 2.0 ms · 7 MB | **6.7 ms · 11 MB** — the whole part is decoded to get one row |
+| `INSERT` one row | 7.8 ms · 9 MB | 9.1 ms · 13 MB — a bigger last part and a bigger last piece of each index |
+| `UPDATE` one row by key | 10.7 ms · 10 MB | **24.6 ms · 17 MB** — one part read and rewritten, five times bigger |
+| `DELETE` one row by key | 14.1 ms · 8 MB | 12.2 ms · 9 MB |
+| Range scan, `GROUP BY`, `ORDER BY … LIMIT` | 17–20 ms · 6 MB | 17–22 ms · 9 MB — same bytes; the part in memory at any moment is five times bigger |
+| `JOIN` aggregated by city | 99 ms · 22 MB | 106 ms · 24 MB |
+
+Reads by key and single-row writes get slower in proportion to the part size
+(they read and write one part, and the part is bigger); everything that reads
+the table anyway costs the same time and about 3 MB more of memory. The
+engine's defaults favour speed because on most plans a few hundred files are
+nothing; if your account is near its quota, 5,000 cuts the files by four for
+a lookup that takes 5 ms instead of 2, and 10,000 is where single-row work
+starts to feel slow.
+
+Changing it on an existing database is safe: tables are read with the part
+size recorded in their `rev.json`, and the first write to each table splits it
+with the new size and rebuilds its indexes, once. That first write is a full
+rewrite of the table, so do it at a quiet moment.
+
+**3. Indexes.** Each index adds *P* files and, without APCu, *P* cache files.
+An index you do not use for equality lookups (`=`, `IN`) is pure cost: ranges,
+`LIKE`, `ORDER BY` and aggregates never use one. `SHOW INDEXES FROM t` lists
+them; `DROP INDEX` removes the ones you created. The automatic ones on the
+primary key and `UNIQUE` constraints stay, because the writer uses them to
+check uniqueness without loading the table.
+
+### What not to do
+
+Compressing the cache or storing it in a more compact format looks tempting
+and was tried: the time to decompress or convert it back eats the gain over
+decoding the JSON, so the cache stops paying for itself. If space is the
+problem, the answer is APCu, not a smaller cache on disk.
+
+### How to measure it on your own data
+
+`php tests/benchmark.php <rows>` prints files and megabytes of data, indexes
+and cache in its first line and times and memory below. To try a different
+part size, add `define('JSONSQLDB_FILAS_POR_PARTE', 5000);` next to the other
+two constants at the top of the file and run it again right after; to see the
+effect of APCu, run it with `php -d apc.enable_cli=1`. The benchmark uses a
+fixed seed, so two runs compare the same data.
+
+---
+
+## 10. Configuration and protection
 
 ### `config.php`
 
@@ -645,7 +840,7 @@ released by the operating system when the process dies.
 |---|---|---|
 | `JSONSQLDB_DATA_PATH` | root folder with one subfolder per database | `data/` |
 | `JSONSQLDB_FILAS_POR_PARTE` | rows per file before a table is split | `1000` |
-| `JSONSQLDB_CACHE_ACTIVA` | enable/disable the cache | `true` |
+| `JSONSQLDB_CACHE_ACTIVA` | `true`: APCu or disk; `'apcu'`: shared memory only; `false`: off | `true` |
 | `JSONSQLDB_CACHE_RESULTADOS` | maximum rows of a `SELECT` result to cache; `0` disables the result cache | `5000` |
 | `JSONSQLDB_INDICES` | maintain and use indexes | `true` |
 | `JSONSQLDB_LOG_ACTIVO` | enable the query log | |
@@ -792,7 +987,7 @@ the same file are two locks that do not exclude each other.
 
 ---
 
-## 10. Upgrading from an earlier version
+## 11. Upgrading from an earlier version
 
 Replace the folder and keep your two configuration files
 (`api/jsonsqldb_api_config.php` and `jsonsqldbadmin/config.php`, both
@@ -836,7 +1031,7 @@ ship with the project (PHP, Python, PowerShell and the panel) already are. See
 
 ---
 
-## 11. Files of this part
+## 12. Files of this part
 
 | File | Responsibility |
 |---|---|

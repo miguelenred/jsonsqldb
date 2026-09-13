@@ -30,8 +30,10 @@ defined('JSONSQLDB_DATA_PATH') || define('JSONSQLDB_DATA_PATH', __DIR__ . '/data
 // encarece bastante las escrituras.
 defined('JSONSQLDB_FILAS_POR_PARTE') || define('JSONSQLDB_FILAS_POR_PARTE', 1000);
 
-// Caché de tablas (APCu si está disponible, si no en <base>/.cache).
-// Se invalida sola en cada escritura. Ponerlo a false solo para depurar.
+// Caché de tablas: true = APCu si está disponible, si no en <base>/.cache;
+// 'apcu' = solo en memoria compartida, nunca en disco (para hostings con poco
+// espacio o cuota de ficheros: la caché en disco ocupa cerca del doble que los
+// datos); false = sin caché, solo para depurar. Se invalida sola al escribir.
 defined('JSONSQLDB_CACHE_ACTIVA') || define('JSONSQLDB_CACHE_ACTIVA', true);
 
 // Caché de resultados de SELECT: una consulta repetida sobre datos que no han

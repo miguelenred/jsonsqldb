@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.6.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.6.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -85,6 +85,21 @@ n rows in the lead, `SELECT * FROM t LIMIT 50` stops reading as soon as it has
 enough, and `SELECT COUNT(*)` and `SHOW TABLES` never build the rows at all.
 Only a query that genuinely needs every row at once — `ORDER BY` without
 `LIMIT`, the inner side of a `JOIN`, `DISTINCT` — holds the table.
+
+**Files and space, and how to tune them for your hosting.** A table is one
+file per 1,000 rows, plus one per part for each index, plus — without APCu —
+a serialised copy of each in `.cache/`. The benchmark with 100,000 customers
+and 150,000 orders ends with 709 files and 29 MB of data and indexes, and
+707 files and 41 MB of cache. Space is never the problem on a cheap plan; the
+number of files can be, if the account counts inodes. Three knobs, in order:
+APCu (the cache leaves the disk entirely, no speed lost);
+`JSONSQLDB_CACHE_ACTIVA = 'apcu'` or `false` (no `.cache/`, reads decode JSON
+every time: a key lookup 13 ms instead of 8 on 100,000 rows);
+`JSONSQLDB_FILAS_POR_PARTE = 5000` (four times fewer files of every kind; a
+key lookup 6.7 ms instead of 2 and an `UPDATE` by key 25 ms instead of 11 on
+20,000 rows; scans unchanged). The full table of trade-offs, measured, is in
+[`docs/01-core.md` §9](docs/01-core.md#9-files-space-and-how-to-tune-them).
+Deleting `.cache/` is always safe.
 
 **A repeated `SELECT` on unchanged data is not run again.** Its result is
 cached under the SQL, the parameters and the revision of every table it
@@ -681,8 +696,11 @@ A write that can propagate works out the set of tables it could reach first
 takes every lock up front in alphabetical order — which is what makes deadlock
 impossible — and falls back to the database lock when the set cannot be
 stated. Reads take each table's shared lock, so reads run together and only
-wait for a write to that same table. The detail is in
-[`docs/01-core.md`](docs/01-core.md).
+wait for a write to that same table. Every lock goes through a turnstile so a
+writer waiting behind continuous readers gets in as soon as the readers
+already inside finish, instead of never (2.6.1). The detail is in
+[`docs/01-core.md`](docs/01-core.md); `php tests/benchmark_concurrencia.php`
+measures readers and writers on one table in real processes.
 
 Writes are **atomic and durable**: the new content goes to a temporary file, is
 forced to disk with `fsync()`, and is then renamed over the original. A crash
@@ -821,7 +839,7 @@ php tests/f4_api.php          → OK: 52    real requests against the API
 php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
 php tests/f5_admin.php        → OK: 119   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 23    real simultaneous processes and locking
+php tests/f7_concurrencia.php → OK: 24    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 59    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 31    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt

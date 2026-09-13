@@ -247,6 +247,55 @@ chk('muchas escrituras simultáneas en la misma tabla no pierden ninguna', funct
         ?: "filas=$n ids únicos=" . count(array_unique($ids));
 });
 
+chk('un escritor entra aunque haya lectores leyendo sin parar', function () use ($raiz) {
+    // flock no da preferencia: un exclusivo espera a que no quede ningún
+    // compartido, y con lectores que se solapan sin parar podía esperar
+    // segundos. El torno (ver Storage::abrirLock) hace que los lectores nuevos
+    // se paren mientras un escritor espera. Tres lectores leyendo en bucle
+    // durante dos segundos y un escritor insertando en bucle: sin torno el
+    // escritor hacía una o dos filas; con él, decenas.
+    // Los lectores cogen el bloqueo directamente y lo retienen unos
+    // milisegundos, como haría una consulta larga sobre una tabla grande
+    $lector = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$st = new JsonSQLDB\\Storage(' . var_export($raiz, true) . ', "conc"); $fin = microtime(true) + 2;'
+            . 'while (microtime(true) < $fin) { $st->bloquear(false); $st->leerMeta("libres_a"); usleep(3000); $st->desbloquear(); }';
+    $escritor = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$bd = new JsonSQLDB\\Database("conc", ' . var_export($raiz, true) . '); $fin = microtime(true) + 2; $n = 0;'
+            . 'while (microtime(true) < $fin) { $bd->consultar("INSERT INTO libres_a (v) VALUES (?)", ["torno"]); $n++; }'
+            . 'echo $n;';
+    $correr = static function (string $codigo, &$tubs) {
+        $tubs = [];
+        return proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubs);
+    };
+    // Primero el escritor solo, para saber a qué ritmo escribe esta máquina
+    $pE = $correr($escritor, $tE);
+    $solo = (int)trim((string)stream_get_contents($tE[1]));
+    fclose($tE[1]); fclose($tE[2]); proc_close($pE);
+
+    $procs = [];
+    for ($i = 0; $i < 3; $i++) {
+        $procs[] = $correr($lector, $tubs[$i]);
+    }
+    usleep(100000);                                     // que los lectores estén ya dentro
+    $pE = $correr($escritor, $tE);
+    $escritas = (int)trim((string)stream_get_contents($tE[1]));
+    $err = trim((string)stream_get_contents($tE[2]));
+    fclose($tE[1]); fclose($tE[2]); proc_close($pE);
+    foreach ($procs as $i => $p) {
+        foreach ($tubs[$i] as $t) { stream_get_contents($t); fclose($t); }
+        proc_close($p);
+    }
+    if ($err !== '') { return "el escritor falló: " . substr($err, 0, 200); }
+    $bd = new Database('conc', $raiz);
+    $enTabla = (int)$bd->consultar("SELECT COUNT(*) AS n FROM libres_a WHERE v = 'torno'")[0]['n'];
+    if ($enTabla !== $solo + $escritas) { return "los escritores dicen " . ($solo + $escritas) . " filas y hay $enTabla"; }
+    echo "       escritor solo: $solo filas en 2 s; con tres lectores encima: $escritas\n";
+    // Sin torno se quedaba muy por debajo de la mitad; con él, cerca del ritmo en solitario
+    return $escritas * 10 >= $solo * 3 ?: "con lectores solo pudo insertar $escritas filas frente a $solo en solitario";
+});
+
 chk('las claves foráneas quedan bien', function () use ($raiz) {
     $bd = new Database('conc', $raiz);
     return $bd->consultar('CHECK KEYS') === [];
