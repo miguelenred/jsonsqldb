@@ -7,6 +7,8 @@ declare(strict_types=1);
  * Levanta el servidor propio de PHP sobre la raíz del proyecto y navega el
  * panel como lo haría un usuario: cookies de sesión, tokens CSRF y
  * formularios reales. El panel habla con la API, y la API con el motor.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 $raizProyecto = dirname(__DIR__);
 $raizDatos    = sys_get_temp_dir() . '/jsonsqldb_test_admin';
@@ -226,10 +228,18 @@ function peticion(string $query, ?array $post): string {
 echo "\n== Instalación y acceso ==\n";
 chk('sin usuarios pide crear el administrador', fn() =>
     str_contains(pedir(), 'Crea el administrador'));
+chk('crear el administrador sin token CSRF se rechaza', fn() =>
+    str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'clave-muy-larga-1', 'clave2' => 'clave-muy-larga-1']),
+                 'Formulario caducado'));
 chk('la contraseña corta se rechaza', fn() =>
-    str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'corta']), 'al menos 10 caracteres'));
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'corta', 'clave2' => 'corta']),
+                 'al menos 10 caracteres'));
+chk('las dos contraseñas tienen que coincidir', fn() =>
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1',
+                               'clave2' => 'clave-muy-larga-2']), 'no coinciden'));
 chk('se crea el administrador', fn() =>
-    str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'clave-muy-larga-1']), 'Ya puedes entrar'));
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1',
+                               'clave2' => 'clave-muy-larga-1']), 'Ya puedes entrar'));
 chk('ahora pide usuario y contraseña', fn() =>
     str_contains(pedir(), 'name="clave"') && !str_contains(pedir(), 'Crea el administrador'));
 chk('contraseña incorrecta', fn() =>
@@ -710,7 +720,7 @@ chk('el listado ofrece el filtro', fn() =>
 chk('el filtro busca en todas las columnas', function () {
     $html = pedir('p=datos&db=tienda&tabla=clientes&q=Sin+saldo');
     return str_contains($html, 'Sin saldo') && !str_contains($html, '>F6<')
-        && str_contains($html, '1 fila(s) filtradas');
+        && str_contains(strip_tags($html), '1 fila(s) filtradas');
 });
 chk('el filtro también encuentra por una columna numérica', fn() =>
     str_contains(pedir('p=datos&db=tienda&tabla=clientes&q=0.00'), 'fila(s) filtradas'));
@@ -826,6 +836,52 @@ chk('el volcado recrea la base tal cual', function () {
     preg_match('/<td>(\d+)<\/td>/', $a, $ma);
     preg_match('/<td>(\d+)<\/td>/', $b, $mb);
     return ($ma[1] ?? 'a') === ($mb[1] ?? 'b') ?: ($ma[1] ?? '?') . ' vs ' . ($mb[1] ?? '?');
+});
+chk('importar el volcado SQL desde el panel recrea la base, con claves y triggers', function () use ($raizDatos) {
+    // El volcado lleva triggers con BEGIN … END y puntos y coma dentro, cadenas
+    // con comillas y comentarios: todo lo que un separador ingenuo rompería
+    $sql = enviar('p=bases', ['accion' => 'exportar_base', 'formato' => 'sql', 'nombre' => 'tienda']);
+    $fichero = $raizDatos . '/volcado.sql';
+    file_put_contents($fichero, $sql);
+    enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'importada']);
+    $html = subir('p=tablas&db=importada', ['accion' => 'importar_sql', 'db' => 'importada'], 'fichero', $fichero);
+    @unlink($fichero);
+    if (!str_contains($html, 'sentencia(s) ejecutadas')) {
+        return 'no terminó: ' . (preg_match('/alert-danger[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
+    }
+    foreach (['SELECT COUNT(*) AS n FROM clientes', 'SELECT COUNT(*) AS n FROM pedidos'] as $q) {
+        preg_match('/<td>([\d.]+)<\/td>/', enviar('p=sql&db=tienda', ['sql' => $q]), $a);
+        preg_match('/<td>([\d.]+)<\/td>/', enviar('p=sql&db=importada', ['sql' => $q]), $b);
+        if (($a[1] ?? 'a') !== ($b[1] ?? 'b')) { return "$q: " . ($a[1] ?? '?') . ' frente a ' . ($b[1] ?? '?'); }
+    }
+    $trg = pedir('p=estructura&db=importada&tabla=pedidos');
+    return str_contains($trg, 'trg_pedidos_ins') ?: 'no se recreó el trigger';
+});
+chk('cargar un CSV: separador deducido, comillas, campos vacíos como NULL y en lotes', function () use ($raizDatos) {
+    enviar('p=sql&db=importada', ['sql' => 'CREATE TABLE gente (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre VARCHAR(40), edad INTEGER)']);
+    $csv = "\xEF\xBB\xBFnombre;edad\n";
+    for ($i = 1; $i <= 450; $i++) {
+        $csv .= ($i === 7 ? '"Pérez; ""el grande"", Juan"' : "persona $i") . ';' . ($i % 50 === 0 ? '' : (string)($i % 90)) . "\n";
+    }
+    $fichero = $raizDatos . '/gente.csv';
+    file_put_contents($fichero, $csv);
+    $html = subir('p=tablas&db=importada', ['accion' => 'importar_csv', 'db' => 'importada', 'tabla' => 'gente'], 'fichero', $fichero);
+    @unlink($fichero);
+    if (!str_contains($html, '450 fila(s) cargadas')) { return 'no cargó las 450 filas'; }
+    $nulos = enviar('p=sql&db=importada', ['sql' => 'SELECT COUNT(*) AS n FROM gente WHERE edad IS NULL']);
+    $raro  = enviar('p=sql&db=importada', ['sql' => 'SELECT nombre FROM gente WHERE id = 7']);
+    return (str_contains($nulos, '<td>9</td>') && str_contains($raro, 'Pérez; &quot;el grande&quot;, Juan'))
+        ?: 'los vacíos no son NULL o las comillas no se respetaron';
+});
+chk('un CSV con un dato que no encaja dice cuánto cargó y dónde paró', function () use ($raizDatos) {
+    $csv = "nombre,edad\n";
+    for ($i = 1; $i <= 300; $i++) { $csv .= "otra $i," . ($i === 250 ? 'abc' : '30') . "\n"; }
+    $fichero = $raizDatos . '/malo.csv';
+    file_put_contents($fichero, $csv);
+    $html = subir('p=tablas&db=importada', ['accion' => 'importar_csv', 'db' => 'importada', 'tabla' => 'gente'], 'fichero', $fichero);
+    @unlink($fichero);
+    return (str_contains($html, 'Se cargaron 200 fila(s)') && str_contains($html, 'no hay transacciones'))
+        ?: 'no explicó el fallo: ' . (preg_match('/alert-danger[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
 });
 chk('con la API en otra máquina, el ZIP se desactiva y se explica', function () use ($raizDatos, $puertoApi) {
     // Se pide el listado de bases haciendo creer al panel que la API está fuera

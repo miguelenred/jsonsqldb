@@ -25,6 +25,8 @@ namespace JsonSQLDB;
  * Solo afecta a ORDER BY. Las comparaciones (=, <, >), las claves únicas, los
  * GROUP BY y los DISTINCT siguen siendo exactos: 'Óscar' y 'oscar' son y
  * seguirán siendo dos valores distintos.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Collation
 {

@@ -12,6 +12,8 @@ namespace JsonSQLDB;
  *
  * Comprueba NOT NULL, tipos, clave primaria, UNIQUE y claves foráneas (con
  * ON DELETE / ON UPDATE), y ejecuta los triggers BEFORE y AFTER con NEW y OLD.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Writer
 {
@@ -28,6 +30,8 @@ final class Writer
     private array $sucioMeta  = [];
     private array $astCache   = [];   // sql de trigger => árbol ya analizado
     private array $idxPadre   = [];   // tabla|cols => definición de índice, o claves recogidas
+    /** @var array<string,int> siguiente autoincremento por tabla, movido en esta sentencia */
+    private array $autoinc    = [];
     private int   $anidamiento = 0;
 
     public function __construct(Catalog $cat)
@@ -332,12 +336,6 @@ final class Writer
         return $this->metas[$tabla];
     }
 
-    private function ponerMeta(string $tabla, array $meta): void
-    {
-        $this->metas[$tabla]     = $meta;
-        $this->sucioMeta[$tabla] = true;
-    }
-
     /**
      * Vuelca a disco todo lo modificado, en una sola escritura: cada tabla
      * puede ocupar varios ficheros y un corte entre dos no debe dejarla a
@@ -369,6 +367,9 @@ final class Writer
         foreach ($tablas as $tabla) {
             $meta = isset($this->sucioMeta[$tabla]) ? Catalog::compactar($this->metas[$tabla]) : null;
             $defs = Indexes::definiciones($this->metas[$tabla] ?? $this->cat->meta($tabla));
+            if (isset($this->autoinc[$tabla])) {
+                $st->ponerAutoincremento($tabla, $this->autoinc[$tabla]);
+            }
             if (isset($this->anexo[$tabla])) {
                 $st->anadirFilas($tabla, $this->anexo[$tabla], $meta, $defs);
                 continue;
@@ -644,23 +645,27 @@ final class Writer
         return $limpia;
     }
 
+    /**
+     * El contador de autoincremento no ensucia la estructura: se lleva aparte
+     * y al volcar va a rev.json (ver Storage::ponerAutoincremento()).
+     */
     private function siguienteAutoincremento(string $tabla): int
     {
-        $meta = $this->meta($tabla);
-        $n    = (int)$meta['autoincrement']['next'];
-        $meta['autoincrement']['next'] = $n + 1;
-        $this->ponerMeta($tabla, $meta);
+        $n = $this->autoinc[$tabla] ?? (int)$this->meta($tabla)['autoincrement']['next'];
+        $this->autoinc[$tabla] = $n + 1;
         return $n;
     }
 
     private function ajustarAutoincremento(string $tabla, int $valor): void
     {
         $meta = $this->meta($tabla);
-        if ($meta['autoincrement'] === null || $valor < (int)$meta['autoincrement']['next']) {
+        if ($meta['autoincrement'] === null) {
             return;
         }
-        $meta['autoincrement']['next'] = $valor + 1;
-        $this->ponerMeta($tabla, $meta);
+        $n = $this->autoinc[$tabla] ?? (int)$meta['autoincrement']['next'];
+        if ($valor >= $n) {
+            $this->autoinc[$tabla] = $valor + 1;
+        }
     }
 
     /**

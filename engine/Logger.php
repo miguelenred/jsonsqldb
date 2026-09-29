@@ -18,6 +18,8 @@ namespace JsonSQLDB;
  *   rows  = registros mostrados (SELECT) o afectados (INSERT/UPDATE/DELETE)
  *   ms    = tiempo de ejecución en milisegundos
  *   origen= etiqueta de la API key que lanzó la consulta (vacío fuera de la API)
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Logger
 {

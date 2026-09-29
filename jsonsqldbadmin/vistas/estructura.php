@@ -20,7 +20,7 @@ require __DIR__ . '/_pestanas.php';
   <!-- Columnas -->
   <div class="col-12">
     <div class="card">
-      <div class="card-header"><i class="bi bi-layout-three-columns"></i> Columnas</div>
+      <div class="card-header"><?= icono('layout-three-columns') ?> Columnas</div>
       <div class="table-responsive">
         <table class="table table-sm align-middle mb-0">
           <thead><tr>
@@ -36,16 +36,16 @@ require __DIR__ . '/_pestanas.php';
                   if ($c['longitud'] !== null) { echo '(' . (int)$c['longitud'] . ')'; }
                   elseif ($c['escala'] !== null) { echo '(10,' . (int)$c['escala'] . ')'; } ?></td>
               <td class="text-center"><?= $c['pk'] ? '<span class="badge text-bg-primary">PK</span>' : '' ?></td>
-              <td class="text-center"><?= $c['auto'] ? '<i class="bi bi-check2"></i>' : '' ?></td>
-              <td class="text-center"><?= $c['notnull'] ? '<i class="bi bi-check2"></i>' : '' ?></td>
-              <td class="text-center"><?= $c['unico'] ? '<i class="bi bi-check2"></i>' : '' ?></td>
+              <td class="text-center"><?= $c['auto'] ? icono('check2') : '' ?></td>
+              <td class="text-center"><?= $c['notnull'] ? icono('check2') : '' ?></td>
+              <td class="text-center"><?= $c['unico'] ? icono('check2') : '' ?></td>
               <td class="text-body-secondary"><?= $c['defecto'] === null ? '' : celda($c['defecto']) ?></td>
               <?php if ($admin): ?>
               <td class="text-end">
                 <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal"
-                        data-bs-target="#ren<?= h(md5($cn)) ?>"><i class="bi bi-pencil"></i></button>
+                        data-bs-target="#ren<?= h(md5($cn)) ?>"><?= icono('pencil') ?></button>
                 <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal"
-                        data-bs-target="#delc<?= h(md5($cn)) ?>"><i class="bi bi-trash"></i></button>
+                        data-bs-target="#delc<?= h(md5($cn)) ?>"><?= icono('trash') ?></button>
               </td>
               <?php endif; ?>
             </tr>
@@ -60,7 +60,7 @@ require __DIR__ . '/_pestanas.php';
   <!-- Añadir columna -->
   <div class="col-lg-6">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-plus-circle"></i> Añadir columna</div>
+      <div class="card-header"><?= icono('plus-circle') ?> Añadir columna</div>
       <div class="card-body">
         <form method="post" class="row g-2 align-items-end">
           <?= csrf() ?>
@@ -117,7 +117,7 @@ require __DIR__ . '/_pestanas.php';
   <!-- Operaciones sobre la tabla -->
   <div class="col-lg-6">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-gear"></i> Operaciones sobre la tabla</div>
+      <div class="card-header"><?= icono('gear') ?> Operaciones sobre la tabla</div>
       <div class="card-body">
         <form method="post" class="row g-2 align-items-end mb-4">
           <?= csrf() ?>
@@ -134,14 +134,14 @@ require __DIR__ . '/_pestanas.php';
           <div class="col-12 form-text">Las claves foráneas de otras tablas se actualizan solas.</div>
         </form>
 
-        <form method="post" onsubmit="return confirm('¿Borrar TODAS las filas de <?= h($tabla) ?>?');">
+        <form method="post" data-confirm="¿Borrar TODAS las filas de <?= h($tabla) ?>?">
           <?= csrf() ?>
           <input type="hidden" name="accion" value="vaciar_tabla">
           <input type="hidden" name="db" value="<?= h($base) ?>">
           <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
           <input type="hidden" name="volver" value="estructura">
           <button class="btn btn-sm btn-outline-danger">
-            <i class="bi bi-eraser"></i> Vaciar la tabla (borrar todas las filas)</button>
+            <?= icono('eraser') ?> Vaciar la tabla (borrar todas las filas)</button>
         </form>
       </div>
     </div>
@@ -151,7 +151,7 @@ require __DIR__ . '/_pestanas.php';
   <!-- Claves -->
   <div class="col-lg-6">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-key"></i> Claves</div>
+      <div class="card-header"><?= icono('key') ?> Claves</div>
       <div class="table-responsive">
         <table class="table table-sm mb-0 align-middle">
           <thead><tr><th>Tipo</th><th>Nombre</th><th>Columnas</th><th>Referencia</th>
@@ -174,28 +174,28 @@ require __DIR__ . '/_pestanas.php';
               <td class="text-end">
                 <?php if ($k['tipo'] === 'PRIMARY'): ?>
                   <?php if (!$hayAuto): ?>
-                    <form method="post" onsubmit="return confirm('¿Quitar la clave primaria?');">
+                    <form method="post" data-confirm="¿Quitar la clave primaria?">
                       <?= csrf() ?>
                       <input type="hidden" name="accion" value="borrar_pk">
                       <input type="hidden" name="db" value="<?= h($base) ?>">
                       <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
                       <input type="hidden" name="volver" value="estructura">
                       <button class="btn btn-sm btn-outline-danger"
-                              title="Quitar la clave primaria"><i class="bi bi-trash"></i></button>
+                              title="Quitar la clave primaria"><?= icono('trash') ?></button>
                     </form>
                   <?php else: ?>
                     <span class="text-body-tertiary small" title="Es AUTOINCREMENT: hay que recrear la tabla">
                       fija</span>
                   <?php endif; ?>
                 <?php else: ?>
-                  <form method="post" onsubmit="return confirm('¿Eliminar la restricción?');">
+                  <form method="post" data-confirm="¿Eliminar la restricción?">
                     <?= csrf() ?>
                     <input type="hidden" name="accion" value="borrar_restriccion">
                     <input type="hidden" name="db" value="<?= h($base) ?>">
                     <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
                     <input type="hidden" name="nombre" value="<?= h($k['nombre']) ?>">
                     <input type="hidden" name="volver" value="estructura">
-                    <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                    <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
                   </form>
                 <?php endif; ?>
               </td>
@@ -209,12 +209,12 @@ require __DIR__ . '/_pestanas.php';
       <div class="card-footer">
         <?php if (!$hayPk): ?>
           <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#nuevaPk">
-            <i class="bi bi-plus"></i> Clave primaria</button>
+            <?= icono('plus') ?> Clave primaria</button>
         <?php endif; ?>
         <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#nuevaUnica">
-          <i class="bi bi-plus"></i> Clave única</button>
+          <?= icono('plus') ?> Clave única</button>
         <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#nuevaFk">
-          <i class="bi bi-plus"></i> Clave foránea</button>
+          <?= icono('plus') ?> Clave foránea</button>
       </div>
       <?php endif; ?>
     </div>
@@ -223,7 +223,7 @@ require __DIR__ . '/_pestanas.php';
   <!-- Triggers -->
   <div class="col-lg-6">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-lightning"></i> Triggers</div>
+      <div class="card-header"><?= icono('lightning') ?> Triggers</div>
       <div class="table-responsive">
         <table class="table table-sm mb-0 align-middle">
           <thead><tr><th>Nombre</th><th>Cuándo</th><th>Condición</th>
@@ -239,14 +239,14 @@ require __DIR__ . '/_pestanas.php';
               <td class="small text-body-secondary"><?= celda($tg['cuando']) ?></td>
               <?php if ($admin): ?>
               <td class="text-end">
-                <form method="post" onsubmit="return confirm('¿Borrar el trigger?');">
+                <form method="post" data-confirm="¿Borrar el trigger?">
                   <?= csrf() ?>
                   <input type="hidden" name="accion" value="borrar_trigger">
                   <input type="hidden" name="db" value="<?= h($base) ?>">
                   <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
                   <input type="hidden" name="nombre" value="<?= h($tg['nombre']) ?>">
                   <input type="hidden" name="volver" value="estructura">
-                  <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                  <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
                 </form>
               </td>
               <?php endif; ?>
@@ -258,7 +258,7 @@ require __DIR__ . '/_pestanas.php';
       <?php if ($admin): ?>
       <div class="card-footer">
         <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#nuevoTrigger">
-          <i class="bi bi-plus"></i> Nuevo trigger</button>
+          <?= icono('plus') ?> Nuevo trigger</button>
       </div>
       <?php endif; ?>
     </div>
@@ -267,7 +267,7 @@ require __DIR__ . '/_pestanas.php';
   <!-- Índices -->
   <div class="col-lg-6">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-search"></i> Índices</div>
+      <div class="card-header"><?= icono('search') ?> Índices</div>
       <div class="table-responsive">
         <table class="table table-sm mb-0 align-middle">
           <thead><tr><th>Nombre</th><th>Columnas</th><th>Origen</th>
@@ -286,14 +286,14 @@ require __DIR__ . '/_pestanas.php';
               <?php if ($admin): ?>
               <td class="text-end">
                 <?php if ((int)$ix['automatico'] === 0): ?>
-                <form method="post" onsubmit="return confirm('¿Borrar el índice?');">
+                <form method="post" data-confirm="¿Borrar el índice?">
                   <?= csrf() ?>
                   <input type="hidden" name="accion" value="borrar_indice">
                   <input type="hidden" name="db" value="<?= h($base) ?>">
                   <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
                   <input type="hidden" name="nombre" value="<?= h($ix['indice']) ?>">
                   <input type="hidden" name="volver" value="estructura">
-                  <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                  <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
                 </form>
                 <?php endif; ?>
               </td>
@@ -306,7 +306,7 @@ require __DIR__ . '/_pestanas.php';
       <?php if ($admin): ?>
       <div class="card-footer">
         <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#nuevoIndice">
-          <i class="bi bi-plus"></i> Nuevo índice</button>
+          <?= icono('plus') ?> Nuevo índice</button>
       </div>
       <?php endif; ?>
     </div>

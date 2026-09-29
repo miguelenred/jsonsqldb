@@ -8,6 +8,8 @@
 // jsonSQLDB - Configuración de la API
 // Este fichero NO debe ser accesible desde el navegador.
 // El .htaccess / web.config de esta carpeta ya lo bloquea.
+//
+// https://miguelenred.es/jsonsqldb
 // ============================================================
 
 // ------------------------------------------------------------

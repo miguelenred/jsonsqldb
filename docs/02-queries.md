@@ -244,22 +244,28 @@ Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``.
 
 ## 5. Performance
 
-Measured with `php tests/benchmark.php` (PHP 8.3, 20,000 customers and 30,000
-orders, on-disk cache; mean of several repetitions):
+Measured with `php tests/benchmark.php` (PHP 8.3, one core, 20,000 customers
+and 30,000 orders, on-disk cache; each figure the mean of three runs, each run
+the mean of several repetitions; two runs of the same thing differ by up to
+10 %):
 
 | Query | Time · peak memory |
 |---|---|
-| Lookup by primary key | 2.3 ms · 7 MB |
-| Equality on an indexed column (2,000 matches) | 17 ms · 7 MB |
-| Numeric range, no index | 18 ms · 6 MB |
-| `LIKE` by prefix | 18 ms · 6 MB |
-| `LIMIT 50`, no filter | 0.5 ms · 6 MB |
-| `COUNT(*)` of a 30,000-row table | 5 ms · 5 MB |
-| `GROUP BY` + `SUM` + `ORDER BY` | 21 ms · 6 MB |
-| `ORDER BY ... LIMIT 20` | 21 ms · 6 MB |
-| `ORDER BY`, whole table | 31 ms · 21 MB |
-| `JOIN` 30,000 × 20,000 with aggregation | 111 ms · 22 MB |
-| `IN (SELECT ...)` subquery | 64 ms · 9 MB |
+| Lookup by primary key | 0.58 ms · 5.5 MB |
+| Lookup by a `UNIQUE` text column | 1.97 ms · 6.8 MB |
+| `BETWEEN` on the primary key (1,000 rows) | 1.9 ms · 6.3 MB |
+| Equality on an indexed column (2,000 matches) | 18 ms · 7.6 MB |
+| Numeric range, no index | 12 ms · 6.3 MB |
+| `LIKE` by prefix | 19 ms · 6.3 MB |
+| `LIMIT 50`, no filter | 0.57 ms · 6.3 MB |
+| `COUNT(*)` of a 30,000-row table | 5.4 ms · 5.4 MB |
+| `GROUP BY` + `SUM` + `ORDER BY` | 26 ms · 6.3 MB |
+| `ORDER BY ... LIMIT 20` | 22 ms · 6.3 MB |
+| `ORDER BY`, whole table | 36 ms · 20 MB |
+| `JOIN` 30,000 × 20,000 with aggregation | 134 ms · 22 MB |
+| `IN (SELECT ...)` subquery | 56–72 ms · 9 MB |
+| `JOIN` of one order with its customer, after `WHERE o.id = ?` | 0.46 ms · 5.6 MB |
+| `LEFT JOIN` of twenty orders with their customers | 3.7 ms · 6.1 MB |
 | Any of the above repeated on unchanged data | < 0.5 ms · 4 MB |
 
 Decisions that make this possible:
@@ -275,7 +281,9 @@ Decisions that make this possible:
 3. **Compiled `WHERE`**: comparisons, `AND`/`OR`/`NOT`, `BETWEEN`, `IN` with
    literals, `LIKE`, `IS NULL` and arithmetic are compiled into PHP closures
    once per query; the general expression evaluator only runs for what cannot
-   be compiled (functions, subqueries, columns of an outer query).
+   be compiled (functions, subqueries, columns of an outer query). A single
+   `col <op> number` or `col BETWEEN number AND number` is decided inline, with
+   no call per row, when the value is a number (2.7).
 4. **Streaming from the first source**: rows are read one part at a time and
    filtered as they arrive. A `WHERE` scan keeps only the rows that pass.
 5. **Accumulated aggregates**: `GROUP BY`, `COUNT`, `SUM`, `AVG`, `MIN` and
@@ -288,14 +296,24 @@ Decisions that make this possible:
    inner side is indexed and looked up directly instead of comparing every row
    against every row, and the joined rows stream into the `WHERE` and the
    grouping. Conditions that are not equalities are applied afterwards, only
-   to the candidates.
+   to the candidates. The parts of the `WHERE` that only concern tables
+   already joined are applied before the join (2.7), and when what is left
+   on the left is small and the right-hand table has an index on the `ON`
+   columns, each left row is looked up by key instead of hashing the table:
+   one order and its customer in 0.46 ms instead of about 20.
 8. **Subqueries executed once**: `IN (SELECT ...)` and scalar subqueries run
    once per query and their result is reused.
 9. **Per-part cache**: parts already read are reused while nobody writes them;
    and a **result cache** serves a repeated `SELECT` on unchanged data without
    running it (see [01-core.md](01-core.md)).
 10. **Indexes**: an equality on an indexed column decodes only the parts that
-    hold the matching rows.
+    hold the matching rows, and on a numeric column only the index pieces
+    whose range can hold the value (2.7). A few rows from a part are read by
+    their byte offset, one line each, without decoding the part (2.7). A
+    `BETWEEN`, `<` or `>` on a numeric indexed column reads only the parts
+    whose piece can hold a value in the range (2.7) — one or two parts for a
+    range of ids on a table that grows by appending, the whole table for a
+    column whose values are spread at random.
 11. **`LIMIT` pushed into the read** when there is no `WHERE` and no `JOIN`,
     and **`COUNT(*)` counting lines** instead of decoding rows.
 
@@ -325,13 +343,13 @@ silently wrong result.
 | `engine/Config.php` | reads `config.php` with defaults |
 | `engine/Logger.php` | query log |
 | `tests/f2_parser.php` | 70 checks of the parser |
-| `tests/f2_select.php` | 144 checks of the executor, with real data |
+| `tests/f2_select.php` | 145 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
 php tests/f1_nucleo.php     → OK: 66
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 144
-php tests/f8_indices.php    → OK: 59
+php tests/f2_select.php     → OK: 145
+php tests/f8_indices.php    → OK: 60
 ```

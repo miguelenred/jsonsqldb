@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Prueba de las sentencias SHOW y de las restricciones añadidas sobre tablas
  * ya creadas. Ejecutar: php tests/f5_esquema.php
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 // Las pruebas usan el motor directamente, sin pasar por la API
 define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -27,6 +29,18 @@ function chk(string $titulo, callable $fn): void {
         global $ko; $ko++;
         echo "  FALLO $titulo -> " . get_class($e) . ': ' . $e->getMessage() . "\n";
     }
+}
+
+/**
+ * ¿Hay algún journal en la base? La carpeta .tx puede existir vacía, y un
+ * temporal de manifiesto que dejó un proceso muerto es basura, no un journal:
+ * lo barre la siguiente escritura con el exclusivo de la base.
+ */
+function hayJournal(string $base): bool {
+    foreach ((array)glob("$base/.tx/*") as $f) {
+        if (substr((string)$f, -4) !== '.tmp') { return true; }
+    }
+    return false;
 }
 
 function esperaError(string $titulo, string $estado, callable $fn): void {
@@ -337,7 +351,7 @@ chk('una operación normal no deja rastro', function () use ($bd, $raiz) {
     $bd->consultar('CREATE TABLE diario (id INTEGER PRIMARY KEY AUTOINCREMENT, a VARCHAR(10))');
     $bd->consultar("INSERT INTO diario (a) VALUES ('uno'),('dos')");
     $bd->consultar('ALTER TABLE diario RENAME TO diario2');
-    return !is_dir("$raiz/tienda/.tx");
+    return !hayJournal("$raiz/tienda");
 });
 /**
  * Simula el corte de una escritura justo después de escribir el manifiesto:
@@ -372,7 +386,7 @@ chk('un corte a mitad de una escritura se termina al volver a abrir', function (
     // Al abrir de nuevo, el motor encuentra el manifiesto y termina lo que faltaba
     $bd2 = new Database('tienda', $raiz);
     $filas = $bd2->consultar('SELECT * FROM diario2 ORDER BY id');
-    return !is_dir("$dir/.tx") && count($filas) === 3 && $filas[2]['a'] === 'tres'
+    return !hayJournal("$dir") && count($filas) === 3 && $filas[2]['a'] === 'tres'
         && glob("$dir/*.tmp") === [];
 });
 chk('un corte antes del manifiesto no toca nada: los temporales sobran', function () use ($raiz) {
@@ -384,7 +398,7 @@ chk('un corte antes del manifiesto no toca nada: los temporales sobran', functio
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar('SELECT 1 AS uno');                  // basta con abrir la base
     $bd2->consultar("INSERT INTO diario2 (id, a) VALUES (4, 'cuatro')");   // la escritura barre el temporal
-    return !is_dir("$dir/.tx") && glob("$dir/*.tmp") === []
+    return !hayJournal("$dir") && glob("$dir/*.tmp") === []
         && $bd2->consultar('SELECT COUNT(*) AS n FROM diario2')[0]['n'] === 4;
 });
 chk('un journal cuyos temporales ya estaban en su sitio no repite nada', function () use ($raiz) {
@@ -398,12 +412,12 @@ chk('un journal cuyos temporales ya estaban en su sitio no repite nada', functio
 
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar('SELECT 1 AS uno');
-    return !is_dir("$dir/.tx") && (string)file_get_contents("$dir/diario2.json") === $antes;
+    return !hayJournal("$dir") && (string)file_get_contents("$dir/diario2.json") === $antes;
 });
 chk('el DROP de una tabla también va con journal', function () use ($raiz) {
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar('DROP TABLE diario2');
-    return !is_dir("$raiz/tienda/.tx")
+    return !hayJournal("$raiz/tienda")
         && !in_array('diario2', $bd2->consultar('SHOW TABLES') === [] ? []
              : array_column($bd2->consultar('SHOW TABLES'), 'tabla'), true);
 });
@@ -419,7 +433,7 @@ chk('un CASCADE que toca dos tablas se journaliza', function () use ($bd, $raiz)
 
     $bd->consultar('DELETE FROM jpadres WHERE id = 1');
     return $bd->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 1
-        && !is_dir("$raiz/tienda/.tx");
+        && !hayJournal("$raiz/tienda");
 });
 chk('un corte a mitad de un CASCADE se termina entero', function () use ($raiz) {
     $dir = "$raiz/tienda";
@@ -429,9 +443,10 @@ chk('un corte a mitad de un CASCADE se termina entero', function () use ($raiz) 
     $rh = json_decode((string)file_get_contents("$dir/jhijas.rev.json"), true);
     $padres = "{\n  \"table\": \"jpadres\",\n  \"rows\": [\n    {\"id\":1,\"n\":\"uno\"}\n  ]\n}\n";
     simularCorte($dir, null, ['jpadres', 'jhijas'], [
-        'jpadres.rev.json' => json_encode(['rev' => $rp['rev'] + 1, 'chunk' => $rp['chunk'], 'rows' => 1, 'parts' => [$rp['rev'] + 1]]),
+        // Los rev.json que deja una escritura de la 2.7 llevan el contador de autoincremento
+        'jpadres.rev.json' => json_encode(['rev' => $rp['rev'] + 1, 'chunk' => $rp['chunk'], 'rows' => 1, 'parts' => [$rp['rev'] + 1], 'autoinc' => $rp['autoinc']]),
         'jhijas.json'      => "{\n  \"table\": \"jhijas\",\n  \"rows\": []\n}\n",
-        'jhijas.rev.json'  => json_encode(['rev' => $rh['rev'] + 1, 'chunk' => $rh['chunk'], 'rows' => 0, 'parts' => [$rh['rev'] + 1]]),
+        'jhijas.rev.json'  => json_encode(['rev' => $rh['rev'] + 1, 'chunk' => $rh['chunk'], 'rows' => 0, 'parts' => [$rh['rev'] + 1], 'autoinc' => $rh['autoinc']]),
     ]);
     file_put_contents("$dir/jpadres.json", $padres);       // este rename ya había ocurrido
     file_put_contents("$dir/jpadres.json.999999.tmp", $padres);
@@ -443,7 +458,7 @@ chk('un corte a mitad de un CASCADE se termina entero', function () use ($raiz) 
     $bd2 = new Database('tienda', $raiz);
     return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 1
         && $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'] === 0
-        && !is_dir("$dir/.tx") && glob("$dir/*.tmp") === [];
+        && !hayJournal("$dir") && glob("$dir/*.tmp") === [];
 });
 chk('una escritura de una sola tabla usa el journal de esa tabla, no el de la base', function () use ($raiz) {
     // Una tabla con clave primaria tiene índice, así que su escritura toca
@@ -452,7 +467,7 @@ chk('una escritura de una sola tabla usa el journal de esa tabla, no el de la ba
     // todas las escrituras de todas las demás.
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar("INSERT INTO jpadres (n) VALUES ('tres')");
-    return !is_dir("$raiz/tienda/.tx")
+    return !hayJournal("$raiz/tienda")
         && $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 2;
 });
 chk('el journal de una tabla se termina solo con el bloqueo de esa tabla', function () use ($raiz) {
@@ -461,21 +476,21 @@ chk('el journal de una tabla se termina solo con el bloqueo de esa tabla', funct
     $rp  = json_decode((string)file_get_contents("$dir/jpadres.rev.json"), true);
     simularCorte($dir, 'jpadres', ['jpadres'], [
         'jpadres.json'     => "{\n  \"table\": \"jpadres\",\n  \"rows\": [\n    {\"id\":1,\"n\":\"uno\"},\n    {\"id\":3,\"n\":\"tres\"},\n    {\"id\":4,\"n\":\"cuatro\"}\n  ]\n}\n",
-        'jpadres.rev.json' => json_encode(['rev' => $rp['rev'] + 1, 'chunk' => $rp['chunk'], 'rows' => 3, 'parts' => [$rp['rev'] + 1]]),
+        'jpadres.rev.json' => json_encode(['rev' => $rp['rev'] + 1, 'chunk' => $rp['chunk'], 'rows' => 3, 'parts' => [$rp['rev'] + 1], 'autoinc' => 5]),
     ]);
 
     // Una lectura cualquiera lo encuentra y lo termina sin necesitar el
     // exclusivo de la base
     $bd2 = new Database('tienda', $raiz);
     return $bd2->consultar('SELECT COUNT(*) AS n FROM jpadres')[0]['n'] === 3
-        && !is_dir("$dir/.tx");
+        && !hayJournal("$dir");
 });
 chk('un journal huérfano de una tabla no bloquea las lecturas de otra', function () use ($raiz) {
     @mkdir("$raiz/tienda/.tx/jpadres", 0775, true);     // sin manifiesto: murió antes
 
     $bd2 = new Database('tienda', $raiz);
     $n = $bd2->consultar('SELECT COUNT(*) AS n FROM jhijas')[0]['n'];
-    return $n === 0 && !is_dir("$raiz/tienda/.tx");
+    return $n === 0 && !hayJournal("$raiz/tienda");
 });
 chk('un trigger que escribe en otra tabla también se journaliza', function () use ($raiz) {
     $bd2 = new Database('tienda', $raiz);
@@ -483,7 +498,7 @@ chk('un trigger que escribe en otra tabla también se journaliza', function () u
                      BEGIN UPDATE jpadres SET n = 'tocado' WHERE id = NEW.pid; END");
     $bd2->consultar('INSERT INTO jhijas (pid) VALUES (3)');
     return $bd2->consultar('SELECT n FROM jpadres WHERE id = 3')[0]['n'] === 'tocado'
-        && !is_dir("$raiz/tienda/.tx");
+        && !hayJournal("$raiz/tienda");
 });
 chk('limpiar las tablas del journal', function () use ($raiz) {
     $bd2 = new Database('tienda', $raiz);

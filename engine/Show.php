@@ -13,6 +13,8 @@ namespace JsonSQLDB;
  *   SHOW KEYS FROM t       claves únicas y foráneas
  *   SHOW TRIGGERS [FROM t]
  *   SHOW INDEXES [FROM t]
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Show
 {

@@ -18,6 +18,8 @@ namespace JsonSQLDB;
  * Qué NO toca: nunca borra filas. Si la columna admite nulos, la pone a NULL;
  * si no los admite, lo informa y lo deja como está, porque la decisión de qué
  * hacer con ese dato es tuya y no de un botón.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Integrity
 {

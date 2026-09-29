@@ -31,11 +31,20 @@ namespace JsonSQLDB;
  * Durabilidad: cada fichero se escribe en un temporal que se fuerza a disco.
  * Cuando una operación toca más de uno, los temporales se ponen en su sitio
  * de golpe guiados por un journal de rehacer (ver txConfirmar()).
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Storage
 {
     private const JSON_FILA = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION;
     private const JSON_META = self::JSON_FILA | JSON_PRETTY_PRINT;
+
+    /**
+     * Hasta cuántas filas de una misma parte se leen línea a línea en vez de
+     * decodificar la parte: una línea cuesta unas 30 µs y una parte de mil
+     * filas unos 400.
+     */
+    private const FILAS_POR_LINEA = 8;
 
     private const RE_BASE  = '/^[A-Za-z0-9_-]{1,64}$/';
     private const RE_TABLA = '/^[A-Za-z_][A-Za-z0-9_]{0,63}$/';
@@ -56,6 +65,14 @@ final class Storage
     private array  $estados = [];
     /** @var array<string,array<string,array>> índices leídos dentro del bloqueo */
     private array  $indicesMemo = [];
+    /** @var array<string,int> partes de cada tabla, dentro del bloqueo */
+    private array  $partesMemo = [];
+    /** @var array<string,int> siguiente autoincremento a anotar en rev.json en la escritura en curso */
+    private array  $autoincPendiente = [];
+    /** @var array<string,mixed> últimas entradas de caché, compartidas por todo el proceso (ver recordar()) */
+    private static array $memoProceso = [];
+    /** @var array<string,array<string,true>> las claves de $memoProceso por grupo, en orden de llegada */
+    private static array $memoGrupos = ['x' => [], 'o' => [], 'm' => []];
     /** @var array<string,int>|null _revs.json de versiones anteriores a la 2.0 */
     private ?array $revsLegadas = null;
     private bool   $cache;
@@ -77,9 +94,17 @@ final class Storage
      *   txCache     entradas de caché que se guardan al confirmar
      */
     private ?string $txAmbito    = null;
+    /** Tabla que se está escribiendo por partes, con su bloqueo compartido (ver bloquearPartes()) */
+    private ?string $modoPartes  = null;
+    /** @var array<string,array> lo que la escritura por partes tiene que confirmar, por tabla */
+    private array   $pendientePartes = [];
+    /** @var array{0: int, 1: int} escrituras por partes confirmadas y repetidas con la tabla entera, en este proceso */
+    private static array $cuentaPartes = [0, 0];
     private bool    $txPropia    = false;   // la abrió guardarTabla() y la confirma ella
     private string  $txOperacion = '';
     private array   $txRenombrar = [];
+    /** @var array<string,true> temporales que no se fuerzan a disco porque su contenido se puede rehacer */
+    private array   $txRegenerables = [];
     private array   $txBorrar    = [];
     private array   $txTablas    = [];
     private array   $txCache     = [];
@@ -232,6 +257,9 @@ final class Storage
         $tablas = $tabla === null ? [] : (is_array($tabla) ? array_values($tabla) : [$tabla]);
         if ($this->lockNivel > 0) {
             if ($exclusivo && !$this->lockExclusivo) {
+                if ($this->modoPartes !== null) {
+                    throw new ConflictoPartes();   // algo pide más que su tabla: con la tabla entera
+                }
                 throw JsonSqlDbError::lock('No se puede escribir dentro de un bloqueo de lectura');
             }
             $this->lockNivel++;
@@ -245,6 +273,7 @@ final class Storage
         $this->lockExclusivo = $exclusivo;
         $this->estados       = [];     // releer revisiones dentro del bloqueo
         $this->indicesMemo   = [];
+        $this->partesMemo    = [];
         $this->revsLegadas   = null;
 
         // La recuperación va antes de coger ningún bloqueo de tabla: así puede
@@ -271,7 +300,12 @@ final class Storage
      */
     private function bloquearLectura(string $tabla): void
     {
-        if ($this->lockNivel === 0 || $this->lockExclusivo || isset($this->locksTabla[$tabla])) {
+        // Escribiendo por partes solo se leen las estructuras de otras tablas
+        // (para ver quién referencia a quién), que son un fichero cada una y
+        // se reemplazan de una pieza: sin bloquearlas. Cogerles el compartido
+        // haría esperarse a dos escrituras por partes de tablas distintas
+        if ($this->lockNivel === 0 || $this->lockExclusivo || isset($this->locksTabla[$tabla])
+            || $this->modoPartes !== null) {
             return;
         }
         $this->locksTabla[$tabla] = $this->abrirLock($this->dir . '/.' . $tabla . '.lock', false, "la tabla '$tabla'");
@@ -339,20 +373,191 @@ final class Storage
         $this->locksTabla    = [];
         $this->lock          = null;
         $this->lockExclusivo = false;
+        $this->modoPartes    = null;
+        $this->pendientePartes = [];
         $this->estados       = [];
         $this->indicesMemo   = [];
+        $this->partesMemo    = [];
         $this->revsLegadas   = null;
     }
 
-    /** ¿Se tiene el bloqueo exclusivo de esta tabla en concreto? */
+    // ------------------------------------------------------------------
+    // Escritura por partes
+    //
+    // Una tabla es una serie de partes de mil filas, y un UPDATE o un DELETE
+    // corriente cambia una o dos. Con el bloqueo de la tabla entera, dos
+    // escrituras sobre filas lejanas de la misma tabla se esperan la una a la
+    // otra durante todo su trabajo, y las lecturas esperan a las dos.
+    //
+    // Con la escritura por partes, el trabajo caro —leer, calcular, escribir
+    // y forzar a disco los ficheros nuevos— se hace con el bloqueo COMPARTIDO
+    // de la tabla: lecturas y otras escrituras por partes siguen a la vez. Al
+    // confirmar, la escritura pasa al exclusivo, solo el tiempo de apuntar la
+    // revisión y renombrar, y comprueba que ninguna de las partes que ha
+    // reescrito haya cambiado entretanto. Si alguna cambió —dos escrituras en
+    // la misma parte— se descarta sin haber tocado nada y se repite con la
+    // tabla entera: se pone a la cola, y ninguna de las dos se pierde.
+    //
+    // Solo para lo que depende de cada fila y de nada más (ver
+    // Database::tablaPorPartes()): sin claves foráneas ni triggers, sin
+    // subconsultas y sin tocar columnas únicas. Lo demás, como siempre.
+    // ------------------------------------------------------------------
+
+    /**
+     * Bloqueo para una escritura por partes: compartido de la base y de la
+     * tabla. Hace la recuperación de siempre al abrir la base.
+     */
+    public function bloquearPartes(string $tabla): void
+    {
+        self::validarTabla($tabla);
+        if ($this->lockNivel > 0) {
+            throw JsonSqlDbError::lock('La escritura por partes tiene que ser el bloqueo de fuera');
+        }
+        $this->bloquear(false);
+        $this->locksTabla[$tabla] = $this->abrirLock($this->dir . '/.' . $tabla . '.lock', false, "la tabla '$tabla'");
+        $this->modoPartes = $tabla;
+        $this->pendientePartes = [];
+        // Una tabla de antes de la 2.5, sin revisión por parte, no se puede
+        // escribir por partes: se va por el camino de siempre
+        $estado = $this->estado($tabla);
+        $moderna = isset($estado['rows'], $estado['parts'], $estado['creada']) && is_array($estado['parts']);
+        foreach ($estado['indexes'] as $revs) {
+            $moderna = $moderna && is_array($revs);
+        }
+        if (!$moderna) {
+            $this->desbloquear();
+            throw new ConflictoPartes();
+        }
+    }
+
+    /** Escrituras por partes confirmadas y repetidas con la tabla entera en este proceso (para las pruebas). */
+    public static function cuentaPartes(): array
+    {
+        return self::$cuentaPartes;
+    }
+
+    /** Anota una escritura por partes que tuvo que repetirse con la tabla entera. */
+    public static function anotarRepeticion(): void
+    {
+        self::$cuentaPartes[1]++;
+    }
+
+    /**
+     * La segunda mitad de la escritura por partes: pasa al exclusivo de la
+     * tabla, comprueba que lo que se reescribió no ha cambiado, y deja
+     * preparada la revisión nueva con los cambios de los demás y los suyos.
+     * Lanza ConflictoPartes, sin haber renombrado nada, si no puede ser.
+     */
+    private function confirmarPartes(): void
+    {
+        $t = (string)$this->modoPartes;
+        $p = $this->pendientePartes[$t] ?? null;
+
+        // Primero se suelta el compartido y después se pide el exclusivo, con
+        // su torno: pedirlo sin soltar el otro dejaría a dos escrituras por
+        // partes esperándose la una a la otra
+        flock($this->locksTabla[$t], LOCK_UN);
+        fclose($this->locksTabla[$t]);
+        unset($this->locksTabla[$t]);
+        $this->modoPartes = null;
+        $this->locksTabla[$t] = $this->abrirLock($this->dir . '/.' . $t . '.lock', true, "la tabla '$t'");
+        $this->lockExclusivo  = true;
+        if ($p === null) {
+            return;
+        }
+
+        $conflicto = function (): void {
+            $this->txAbandonar();
+            throw new ConflictoPartes();
+        };
+        // Entre medias puede haber quedado un journal a medias de otro proceso,
+        // o un barrido de temporales: los dos se resuelven por el camino de siempre
+        clearstatcache();
+        if ((array)glob($this->dirTx . '/*') !== []) {
+            $conflicto();
+        }
+        foreach (array_keys($this->txRenombrar) as $tmp) {
+            if (!is_file((string)$tmp)) {
+                $conflicto();
+            }
+        }
+        unset($this->estados[$t], $this->indicesMemo[$t]);
+        $this->partesMemo = [];
+        $fresco = $this->estado($t);
+        $antes  = $p['antes'];
+        $nuevo  = $p['nuevo'];
+        $rev    = (int)$nuevo['rev'];
+        $total  = count($nuevo['parts']);
+        $partesAntes = (int)$p['partesAntes'];
+
+        if (($fresco['creada'] ?? null) !== ($antes['creada'] ?? null) || ($fresco['chunk'] ?? null) !== ($antes['chunk'] ?? null)
+            || (string)@md5_file($this->ficheroMeta($t)) !== $p['meta']) {
+            $conflicto();                       // la tabla o su estructura ha cambiado
+        }
+        $nombres = array_keys($fresco['indexes']);
+        $propios = array_keys($nuevo['indexes']);
+        sort($nombres);
+        sort($propios);
+        if ($nombres !== $propios) {
+            $conflicto();
+        }
+        // Si cambia el número de filas, las posiciones de detrás se mueven: nadie
+        // más puede haber añadido ni quitado filas
+        if ((int)$nuevo['rows'] !== (int)$antes['rows']
+            && ((int)$fresco['rows'] !== (int)$antes['rows'] || count($fresco['parts']) !== $partesAntes)) {
+            $conflicto();
+        }
+        // Las partes reescritas o quitadas, y los trozos de índice, tienen que
+        // estar como estaban cuando se leyeron
+        $tocada = static fn(int $i, $r): bool => $r === $rev || ($i >= $total && $i < $partesAntes);
+        $m = $fresco;
+        for ($i = 0; $i < max($total, $partesAntes); $i++) {
+            if ($tocada($i, $nuevo['parts'][$i] ?? null) && ($fresco['parts'][$i] ?? null) !== ($antes['parts'][$i] ?? null)) {
+                $conflicto();
+            }
+            if ($i < $total && ($nuevo['parts'][$i] ?? null) === $rev) {
+                $m['parts'][$i] = $rev;
+            }
+        }
+        if ($total < count($m['parts'])) {
+            $m['parts'] = array_slice($m['parts'], 0, $total);
+        }
+        foreach ($nuevo['indexes'] as $n => $revs) {
+            for ($i = 0; $i < max($total, $partesAntes); $i++) {
+                $r = $revs[$i] ?? null;
+                if ($tocada($i, $r) && ($fresco['indexes'][$n][$i] ?? null) !== ($antes['indexes'][$n][$i] ?? null)) {
+                    $conflicto();
+                }
+                if ($i < $total && $r === $rev) {
+                    $m['indexes'][$n][$i] = $rev;
+                    $m['rangos'][$n][$i]  = $nuevo['rangos'][$n][$i] ?? null;
+                }
+            }
+            $m['indexes'][$n] = array_slice(array_values((array)$m['indexes'][$n]), 0, $total);
+            $m['rangos'][$n]  = array_slice(array_values((array)($m['rangos'][$n] ?? [])), 0, $total);
+        }
+        $m['rows'] = (int)$fresco['rows'] + ((int)$nuevo['rows'] - (int)$antes['rows']);
+        $m['rev']  = max((int)$fresco['rev'], $rev - 1) + 1;
+
+        $guardar = $m;
+        $guardar['indexes'] = (object)$m['indexes'];
+        $guardar['rangos']  = (object)$m['rangos'];
+        $this->escribirAtomico($this->ficheroRev($t), json_encode($guardar, self::JSON_META) . "\n");
+        $this->limpiarCache($t, $fresco, $m, $p['indicesAntes']);
+        $this->estados[$t] = $m;
+        $this->pendientePartes = [];
+        self::$cuentaPartes[0]++;
+    }
+
+    /** ¿Se tiene el bloqueo exclusivo de esta tabla en concreto, o se escribe por partes? */
     public function tieneExclusivoDe(string $tabla): bool
     {
-        return $this->lockExclusivo && isset($this->locksTabla[$tabla]);
+        return ($this->lockExclusivo && isset($this->locksTabla[$tabla])) || $this->modoPartes === $tabla;
     }
 
     public function enEscritura(): bool
     {
-        return $this->lockNivel > 0 && $this->lockExclusivo;
+        return $this->lockNivel > 0 && ($this->lockExclusivo || $this->modoPartes !== null);
     }
 
     private function exigirEscritura(): void
@@ -384,12 +589,22 @@ final class Storage
     // reconocen y se deshacen igual (ver deshacer()).
     // ------------------------------------------------------------------
 
+    /** Carpeta del journal de un ámbito, como lo dejaban las versiones 2.0 a 2.6. */
     private function dirJournal(?string $tabla): string
     {
         return $this->dirTx . '/' . ($tabla ?? '_base');    // ninguna tabla puede llamarse _base
     }
 
-    /** ¿Quedó alguna operación a medias? Cuesta un stat, una vez por bloqueo. */
+    /** Fichero del manifiesto de un ámbito (desde la 2.7): un solo fichero, sin carpeta propia. */
+    private function ficheroJournal(?string $tabla): string
+    {
+        return $this->dirTx . '/' . ($tabla ?? '_base') . '.json';
+    }
+
+    /**
+     * ¿Quedó alguna operación a medias? Cuesta un stat y un listado de una
+     * carpeta casi siempre vacía, una vez por bloqueo.
+     */
     private function recuperar(bool $yaExclusivo): void
     {
         if (!is_dir($this->dirTx)) {
@@ -397,16 +612,23 @@ final class Storage
         }
         $this->migrarJournalPlano();
 
-        foreach ((array)glob($this->dirTx . '/*', GLOB_ONLYDIR) as $dir) {
-            $ambito = basename((string)$dir);
+        $ambitos = [];
+        foreach ((array)glob($this->dirTx . '/*') as $ruta) {
+            $nombre = basename((string)$ruta);
+            if (substr($nombre, -5) === '.json') {
+                $nombre = substr($nombre, 0, -5);
+            } elseif (!is_dir((string)$ruta)) {
+                continue;                             // un temporal del manifiesto: sobra
+            }
+            $ambitos[$nombre] = true;
+        }
+        foreach (array_keys($ambitos) as $ambito) {
             if ($ambito === '_base') {
                 $this->recuperarBase($yaExclusivo);
-            } elseif (preg_match(self::RE_TABLA, $ambito)) {
-                $this->recuperarTabla($ambito);
+            } elseif (preg_match(self::RE_TABLA, (string)$ambito)) {
+                $this->recuperarTabla((string)$ambito);
             }
         }
-        @rmdir($this->dirTx);                         // falla sola si aún queda alguno
-        clearstatcache(true, $this->dirTx);
     }
 
     /**
@@ -442,7 +664,8 @@ final class Storage
             return;
         }
         clearstatcache(true, $this->dirJournal(null));
-        if (is_dir($this->dirJournal(null))) {        // por si otro se adelantó
+        clearstatcache(true, $this->ficheroJournal(null));
+        if (is_file($this->ficheroJournal(null)) || is_dir($this->dirJournal(null))) {   // por si otro se adelantó
             $this->aplicarJournal(null);
         }
         if (!$yaExclusivo) {
@@ -457,8 +680,7 @@ final class Storage
      */
     private function recuperarTabla(string $ambito): void
     {
-        $dir        = $this->dirJournal($ambito);
-        $manifiesto = json_decode((string)@file_get_contents($dir . '/manifiesto.json'), true);
+        $manifiesto = $this->leerManifiesto($ambito);
         $tablas     = is_array($manifiesto) ? (array)($manifiesto['tablas'] ?? []) : [];
         $tablas     = array_values(array_filter(
             array_map('strval', $tablas),
@@ -484,8 +706,9 @@ final class Storage
                     return;                           // hay una escritura viva: no es huérfano
                 }
             }
-            clearstatcache(true, $dir);
-            if (is_dir($dir)) {
+            clearstatcache(true, $this->dirJournal($ambito));
+            clearstatcache(true, $this->ficheroJournal($ambito));
+            if (is_file($this->ficheroJournal($ambito)) || is_dir($this->dirJournal($ambito))) {
                 $this->aplicarJournal($ambito);
             }
         } finally {
@@ -535,6 +758,9 @@ final class Storage
         if ($this->txAmbito === null) {
             return;
         }
+        if ($this->modoPartes !== null) {
+            $this->confirmarPartes();
+        }
         $ambito = $this->txAmbito === '_base' ? null : $this->txAmbito;
         $tablas = array_keys($this->txTablas);
         if ($ambito !== null) {
@@ -545,44 +771,48 @@ final class Storage
             }
         }
 
-        $dir = null;
+        $manifiesto = null;
         if (count($this->txRenombrar) + count($this->txBorrar) > 1) {
-            $dir = $this->dirJournal($ambito);
-            // mkdir recursivo crea .tx y luego .tx/<ámbito>; entre las dos cosas
-            // otro proceso puede haber barrido .tx por vacío al terminar el suyo
-            for ($intento = 0; !@mkdir($dir, 0775, true) && !is_dir($dir); $intento++) {
-                clearstatcache(true, $dir);
-                if ($intento >= 3) {
-                    throw JsonSqlDbError::io('No se puede crear la carpeta del journal');
-                }
+            $manifiesto = $this->ficheroJournal($ambito);
+            if (!is_dir($this->dirTx) && !@mkdir($this->dirTx, 0775, true) && !is_dir($this->dirTx)) {
+                throw JsonSqlDbError::io('No se puede crear la carpeta del journal');
             }
-            $this->fsyncDir($this->dirTx);
-            $renombrar = [];
+            $renombrar    = [];
+            $regenerables = [];
             foreach ($this->txRenombrar as $tmp => $f) {
                 $renombrar[basename((string)$tmp)] = basename($f);
+                if (isset($this->txRegenerables[$tmp])) {
+                    $regenerables[] = basename($f);
+                }
             }
-            $this->volcarFichero($dir . '/manifiesto.json', json_encode([
-                'tipo'      => 'redo',
-                'operacion' => $this->txOperacion,
-                'ambito'    => $ambito,
-                'tablas'    => $tablas,
-                'renombrar' => $renombrar,
-                'borrar'    => array_map('basename', array_keys($this->txBorrar)),
-                'ts'        => date('Y-m-d H:i:s'),
+            // El manifiesto va forzado a disco junto con su entrada en .tx/: a
+            // partir de aquí la escritura es irrevocable
+            $this->volcarFichero($manifiesto, json_encode([
+                'tipo'         => 'redo',
+                'operacion'    => $this->txOperacion,
+                'ambito'       => $ambito,
+                'tablas'       => $tablas,
+                'renombrar'    => $renombrar,
+                'borrar'       => array_map('basename', array_keys($this->txBorrar)),
+                'regenerables' => $regenerables,
+                'ts'           => date('Y-m-d H:i:s'),
             ], self::JSON_META) . "\n");
         }
 
-        $this->rehacer($this->txRenombrar, array_keys($this->txBorrar));
+        $this->rehacer($this->txRenombrar, array_keys($this->txBorrar), $this->txRegenerables);
 
-        if ($dir !== null) {
-            $this->borrarDirJournal($ambito);
+        if ($manifiesto !== null) {
+            // Sin forzarlo a disco: un manifiesto que sobrevive a un corte se
+            // vuelve a aplicar, y aplicarlo dos veces es lo mismo que una
+            @unlink($manifiesto);
         }
         foreach ($this->txCache as [$clave, $valor]) {
             $this->cacheGuardar($clave, $valor);
         }
+        $this->partesMemo = [];                    // los ficheros de datos han cambiado
         $this->txAmbito = null;
         $this->txPropia = false;
-        $this->txRenombrar = $this->txBorrar = $this->txTablas = $this->txCache = [];
+        $this->txRenombrar = $this->txRegenerables = $this->txBorrar = $this->txTablas = $this->txCache = [];
     }
 
     /** Tira una escritura que no se confirmó: los temporales sobran, los datos siguen intactos. */
@@ -594,25 +824,32 @@ final class Storage
         foreach (array_keys($this->txTablas) as $t) {
             unset($this->estados[$t], $this->indicesMemo[$t]);   // lo subido en memoria no llegó al disco
         }
+        $this->partesMemo = [];
+        $this->autoincPendiente = [];
         $this->txAmbito = null;
         $this->txPropia = false;
-        $this->txRenombrar = $this->txBorrar = $this->txTablas = $this->txCache = [];
+        $this->txRenombrar = $this->txRegenerables = $this->txBorrar = $this->txTablas = $this->txCache = [];
     }
 
     /**
      * Pone cada temporal en su sitio y borra lo que sobra. Idempotente: se
      * puede repetir tras un corte hasta que termine.
      *
-     * @param array<string,string> $renombrar temporal => definitivo (rutas completas)
-     * @param list<string>         $borrar    rutas completas
+     * Un temporal regenerable —un trozo de índice— que no llegó al disco no
+     * detiene nada: su fichero queda sin escribir y el índice se rehace en
+     * la siguiente escritura (ver trozoSano()); hasta entonces se recorre.
+     *
+     * @param array<string,string> $renombrar    temporal => definitivo (rutas completas)
+     * @param list<string>         $borrar       rutas completas
+     * @param array<string,true>   $regenerables temporales cuyo contenido se puede rehacer
      */
-    private function rehacer(array $renombrar, array $borrar): void
+    private function rehacer(array $renombrar, array $borrar, array $regenerables = []): void
     {
         foreach ($renombrar as $tmp => $fichero) {
             $tmp = (string)$tmp;
             if (!is_file($tmp)) {
-                if (is_file($fichero)) {
-                    continue;                     // ya se había renombrado
+                if (is_file($fichero) || isset($regenerables[$tmp])) {
+                    continue;                     // ya se había renombrado, o se puede rehacer
                 }
                 throw JsonSqlDbError::io('Falta el temporal de ' . basename($fichero) . ' al rehacer la escritura');
             }
@@ -630,19 +867,37 @@ final class Storage
         $this->fsyncDir($this->dir);
     }
 
+    /**
+     * El manifiesto de un ámbito, esté en su fichero (2.7) o en su carpeta
+     * (2.0 a 2.6), o null si no hay ninguno legible.
+     */
+    private function leerManifiesto(?string $ambito): ?array
+    {
+        $fichero = $this->ficheroJournal($ambito);
+        if (!is_file($fichero)) {
+            $fichero = $this->dirJournal($ambito) . '/manifiesto.json';
+        }
+        $m = json_decode((string)@file_get_contents($fichero), true);
+        return is_array($m) ? $m : null;
+    }
+
     /** Aplica o deshace el journal de un ámbito, según de qué versión sea. */
     private function aplicarJournal(?string $ambito): void
     {
-        $dir        = $this->dirJournal($ambito);
-        $manifiesto = json_decode((string)@file_get_contents($dir . '/manifiesto.json'), true);
+        $manifiesto = $this->leerManifiesto($ambito);
 
         // Sin manifiesto no hay nada que hacer: se escribe DESPUÉS de los
         // temporales y de una pieza, así que si falta no se tocó ningún dato
-        if (is_array($manifiesto) && ($manifiesto['tipo'] ?? '') === 'redo') {
-            $renombrar = [];
+        if ($manifiesto !== null && ($manifiesto['tipo'] ?? '') === 'redo') {
+            $renombrar    = [];
+            $regenerables = [];
+            $sinRehacer   = array_fill_keys((array)($manifiesto['regenerables'] ?? []), true);
             foreach ((array)($manifiesto['renombrar'] ?? []) as $tmp => $f) {
                 if (is_string($tmp) && is_string($f) && strpos($tmp, '/') === false && strpos($f, '/') === false) {
                     $renombrar[$this->dir . '/' . $tmp] = $this->dir . '/' . $f;
+                    if (isset($sinRehacer[$f])) {
+                        $regenerables[$this->dir . '/' . $tmp] = true;
+                    }
                 }
             }
             $borrar = [];
@@ -651,8 +906,8 @@ final class Storage
                     $borrar[] = $this->dir . '/' . $f;
                 }
             }
-            $this->rehacer($renombrar, $borrar);
-        } elseif (is_array($manifiesto) && ($manifiesto['estado'] ?? '') !== '') {
+            $this->rehacer($renombrar, $borrar, $regenerables);
+        } elseif ($manifiesto !== null && ($manifiesto['estado'] ?? '') !== '') {
             $this->deshacer($ambito, $manifiesto);
         }
         foreach ((array)($manifiesto['tablas'] ?? []) as $t) {
@@ -660,6 +915,7 @@ final class Storage
                 unset($this->estados[$t]);
             }
         }
+        @unlink($this->ficheroJournal($ambito));
         $this->borrarDirJournal($ambito);
     }
 
@@ -764,18 +1020,21 @@ final class Storage
         }
     }
 
+    /** Retira la carpeta de journal de un ámbito, de las versiones 2.0 a 2.6. */
     private function borrarDirJournal(?string $ambito): void
     {
         $dir = $this->dirJournal($ambito);
+        if (!is_dir($dir)) {
+            return;
+        }
         // El manifiesto, primero: es lo que da por válido el resto
         @unlink($dir . '/manifiesto.json');
         foreach ((array)glob($dir . '/*') as $f) {
             @unlink((string)$f);
         }
         @rmdir($dir);
-        @rmdir($this->dirTx);                         // falla sola si queda otro ámbito
         // Que haya desaparecido de verdad: tras un corte no debe volver a verse
-        $this->fsyncDir($this->dir);
+        $this->fsyncDir($this->dirTx);
         clearstatcache(true, $dir);
     }
 
@@ -817,19 +1076,39 @@ final class Storage
         $this->bloquearLectura($tabla);
         $clave = $this->claveCache($tabla, 'm');
         $meta  = $this->cacheLeer($clave);
-        if ($meta !== null) {
-            return $meta;
+        if ($meta === null) {
+            $fichero = $this->ficheroMeta($tabla);
+            if (!is_file($fichero)) {
+                throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
+            }
+            $meta = json_decode((string)file_get_contents($fichero), true);
+            if (!is_array($meta)) {
+                throw JsonSqlDbError::io("Estructura ilegible en '$tabla.meta.json'");
+            }
+            $this->cacheGuardar($clave, $meta);
         }
-        $fichero = $this->ficheroMeta($tabla);
-        if (!is_file($fichero)) {
-            throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
+        // El contador de autoincremento vive en rev.json desde la 2.7 (ver
+        // ponerAutoincremento()); el de meta.json es el de la creación o el
+        // de una versión anterior. Vale el mayor: un contador nunca baja.
+        if (isset($meta['autoincrement']['next'])) {
+            $vivo = $this->estado($tabla)['autoinc'] ?? null;
+            if ($vivo !== null && (int)$vivo > (int)$meta['autoincrement']['next']) {
+                $meta['autoincrement']['next'] = (int)$vivo;
+            }
         }
-        $meta = json_decode((string)file_get_contents($fichero), true);
-        if (!is_array($meta)) {
-            throw JsonSqlDbError::io("Estructura ilegible en '$tabla.meta.json'");
-        }
-        $this->cacheGuardar($clave, $meta);
         return $meta;
+    }
+
+    /**
+     * Fija el siguiente valor de autoincremento de una tabla para la
+     * escritura en curso: va a rev.json, que se escribe de todas formas, y
+     * así un INSERT no reescribe también la estructura (ni la fuerza a
+     * disco) solo por mover un contador.
+     */
+    public function ponerAutoincremento(string $tabla, int $siguiente): void
+    {
+        $this->exigirEscritura();
+        $this->autoincPendiente[$tabla] = $siguiente;
     }
 
     /** Guarda la estructura de una tabla e invalida su caché. */
@@ -953,7 +1232,7 @@ final class Storage
             $enFilas = false;
             $n = 0;
             while (($linea = fgets($fh)) !== false) {
-                $linea = trim($linea);
+                $linea = rtrim(trim($linea), ',');
                 if (!$enFilas) {
                     if (strncmp($linea, '"rows":', 7) !== 0) {
                         continue;                     // cabecera
@@ -964,9 +1243,10 @@ final class Storage
                     $enFilas = true;
                     continue;
                 }
-                $linea = rtrim($linea, ',');
                 if ($linea !== '' && $linea[0] === '{' && substr($linea, -1) === '}') {
                     $n++;
+                } elseif ($linea === ']') {
+                    break;                            // detrás vienen los desfases
                 }
             }
             return $enFilas ? $n : null;
@@ -1209,14 +1489,17 @@ final class Storage
         $this->bloquearLectura($tabla);
         $chunk = max(1, (int)($this->estado($tabla)['chunk'] ?? $this->filasPorParte));
         sort($posiciones);
-        $out = [];
+        $out    = [];
+        $actual = 0;                                 // la parte que se tiene abierta: van ordenadas
+        $filas  = [];
         foreach ($posiciones as $pos) {
-            $parte   = intdiv($pos, $chunk) + 1;
-            $fichero = $this->ficheroDatos($tabla, $parte);
-            if (!is_file($fichero)) {
-                continue;
+            $parte = intdiv($pos, $chunk) + 1;
+            if ($parte !== $actual) {
+                $fichero = $this->ficheroDatos($tabla, $parte);
+                $filas   = is_file($fichero) ? $this->parte($tabla, $parte, $fichero) : [];
+                $actual  = $parte;
             }
-            $fila = $this->parte($tabla, $parte, $fichero)[$pos - ($parte - 1) * $chunk] ?? null;
+            $fila = $filas[$pos - ($parte - 1) * $chunk] ?? null;
             if ($fila !== null) {
                 $out[$pos] = $fila;
             }
@@ -1253,15 +1536,20 @@ final class Storage
         if (isset($this->txTablas[$tabla])) {
             throw JsonSqlDbError::lock("La tabla '$tabla' ya se ha guardado en esta escritura");
         }
+        if ($this->modoPartes !== null && $this->modoPartes !== $tabla) {
+            throw new ConflictoPartes();          // otra tabla: con los bloqueos de siempre
+        }
         if ($this->txAmbito === null) {
             $this->txIniciar($operacion, isset($this->locksTabla[$tabla]) ? $tabla : null);
             $this->txPropia = true;
         }
         $this->txTablas[$tabla] = true;
         // Un proceso muerto de golpe no ejecuta el finally de escribirTemporal()
-        // y deja su temporal ahí. Aquí se tiene el exclusivo de la tabla, así
-        // que cualquier temporal suyo es de un proceso muerto y sobra.
-        $this->barrerTemporales($tabla);
+        // y deja su temporal ahí. Pero ni con el exclusivo de la tabla se puede
+        // dar por muerto todo temporal: una escritura por partes que espera
+        // para confirmar tiene los suyos escritos y ha soltado la tabla. Se
+        // borran solo los de procesos que ya no existen
+        $this->barrerTemporalesMuertos($tabla);
     }
 
     /**
@@ -1338,10 +1626,11 @@ final class Storage
         // Los índices, trozo a trozo: uno por parte de la tabla. De cada
         // índice se reescriben solo los trozos que cambian y se anota en qué
         // revisión quedó cada uno; los demás siguen valiendo tal cual
-        $vigentes = [];
+        $vigentes      = [];
+        $rangosIndices = [];
         foreach ($definiciones as $def) {
             $vigentes[$def['name']] = true;
-            $revsIndices[$def['name']] = $this->escribirIndice(
+            [$revsIndices[$def['name']], $rangosIndices[$def['name']]] = $this->escribirIndice(
                 $tabla, $def, $rev, $total, $nFilas, $desde, $cola, $sueltas, $viejas, $todas, $filas);
         }
         foreach ($indicesAntes as $nombre => $ficheros) {
@@ -1357,9 +1646,31 @@ final class Storage
         // borró: sus revisiones empiezan de cero y un resultado guardado en
         // APCu, que no se puede borrar por tabla, la confundiría con ella.
         $nuevo = ['rev' => $rev, 'chunk' => $this->filasPorParte, 'rows' => $nFilas, 'creada' => $creada,
-                  'parts' => array_values($revsPartes), 'indexes' => (object)$revsIndices];
+                  'parts' => array_values($revsPartes), 'indexes' => (object)$revsIndices,
+                  'rangos' => (object)$rangosIndices];
+        $autoinc = $this->autoincPendiente[$tabla] ?? $estado['autoinc'] ?? null;
+        if ($autoinc !== null) {
+            $nuevo['autoinc'] = (int)$autoinc;
+        }
+        unset($this->autoincPendiente[$tabla]);
+        if ($this->modoPartes !== null) {
+            // Por partes, la revisión se escribe al confirmar, ya con el
+            // exclusivo, juntando esto con lo que otros hayan hecho entretanto
+            if ($meta !== null) {
+                throw new ConflictoPartes();
+            }
+            $nuevo['indexes'] = $revsIndices;
+            $nuevo['rangos']  = $rangosIndices;
+            $this->pendientePartes[$tabla] = [
+                'antes' => $estado, 'nuevo' => $nuevo, 'partesAntes' => $partesAntes,
+                'meta' => (string)@md5_file($this->ficheroMeta($tabla)), 'indicesAntes' => array_keys($indicesAntes),
+            ];
+            unset($this->indicesMemo[$tabla]);
+            return;
+        }
         $this->escribirAtomico($this->ficheroRev($tabla), json_encode($nuevo, self::JSON_META) . "\n");
         $nuevo['indexes'] = $revsIndices;
+        $nuevo['rangos']  = $rangosIndices;
 
         $this->limpiarCache($tabla, $estado, $nuevo, array_keys($indicesAntes));
         $this->estados[$tabla] = $nuevo;
@@ -1453,21 +1764,74 @@ final class Storage
      * que ningún temporal que se vea sea de una escritura viva; y antes de
      * escribir nada, así que no hay ningún temporal propio en vuelo.
      */
+    /**
+     * Borra los temporales de una tabla que son de procesos que ya no existen:
+     * el nombre lleva el pid de quien lo escribió. Si no se puede saber si ese
+     * proceso vive (sin /proc ni posix), solo los de más de un minuto.
+     */
+    private function barrerTemporalesMuertos(string $tabla): void
+    {
+        $yo   = getmypid();
+        $proc = is_dir('/proc/self');
+        foreach ((array)glob($this->dir . '/' . $tabla . '.*.tmp') as $f) {
+            $f = (string)$f;
+            if (!preg_match('/\.(\d+)(?:\.[a-z]+)?\.tmp$/', $f, $m) || (int)$m[1] === $yo) {
+                continue;
+            }
+            $pid = (int)$m[1];
+            if ($proc) {
+                $muerto = !is_dir("/proc/$pid");
+            } elseif (function_exists('posix_kill')) {
+                $muerto = !@posix_kill($pid, 0) && posix_get_last_error() === 3;   // ESRCH
+            } else {
+                $muerto = (time() - (int)@filemtime($f)) > 60;
+            }
+            if ($muerto) {
+                @unlink($f);
+            }
+        }
+    }
+
     private function barrerTemporales(?string $tabla = null): void
     {
         $patron = $tabla === null ? '/*.tmp' : '/' . $tabla . '.*.tmp';
         foreach ((array)glob($this->dir . $patron) as $f) {
             @unlink((string)$f);
         }
+        if ($tabla === null) {
+            foreach ((array)glob($this->dirTx . '/*.tmp') as $f) {
+                @unlink((string)$f);                  // un manifiesto que no llegó a escribirse
+            }
+        }
     }
 
-    /** Cuántos ficheros de datos tiene ahora mismo una tabla. */
+    /**
+     * Cuántas filas dice el fichero de revisión que tiene la tabla, o null si
+     * no lo dice (bases de antes de la 2.5). Es un dato de planificación, no
+     * un recuento: para contar está contarFilas().
+     */
+    public function filasSegunRevision(string $tabla): ?int
+    {
+        self::validarTabla($tabla);
+        $this->bloquearLectura($tabla);
+        $estado = $this->estado($tabla);
+        return isset($estado['rows']) ? (int)$estado['rows'] : null;
+    }
+
+    /**
+     * Cuántos ficheros de datos tiene ahora mismo una tabla. Dentro de un
+     * bloqueo no cambia salvo que escriba este proceso, así que se recuerda:
+     * una escritura de muchas filas pregunta por cada una.
+     */
     public function partes(string $tabla): int
     {
         self::validarTabla($tabla);
+        if (isset($this->partesMemo[$tabla])) {
+            return $this->partesMemo[$tabla];
+        }
         for ($parte = 1; ; $parte++) {
             if (!is_file($this->ficheroDatos($tabla, $parte))) {
-                return $parte - 1;
+                return $this->partesMemo[$tabla] = $parte - 1;
             }
         }
     }
@@ -1481,33 +1845,117 @@ final class Storage
     private function escribirParte(string $fichero, string $tabla, array $filas): void
     {
         $this->escribirTemporal($fichero, static function ($fh) use ($tabla, $filas, $fichero): void {
-            $escribir = static function (string $texto) use ($fh, $fichero): void {
+            $pos      = 0;
+            $escribir = static function (string $texto) use ($fh, $fichero, &$pos): void {
                 if (@fwrite($fh, $texto) !== strlen($texto)) {
                     throw JsonSqlDbError::io('Escritura incompleta de ' . basename($fichero));
                 }
+                $pos += strlen($texto);
             };
             $escribir("{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [");
-            $sep = "\n    ";
+            // Dónde empieza cada fila: con ello una lectura por clave lee
+            // una línea del fichero en vez de decodificarlo entero (ver
+            // filaEnParte()). Van al final, con la posición del propio
+            // listado en la última línea para encontrarlo sin leer nada más.
+            $desfases = [];
+            $sep      = "\n    ";
             foreach ($filas as $fila) {
                 $json = json_encode($fila, self::JSON_FILA);
                 if ($json === false) {
                     throw JsonSqlDbError::io("No se puede codificar una fila de '$tabla' a JSON");
                 }
+                $desfases[] = $pos + strlen($sep);
                 $escribir($sep . $json);
                 $sep = ",\n    ";
             }
-            $escribir($filas === [] ? "]\n}\n" : "\n  ]\n}\n");
+            $escribir($filas === [] ? "],\n" : "\n  ],\n");
+            $aqui = $pos;
+            $escribir('  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n");
         });
     }
 
+    /**
+     * Dónde empieza cada fila de una parte, leído de su final; null si la
+     * parte es de antes de la 2.7 o está editada a mano y no lo trae. Se
+     * recuerda en el proceso: una racha de búsquedas por clave cae muchas
+     * veces en la misma parte.
+     *
+     * @return string|null los desfases empaquetados, cuatro bytes cada uno (pack 'N')
+     */
+    private function desfasesDeParte(string $tabla, int $parte, string $fichero): ?string
+    {
+        $clave = $this->prefijo . $this->etiqueta($tabla) . ':o' . $parte . ':' . (int)($this->estado($tabla)['parts'][$parte - 1] ?? $this->rev($tabla));
+        if (isset(self::$memoProceso[$clave])) {
+            return self::$memoProceso[$clave];
+        }
+        $fh = @fopen($fichero, 'rb');
+        if ($fh === false) {
+            return null;
+        }
+        try {
+            $tam = filesize($fichero);
+            if ($tam === false || $tam < 40) {
+                return null;
+            }
+            fseek($fh, -min(48, $tam), SEEK_END);
+            if (!preg_match('/"offsets_at": (\d+)\s*\}\s*$/', (string)fread($fh, 48), $m)) {
+                return null;
+            }
+            fseek($fh, (int)$m[1]);
+            $linea = (string)fgets($fh);
+            $ini   = strpos($linea, '[');
+            $fin   = strrpos($linea, ']');
+            if ($ini === false || $fin === false || $fin < $ini) {
+                return null;
+            }
+            $lista = $ini + 1 === $fin ? [] : json_decode(substr($linea, $ini, $fin - $ini + 1), true);
+            if (!is_array($lista)) {
+                return null;
+            }
+        } finally {
+            fclose($fh);
+        }
+        // En memoria van empaquetados, cuatro bytes por fila: un array de PHP
+        // de mil enteros ocupa unas cinco veces más, y la lista se guarda en
+        // la memoria del proceso para las búsquedas siguientes
+        $lista = pack('N*', ...array_map('intval', $lista));
+        $this->recordar($clave, $lista);
+        return $lista;
+    }
+
+    /**
+     * Una fila de una parte, leyendo solo su línea del fichero. Null si la
+     * parte no trae desfases o la línea no es lo que debería (editada a
+     * mano): entonces hay que decodificar la parte.
+     */
+    private function filaEnParte(string $tabla, int $parte, string $fichero, int $desfase): ?array
+    {
+        $desfases = $this->desfasesDeParte($tabla, $parte, $fichero);
+        if ($desfases === null || $desfase < 0 || strlen($desfases) < 4 * ($desfase + 1)) {
+            return null;
+        }
+        $fh = @fopen($fichero, 'rb');
+        if ($fh === false) {
+            return null;
+        }
+        fseek($fh, (int)unpack('N', $desfases, 4 * $desfase)[1]);
+        $linea = rtrim((string)fgets($fh), ",\r\n");
+        fclose($fh);
+        if ($linea === '' || $linea[0] !== '{') {
+            return null;
+        }
+        $fila = json_decode($linea, true);
+        return is_array($fila) ? $fila : null;
+    }
+
     /** Escribe un fichero entero dentro de la escritura abierta. */
-    private function escribirAtomico(string $fichero, string $contenido): void
+    private function escribirAtomico(string $fichero, string $contenido, bool $sincronizar = true): void
     {
         $this->escribirTemporal($fichero, static function ($fh) use ($contenido, $fichero): void {
             if (@fwrite($fh, $contenido) !== strlen($contenido)) {
                 throw JsonSqlDbError::io('Escritura incompleta de ' . basename($fichero));
             }
-        });
+        }, $sincronizar);
     }
 
     /**
@@ -1519,8 +1967,11 @@ final class Storage
      * buffer de PHP.
      *
      * @param callable(resource):void $volcar
+     * @param bool $sincronizar false para lo que no hace falta que sobreviva a un
+     *             corte: los trozos de índice, que se rehacen desde las filas si
+     *             faltan. Cada fsync cuesta milisegundos en un disco de hosting.
      */
-    private function escribirTemporal(string $fichero, callable $volcar): void
+    private function escribirTemporal(string $fichero, callable $volcar, bool $sincronizar = true): void
     {
         $tmp = $fichero . '.' . getmypid() . '.tmp';
         $fh  = @fopen($tmp, 'wb');
@@ -1530,7 +1981,7 @@ final class Storage
         try {
             $volcar($fh);
             @fflush($fh);
-            if (function_exists('fsync')) {
+            if ($sincronizar && function_exists('fsync')) {
                 @fsync($fh);                // los datos, en el disco de verdad
             }
         } catch (\Throwable $e) {
@@ -1541,6 +1992,9 @@ final class Storage
         @fclose($fh);
         unset($this->txBorrar[$fichero]);   // si se borraba y se vuelve a escribir, gana lo último
         $this->txRenombrar[$tmp] = $fichero;
+        if (!$sincronizar) {
+            $this->txRegenerables[$tmp] = true;
+        }
     }
 
     /** Apunta un fichero para borrarlo al confirmar. */
@@ -1549,7 +2003,7 @@ final class Storage
         $tmp = array_search($fichero, $this->txRenombrar, true);
         if ($tmp !== false) {
             @unlink((string)$tmp);
-            unset($this->txRenombrar[$tmp]);
+            unset($this->txRenombrar[$tmp], $this->txRegenerables[$tmp]);
         }
         $this->txBorrar[$fichero] = true;
     }
@@ -1654,7 +2108,7 @@ final class Storage
      * @param list<array>|null       $filas todas las filas, si ya se han leído
      * @param array<int,array>       $sueltas posición => fila nueva
      * @param array<int,array>       $viejas  posición => fila de antes
-     * @return list<int>
+     * @return array{0: list<int>, 1: list<array|null>} revisión y rango de cada trozo (ver Indexes::rango())
      */
     private function escribirIndice(
         string $tabla,
@@ -1670,7 +2124,9 @@ final class Storage
         ?array &$filas
     ): array {
         $nombre = $def['name'];
-        $revs   = $this->estado($tabla)['indexes'][$nombre] ?? null;
+        $estado = $this->estado($tabla);
+        $revs   = $estado['indexes'][$nombre] ?? null;
+        $rangos = $estado['rangos'][$nombre] ?? [];
         $chunk  = $this->filasPorParte;
 
         // Qué trozos hay que tocar, y si los que se corrigen están al día.
@@ -1686,8 +2142,10 @@ final class Storage
                 $tocar[$p] = true;
             }
             // Los trozos que se corrigen se leen enteros; los que se dejan
-            // como están solo se miran por encima, para que un fichero
-            // dañado o editado a mano no se quede así para siempre
+            // como están solo se miran por encima —cabecera y cola, sin
+            // decodificar—, para que un fichero dañado por un corte o editado
+            // a mano no se quede así para siempre. Cien trozos cuestan un
+            // milisegundo: se paga en cada escritura.
             for ($p = 0; $p < min($total, count($revs)); $p++) {
                 $sano = isset($tocar[$p])
                     ? $p * $chunk >= $desde || $this->trozoIndice($tabla, $def, $p + 1) !== null
@@ -1702,6 +2160,7 @@ final class Storage
         }
 
         $salida = [];
+        $tramos = [];
         if ($desde === null) {
             // Entero, desde las filas: se reparten por trozos según su posición
             $filas ??= $todas();
@@ -1713,13 +2172,14 @@ final class Storage
                 }
             }
             for ($p = 0; $p < $total; $p++) {
-                $this->escribirTrozo($tabla, $def, $p + 1, $rev, $trozos[$p] ?? []);
+                $tramos[$p] = $this->escribirTrozo($tabla, $def, $p + 1, $rev, $trozos[$p] ?? []);
                 $salida[$p] = $rev;
             }
         } else {
             for ($p = 0; $p < $total; $p++) {
                 if (!isset($tocar[$p])) {
                     $salida[$p] = (int)$revs[$p];
+                    $tramos[$p] = $rangos[$p] ?? null;
                     continue;
                 }
                 $inicio = $p * $chunk;
@@ -1745,10 +2205,11 @@ final class Storage
                     }
                 }
                 if ($cambio) {
-                    $this->escribirTrozo($tabla, $def, $p + 1, $rev, $keys);
+                    $tramos[$p] = $this->escribirTrozo($tabla, $def, $p + 1, $rev, $keys);
                     $salida[$p] = $rev;
                 } else {
                     $salida[$p] = (int)$revs[$p];
+                    $tramos[$p] = $rangos[$p] ?? null;
                 }
             }
         }
@@ -1756,7 +2217,7 @@ final class Storage
         for ($p = $total + 1; is_file($this->ficheroIndice($tabla, $nombre, $p)); $p++) {
             $this->borrarFichero($this->ficheroIndice($tabla, $nombre, $p));
         }
-        return array_values($salida);
+        return [array_values($salida), array_values($tramos)];
     }
 
     /**
@@ -1771,16 +2232,24 @@ final class Storage
             return false;
         }
         $cabecera = (string)fread($fh, 512);
+        // Y el final: los trozos se escriben sin fsync, y un corte puede dejar
+        // el fichero con la cabecera bien y la cola a ceros o cortada
+        fseek($fh, -3, SEEK_END);
+        $cola = (string)fread($fh, 3);
         fclose($fh);
         $esperada = substr(json_encode([
             'index' => $def['name'], 'table' => $tabla, 'columns' => $def['columns'],
             'part' => $parte, 'rev' => $rev,
         ], self::JSON_FILA), 1, -1);
-        return strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0;
+        return strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0 && $cola === "}}\n";
     }
 
-    /** @param array<string, int|list<int>> $keys */
-    private function escribirTrozo(string $tabla, array $def, int $parte, int $rev, array $keys): void
+    /**
+     * Escribe un trozo de índice y devuelve su rango numérico (ver Indexes::rango()).
+     *
+     * @param array<string, int|list<int>> $keys
+     */
+    private function escribirTrozo(string $tabla, array $def, int $parte, int $rev, array $keys): ?array
     {
         $idx = [
             'index'   => $def['name'],
@@ -1791,8 +2260,9 @@ final class Storage
             'chunk'   => $this->filasPorParte,
             'keys'    => $keys,
         ];
-        $this->escribirAtomico($this->ficheroIndice($tabla, $def['name'], $parte), json_encode($idx, self::JSON_FILA) . "\n");
+        $this->escribirAtomico($this->ficheroIndice($tabla, $def['name'], $parte), json_encode($idx, self::JSON_FILA) . "\n", false);
         $this->txCache[] = [$this->claveCache($tabla, 'x' . $def['name'] . 'p' . $parte, $rev), $idx];
+        return Indexes::rango($keys);
     }
 
     /**
@@ -1840,39 +2310,83 @@ final class Storage
     }
 
     /**
-     * Todos los trozos de un índice, o null si alguno no sirve. Un índice de
-     * antes de la 2.6 —un solo fichero con todas las claves, y su revisión
-     * anotada como número— sale como un solo trozo. Quedan en memoria
-     * mientras dure el bloqueo: una escritura de muchas filas pregunta por
-     * ellos una vez por fila.
+     * Lo que hace falta saber de un índice para buscar en él sin abrir
+     * trozos de más: cuántos trozos tiene, el rango numérico de cada uno (ver
+     * Indexes::rango()) y el mínimo y máximo de todos, para descartar de un
+     * golpe una clave fuera de ellos. Un índice de antes de la 2.6 —un solo
+     * fichero con todas las claves— viene en `legado`. Null si el índice no
+     * sirve. Se recuerda mientras dure el bloqueo: una escritura de muchas
+     * filas pregunta por cada una.
      *
-     * @return list<array<string, int|list<int>>>|null
+     * @return array{partes: int, rangos: list<array|null>, min: int|float|null, max: int|float|null, legado: ?array}|null
      */
-    private function trozosIndice(string $tabla, array $def): ?array
+    private function planIndice(string $tabla, array $def): ?array
     {
         $nombre = $def['name'];
-        if (isset($this->indicesMemo[$tabla][$nombre]['*'])) {
-            return $this->indicesMemo[$tabla][$nombre]['*'];
+        if (isset($this->indicesMemo[$tabla][$nombre]['plan'])) {
+            return $this->indicesMemo[$tabla][$nombre]['plan'];
         }
         $estado = $this->estado($tabla);
         $revs   = $estado['indexes'][$nombre] ?? $estado['rev'];
         if (!is_array($revs)) {
             $legado = $this->indiceLegado($tabla, $def, (int)$revs);
-            return $legado === null ? null : [$legado];
+            if ($legado === null) {
+                return null;
+            }
+            $plan = ['partes' => 0, 'rangos' => [], 'min' => null, 'max' => null, 'legado' => $legado];
+        } else {
+            $partes = max(1, $this->partes($tabla));
+            if (count($revs) < $partes) {
+                return null;
+            }
+            $rangos = array_slice(array_pad((array)($estado['rangos'][$nombre] ?? []), $partes, null), 0, $partes);
+            $min = $max = null;
+            foreach ($rangos as $r) {
+                if ($r === null) {
+                    $min = $max = null;                 // un trozo sin acotar: no hay mínimo ni máximo global
+                    break;
+                }
+                if ($r !== []) {
+                    if ($min === null || $r[0] < $min) { $min = $r[0]; }
+                    if ($max === null || $r[1] > $max) { $max = $r[1]; }
+                }
+            }
+            $plan = ['partes' => $partes, 'rangos' => $rangos, 'min' => $min, 'max' => $max, 'legado' => null];
         }
-        $partes = max(1, $this->partes($tabla));
-        if (count($revs) < $partes) {
+        return $this->indicesMemo[$tabla][$nombre]['plan'] = $plan;
+    }
+
+    /**
+     * Los trozos de un índice en los que pueden estar unas claves, o null si
+     * el índice no sirve. Con el rango numérico de cada trozo se saltan los
+     * que no pueden contener ninguna: en una clave primaria autoincremental
+     * es abrir un trozo en vez de todos.
+     *
+     * @param list<string> $claves  claves buscadas (o sus prefijos)
+     * @return list<array<string, int|list<int>>>|null
+     */
+    private function trozosParaClaves(string $tabla, array $def, array $claves): ?array
+    {
+        $plan = $this->planIndice($tabla, $def);
+        if ($plan === null) {
             return null;
         }
-        $trozos = [];
-        for ($p = 1; $p <= $partes; $p++) {
+        if ($plan['legado'] !== null) {
+            return [$plan['legado']];
+        }
+        $valores = array_map([Indexes::class, 'valorNumerico'], $claves);
+        $trozos  = [];
+        for ($p = 1; $p <= $plan['partes']; $p++) {
+            if (!Indexes::cabeEnRango($valores, $plan['rangos'][$p - 1])) {
+                continue;
+            }
             $keys = $this->trozoIndice($tabla, $def, $p);
             if ($keys === null) {
                 return null;
             }
             $trozos[] = $keys;
         }
-        return $this->indicesMemo[$tabla][$nombre]['*'] = $trozos;
+        return $trozos;
     }
 
     /**
@@ -1917,7 +2431,7 @@ final class Storage
             return null;
         }
         $this->bloquearLectura($tabla);
-        $trozos = $this->trozosIndice($tabla, $def);
+        $trozos = $this->trozosParaClaves($tabla, $def, $claves);
         if ($trozos === null) {
             return null;
         }
@@ -1956,11 +2470,51 @@ final class Storage
             return null;
         }
         $this->bloquearLectura($tabla);
-        $trozos = $this->trozosIndice($tabla, $def);
-        if ($trozos === null) {
+        $plan = $this->planIndice($tabla, $def);
+        if ($plan === null) {
             return null;
         }
-        foreach ($trozos as $keys) {
+        if ($plan['legado'] !== null) {
+            return isset($plan['legado'][$clave]);
+        }
+        // Una clave numérica fuera del mínimo y el máximo de todo el índice —un
+        // id nuevo en una tabla con clave autoincremental— no está en ningún
+        // trozo, y se sabe sin mirar ninguno
+        $v = Indexes::valorNumerico($clave);
+        if ($v !== null && $plan['min'] !== null && ($v < $plan['min'] || $v > $plan['max'])) {
+            return false;
+        }
+        if ($v === null) {
+            // Una clave de texto puede estar en cualquier trozo: se miran todos,
+            // que quedan cargados en una lista para la siguiente pregunta
+            $todos = $this->indicesMemo[$tabla][$def['name']]['*'] ?? null;
+            if ($todos === null) {
+                $todos = [];
+                for ($p = 1; $p <= $plan['partes']; $p++) {
+                    $keys = $this->trozoIndice($tabla, $def, $p);
+                    if ($keys === null) {
+                        return null;
+                    }
+                    $todos[] = $keys;
+                }
+                $this->indicesMemo[$tabla][$def['name']]['*'] = $todos;
+            }
+            foreach ($todos as $keys) {
+                if (isset($keys[$clave])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        for ($p = 1; $p <= $plan['partes']; $p++) {
+            $r = $plan['rangos'][$p - 1];
+            if ($r !== null && ($r === [] || $v < $r[0] || $v > $r[1])) {
+                continue;
+            }
+            $keys = $this->trozoIndice($tabla, $def, $p);
+            if ($keys === null) {
+                return null;
+            }
             if (isset($keys[$clave])) {
                 return true;
             }
@@ -1972,6 +2526,55 @@ final class Storage
     public function indiceValido(string $tabla, array $def): bool
     {
         return $this->claveEnIndice($tabla, $def, "\0") !== null;
+    }
+
+    /**
+     * Filas de las partes cuyo trozo de índice puede contener algún valor de
+     * un rango numérico [min, max] (un extremo null es abierto): con una
+     * clave autoincremental, o cualquier columna que crezca con el tiempo,
+     * un `BETWEEN` lee unas pocas partes en vez de la tabla. Salen todas las
+     * filas de esas partes; el WHERE hace el resto. Null si el índice no
+     * sirve, no tiene rangos, o habría que leer más de la mitad de la tabla.
+     *
+     * @param int|float|null $min
+     * @param int|float|null $max
+     * @return \Generator<int, array>|null
+     */
+    public function filasPorRango(string $tabla, array $def, $min, $max): ?\Generator
+    {
+        self::validarTabla($tabla);
+        if (!$this->indices) {
+            return null;
+        }
+        $this->bloquearLectura($tabla);
+        $plan = $this->planIndice($tabla, $def);
+        if ($plan === null || $plan['legado'] !== null) {
+            return null;
+        }
+        $partes = [];
+        foreach ($plan['rangos'] as $i => $r) {
+            if ($r === null) {
+                return null;                          // un trozo sin acotar: no se sabe qué partes saltar
+            }
+            if ($r !== [] && ($min === null || $r[1] >= $min) && ($max === null || $r[0] <= $max)) {
+                $partes[] = $i + 1;
+            }
+        }
+        if (count($partes) * 2 > $plan['partes']) {
+            return null;
+        }
+        return (function () use ($tabla, $partes) {
+            foreach ($partes as $parte) {
+                $fichero = $this->ficheroDatos($tabla, $parte);
+                if (!is_file($fichero)) {
+                    return;
+                }
+                foreach ($this->parte($tabla, $parte, $fichero) as $fila) {
+                    Memoria::comprobar('la lectura por rango');
+                    yield $fila;
+                }
+            }
+        })();
     }
 
     /**
@@ -2003,17 +2606,39 @@ final class Storage
         if ($necesarias !== [] && count($necesarias) * 2 > $todas) {
             return null;
         }
-        $buscadas = array_fill_keys($posiciones, true);
+        $porParte = [];
+        foreach ($posiciones as $p) {
+            $porParte[intdiv($p, $chunk) + 1][] = $p - intdiv($p, $chunk) * $chunk;
+        }
 
         $filas = [];
-        foreach (array_keys($necesarias) as $parte) {
+        foreach ($porParte as $parte => $desfases) {
             $fichero = $this->ficheroDatos($tabla, $parte);
             if (!is_file($fichero)) {
                 return null;                          // índice y datos no cuadran
             }
-            $base = ($parte - 1) * $chunk;
+            // Pocas filas de una parte: se leen sus líneas, sin decodificar las
+            // mil. Muchas, o una parte que no trae desfases: se decodifica
+            if (count($desfases) <= self::FILAS_POR_LINEA) {
+                $sueltas = [];
+                foreach ($desfases as $d) {
+                    $fila = $this->filaEnParte($tabla, $parte, $fichero, $d);
+                    if ($fila === null) {
+                        $sueltas = null;
+                        break;
+                    }
+                    $sueltas[] = $fila;
+                }
+                if ($sueltas !== null) {
+                    foreach ($sueltas as $fila) {
+                        $filas[] = $fila;
+                    }
+                    continue;
+                }
+            }
+            $buscadas = array_fill_keys($desfases, true);
             foreach ($this->parte($tabla, $parte, $fichero) as $desfase => $fila) {
-                if (isset($buscadas[$base + $desfase])) {
+                if (isset($buscadas[$desfase])) {
                     $filas[] = $fila;
                     Memoria::comprobar('la lectura por índice');
                 }
@@ -2052,7 +2677,9 @@ final class Storage
      *   chunk  tamaño de parte con que se escribió
      *   rows     cuántas filas tiene (desde la 2.5)
      *   parts    revisión en que se escribió cada parte (desde la 2.5)
-     *   indexes  revisión en que se escribió cada índice (desde la 2.5)
+     *   indexes  revisión en que se escribió cada trozo de cada índice (2.5; por trozos desde la 2.6)
+     *   rangos   mínimo y máximo numérico de cada trozo de cada índice (desde la 2.7)
+     *   autoinc  siguiente valor de autoincremento (desde la 2.7; antes en meta.json)
      *   creada   número aleatorio fijo desde la primera escritura (desde la 2.6)
      *
      * Cada tabla guarda el suyo: dos escrituras en tablas distintas van a la
@@ -2067,6 +2694,7 @@ final class Storage
         $json    = is_file($fichero) ? json_decode((string)@file_get_contents($fichero), true) : null;
         $estado  = is_array($json) ? ['rev' => (int)($json['rev'] ?? 0)] + $json : ['rev' => $this->revLegada($tabla)];
         $estado['indexes'] = (array)($estado['indexes'] ?? []);
+        $estado['rangos']  = (array)($estado['rangos'] ?? []);
         return $this->estados[$tabla] = $estado;
     }
 
@@ -2178,18 +2806,60 @@ final class Storage
         if (!$this->cache) {
             return null;
         }
+        if (isset(self::$memoProceso[$clave])) {
+            return self::$memoProceso[$clave];
+        }
         if ($this->apcu) {
             $ok  = false;
             $val = apcu_fetch($clave, $ok);
-            return $ok ? $val : null;
+            if (!$ok) {
+                return null;
+            }
+        } else {
+            $fichero = $this->ficheroCache($clave);
+            if ($fichero === null || !is_file($fichero)) {
+                return null;
+            }
+            Memoria::comprobarFichero($fichero);
+            $val = @unserialize((string)file_get_contents($fichero), ['allowed_classes' => false]);
+            if ($val === false) {
+                return null;
+            }
         }
-        $fichero = $this->ficheroCache($clave);
-        if ($fichero === null || !is_file($fichero)) {
-            return null;
+        $this->recordar($clave, $val);
+        return $val;
+    }
+
+    /**
+     * Guarda en el propio proceso las últimas entradas de caché leídas o
+     * escritas, para no volver a decodificarlas en la siguiente consulta: un
+     * script que hace miles de búsquedas, o el panel, leen una y otra vez
+     * los mismos trozos de índice y las mismas partes. La clave lleva la
+     * revisión, así que si otro proceso escribe la entrada deja de pedirse
+     * sola. Cabe poco a propósito, alrededor de un megabyte: trozos de
+     * índice, listas de desfases y estructuras, que son pequeños. Las partes
+     * no: son grandes y las búsquedas por clave ya no las necesitan (ver
+     * filaEnParte()).
+     */
+    private function recordar(string $clave, $valor): void
+    {
+        [, , , $tipo] = explode(':', $clave);
+        if ($tipo === 'r' || $tipo[0] === 'p') {
+            return;                                 // resultados y partes: pueden ser grandes
         }
-        Memoria::comprobarFichero($fichero);
-        $val = @unserialize((string)file_get_contents($fichero), ['allowed_classes' => false]);
-        return $val === false ? null : $val;
+        if (Memoria::apretado()) {
+            self::$memoProceso = [];                // si la memoria escasea, esto es lo primero que sobra
+            self::$memoGrupos  = ['x' => [], 'o' => [], 'm' => []];
+            return;
+        }
+        $grupo = $tipo[0] === 'x' ? 'x' : ($tipo[0] === 'o' ? 'o' : 'm');
+        $tope  = ['x' => 4, 'o' => 16, 'm' => 16][$grupo];
+        self::$memoProceso[$clave] = $valor;
+        self::$memoGrupos[$grupo][$clave] = true;
+        while (count(self::$memoGrupos[$grupo]) > $tope) {
+            $vieja = array_key_first(self::$memoGrupos[$grupo]);
+            unset(self::$memoGrupos[$grupo][$vieja], self::$memoProceso[$vieja]);
+        }
     }
 
     private function cacheGuardar(string $clave, $valor): void
@@ -2199,6 +2869,7 @@ final class Storage
         if (!$this->cache || Memoria::apretado()) {
             return;
         }
+        $this->recordar($clave, $valor);
         if ($this->apcu) {
             apcu_store($clave, $valor);
             return;

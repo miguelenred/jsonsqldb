@@ -31,12 +31,17 @@ $filaColumna = static function (string $i) use ($tipos): string {
                  name="columnas[<?= $i ?>][unico]" value="1"></td>
       <td><input class="form-control form-control-sm" name="columnas[<?= $i ?>][defecto]"></td>
       <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger quitar-fila"
-                 title="Quitar esta fila"><i class="bi bi-x-lg"></i></button></td>
+                 title="Quitar esta fila"><?= icono('x-lg') ?></button></td>
     </tr>
     <?php return (string)ob_get_clean();
 };
 ?>
-<h1 class="h5 mb-3"><i class="bi bi-plus-circle"></i> Nueva tabla en <?= h($base) ?></h1>
+<div class="page-head">
+  <div>
+    <h1>Nueva tabla</h1>
+    <p>En la base de datos <?= h($base) ?></p>
+  </div>
+</div>
 
 <form method="post">
   <?= csrf() ?>
@@ -78,7 +83,7 @@ $filaColumna = static function (string $i) use ($tipos): string {
     </div>
     <div class="card-footer">
       <button type="button" class="btn btn-sm btn-outline-primary" id="anadirFila">
-        <i class="bi bi-plus-lg"></i> Añadir columna</button>
+        <?= icono('plus-lg') ?> Añadir columna</button>
       <div class="small text-body-secondary mt-2 mb-0">
         Las filas que dejes en blanco se ignoran. La longitud solo se aplica a TEXT (pasa a
         VARCHAR) y la escala a DECIMAL (por defecto 2). AUTOINCREMENT necesita una columna
@@ -87,7 +92,7 @@ $filaColumna = static function (string $i) use ($tipos): string {
     </div>
   </div>
 
-  <button class="btn btn-primary"><i class="bi bi-check2"></i> Crear tabla</button>
+  <button class="btn btn-primary"><?= icono('check2') ?> Crear tabla</button>
   <a class="btn btn-outline-secondary" href="<?= h(url(['p' => 'tablas', 'db' => $base])) ?>">Cancelar</a>
 </form>
 

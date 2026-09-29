@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.6.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.7.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -29,20 +29,24 @@ statement is atomic on its own — it either completes or leaves the data as it
 was — but you cannot group several statements into one unit of work that rolls
 back together. If your data needs that, this is not the right tool.
 
-**If a query does not fit in memory**, the engine stops it at 85 % of PHP's
-`memory_limit` with an ordinary error explaining what happened, instead of dying
+**If a query does not fit in memory**, the engine stops it by 85 % of PHP's
+`memory_limit` at the latest — earlier if its next step would not fit — with an
+ordinary error explaining what happened, instead of dying
 with PHP's uncatchable fatal. The query still fails, but the process survives and
 the API answers properly. Data is never corrupted by it: reads write nothing,
 writes are buffered and flushed at the end, every file is written atomically, and
 multi-file writes are finished or discarded whole by the journal.
 
-Rough numbers on 20,000 customers and 30,000 orders, one core, PHP 8.3: a
-primary key lookup 2 ms and 7 MB, a filtered scan without an index 18 ms and
-6 MB, a `GROUP BY` 21 ms and 6 MB, an aggregate join 111 ms and 22 MB, a
-single-row `INSERT` 10 ms and 9 MB, an `UPDATE` by key 12 ms and 10 MB, and
-any of those repeated on unchanged data under half a millisecond. On 100,000
-rows: primary key lookup 8 ms and 13 MB, `GROUP BY` 105 ms and 6 MB,
-single-row `INSERT` 30 ms and 22 MB. A write reads and rewrites only the parts
+Rough numbers on 20,000 customers and 30,000 orders, one core, PHP 8.3,
+on-disk cache: a primary key lookup 0.6 ms and 6 MB, a lookup by a `UNIQUE` text
+column 2 ms, a scan with a numeric filter and no index 12 ms and 6 MB, a
+`GROUP BY` 26 ms and 6 MB, an aggregate join of both tables 134 ms and 22 MB, a
+single-row `INSERT` 10 ms and 9 MB, an `UPDATE` by key 13 ms and 10 MB, and any
+of those repeated on unchanged data under half a millisecond. On 100,000 rows:
+primary key lookup 0.75 ms and 6 MB, `UNIQUE` text lookup 9 ms, `GROUP BY`
+115 ms and 6 MB, single-row `INSERT` 36 ms and 22 MB. The writes are measured
+on a disk where an `fsync` costs 0.1 ms; on a shared host's disk, where it
+costs a few milliseconds, add that four times. A write reads and rewrites only the parts
 it touches and the pieces of the indexes that cover them; a read holds the
 whole table only when the query genuinely needs every row at once. Measure on
 your own hardware rather than trusting these — a shared host with a network
@@ -67,8 +71,13 @@ revision file and its indexes, so two thousand rows as one statement with many
 statements cost two thousand times that.
 
 **Indexes speed up reads and writes.** Equality and `IN` on an indexed column
-read only the parts of the table where the matching rows live: on 100,000 rows
-a primary key lookup takes 8 ms and 13 MB instead of scanning 29 MB of JSON.
+read only the parts of the table where the matching rows live, and on a
+numeric column only the index pieces whose recorded range can hold the value:
+on 100,000 rows a primary key lookup takes 0.75 ms and 5.5 MB instead of scanning
+29 MB of JSON, reading one line of one part by its byte offset. A `BETWEEN` on
+a numeric indexed column reads only the parts whose values can fall in the
+range. The last index pieces read stay in the process, so a loop of lookups
+does not decode them again.
 Ranges, `LIKE`, `ORDER BY` and aggregates still read everything. Writes use them
 too: an `INSERT` checks uniqueness against the index on disk and appends to the
 last part without loading the table, and an `UPDATE` or `DELETE` by key reads
@@ -101,6 +110,12 @@ key lookup 6.7 ms instead of 2 and an `UPDATE` by key 25 ms instead of 11 on
 [`docs/01-core.md` §9](docs/01-core.md#9-files-space-and-how-to-tune-them).
 Deleting `.cache/` is always safe.
 
+**A `JOIN` behind a selective `WHERE` looks rows up instead of hashing a
+table.** The parts of the `WHERE` that concern the left side run before the
+join, and when few rows are left and the right-hand table has an index on the
+`ON` columns, each one is looked up by key: one order and its customer in
+0.46 ms and 5.6 MB instead of about 20 ms and 25 MB.
+
 **A repeated `SELECT` on unchanged data is not run again.** Its result is
 cached under the SQL, the parameters and the revision of every table it
 touches; any write to one of them changes the revision and the cached result
@@ -129,16 +144,86 @@ statements into one unit of work — there is no `BEGIN`/`COMMIT`.
 
 ---
 
+## Principles
+
+Three rules that every change to this project has to respect. When a faster or
+smaller design breaks one of them, it is not done — and the documentation says
+so, with the numbers, where it happened.
+
+1. **The data stays readable by a person.** Every table is JSON that you can
+   open in a text editor, read, and understand: one row per line, the column
+   names spelled out, no binary encoding, no compression, no format that needs
+   a tool to decode. The indexes, the revision files and the journal follow the
+   same rule. This is why the on-disk cache is a copy that can be deleted, not
+   the data itself, and why a per-piece filter for text keys was not added.
+
+2. **It runs on cheap hosting.** No database server, or one too small or too
+   limited to use: that is the hosting this project is for. Plain PHP 8.0 or
+   later, no Composer, no extensions beyond the standard ones, and nothing that
+   has to stay running between requests. It must work within a small
+   `memory_limit` (the engine stops a query by 85 % of it at the latest, with an
+   ordinary error rather than dying) and without APCu.
+
+3. **Few disk operations.** On a shared host the disk is shared, often slow, and
+   every `fsync` costs milliseconds. Writes touch only the parts of a table they
+   change, and force to disk only what must survive a power cut; reads use the
+   indexes to open as few files as possible. This, and not raw speed, is what
+   most of the design is organised around.
+
+And one that follows from the others: **nothing is lost in a power cut.** A
+statement either completes or leaves the data as it was. This one needs PHP 8.1
+or later: on 8.0 there is no `fsync()`, and it holds for a crashed process but
+not for a power cut (see
+[PHP 8.0 works, but 8.1 or later is recommended](#php-80-works-but-81-or-later-is-recommended)).
+
+---
+
+
 ## Requirements
 
 | | |
 |---|---|
-| **PHP** | 8.0 or later. Developed on 8.3; CI runs every version from **8.0 to 8.5** |
+| **PHP** | 8.0 or later. Developed on 8.3; CI runs every version from **8.0 to 8.5**. **8.1 or later recommended**: 8.0 has no `fsync()`, so a power cut can lose roughly the last 30 seconds of writes (a crashed or killed process loses nothing on any version). See [below](#php-80-works-but-81-or-later-is-recommended) |
 | **PHP extensions** | Only the standard ones (`json`, `pcre`, `hash`, `filter`). **No** mbstring, **no** intl, **no** PDO |
-| **cURL** | Required by **jsonSQLDBadmin** and by the test suite, because the panel talks to the API over HTTP. Not needed by the engine itself |
+| **cURL** | Optional. **jsonSQLDBadmin** uses it for the API when it is there, and PHP's own streams when it is not; with the direct connection it makes no HTTP calls at all. The panel tests (`f5_admin.php`, `f11_asistente.php`) do need it. Not needed by the engine |
 | **zip** | Optional. Only for the panel's "ZIP backup" button |
 | **Web server** | Apache, LiteSpeed, IIS or nginx — see below |
 | **Composer** | Optional. Only to install this project; it pulls in nothing else |
+
+### PHP 8.0 works, but 8.1 or later is recommended
+
+> **Warning.** On PHP 8.0 jsonSQLDB cannot guarantee that a write reported as
+> done survives a **power cut**. Use PHP 8.1 or later if your hosting offers it.
+
+**Why.** When a program writes a file, the data does not go to the disk at once:
+the operating system keeps it in memory and writes it back a little later,
+because that is much faster. If the power fails in between, whatever was still
+in memory is gone. The only way for a program to say "put this on the disk now,
+and do not return until it is there" is the system call `fsync()`. PHP exposes
+it as a function only since **PHP 8.1**.
+
+jsonSQLDB relies on it for its guarantee that nothing is lost in a power cut:
+every write forces the new data files, the revision file and the journal
+manifest to disk before it reports success (see
+[Durability](docs/01-core.md#6-durability-atomic-files-and-the-journal)). On
+8.0 that call does not exist, and **there is no reliable substitute in plain
+PHP**: `fflush()` only empties PHP's own buffer into the operating system; the
+`dio` extension, which has one, is not installed on shared hosting; `posix` has
+no `fsync`; and running `sync` through `exec()` needs a shell that shared
+hosting does not give, and flushes the whole machine.
+
+**What that means in practice on PHP 8.0:**
+
+| Event | PHP 8.0 | PHP 8.1 or later |
+|---|---|---|
+| The PHP process dies, is killed or runs out of memory mid-write | nothing is lost: the journal finishes or discards the write | nothing is lost |
+| Power cut, or the operating system crashes | writes the system had not yet put on disk are lost — on Linux with default settings, roughly the **last 30 seconds** — even though they were reported as done | nothing that was reported as done is lost |
+| Could a table be left damaged? | on ext4 with default options (the usual on hosting), no: the kernel writes a replaced file's data before its rename. On other filesystems a replaced file could be left empty; `INTEGRITY CHECK` would report it and a backup is the way back | no |
+
+Everything else — features, speed, memory — is the same on 8.0. The setup
+wizard and the Configuration page of jsonSQLDBadmin show this warning when they
+run on 8.0. PHP 8.0 itself has had no security fixes since November 2023, which
+is a second reason to move if you can.
 
 ### Web server compatibility
 
@@ -246,8 +331,7 @@ If you are on nginx or OpenLiteSpeed, do [`nginx/`](nginx/) or
 This matters enough to be explicit about it: **jsonSQLDB uses no third-party
 libraries at all.** Not one. The engine, the API and the admin panel are written
 against the PHP standard library, and the only bundled third-party code is
-Bootstrap and Bootstrap Icons for the panel's appearance, served from local files
-with no CDN.
+Bootstrap for the panel's appearance, served from local files with no CDN.
 
 There is a `composer.json`, and it might look like a contradiction. It is not:
 it exists so you can install jsonSQLDB *with* Composer if that is how you manage
@@ -433,10 +517,13 @@ try {
 
 A web panel for managing everything, bundled in [`jsonsqldbadmin/`](jsonsqldbadmin/).
 
-**It requires cURL to be enabled**, because the panel is just another API client:
-it talks to `jsonsqldb_api.php` over HTTP exactly like your application does, and
-never touches the engine or the data files directly. On XAMPP, uncomment
-`extension=curl` in `php.ini`.
+It talks to the engine in one of two ways, chosen in a **setup wizard** the
+first time it is opened: **through the API**, over HTTP and signed exactly like
+your application (it uses cURL if it is there and PHP's own streams if not), or
+by **direct connection** (2.7), loading the engine without HTTP when the panel
+and the data are on the same machine. With either, the engine itself applies
+the role of each panel user. Apart from the ZIP backup and restore, the panel
+never reads or writes the data files.
 
 It manages databases, tables, columns, keys, views, triggers and rows; checks
 and repairs referential integrity; exports to CSV, `INSERT` statements, SQL
@@ -444,8 +531,8 @@ dump or ZIP (and restores the ZIP); and has its own users with `admin` /
 read-only roles, bcrypt passwords, per-IP lockout, CSRF tokens and a daily
 audit trail. The full tour is in [`docs/05-admin.md`](docs/05-admin.md).
 
-Bootstrap 5.3.3 and Bootstrap Icons are bundled locally. The panel makes **zero**
-external requests.
+Bootstrap 5.3.3 is bundled locally and the icons are inline SVG; light and dark
+theme. The panel makes **zero** external requests.
 
 ---
 
@@ -698,7 +785,12 @@ impossible — and falls back to the database lock when the set cannot be
 stated. Reads take each table's shared lock, so reads run together and only
 wait for a write to that same table. Every lock goes through a turnstile so a
 writer waiting behind continuous readers gets in as soon as the readers
-already inside finish, instead of never (2.6.1). The detail is in
+already inside finish, instead of never (2.6.1). And an `UPDATE` or `DELETE`
+that depends only on each row does its work holding the table's shared lock and
+locks it only to commit, checking then that the parts it rewrote did not change
+meanwhile — if they did, it runs again with the table locked (2.7). Readers
+stop waiting for it: on the benchmark, eleven times as many reads during
+writes, at a fourteenth of the latency. The detail is in
 [`docs/01-core.md`](docs/01-core.md); `php tests/benchmark_concurrencia.php`
 measures readers and writers on one table in real processes.
 
@@ -752,22 +844,38 @@ and streaming do.
 #### What the engine does about it
 
 Measured with `php tests/benchmark.php` on 20,000 customers and 30,000 orders
-(on-disk cache), 2.5.0 against 2.6.0, run one after the other:
+(on-disk cache, one core, PHP 8.3), 2.6.1 against 2.7.0, each the mean of three
+runs taken one after the other; differences under 10 % are within what two runs
+of the same version differ by:
 
-| | 2.5.0 | 2.6.0 |
+| | 2.6.1 | 2.7.0 |
 |---|---|---|
-| Numeric range, no index | 30 ms · 7 MB | **18 ms · 6 MB** |
-| `GROUP BY` with `SUM` | 33 ms · 15 MB | **21 ms · 6 MB** |
-| `ORDER BY … LIMIT 20` | 45 ms · 18 MB | **21 ms · 6 MB** |
-| `ORDER BY`, whole table | 128 ms · 20 MB | **31 ms · 21 MB** |
-| `JOIN` aggregated by city | 146 ms · 43 MB | **111 ms · 22 MB** |
-| `INSERT` one row | 20 ms · 13 MB | **10 ms · 9 MB** |
-| `DELETE` one row by key | 28 ms · 13 MB | **16 ms · 8 MB** |
+| Lookup by primary key | 2.85 ms · 7.1 MB | **0.58 ms · 5.5 MB** |
+| `IN` of ten primary keys | 3.45 ms · 7.1 MB | **0.41 ms · 5.5 MB** |
+| Lookup by a `UNIQUE` text column | 2.40 ms · 7.3 MB | 1.97 ms · 6.8 MB |
+| `BETWEEN` on the primary key (1,000 rows) | 19.5 ms (scan) | **1.89 ms · 6.3 MB** |
+| Numeric range, no index | 19.5 ms · 5.7 MB | **12.0 ms · 6.3 MB** |
+| `JOIN` of one order with its customer | ~20 ms · 25 MB | **0.46 ms · 5.6 MB** |
+| `LEFT JOIN` of twenty orders | ~60 ms · 23 MB | **3.7 ms · 6.1 MB** |
+| `GROUP BY`, `ORDER BY`, `LIKE`, aggregated `JOIN`, subquery | — | same, ±8 % |
+| `INSERT` / `UPDATE` / `DELETE` one row | 11.0 / 13.6 / 18.3 ms | 10.0 / 13.0 / 17.1 ms |
 
-On 100,000 rows: `GROUP BY` from 211 ms and 58 MB to 105 ms and 6 MB, `ORDER BY
-… LIMIT 20` from 307 ms and 69 MB to 100 ms and 6 MB, the aggregated `JOIN` from
-927 ms and 193 MB to 676 ms and 85 MB, a one-row `INSERT` from 95 ms and 43 MB
-to 30 ms and 22 MB.
+On 100,000 rows: a primary key lookup from 9.3 ms and 13 MB to 0.75 ms and
+5.5 MB, ten keys by `IN` from 9.1 ms to 0.56 ms, a range without index from
+92 ms to 58 ms, and the rest the same. A lookup by a `UNIQUE` text column
+stays at 9 ms: a text key can be in any piece of the index, so all of them are
+read (see "Where the floor is" in [`docs/01-core.md`](docs/01-core.md)). The
+writes do not change here because this machine's disk makes an `fsync` cost
+0.1 ms; on a shared host's disk, where it costs 3 ms, a one-row `INSERT` goes
+from 50 ms to 28 ms because 2.7 makes four `fsync` calls where 2.6 made ten.
+
+Memory: lookups use 1.5 MB less; everything else about 0.6 MB more on this
+benchmark. Of that, 0.24 MB is the larger code of the engine, which with
+OPcache (the normal case on a web server) lives in shared memory and does not
+count; the rest is what the process keeps between statements (four index
+pieces, the row offsets of sixteen parts, the table structures), which a
+request of one or two queries does not accumulate and which is the first thing
+let go when memory runs short.
 
 Rows are read one part at a time and filtered as they arrive, and used as they
 come out of the cache without copying; aggregates are accumulated instead of
@@ -833,16 +941,17 @@ touch your data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 144   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
+php tests/f2_select.php       → OK: 145   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 60    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 52    real requests against the API
 php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 119   the panel, driven like a user
+php tests/f5_admin.php        → OK: 124   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 24    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 59    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 31    every intermediate state a crash can leave
+php tests/f7_concurrencia.php → OK: 27    real simultaneous processes and locking
+php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
+php tests/f11_asistente.php    → OK: 18    panel setup wizard and direct connection
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that
@@ -855,10 +964,17 @@ literal results: it compares every indexed query against the same condition
 written so the index cannot be used, and the cheap write paths against a table
 without indexes.
 
-The engine, the API and the panel pass PHPStan at level 5 with no warnings. The
-configuration is not committed — it is a development tool and the project needs
-nothing beyond PHP itself — but the source carries the `@phpstan-type` and
-`@phpstan-impure` annotations that make such an analysis meaningful.
+The engine, the API and the panel are checked with PHPStan at level 5 before
+each release. It does not come back clean, and this is what it reports: most
+warnings are about the configuration constants, which it evaluates with their
+default values and so calls every condition on them "always true" or "always
+false"; the rest are places where it cannot follow a type (a flag set by a nested
+call, a list built by a loop, a numeric string that has just been checked) or
+defensive calls it considers redundant. None of them is a bug; each was looked
+at. The PHPStan configuration is not committed — it is a development tool and
+the project needs nothing beyond PHP itself — but the source carries the
+`@phpstan-type` and `@phpstan-impure` annotations that make the analysis
+meaningful.
 
 `f5_admin.php` needs cURL and starts two PHP built-in servers — one for the panel
 and one for the API, because the built-in server handles one request at a time
@@ -889,15 +1005,16 @@ Source code comments and engine messages are in Spanish.
 
 Copyright 2026 Miguel Sanchez.
 
-The concept, architecture, functional and technical specification, design
-decisions and review of this project are the work of its author.
+This project is **directed by Miguel Sanchez** and **assisted by artificial
+intelligence**. The concept, architecture, functional and technical
+specification, design decisions, priorities, acceptance criteria and review
+are the author's. The implementation — the PHP source code, the test suites,
+the benchmarks and the documentation — is produced with the help of AI models
+(Anthropic's Claude among others), working from that specification and under
+the author's direction, and reviewed by him before being kept.
 
-The implementation — the PHP source code, the test suites and the documentation —
-was written by **Claude Opus 5**, an AI model developed by Anthropic, working
-from that specification and under the author's direction and review.
-
-Every design decision, trade-off and acceptance criterion was made by a human.
-Every line was produced by the model and reviewed before being kept.
+Every design decision and every trade-off was made by a human. No line ships
+without his review.
 
 See [AUTHORS](AUTHORS) and [NOTICE](NOTICE).
 

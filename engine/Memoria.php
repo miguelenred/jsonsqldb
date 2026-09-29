@@ -25,6 +25,8 @@ namespace JsonSQLDB;
  *
  * No hace milagros: una consulta que necesita más memoria de la que hay no se
  * puede completar. Lo que cambia es CÓMO falla.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Memoria
 {
@@ -70,6 +72,9 @@ final class Memoria
      * cortar consultas que caben.
      */
     private const DIVISOR_RESERVA = 8;
+
+    /** Tamaño del bloque en que PHP pide memoria al sistema (zend_mm). */
+    private const BLOQUE = 2097152;
 
     /** Memoria apartada de antemano, para poder trabajar cuando ya no queda. */
     private const RESERVA = 1048576 * 2;
@@ -225,10 +230,15 @@ final class Memoria
         // queda alto después de una consulta grande aunque ya no se use nada,
         // así que como medida principal cortaría consultas que caben de sobra.
         // Aquí solo dice cuánto queda de verdad antes del fatal.
+        //
+        // PHP pide memoria al sistema en bloques de 2 MB: si el siguiente
+        // bloque ya no cabe bajo el límite, cualquier petición que no quepa en
+        // los bloques que ya tiene es el fatal, por pequeña que sea. Por eso la
+        // reserva sobre la memoria pedida nunca baja de un bloque.
         $pedida = memory_get_usage(true);
 
         $cabeOtroSalto = ($uso + $reservado) < self::$limite
-                      && ($pedida + $reservado) < self::$limite;
+                      && ($pedida + max($reservado, self::BLOQUE)) < self::$limite;
 
         if ($uso < self::$techo && $cabeOtroSalto) {
             return;

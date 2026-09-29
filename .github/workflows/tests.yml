@@ -54,6 +54,9 @@ jobs:
       - name: Admin panel
         run: php tests/f5_admin.php
 
+      - name: Admin panel setup wizard and direct connection
+        run: php tests/f11_asistente.php
+
       - name: Crash recovery
         run: php tests/f6_cortes.php
 

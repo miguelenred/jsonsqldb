@@ -12,6 +12,8 @@ namespace JsonSQLDB;
  * Nulos:     COALESCE NULLIF IFNULL
  * Varios:    MIN MAX con 2 o más argumentos (con 1 son de agregación)
  * Agregados: COUNT SUM AVG MIN MAX GROUP_CONCAT  (admiten DISTINCT)
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Functions
 {

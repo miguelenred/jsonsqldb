@@ -6,6 +6,8 @@ declare(strict_types=1);
  *
  * Cada petición se lanza en un proceso PHP aparte (tests/_peticion.php) para
  * reproducir el ciclo real: superglobales, cabeceras y exit del endpoint.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 $raizProyecto = dirname(__DIR__);
 $raizDatos    = sys_get_temp_dir() . '/jsonsqldb_test_f4';

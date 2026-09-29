@@ -7,6 +7,8 @@ namespace JsonSQLDB;
  * Acceso a la configuración. Si config.php no define una constante, se usa
  * el valor por defecto de aquí, de modo que el motor funciona igualmente
  * (útil en pruebas y en scripts de mantenimiento).
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Config
 {
@@ -57,6 +59,12 @@ final class Config
             return 'apcu';
         }
         return (bool)JSONSQLDB_CACHE_ACTIVA;
+    }
+
+    /** ¿Se escriben por partes los UPDATE y DELETE que lo admiten? (ver Storage::bloquearPartes()) */
+    public static function escrituraPorPartes(): bool
+    {
+        return !defined('JSONSQLDB_ESCRITURA_POR_PARTES') || (bool)JSONSQLDB_ESCRITURA_POR_PARTES;
     }
 
     /** Máximo de filas de un resultado de SELECT para guardarlo en caché; 0 la desactiva. */

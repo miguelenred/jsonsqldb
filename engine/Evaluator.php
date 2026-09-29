@@ -14,6 +14,8 @@ namespace JsonSQLDB;
  *
  * Contexto de evaluación:
  *   ['fila' => array, 'agregados' => ?array de resultados por agid, 'sub' => callable(AST): filas]
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Evaluator
 {

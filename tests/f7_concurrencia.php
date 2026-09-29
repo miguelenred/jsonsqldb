@@ -16,6 +16,8 @@ declare(strict_types=1);
  *   - Escritura y lectura de tablas distintas: en paralelo.
  *   - Escritura en una tabla con claves foráneas: bloquea toda la base.
  *   - DDL: bloquea toda la base.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 
@@ -36,6 +38,18 @@ function chk(string $titulo, callable $fn): void {
         global $ko; $ko++;
         echo "  FALLO $titulo -> " . get_class($e) . ': ' . $e->getMessage() . "\n";
     }
+}
+
+/**
+ * ¿Hay algún journal en la base? La carpeta .tx puede existir vacía, y un
+ * temporal de manifiesto que dejó un proceso muerto es basura, no un journal:
+ * lo barre la siguiente escritura con el exclusivo de la base.
+ */
+function hayJournal(string $base): bool {
+    foreach ((array)glob("$base/.tx/*") as $f) {
+        if (substr((string)$f, -4) !== '.tmp') { return true; }
+    }
+    return false;
 }
 
 function borrarArbol(string $dir): void {
@@ -301,7 +315,7 @@ chk('las claves foráneas quedan bien', function () use ($raiz) {
     return $bd->consultar('CHECK KEYS') === [];
 });
 
-chk('no quedan journals a medias', fn() => !is_dir($raiz . '/conc/.tx'));
+chk('no quedan journals a medias', fn() => !hayJournal($raiz . '/conc'));
 
 echo "\n== Lectura con tablas repartidas en partes ==\n";
 chk('una lectura no ve nunca media escritura de una tabla partida', function () use ($raiz) {
@@ -553,6 +567,122 @@ chk('dos escrituras sobre grupos de tablas sin relación no se esperan', functio
         return 'dos escrituras del MISMO grupo se solaparon: no se están excluyendo';
     }
     return true;
+});
+
+echo "\n== Escritura por partes ==\n";
+
+/**
+ * Lanza procesos que ejecutan cada uno su lista de sentencias y espera a que
+ * acaben. Devuelve lo que escribió cada uno (las cuentas de escrituras por
+ * partes y repetidas) o el error del que falló.
+ */
+function enParalelo(string $dir, array $listas): array {
+    $cabecera = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+              . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+              . '$bd = new JsonSQLDB\\Database("p", ' . var_export($dir, true) . ');';
+    $procs = [];
+    foreach ($listas as $sentencias) {
+        $codigo = $cabecera . 'foreach (' . var_export($sentencias, true) . ' as $s) { $bd->consultar($s); }'
+                . 'echo json_encode(JsonSQLDB\\Storage::cuentaPartes());';
+        $tub = [];
+        $procs[] = [proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub), $tub];
+    }
+    $salidas = [];
+    foreach ($procs as [$p, $tub]) {
+        $out = (string)stream_get_contents($tub[1]);
+        $err = trim((string)stream_get_contents($tub[2]));
+        fclose($tub[1]); fclose($tub[2]);
+        proc_close($p);
+        $salidas[] = $err !== '' ? ['error' => substr($err, 0, 300)] : (json_decode($out, true) ?: ['error' => $out]);
+    }
+    return $salidas;
+}
+
+function tablaPorPartes(string $dir, int $filas): Database {
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, grupo INTEGER, v INTEGER, nota VARCHAR(20))');
+    $bd->consultar('CREATE INDEX ix_grupo ON t (grupo)');
+    $vals = [];
+    for ($i = 1; $i <= $filas; $i++) { $vals[] = "($i, " . ($i % 7) . ", 0, 'n$i')"; }
+    foreach (array_chunk($vals, 1000) as $b) { $bd->consultar('INSERT INTO t VALUES ' . implode(',', $b)); }
+    return $bd;
+}
+
+chk('cuatro procesos sumando en la misma fila no pierden ninguna suma', function () use ($raiz) {
+    // Todos reescriben la misma parte: cada vez, uno confirma y los demás se
+    // encuentran la parte cambiada y se repiten con la tabla entera. Si eso
+    // no se comprobara, cada uno escribiría su v+1 sobre el mismo v y se
+    // perderían sumas. Cuatro procesos por cincuenta sumas: 200 exactas
+    $dir = $raiz . '/partes1';
+    $bd  = tablaPorPartes($dir, 3000);
+    $listas = array_fill(0, 4, array_fill(0, 50, 'UPDATE t SET v = v + 1 WHERE id = 1500'));
+    $r = enParalelo($dir, $listas);
+    foreach ($r as $x) { if (isset($x['error'])) { return 'un proceso falló: ' . $x['error']; } }
+    $v = (int)$bd->consultar('SELECT v FROM t WHERE id = 1500')[0]['v'];
+    $partes = array_sum(array_column($r, 0));
+    $repetidas = array_sum(array_column($r, 1));
+    echo "       por partes: $partes, repetidas con la tabla entera: $repetidas\n";
+    if ($v !== 200) { return "se perdieron sumas: v = $v y debía ser 200"; }
+    return $partes > 0 ?: 'no se escribió nada por partes';
+});
+
+chk('procesos en partes distintas, con un DELETE a la vez, dejan la tabla exacta', function () use ($raiz) {
+    // Tres procesos suman en filas de partes distintas y un cuarto borra filas
+    // del final. Al acabar, cada suma tiene que estar, las borradas no, los
+    // índices tienen que decir lo mismo que recorrer la tabla, y no puede
+    // quedar ni un temporal ni un journal
+    $dir = $raiz . '/partes2';
+    $bd  = tablaPorPartes($dir, 5000);
+    $listas = [];
+    foreach ([10, 1200, 2400] as $base) {
+        $l = [];
+        for ($k = 0; $k < 30; $k++) { $l[] = 'UPDATE t SET v = v + 1, nota = \'x\' WHERE id = ' . ($base + $k % 10); }
+        $listas[] = $l;
+    }
+    $borrar = [];
+    for ($k = 0; $k < 20; $k++) { $borrar[] = 'DELETE FROM t WHERE id = ' . (4990 - $k); }
+    $listas[] = $borrar;
+    $r = enParalelo($dir, $listas);
+    foreach ($r as $x) { if (isset($x['error'])) { return 'un proceso falló: ' . $x['error']; } }
+    foreach ([10, 1200, 2400] as $base) {
+        $sum = (int)$bd->consultar('SELECT SUM(v) AS s FROM t WHERE id BETWEEN ? AND ?', [$base, $base + 9])[0]['s'];
+        if ($sum !== 30) { return "en las filas desde $base la suma es $sum y debía ser 30"; }
+    }
+    if ((int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'] !== 4980) { return 'no se borraron 20 filas'; }
+    for ($g = 0; $g < 7; $g++) {
+        $a = $bd->consultar('SELECT id FROM t WHERE grupo = ? ORDER BY id', [$g]);
+        $b = $bd->consultar('SELECT id FROM t WHERE grupo + 0 = ? ORDER BY id', [$g]);
+        if ($a !== $b) { return "el índice del grupo $g no cuadra con la tabla"; }
+    }
+    foreach ([1, 1205, 2403, 4970] as $id) {
+        if ($bd->consultar('SELECT id FROM t WHERE id = ?', [$id]) !== $bd->consultar('SELECT id FROM t WHERE id + 0 = ?', [$id])) {
+            return "la clave primaria no encuentra $id como el recorrido";
+        }
+    }
+    if (glob("$dir/p/*.tmp") !== [] || (array)glob("$dir/p/.tx/*") !== []) { return 'quedaron temporales o journals'; }
+    return array_sum(array_column($r, 0)) > 0 ?: 'no se escribió nada por partes';
+});
+
+chk('con una clave única, una columna única no se escribe por partes', function () use ($raiz) {
+    // Dos procesos poniendo el mismo valor en una columna UNIQUE de filas de
+    // partes distintas: por partes, ninguno vería al otro y los dos
+    // confirmarían. Con la tabla entera, el segundo tiene que fallar
+    $dir = $raiz . '/partes3';
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE u (id INTEGER PRIMARY KEY, email VARCHAR(40) UNIQUE)');
+    $vals = [];
+    for ($i = 1; $i <= 3000; $i++) { $vals[] = "($i, 'e$i')"; }
+    $bd->consultar('INSERT INTO u VALUES ' . implode(',', $vals));
+    $r = enParalelo($dir, [["UPDATE u SET email = 'mismo' WHERE id = 10"], ["UPDATE u SET email = 'mismo' WHERE id = 2900"]]);
+    $n = (int)$bd->consultar("SELECT COUNT(*) AS n FROM u WHERE email = 'mismo'")[0]['n'];
+    $fallos = count(array_filter($r, static fn($x) => isset($x['error'])));
+    return $n === 1 && $fallos === 1 ?: "quedaron $n filas con el mismo email ($fallos procesos fallaron)";
 });
 
 echo "\n== Limpieza ==\n";

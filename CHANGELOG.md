@@ -9,6 +9,288 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.7.0] - 2026-09-29
+
+The release that goes to the floor: for every kind of operation, what the
+engine cannot go below while data stays in readable JSON, PHP interprets every
+row and writes survive a power cut — measured, and written down in
+`docs/01-core.md` §11 so the question "can it be faster?" has a fixed answer.
+Prompted by a comparison against a document store that found key lookups the
+weakest point of 2.6: 3.4 ms for one row by primary key, a loop of 5,000 of
+them taking twenty seconds, and an `UPDATE` by condition taking four. Nothing
+breaking; two keys added to files (`rangos` in `rev.json`, `offsets` in the
+data parts), filled in as tables are written; the journal manifest is now a
+single file.
+
+### Added
+
+- **Writes by part.** An `UPDATE` or `DELETE` that depends only on each row —
+  no foreign keys or triggers on the table, nobody referencing it, no
+  subqueries, and no primary key or `UNIQUE` column in the `SET` — does its work
+  (reading, computing, writing and forcing the new files to disk) holding the
+  table's shared lock, and takes the exclusive lock only to commit. At commit
+  it checks that the parts and index pieces it rewrote are still as it read
+  them; if another write went to the same part in between, it discards its
+  files without having renamed anything and runs again with the whole table
+  locked. The on-disk format does not change. Measured with one writer and two
+  readers on a 20,000-row table, one core, `fsync` delayed 3 ms: 3,837 reads
+  instead of 334, read latency p50 2.5 ms instead of 35.7; writes done 88
+  instead of 166, because on one core the readers now share the processor with
+  the writer. Between writers the gain is small (30–31 updates a second either
+  way), since three of a write's four `fsync` calls have to stay inside the
+  commit. `JSONSQLDB_ESCRITURA_POR_PARTES = false` turns it off.
+  `tests/f7_concurrencia.php` gains three checks with real processes — four
+  processes adding to the same row must not lose a single addition (without
+  the commit check they lose three quarters), writers in different parts with a
+  `DELETE` at the same time must leave every sum and index exact, and a
+  `UNIQUE` column is never written by part.
+- Temporary files of a write are only swept when the process that wrote them no
+  longer exists (checked in `/proc`, or with `posix_kill`, or failing both
+  after a minute). A write holding a table's lock used to sweep them all, which
+  is no longer safe: a write by part waiting to commit has its files written.
+
+- **jsonSQLDBadmin has a setup wizard.** While the panel has no `config.php`
+  (or still has the template's `CHANGE_ME_` keys), the only thing it serves is
+  a wizard: choose how the panel talks to the engine, whether to accept plain
+  HTTP for local testing, and the administrator. **The connection is tested
+  before anything is written** — a wrong folder, an API that does not answer or
+  a rejected signature is reported on the same screen and no file is created.
+  Then it writes `config.php` from `config.dist.php`, keeping every comment,
+  with permissions `0600`. If the API of the same installation is not
+  configured yet, the wizard can create its configuration with new random keys.
+  Deleting `config.php` brings the wizard back for the connection only; users
+  and audit trail are kept. Replaces the old text-only "the panel is not
+  configured" error.
+
+- **jsonSQLDBadmin can connect directly to the engine**, without the API:
+  `ADMIN_CONEXION = 'directa'`, chosen in the wizard. Only when the panel and
+  the data are on the same machine; no keys to configure, and no HTTP request
+  per query. Measured on the PHP built-in server with five 500-row tables, per
+  page: table list 4.3 → 2.4 ms, data browser 10.6 → 3.5 ms, structure
+  15.3 → 3.0 ms. **The engine still applies each panel user's role**: a
+  read-only user's statements are checked against the same list an API key
+  with read permission gets, and refused before they run.
+  `tests/f11_asistente.php` (new, 18 checks) walks the wizard like a user and
+  then calls the engine the way the panel does, bypassing the pages, to prove
+  it is the engine that refuses a read-only `DELETE`; it fails if that check is
+  removed.
+
+- **Import in the panel**: an SQL file (the panel's own dump or any list of
+  statements) and a CSV into an existing table, from the page of each
+  database. Both are read as a stream, go through the API or the direct
+  connection like everything else, and send rows in batches of 200. The SQL
+  splitter respects strings, quoted identifiers, comments and the `BEGIN … END`
+  of triggers. No transactions, and it says so: on failure it reports how much
+  went in and where it stopped. Before, the only import was the ZIP restore,
+  which needs the panel and the engine on the same machine — and its error
+  message told the user to use "the SQL dump", which the panel could produce
+  but not load. Three checks in `tests/f5_admin.php`; the one for the dump fails
+  if the splitter stops honouring `BEGIN … END`.
+- **Configuration page** in the panel (administrators): connection, engine
+  response time, paths, HTTPS, allowed IPs, versions, and how to change them.
+
+### Changed
+
+- **jsonSQLDBadmin has a new design**: sidebar with the
+  databases and the tables of the current one (with a filter when there are
+  many), top bar with the path, light/dark theme remembered per browser, page
+  and table headers with tabs, the same login and setup screens. The icons are
+  inline SVG drawn in the same stroke; **Bootstrap Icons is no longer bundled**
+  (390 KB of CSS and fonts less). The link to `https://miguelenred.es/jsonsqldb`
+  is at the bottom left of the sidebar.
+
+- **Creating the first administrator needs a CSRF token and the password
+  typed twice.** Before, the form accepted a bare POST: a page on another site
+  could make the browser of someone on the same network as an unconfigured
+  panel create the administrator with a password chosen by the attacker.
+
+- The panel answers each `SHOW` once per request: the sidebar and the page
+  asked for the same tables; any other statement clears it.
+
+- **A numeric comparison or `BETWEEN` in the `WHERE` is decided inline.**
+  `col <op> number` and `col [NOT] BETWEEN number AND number` compare numeric
+  values with PHP's own `<=>` in the loop, which is exactly what
+  `Valor::comparar()` does for two numbers, without the call per row; any
+  other value takes the usual path. A range without index on 20,000 rows went
+  from 19.5 ms to 12.0 ms. `tests/f2_select.php` runs thirteen more predicates
+  over integer, decimal and text columns (with numbers stored as text and
+  `NULL`s) through both paths and demands the same rows.
+
+- **The engine keeps less in memory between statements**: row offsets are held
+  packed, four bytes per row instead of a PHP array of integers, and at most
+  four index pieces; data parts are never kept.
+
+- **A `JOIN` behind a selective `WHERE` looks its rows up instead of hashing a
+  table.** Two things: the conditions of the `WHERE` that only concern tables
+  already joined are now applied *before* the join (for `INNER` and `LEFT`;
+  a `RIGHT` or `FULL` join would change its result, so they are left alone);
+  and if what remains on the left is small compared with the right-hand table
+  — one row per 150 of the table, up to a thousand — and that table has an
+  index on the columns the `ON` equates, each left row is looked up by key
+  rather than building a hash of the whole table. `FROM orders o JOIN
+  customers c ON c.id = o.customer_id WHERE o.id = ?` on 30,000 orders and
+  20,000 customers: 20 ms and 25 MB before, 0.35 ms and 6 MB now; the same
+  with `LEFT JOIN` over twenty orders, 60 ms and 23 MB before, 3 ms and 7 MB
+  now. Above the threshold, or without a usable index, the hash join runs as
+  before on whatever the `WHERE` left — the aggregated `JOIN` of the whole
+  benchmark is unchanged. Equalities of the `ON` the index does not cover,
+  and the rest of the condition, are checked on each candidate.
+  `tests/f2_select.php` runs nine joins through both paths — the same query
+  with the `ON` written so no index can be used — and demands identical rows.
+
+- **The `AUTOINCREMENT` counter lives in `rev.json`.** It used to live in the
+  structure file, so every `INSERT` rewrote and force-synced `meta.json` just
+  to move a number; now it rides on a file the write touches anyway. One
+  `fsync` less per `INSERT`: four per write (the part, `rev.json`, the
+  manifest and the directory), five when the insert opens a new part. With
+  the kernel made to delay each `fsync` by 3 ms, as a shared host's disk
+  does, a one-row `INSERT` went from 50 ms in 2.6.1 to 28 ms. `meta.json`
+  keeps whatever value it had, and the larger of the two wins on reading, so
+  bases from earlier versions and hand-edited counters keep working.
+
+- **Each data part records where every row's line starts.** `offsets` at the
+  end of the part file, written along with the rows. A lookup that needs a
+  few rows of a part reads their lines by byte offset — three small reads,
+  about 30 µs — instead of decoding the thousand rows of the part. Combined
+  with the index ranges below, a primary key lookup goes from 2.3 ms and 7 MB
+  to 0.5 ms and 5 MB on 20,000 rows, and from 10.8 ms and 13 MB to 0.7 ms and
+  5 MB on 100,000; `IN` of ten keys from 3.2 ms to 0.4 ms; five thousand
+  lookups by key in one process from 9.9 s to 0.9 s. Parts from earlier
+  versions have no offsets and are decoded whole until they are next written.
+
+- **A range on a numeric indexed column reads only the parts that can hold it.**
+  `BETWEEN`, `<`, `<=`, `>`, `>=` with numeric literals on the first column of
+  an index, in the top-level `AND` chain of the `WHERE`, use the per-piece
+  ranges to skip parts whose values cannot fall in the range. On a table that
+  grows by appending, `WHERE id BETWEEN a AND b` reads one or two parts:
+  2.4 ms on 20,000 rows and 2.6 ms on 100,000, where a scan takes 18 ms and
+  92 ms. On a column whose values are spread at random it reads everything,
+  as before. `tests/f8_indices.php` compares eleven range conditions against
+  the same conditions written so the index cannot be used, after every move,
+  delete and reinsert of ids across pieces.
+
+- **Half the `fsync` calls per write.** The manifest is a single file,
+  `.tx/<scope>.json`, in a folder that is created once and stays, instead of
+  a folder per scope created and synced on every write; and the index pieces
+  are written without `fsync`, listed in the manifest as regenerable: if a
+  crash loses one, recovery carries on without it, lookups on that index scan
+  the table, and the next write to the table rebuilds it (every piece's
+  header and tail are checked before a write trusts it). A one-row `INSERT`
+  into a table with three indexes went from ten `fsync` calls to five, which
+  is the floor for keeping every data file durable on its own. On this
+  machine an `fsync` costs 0.1 ms and the change is invisible; with the
+  kernel made to delay each `fsync` by 3 ms, as a shared host's disk does,
+  the `INSERT` went from 50 ms to 34 ms, and by 8 ms from 102 ms to 59 ms.
+  `tests/f9_journal.php` checks that a lost index piece neither stops
+  recovery nor changes a result, and is rebuilt by the next write. Manifests
+  left by 2.5 and 2.6 in their folders are still recognised and applied.
+
+- **Index pieces carry their numeric range.** For an index whose first
+  column is numeric, `rev.json` now records the smallest and largest value in
+  each piece (`"rangos": {"auto_id": [[1, 1000], [1001, 2000], ...]}`; `[]`
+  for an empty piece, `null` for a text column). A lookup opens only the
+  pieces whose range can hold the value, and a value outside every range is
+  answered without opening any. With an auto-increment key each piece covers
+  a stretch of ids, so a lookup by id reads one piece instead of all of them:
+  from 2.3 ms to 0.6 ms on 20,000 rows and from 10.7 ms to 0.7 ms on 100,000;
+  `IN` of ten keys from 2.8 ms to 1.9 ms. The uniqueness check of an `INSERT`
+  benefits the same way: a new id is known to be unique without reading a
+  piece. Numbers spread at random over the table gain nothing and lose
+  nothing; text keys still read every piece. The range is recomputed from the
+  piece's keys every time the piece is written, so a key moved by an `UPDATE`
+  or a `DELETE` is never left outside. `tests/f8_indices.php` checks the
+  recorded ranges and that lookups agree with a full scan after ids are moved
+  across pieces, deleted and reinserted. Bases from 2.6 work as they are:
+  lookups read every piece until each piece gets its range at its next write.
+
+- **The last cache entries stay in the process.** Eight index pieces, sixteen
+  offset lists and a few table structures — about a megabyte — are kept
+  decoded across statements, keyed exactly as in the cache, revision included,
+  so an entry made stale by another process is never used, and it is the
+  first thing dropped when memory runs short. A single query in a request
+  gains nothing; a loop of lookups stops decoding the same piece on every
+  turn. Data parts are not kept: they are large, and lookups no longer need
+  them.
+
+- **The memory watchdog keeps a 2 MB block in reserve** on the memory PHP has
+  requested from the system, not only on the memory in use: PHP requests
+  memory in 2 MB blocks, and once the next block no longer fits under the
+  limit any allocation that does not fit in the existing ones is the fatal
+  error, however small. Found by `tests/f1_nucleo.php` with a 16 MB limit
+  after the process kept a little more between queries.
+
+- **An `UPDATE` or `DELETE` by an indexed condition that hits many rows
+  decoded the same part once per row.** The rows of the candidate positions
+  were fetched one by one, each through the cache, so an `UPDATE` of the
+  2,000 rows of one city on 20,000 rows took 1.6–2.7 s. Positions are read
+  in order and each part is decoded once: 120 ms for the same statement.
+  This is the "update by condition" case a comparison against a document
+  store found ten times slower than the competitor; it is now faster.
+
+- The number of parts of a table is remembered for the duration of a lock:
+  a write of many rows asked the file system for it once per row.
+
+### Fixed
+
+- **`?p=fila` crashed the panel.** The page was on the list of allowed pages
+  but had no view behind it, so requesting it was a PHP fatal error. Removed.
+- **The documentation said things that were not true**, found while reviewing
+  it: that the panel requires cURL (it falls back to PHP's streams; only the
+  tests need cURL), and that `ADMIN_EXIGIR_HTTPS` defaults to `false` (the
+  template sets `true`).
+- **What PHP 8.0 does not guarantee is now said plainly.** `fsync()` exists only
+  from PHP 8.1 and there is no reliable pure-PHP substitute on 8.0, so on 8.0 a
+  power cut can lose the last few seconds of writes, even though a killed or
+  crashed process loses nothing. The documentation used to say only that 8.0
+  "flushes PHP's buffer, which is as far as that version can go". The README,
+  `docs/01-core.md`, the setup wizard and the panel's Configuration page now
+  say what that means and recommend 8.1 or later; the README has a section of
+  its own, "PHP 8.0 works, but 8.1 or later is recommended", with the reason in
+  detail and a table of what is and is not lost on each version. PHP 8.0 stays
+  supported and in CI. The code is unchanged.
+
+### Measured against 2.6.1
+
+`php tests/benchmark.php`, 20,000 customers and 30,000 orders, on-disk cache,
+one core, PHP 8.3, mean of three runs of each version taken one after the
+other (ms · peak MB):
+
+| Operation | 2.6.1 | 2.7.0 |
+|---|---|---|
+| Lookup by primary key | 2.85 · 7.1 | 0.58 · 5.5 |
+| `IN` of ten primary keys | 3.45 · 7.1 | 0.41 · 5.5 |
+| Lookup by `UNIQUE` text column | 2.40 · 7.3 | 1.97 · 6.8 |
+| Equality on an indexed column | 17.6 · 7.3 | 17.8 · 7.6 |
+| Numeric range, no index | 19.5 · 5.7 | 12.0 · 6.3 |
+| `BETWEEN` on the primary key | — | 1.89 · 6.3 |
+| `LIKE` by prefix | 19.7 · 5.7 | 19.0 · 6.3 |
+| `GROUP BY` with `SUM` | 24.4 · 5.7 | 25.7 · 6.3 |
+| `ORDER BY … LIMIT 20` / whole table | 22.4 / 36.6 | 22.3 / 36.3 |
+| `JOIN` aggregated by city | 134 · 21.5 | 134 · 22.1 |
+| `JOIN` of one order with its customer | — | 0.46 · 5.6 |
+| Subquery with `IN` | 67 · 9.0 | 72 · 9.3 (equal in a separate measurement: 56–60 both) |
+| `INSERT` / `UPDATE` / `DELETE` one row | 11.0 / 13.6 / 18.3 | 10.0 / 13.0 / 17.1 |
+
+On 100,000 rows (one run each): primary key 9.3 → 0.75 ms, ten keys by `IN`
+9.1 → 0.56 ms, range without index 92 → 58 ms, lookup by `UNIQUE` text column
+8.9 → 9.1 ms (unchanged: every piece of the index is read), everything else
+within ±7 %. Differences under 10 % are within what two runs of the same
+version differ by on this machine. Memory is about 0.6 MB higher outside the
+lookups: 0.24 MB of it is the engine's larger code, which OPcache keeps out of
+each request, and the rest is what the process keeps between statements.
+
+### Not changed
+
+- Parsing SQL was measured at 0.013 ms per statement, 0.6 % of a key lookup;
+  there was nothing to gain there.
+- The authorship note now says what is true today: the project is **directed
+  by Miguel Sanchez** and **assisted by artificial intelligence** — several
+  models, not one. README, AUTHORS, NOTICE and composer.json.
+- Lock-free reads (read, then verify nothing changed, repeat if it did) were
+  built and measured in 2.6.1 and discarded; see that entry. Concurrent writes
+  to the same table stay serialised: the last part and the index pieces are
+  files rewritten whole, and two processes cannot rewrite one at once.
+
 ## [2.6.1] - 2026-09-12
 
 A locking fix found by measuring, plus documentation and one setting prompted

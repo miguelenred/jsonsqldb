@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Prueba del analizador (léxico + sintáctico). Ejecutar: php tests/f2_parser.php
  * No toca el disco.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 require_once __DIR__ . '/../engine/bootstrap.php';
 

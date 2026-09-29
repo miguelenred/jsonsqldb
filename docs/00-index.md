@@ -8,6 +8,21 @@ happened to this document for three versions.
 An SQL database on JSON files, in pure PHP. No Composer, no unusual extensions
 and no database server: copy the folder and it works.
 
+Three rules guide every design decision, and are written in full in the
+[README](../README.md#principles): **the data stays readable by a person**
+(plain JSON, one row per line, no binary or compressed format), **it runs on
+cheap hosting** (no database server, no extensions, small `memory_limit`,
+nothing resident between requests), and **it does as few disk operations as it
+can** (writes touch only what they change and force to disk only what must
+survive a power cut). When an optimisation would break one of them, it is not
+done.
+
+> **PHP 8.0 is supported, but 8.1 or later is recommended.** 8.0 has no
+> `fsync()`, the call that forces data onto the disk, and there is no reliable
+> substitute in plain PHP; so on 8.0 a power cut can lose roughly the last 30
+> seconds of writes. The full explanation is in the
+> [README](../README.md#php-80-works-but-81-or-later-is-recommended).
+
 Three pieces, each on top of the previous one:
 
 ```
@@ -20,14 +35,14 @@ data/             one folder per database, one .json per table
 ## Documentation
 
 > **Coming from an earlier version?** Read
-> [Upgrading from an earlier version](01-core.md#11-upgrading-from-an-earlier-version)
+> [Upgrading from an earlier version](01-core.md#12-upgrading-from-an-earlier-version)
 > before replacing the folder. The data needs no conversion, but if you come
 > from 1.x **the HMAC signature of the API changed** and your own clients stop
 > working until they are updated.
 
 | Document | What it covers |
 |---|---|
-| [01-core.md](01-core.md) | storage, types, locking, journal, indexes, memory, files and space (tuning for a hosting plan), configuration, log, upgrading |
+| [01-core.md](01-core.md) | storage, types, locking, journal, indexes, memory, files and space (tuning for a hosting plan), configuration, log, where the floor is, upgrading |
 | [02-queries.md](02-queries.md) | `SELECT`: syntax, functions, alphabetical order, performance |
 | [03-writes.md](03-writes.md) | `INSERT`/`UPDATE`/`DELETE`, DDL, keys, triggers, views, integrity |
 | [04-api.md](04-api.md) | HTTP endpoint, HMAC signature, bound parameters, clients |
@@ -90,16 +105,17 @@ data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 144   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 59    writes, DDL, keys and triggers
+php tests/f2_select.php       → OK: 145   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 60    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 52    real requests against the API
 php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 119   the panel, driven like a user
+php tests/f5_admin.php        → OK: 124   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 24    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 59    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 31    every intermediate state a crash can leave
+php tests/f7_concurrencia.php → OK: 27    real simultaneous processes and locking
+php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
+php tests/f11_asistente.php    → OK: 18    panel setup wizard and direct connection
 ```
 
 `f5_admin.php` needs the cURL extension and starts two PHP built-in servers,

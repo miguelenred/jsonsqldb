@@ -19,6 +19,8 @@ declare(strict_types=1);
  * terminar. En una máquina de un solo núcleo los procesos se reparten la CPU
  * y los tiempos suben con cada proceso más; lo que importa es la comparación
  * entre dos ejecuciones iguales.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 
 define('JSONSQLDB_CONEXION_DIRECTA', true);

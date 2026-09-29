@@ -11,6 +11,8 @@ namespace JsonSQLDB;
  *
  * El fichero de estado se lee y se escribe bajo bloqueo exclusivo, y se limpia
  * de entradas caducadas en cada escritura, así que no crece indefinidamente.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class ApiStore
 {

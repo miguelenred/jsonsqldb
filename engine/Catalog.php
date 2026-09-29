@@ -27,6 +27,8 @@ namespace JsonSQLDB;
  *   "autoincrement": {"column":"id","next":1},
  *   "created_at": "...", "updated_at": "..."
  * }
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Catalog
 {

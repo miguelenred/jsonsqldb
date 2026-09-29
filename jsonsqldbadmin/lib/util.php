@@ -8,6 +8,8 @@ declare(strict_types=1);
  * HTTP— así que si no está disponible se lee el mismo fichero directamente. Lo
  * que no puede haber son dos sitios que sepan la versión por su cuenta: así es
  * como el índice de la documentación se quedó tres versiones atrás.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 function version(): string
 {
@@ -260,6 +262,12 @@ function rutaDeLaBase(string $base): string
     }
 
     $raiz = trim((string)ADMIN_RUTA_DATOS_MOTOR);
+    if ($raiz === '' && Api::directa()) {
+        // Con conexión directa el motor está cargado aquí mismo: su carpeta de
+        // datos es la de su configuración, sin tener que repetirla en el panel
+        Api::cargarMotor();
+        $raiz = (string)JSONSQLDB_DATA_PATH;
+    }
     if ($raiz === '') {
         $raiz = dirname(__DIR__, 2) . '/data';          // instalación normal
     }

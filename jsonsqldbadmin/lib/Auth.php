@@ -7,6 +7,8 @@ declare(strict_types=1);
  * Roles:
  *   admin    todo
  *   lectura  ver la estructura y los datos, y lanzar SELECT/SHOW
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Auth
 {
@@ -97,20 +99,29 @@ final class Auth
         return null;
     }
 
+    /**
+     * Comprueba que un usuario nuevo se puede crear, sin crearlo: el asistente
+     * de instalación lo mira antes de escribir la configuración.
+     */
+    public static function validarNuevo(string $usuario, string $clave): void
+    {
+        if (!preg_match('/^[A-Za-z0-9_.@-]{3,32}$/', trim($usuario))) {
+            throw new RuntimeException('El usuario admite de 3 a 32 caracteres: letras, números y . _ - @');
+        }
+        self::validarClave($clave);
+        if (self::buscar(trim($usuario)) !== null) {
+            throw new RuntimeException("El usuario '" . trim($usuario) . "' ya existe");
+        }
+    }
+
     /** Crea un usuario. Devuelve el nombre normalizado. */
     public static function crear(string $usuario, string $clave, string $rol): string
     {
         $usuario = trim($usuario);
-        if (!preg_match('/^[A-Za-z0-9_.@-]{3,32}$/', $usuario)) {
-            throw new RuntimeException('El usuario admite de 3 a 32 caracteres: letras, números y . _ - @');
-        }
         if (!in_array($rol, ['admin', 'lectura'], true)) {
             throw new RuntimeException('Rol no válido');
         }
-        self::validarClave($clave);
-        if (self::buscar($usuario) !== null) {
-            throw new RuntimeException("El usuario '$usuario' ya existe");
-        }
+        self::validarNuevo($usuario, $clave);
 
         $usuarios = self::usuarios();
         $usuarios[] = [

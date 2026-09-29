@@ -16,6 +16,8 @@ namespace JsonSQLDB;
  *   eof   fin de la sentencia
  *
  * Se ignoran los comentarios -- hasta fin de línea y los bloques.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 /**
  * Un token es siempre una de estas formas. Tenerlas separadas, en vez de un

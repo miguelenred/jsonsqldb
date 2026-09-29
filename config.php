@@ -2,6 +2,8 @@
 // ============================================================
 // jsonSQLDB - Configuración general
 // Este fichero NO debe ser accesible desde el navegador.
+//
+// https://miguelenred.es/jsonsqldb
 // ============================================================
 
 // ------------------------------------------------------------
@@ -35,6 +37,13 @@ defined('JSONSQLDB_FILAS_POR_PARTE') || define('JSONSQLDB_FILAS_POR_PARTE', 1000
 // espacio o cuota de ficheros: la caché en disco ocupa cerca del doble que los
 // datos); false = sin caché, solo para depurar. Se invalida sola al escribir.
 defined('JSONSQLDB_CACHE_ACTIVA') || define('JSONSQLDB_CACHE_ACTIVA', true);
+
+// Escritura por partes: un UPDATE o DELETE que solo depende de cada fila hace
+// su trabajo con la tabla compartida y solo la bloquea entera para confirmar,
+// así que no espera a otras escrituras en partes distintas ni hace esperar a
+// las lecturas. Si dos coinciden en la misma parte, la segunda se repite con
+// la tabla entera. false = siempre con la tabla entera, como antes de la 2.7.
+defined('JSONSQLDB_ESCRITURA_POR_PARTES') || define('JSONSQLDB_ESCRITURA_POR_PARTES', true);
 
 // Caché de resultados de SELECT: una consulta repetida sobre datos que no han
 // cambiado no se vuelve a ejecutar. Es el máximo de filas de un resultado para

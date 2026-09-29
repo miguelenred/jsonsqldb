@@ -21,8 +21,8 @@
             "role": "Author, design and technical direction"
         },
         {
-            "name": "Claude Opus 5 (Anthropic)",
-            "role": "Implementation, under the author's direction and review"
+            "name": "AI-assisted implementation",
+            "role": "Source code, tests and documentation produced with AI assistance (Anthropic's Claude among other models), under the author's direction and review"
         }
     ],
     "support": {

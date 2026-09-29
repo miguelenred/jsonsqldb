@@ -23,6 +23,8 @@ declare(strict_types=1);
  * Si la API va por HTTPS con certificado propio:
  *   $cli->certificado('C:/xampp/apache/conf/ssl.crt/server.crt');
  *   $cli->aceptarAutofirmado();   // atajo, sin verificar
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class JsonSqlDbCliente
 {

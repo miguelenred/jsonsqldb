@@ -13,6 +13,8 @@ namespace JsonSQLDB;
  * Se encarga de: analizar la SQL, coger el bloqueo que corresponda
  * (compartido en lectura, exclusivo en escritura), ejecutar y registrar
  * la consulta en el log.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Database
 {
@@ -127,6 +129,31 @@ final class Database
             // cuanto otro proceso escriba, así que se olvida nada más bloquear:
             // sin esto, dos procesos podían reutilizar el mismo autoincremento.
             $tablas = $escritura ? $this->tablasAfectadas($ast) : null;
+
+            // Un UPDATE o DELETE que solo depende de cada fila se escribe por
+            // partes (ver Storage::bloquearPartes()); si se cruza con otra
+            // escritura en la misma parte, se repite con la tabla entera
+            $porPartes = $escritura ? $this->tablaPorPartes($ast) : null;
+            if ($porPartes !== null) {
+                try {
+                    $this->st->bloquearPartes($porPartes);
+                    $this->cat->olvidar();
+                    try {
+                        // Lo decidido antes de bloquear puede haber cambiado
+                        if ($this->tablaPorPartes($ast) !== $porPartes) {
+                            throw new ConflictoPartes();
+                        }
+                        $res = (new Writer($this->cat))->ejecutar($ast);
+                    } finally {
+                        $this->st->desbloquear();
+                        $this->cat->olvidar();
+                    }
+                    Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                    return ['success' => true, 'filas' => $res['filas'], 'mensaje' => $res['mensaje']];
+                } catch (ConflictoPartes $e) {
+                    Storage::anotarRepeticion();          // a la cola: con la tabla entera, abajo
+                }
+            }
 
             $this->st->bloquear($escritura, $tablas);
             $this->cat->olvidar();
@@ -264,6 +291,52 @@ final class Database
      *
      * @return list<string>|null
      */
+    /**
+     * La tabla de un UPDATE o DELETE que se puede escribir por partes, o null.
+     * Solo lo que depende de cada fila y de nada más: la tabla no tiene claves
+     * foráneas ni triggers, nadie la referencia (tablaUnica()), no hay
+     * subconsultas, y un UPDATE no toca columnas de una clave primaria o
+     * única, cuya unicidad es cosa de toda la tabla. Así, dos escrituras sobre
+     * partes distintas no pueden depender la una de la otra.
+     */
+    private function tablaPorPartes(array $ast): ?string
+    {
+        if (!Config::escrituraPorPartes() || !in_array($ast['k'], ['update', 'delete'], true)) {
+            return null;
+        }
+        $tabla = $this->tablaUnica($ast);
+        if ($tabla === null || self::tieneSubconsulta($ast)) {
+            return null;
+        }
+        if ($ast['k'] === 'update') {
+            $unicas = [];
+            foreach (Catalog::conjuntosUnicos($this->cat->meta($tabla)) as $uq) {
+                foreach ($uq['columns'] as $c) {
+                    $unicas[strtolower((string)$c)] = true;
+                }
+            }
+            foreach ($ast['set'] as $s) {
+                if (isset($unicas[strtolower((string)$s['col'])])) {
+                    return null;
+                }
+            }
+        }
+        return $tabla;
+    }
+
+    private static function tieneSubconsulta(array $n): bool
+    {
+        if (isset($n['select']) && is_array($n['select'])) {
+            return true;
+        }
+        foreach ($n as $v) {
+            if (is_array($v) && self::tieneSubconsulta($v)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public function tablasAfectadas(array $ast): ?array
     {
         $tabla = $this->tablaUnica($ast);

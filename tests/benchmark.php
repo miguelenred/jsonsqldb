@@ -17,6 +17,8 @@ declare(strict_types=1);
  *
  * Usa la conexión directa al motor, sin HTTP: lo que se mide es el motor. El
  * coste de la API se suma aparte y se documenta en docs/04-api.md.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 
 define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -137,6 +139,9 @@ $correr('Igualdad sobre columna indexada',
 $correr('Rango numérico (sin índice)',
     static fn() => $bd->consultar('SELECT COUNT(*) AS n FROM clientes WHERE edad BETWEEN 30 AND 40'));
 
+$correr('Rango sobre la clave primaria',
+    static fn() => $bd->consultar('SELECT * FROM clientes WHERE id BETWEEN ? AND ?', [$medio, $medio + 999]));
+
 $correr('LIKE por prefijo',
     static fn() => $bd->consultar("SELECT COUNT(*) AS n FROM clientes WHERE nombre LIKE 'Nombre Apellido 1%'"));
 
@@ -160,6 +165,12 @@ $correr('JOIN agregado por ciudad',
     static fn() => $bd->consultar('SELECT c.ciudad, COUNT(*) AS n, SUM(p.total) AS t
                                    FROM pedidos p JOIN clientes c ON c.id = p.cid
                                    GROUP BY c.ciudad ORDER BY c.ciudad'), 5);
+
+$correr('JOIN de un pedido con su cliente',
+    static fn() => $bd->consultar('SELECT p.id, c.nombre, p.total FROM pedidos p JOIN clientes c ON c.id = p.cid WHERE p.id = ?', [$medio]));
+
+$correr('LEFT JOIN de 20 pedidos con sus clientes',
+    static fn() => $bd->consultar('SELECT p.id, c.nombre FROM pedidos p LEFT JOIN clientes c ON c.id = p.cid WHERE p.id BETWEEN ? AND ?', [$medio, $medio + 19]));
 
 $correr('Subconsulta con IN',
     static fn() => $bd->consultar("SELECT COUNT(*) AS n FROM pedidos

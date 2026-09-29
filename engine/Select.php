@@ -10,6 +10,8 @@ namespace JsonSQLDB;
  * de modo que leer una columna es un acceso directo. Los JOIN con condición de
  * igualdad se resuelven con tabla hash (no comparando todas las filas contra
  * todas), y las subconsultas se ejecutan una sola vez y se guardan en memoria.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Select
 {
@@ -27,6 +29,15 @@ final class Select
     private bool $indexable;
     /** Profundidad máxima de vistas anidadas (una vista que usa otra vista). */
     private const MAX_VISTAS = 8;
+
+    /**
+     * Cruce por índice (ver unirPorIndice()): hasta cuántas filas del lado
+     * izquierdo se leen para decidirlo, y cuántas filas de la tabla de la
+     * derecha vale una búsqueda por clave frente a leerla entera: una
+     * búsqueda cuesta como decodificar unas 150 filas.
+     */
+    private const CRUCE_POR_INDICE_MAX    = 1000;
+    private const CRUCE_POR_INDICE_FACTOR = 150;
 
     /** @var int vistas resueltas en la cadena actual, para cortar ciclos */
     private int $profundidadVista = 0;
@@ -891,6 +902,25 @@ final class Select
         return ['clave' => $col['clave'], 'op' => $op, 'valor' => $lit['v']];
     }
 
+    /**
+     * `col [NOT] BETWEEN a AND b` con a y b literales numéricos: [clave, a, b,
+     * not], o null si no es eso. Con un valor NULL o incomparable el resultado
+     * es desconocido, y no cumple ni con NOT, como en el evaluador general.
+     */
+    private static function rangoNumerico(array $n): ?array
+    {
+        if ($n['k'] !== 'between' || ($n['e']['k'] ?? '') !== 'col' || !isset($n['e']['clave'])
+            || isset($n['e']['externa']) || ($n['min']['k'] ?? '') !== 'lit' || ($n['max']['k'] ?? '') !== 'lit') {
+            return null;
+        }
+        $a = $n['min']['v'];
+        $b = $n['max']['v'];
+        if (!(is_int($a) || is_float($a)) || !(is_int($b) || is_float($b))) {
+            return null;
+        }
+        return [$n['e']['clave'], $a, $b, (bool)$n['not']];
+    }
+
     /** @param mixed $a @param mixed $b */
     public static function compara(string $op, $a, $b): bool
     {
@@ -934,6 +964,33 @@ final class Select
             return null;
         }
         return $st->filasPorIndice($tabla, $elegido['def'], $elegido['claves'], $elegido['prefijo']);
+    }
+
+    /**
+     * Las filas de las partes que pueden contener algún valor de un rango
+     * numérico sobre la primera columna de un índice (ver Storage::filasPorRango()).
+     *
+     * @param array<string, array{0: int|float|null, 1: int|float|null}> $rangos columna => [min, max]
+     */
+    private function porRango(string $tabla, array $rangos): ?iterable
+    {
+        if (!$this->indexable || $rangos === []) {
+            return null;
+        }
+        $st = $this->cat->storage();
+        if (!$st->indicesActivos()) {
+            return null;
+        }
+        foreach ($this->cat->indicesDe($tabla) as $def) {
+            $r = $rangos[strtolower($def['columns'][0])] ?? null;
+            if ($r !== null) {
+                $filas = $st->filasPorRango($tabla, $def, $r[0], $r[1]);
+                if ($filas !== null) {
+                    return $filas;
+                }
+            }
+        }
+        return null;
     }
 
     private static function claveFila(array $fila): string
@@ -1044,6 +1101,7 @@ final class Select
             ? strtolower((string)($from[0]['alias'] ?? $from[0]['nombre']))
             : null;
         $predicados = $this->indexable ? Indexes::predicados($where, $unico) : [];
+        $rangos     = $this->indexable ? Indexes::rangos($where, $unico) : [];
 
         // El tope solo se puede aplicar al leer si no hay nada que filtrar
         // después: con WHERE o con JOIN, las filas que sobran no son las
@@ -1056,17 +1114,278 @@ final class Select
         // enteros.
         $varios  = count($from) > 1;
         $usadas  = $varios ? self::columnasUsadas($ast) : null;
-        $primero = $this->cargar($from[0], $predicados, $topeLectura, $varios, $usadas);
+        $primero = $this->cargar($from[0], $predicados, $topeLectura, $varios, $usadas, $rangos);
         $filas   = $primero['filas'];
         $fuentes = $primero['fuentes'];
 
         for ($i = 1, $n = count($from); $i < $n; $i++) {
-            $der          = $this->cargar($from[$i], $predicados, null, true, $usadas);
+            // Lo que el WHERE dice solo de las tablas que ya están en el
+            // cruce se aplica antes de cruzar: cada fila que cae aquí es una
+            // fila menos que buscar o casar. Con INNER y LEFT no cambia nada
+            // del resultado; con RIGHT y FULL sí podría (una fila descartada
+            // deja huérfanas a las de la otra tabla), y no se hace.
+            $tipo = $from[$i]['join'] ?? 'CROSS';
+            if ($where !== null && $tipo !== 'RIGHT' && $tipo !== 'FULL') {
+                $filas = $this->empujarWhere($filas, $fuentes, $where);
+            }
+            // Con pocas filas a la izquierda y un índice en la tabla de la
+            // derecha sobre las columnas del ON, se busca cada fila por su
+            // clave en vez de cargar la tabla entera para cruzarla. Si a la
+            // izquierda está una tabla entera, sin WHERE, se sabe cuántas filas
+            // son sin leerlas: si son muchas, ni se intenta
+            $izqConocida = $i === 1 && $where === null && $from[0]['tipo'] === 'tabla'
+                && !isset($this->con[strtolower($from[0]['nombre'])]) && !isset($this->con[$from[0]['nombre']])
+                && $this->cat->existe($from[0]['nombre'])
+                ? $this->cat->storage()->filasSegunRevision($from[0]['nombre']) : null;
+            $cruce = $this->unirPorIndice($filas, $fuentes, $from[$i], $usadas, $izqConocida);
+            if ($cruce !== null) {
+                [$filas, $fuentesDer] = $cruce;
+                $fuentes = array_merge($fuentes, $fuentesDer);
+                continue;
+            }
+            $der          = $this->cargar($from[$i], $predicados, null, true, $usadas, $rangos);
             $der['filas'] = iterator_to_array($der['filas'], false);
             $filas   = $this->unir($filas, $fuentes, $der, $from[$i]);
             $fuentes = array_merge($fuentes, $der['fuentes']);
         }
         return [$filas, $fuentes];
+    }
+
+    /**
+     * Aplica a las filas las condiciones del WHERE que solo miran columnas
+     * que ya tienen: las conjunciones de primer nivel que se resuelven con
+     * estas fuentes y se pueden compilar. Las demás las aplica el WHERE
+     * entero, después, como siempre (este también vuelve a pasar por ellas:
+     * cuesta nada comparado con lo que ahorra).
+     *
+     * @param iterable<array> $filas
+     * @param list<array{0: string, 1: string, 2: string}> $fuentes
+     */
+    private function empujarWhere(iterable $filas, array $fuentes, array $where): iterable
+    {
+        $mapa       = $this->mapaColumnas($fuentes);
+        $compiladas = [];
+        foreach (Indexes::conjunciones($where) as $c) {
+            try {
+                $r = Evaluator::resolver($c, $mapa, [], []);
+            } catch (JsonSqlDbError $e) {
+                continue;                             // nombra columnas que aún no están
+            }
+            $f = Evaluator::compilar($r);
+            if ($f !== null) {
+                $compiladas[] = $f;
+            }
+        }
+        if ($compiladas === []) {
+            return $filas;
+        }
+        return (static function () use ($filas, $compiladas) {
+            foreach ($filas as $fila) {
+                foreach ($compiladas as $f) {
+                    if (Valor::verdadero($f($fila)) !== true) {
+                        continue 2;
+                    }
+                }
+                yield $fila;
+            }
+        })();
+    }
+
+    /**
+     * Cruce por índice: cuando el lado izquierdo tiene pocas filas —un JOIN
+     * detrás de un WHERE que deja una o unas decenas— y la tabla de la
+     * derecha tiene un índice sobre las columnas que iguala el ON, cargarla
+     * entera para casar unas pocas filas es lo más caro de la consulta. En su
+     * lugar se busca cada fila de la izquierda por su clave en el índice.
+     * Vale para INNER y LEFT. Devuelve null si no se dan las condiciones, y
+     * entonces el cruce es el de siempre; el lado izquierdo, que se ha
+     * empezado a leer para contarlo, se devuelve entero en $izq.
+     *
+     * @param iterable<mixed> $izq
+     * @return array{0: \Generator, 1: list<array{0: string, 1: string, 2: string}>}|null
+     */
+    private function unirPorIndice(iterable &$izq, array $fuentesIzq, array $o, ?array $usadas, ?int $izqConocida = null): ?array
+    {
+        $tipo = $o['join'] ?? 'CROSS';
+        if (!$this->indexable || ($tipo !== 'INNER' && $tipo !== 'LEFT') || $o['on'] === null
+            || $o['tipo'] !== 'tabla' || isset($this->con[strtolower($o['nombre'])]) || isset($this->con[$o['nombre']])
+            || $this->cat->esVista($o['nombre'])
+            || !$this->cat->existe($o['nombre'])) {
+            return null;
+        }
+        $st = $this->cat->storage();
+        if (!$st->indicesActivos()) {
+            return null;
+        }
+        $nombre = $o['nombre'];
+        $alias  = $o['alias'] ?? $nombre;
+        [$cols, $fuentesDer] = $this->fuentesDeTabla($nombre, $alias, $usadas);
+        $clavesDer = array_column($fuentesDer, 2);
+
+        $mapa = $this->mapaColumnas(array_merge($fuentesIzq, $fuentesDer));
+        $on   = Evaluator::resolver($o['on'], $mapa, [], $this->externo['mapa'] ?? []);
+        [$pares, $resto] = $this->igualdades($on, array_flip($clavesDer));
+        if ($pares === []) {
+            return null;
+        }
+        // columna interna => clave externa con la que se iguala
+        $porColumna = [];
+        foreach ($pares as [$claveExt, $claveInt]) {
+            $porColumna[substr($claveInt, strlen($alias) + 1)] ??= $claveExt;
+        }
+        // El índice que más columnas del ON cubre, por la izquierda
+        $def      = null;
+        $externas = [];
+        foreach ($this->cat->indicesDe($nombre) as $d) {
+            $cubre = [];
+            foreach ($d['columns'] as $c) {
+                if (!isset($porColumna[$c])) {
+                    break;
+                }
+                $cubre[] = $porColumna[$c];
+            }
+            if (count($cubre) > count($externas)) {
+                $def      = $d;
+                $externas = $cubre;
+            }
+        }
+        if ($def === null) {
+            return null;
+        }
+        // Las igualdades del ON que el índice no cubre se comprueban en cada
+        // candidata, como el resto de la condición
+        $otrasIgualdades = [];
+        foreach ($pares as [$claveExt, $claveInt]) {
+            if (!in_array($claveExt, $externas, true) || $porColumna[substr($claveInt, strlen($alias) + 1)] !== $claveExt) {
+                $otrasIgualdades[] = [$claveExt, $claveInt];
+            }
+        }
+
+        // ¿Cuántas filas hay a la izquierda? Compensa buscar mientras sean
+        // pocas para lo grande que es la tabla: se leen como mucho esas, y si
+        // hay más, se sigue por el camino de siempre sin haber guardado nada más
+        $internas = $st->filasSegunRevision($nombre);
+        $tope     = $internas === null ? 0 : min(self::CRUCE_POR_INDICE_MAX, intdiv($internas, self::CRUCE_POR_INDICE_FACTOR));
+        if ($tope < 1 || ($izqConocida !== null && $izqConocida > $tope)) {
+            return null;
+        }
+        $it = $izq instanceof \Iterator ? $izq : new \ArrayIterator(is_array($izq) ? $izq : iterator_to_array($izq, false));
+        $it->rewind();
+        $filasIzq = [];
+        $agotado  = true;
+        while ($it->valid()) {
+            $filasIzq[] = $it->current();
+            $it->next();
+            if (count($filasIzq) > $tope) {
+                $agotado = false;
+                break;
+            }
+        }
+        if (!$agotado) {
+            // No compensa: el lado izquierdo sigue por el camino de siempre,
+            // con lo ya leído por delante y lo que quede detrás
+            $izq = (static function () use ($filasIzq, $it) {
+                yield from $filasIzq;
+                while ($it->valid()) {
+                    yield $it->current();
+                    $it->next();
+                }
+            })();
+            return null;
+        }
+
+        $prefijo   = count($externas) < count($def['columns']);
+        $nulos     = array_fill_keys($clavesDer, null);
+        $condicion = $resto === null ? null : (Evaluator::compilar($resto) ?? $resto);
+        $sub       = function (array $sel, int $sid): array {
+            return $this->subs[$sid] ??= $this->correr($sel)['filas'];
+        };
+        $conjunto  = function (array $sel, int $sid) use ($sub): array {
+            if (!isset($this->conjuntos[$sid])) {
+                $valores = [];
+                foreach ($sub($sel, $sid) as $fila) {
+                    $valores[] = reset($fila);
+                }
+                $this->conjuntos[$sid] = Indexes::conjunto($valores);
+            }
+            return $this->conjuntos[$sid];
+        };
+        $lector = $this->lector;
+        $gen = (function () use ($filasIzq, $externas, $otrasIgualdades, $def, $nombre, $alias, $cols, $prefijo, $tipo, $nulos, $condicion, $st, $sub, $conjunto, $lector) {
+            foreach ($filasIzq as $ext) {
+                $valores = [];
+                foreach ($externas as $claveExt) {
+                    $valores[] = $ext[$claveExt] ?? null;
+                }
+                $clave = Indexes::clave($valores);            // null si algún valor es NULL: no iguala nada
+                $candidatas = $clave === null ? [] : $st->filasPorIndice($nombre, $def, [$clave], $prefijo);
+                if ($candidatas === null) {
+                    // El índice no sirve, o la clave está en demasiadas partes:
+                    // para esta fila se recorre la tabla
+                    $candidatas = [];
+                    foreach ($lector($nombre) as $fila) {
+                        $suya = Indexes::clave(array_map(static fn(string $c) => $fila[$c] ?? null, $def['columns']));
+                        if ($suya !== null && ($prefijo ? strncmp($suya, $clave, strlen($clave)) === 0 : $suya === $clave)) {
+                            $candidatas[] = $fila;
+                        }
+                    }
+                }
+                $encontrada = false;
+                foreach ($candidatas as $int) {
+                    $plana = [];
+                    foreach ($cols as $c) {
+                        $plana[$alias . '.' . $c] = $int[$c] ?? null;
+                    }
+                    $fila = $ext + $plana;
+                    foreach ($otrasIgualdades as [$ke, $ki]) {
+                        if ($fila[$ke] === null || $fila[$ki] === null || Valor::comparar($fila[$ke], $fila[$ki]) !== 0) {
+                            continue 2;
+                        }
+                    }
+                    if ($condicion !== null) {
+                        $vale = $condicion instanceof \Closure
+                            ? Valor::verdadero($condicion($fila))
+                            : Valor::verdadero(Evaluator::evaluar($condicion, ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
+                                                                                 'filaExterna' => $this->externo['fila'] ?? []]));
+                        if ($vale !== true) {
+                            continue;
+                        }
+                    }
+                    Memoria::comprobar('el JOIN');
+                    yield $fila;
+                    $encontrada = true;
+                }
+                if (!$encontrada && $tipo === 'LEFT') {
+                    yield $ext + $nulos;
+                }
+            }
+        })();
+        return [$gen, $fuentesDer];
+    }
+
+    /**
+     * Columnas de una tabla del FROM y sus fuentes con prefijo de alias,
+     * quedándose solo con las que usa la consulta (ver columnasUsadas()).
+     *
+     * @return array{0: list<string>, 1: list<array{0: string, 1: string, 2: string}>}
+     */
+    private function fuentesDeTabla(string $nombre, string $alias, ?array $usadas): array
+    {
+        $cols = [];
+        foreach ($this->cat->meta($nombre)['columns'] as $c) {
+            $cols[] = $c['name'];
+        }
+        if ($usadas !== null && !isset($usadas[2][strtolower($alias)])) {
+            [$porAlias, $sueltas] = $usadas;
+            $suyas = $porAlias[strtolower($alias)] ?? [];
+            $cols  = array_values(array_filter($cols,
+                static fn(string $c): bool => isset($suyas[strtolower($c)]) || isset($sueltas[strtolower($c)])));
+        }
+        $fuentes = [];
+        foreach ($cols as $c) {
+            $fuentes[] = [$alias, $c, $alias . '.' . $c];
+        }
+        return [$cols, $fuentes];
     }
 
     /**
@@ -1118,7 +1437,7 @@ final class Select
      *
      * @return array{fuentes: list<array{0: string, 1: string, 2: string}>, filas: iterable<array>}
      */
-    private function cargar(array $o, array $predicados, ?int $tope, bool $prefijar, ?array $usadas): array
+    private function cargar(array $o, array $predicados, ?int $tope, bool $prefijar, ?array $usadas, array $rangos = []): array
     {
         if ($o['tipo'] === 'sub') {
             $r      = $this->correr($o['select']);
@@ -1168,6 +1487,7 @@ final class Select
             // Con un índice aprovechable se leen solo las partes donde están las
             // filas buscadas; si no lo hay, o no compensa, se recorre la tabla.
             $origen = $this->porIndice($nombre, $predicados[strtolower($alias)] ?? [])
+                   ?? $this->porRango($nombre, $rangos[strtolower($alias)] ?? [])
                    ?? ($this->lector)($nombre);
         }
 
@@ -1510,12 +1830,39 @@ final class Select
     private function filtrar(iterable $filas, array $where, callable $sub, callable $conjunto, array $externa, ?int $tope): \Generator
     {
         $simple    = self::comparacionSimple($where);
-        $compilado = $simple === null ? Evaluator::compilar($where) : null;
+        $rango     = $simple === null ? self::rangoNumerico($where) : null;
+        $compilado = $simple === null && $rango === null ? Evaluator::compilar($where) : null;
+        // Con un literal numérico, un valor numérico se compara aquí mismo:
+        // Valor::comparar() haría exactamente lo mismo (<=>) tras una llamada
+        $num = $simple !== null && (is_int($simple['valor']) || is_float($simple['valor']));
         $n = 0;
         foreach ($filas as $fila) {
             if ($simple !== null) {
-                $v    = $fila[$simple['clave']] ?? null;
-                $vale = $v === null ? false : self::compara($simple['op'], $v, $simple['valor']);
+                $v = $fila[$simple['clave']] ?? null;
+                if ($num && (is_int($v) || is_float($v))) {
+                    $c = $v <=> $simple['valor'];
+                    switch ($simple['op']) {
+                        case '=':  $vale = $c === 0; break;
+                        case '<':  $vale = $c < 0; break;
+                        case '<=': $vale = $c <= 0; break;
+                        case '>':  $vale = $c > 0; break;
+                        case '>=': $vale = $c >= 0; break;
+                        default:   $vale = $c !== 0;          // <> y !=
+                    }
+                } else {
+                    $vale = $v === null ? false : self::compara($simple['op'], $v, $simple['valor']);
+                }
+            } elseif ($rango !== null) {
+                // col BETWEEN a AND b, con a y b números
+                $v = $fila[$rango[0]] ?? null;
+                if (is_int($v) || is_float($v)) {
+                    $vale = ($v >= $rango[1] && $v <= $rango[2]) !== $rango[3];
+                } else {
+                    // NULL o incomparable: desconocido, que no cumple ni con NOT
+                    $ca = $v === null ? null : Valor::comparar($v, $rango[1]);
+                    $cb = $v === null ? null : Valor::comparar($v, $rango[2]);
+                    $vale = $ca !== null && $cb !== null && (($ca >= 0 && $cb <= 0) !== $rango[3]);
+                }
             } elseif ($compilado !== null) {
                 $vale = Valor::verdadero($compilado($fila)) === true;
             } else {
@@ -1636,7 +1983,7 @@ final class Select
     /**
      * Añade a las claves de ordenación (por columnas) las de una fila.
      *
-     * @param array<int, array<int, mixed>> $clavesOrden
+     * @param array<array<int, mixed>> $clavesOrden
      */
     private function anotarClaves(array &$clavesOrden, array $orden, array $ctx, array $proyectada): void
     {

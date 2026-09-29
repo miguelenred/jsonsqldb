@@ -5,10 +5,18 @@ sort($bases);
 // La copia en ZIP lee el disco: solo tiene sentido si el motor está aquí
 $zipDisponible = mismoHostQueLaApi() !== false;
 ?>
+<div class="page-head">
+  <div>
+    <h1>Bases de datos</h1>
+    <p><?= count($bases) ?> <?= count($bases) === 1 ? 'base' : 'bases' ?> ·
+       <?= Api::directa() ? 'conexión directa al motor' : 'conexión por la API' ?></p>
+  </div>
+</div>
+
 <div class="row g-3">
   <div class="col-lg-7">
     <div class="card">
-      <div class="card-header"><i class="bi bi-hdd-stack"></i> Bases de datos</div>
+      <div class="card-header"><?= icono('hdd-stack') ?> Bases de datos</div>
       <div class="card-body p-0">
         <?php if ($bases === []): ?>
           <p class="text-body-secondary m-3">Todavía no hay ninguna base de datos.</p>
@@ -20,16 +28,16 @@ $zipDisponible = mismoHostQueLaApi() !== false;
               <tr>
                 <td>
                   <a href="<?= h(url(['p' => 'tablas', 'db' => $b])) ?>">
-                    <i class="bi bi-database"></i> <?= h($b) ?></a>
+                    <?= icono('database') ?> <?= h($b) ?></a>
                 </td>
                 <td class="text-end">
                   <div class="d-inline-flex gap-2 align-items-center">
                     <a class="btn btn-sm btn-outline-secondary"
-                       href="<?= h(url(['p' => 'sql', 'db' => $b])) ?>"><i class="bi bi-terminal"></i> SQL</a>
+                       href="<?= h(url(['p' => 'sql', 'db' => $b])) ?>"><?= icono('terminal') ?> SQL</a>
                     <?php if ($zipDisponible && Auth::esAdmin()): ?>
                       <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal"
                               data-bs-target="#imp<?= h(md5($b)) ?>" title="Restaurar desde una copia ZIP">
-                        <i class="bi bi-upload"></i></button>
+                        <?= icono('upload') ?></button>
                     <?php endif; ?>
                     <?php
                     $formatos = ['sql' => ['Volcado SQL', 'filetype-sql']];
@@ -44,12 +52,12 @@ $zipDisponible = mismoHostQueLaApi() !== false;
                         <input type="hidden" name="nombre" value="<?= h($b) ?>">
                         <input type="hidden" name="volver" value="bases">
                         <button class="btn btn-sm btn-outline-secondary" title="<?= h($bt[0]) ?>">
-                          <i class="bi bi-<?= h($bt[1]) ?>"></i></button>
+                          <?= icono($bt[1]) ?></button>
                       </form>
                     <?php endforeach; ?>
                     <?php if (Auth::esAdmin()): ?>
                       <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal"
-                              data-bs-target="#borrar<?= h(md5($b)) ?>"><i class="bi bi-trash"></i></button>
+                              data-bs-target="#borrar<?= h(md5($b)) ?>"><?= icono('trash') ?></button>
                     <?php endif; ?>
                   </div>
                 </td>
@@ -60,16 +68,16 @@ $zipDisponible = mismoHostQueLaApi() !== false;
         <?php endif; ?>
       </div>
       <div class="card-footer small text-body-secondary">
-        <i class="bi bi-filetype-sql"></i> volcado en SQL: estructura y datos, legible y
+        <?= icono('filetype-sql') ?> volcado en SQL: estructura y datos, legible y
         reejecutable.
         <?php if ($zipDisponible): ?>
-          <i class="bi bi-file-zip"></i> copia en ZIP: los ficheros JSON tal cual, con su
+          <?= icono('file-zip') ?> copia en ZIP: los ficheros JSON tal cual, con su
           estructura de carpetas.
-          <i class="bi bi-upload"></i> restaura esa copia sobre la base, sustituyendo lo que
+          <?= icono('upload') ?> restaura esa copia sobre la base, sustituyendo lo que
           haya.
         <?php else: ?>
           <br>
-          <i class="bi bi-info-circle"></i> La <strong>copia en ZIP no está disponible</strong>:
+          <?= icono('info-circle') ?> La <strong>copia en ZIP no está disponible</strong>:
           lee los ficheros del disco y la API está en otra máquina
           (<code><?= h(parse_url(Api::url(), PHP_URL_HOST) ?: '?') ?></code>, y el panel se sirve
           desde <code><?= h(explode(':', (string)($_SERVER['HTTP_HOST'] ?? '?'))[0]) ?></code>).
@@ -81,8 +89,8 @@ $zipDisponible = mismoHostQueLaApi() !== false;
 
   <?php if (Auth::esAdmin()): ?>
   <div class="col-lg-5">
-    <div class="card">
-      <div class="card-header"><i class="bi bi-plus-circle"></i> Nueva base de datos</div>
+    <div class="card" id="nuevaBase">
+      <div class="card-header"><?= icono('plus-circle') ?> Nueva base de datos</div>
       <div class="card-body">
         <form method="post" class="row g-2 align-items-end">
           <?= csrf() ?>
@@ -156,8 +164,8 @@ $zipDisponible = mismoHostQueLaApi() !== false;
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
         <button class="btn btn-warning"
-                onclick="return confirm('¿Sustituir el contenido de <?= h($b) ?>?');">
-          <i class="bi bi-upload"></i> Restaurar</button>
+                data-confirm-click="¿Sustituir el contenido de <?= h($b) ?>?">
+          <?= icono('upload') ?> Restaurar</button>
       </div>
     </form>
   </div></div>

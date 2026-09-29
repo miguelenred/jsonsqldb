@@ -3,15 +3,15 @@ $vistas = Api::sql($base, 'SHOW VIEWS');
 $tablas = array_column(Api::sql($base, 'SHOW TABLES'), 'tabla');
 $admin  = Auth::esAdmin();
 ?>
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h1 class="h5 mb-0">
-    <a class="link-secondary text-decoration-none" href="<?= h(url(['p' => 'tablas', 'db' => $base])) ?>">
-      <i class="bi bi-database"></i> <?= h($base) ?></a>
-    <span class="text-body-tertiary">/</span> <i class="bi bi-eye"></i> Vistas
-  </h1>
+<div class="page-head">
+  <div>
+    <h1>Vistas</h1>
+    <p>Consultas guardadas con nombre en <?= h($base) ?>: se usan como tablas y siempre dan los datos del momento</p>
+  </div>
   <?php if ($admin): ?>
-    <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#nuevaVista">
-      <i class="bi bi-plus-circle"></i> Nueva vista</button>
+    <div class="page-actions">
+      <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#nuevaVista"><?= icono('plus') ?> Nueva vista</button>
+    </div>
   <?php endif; ?>
 </div>
 
@@ -32,7 +32,7 @@ $admin  = Auth::esAdmin();
           <tr>
             <td><a href="<?= h(url(['p' => 'sql', 'db' => $base,
                                     'sql' => 'SELECT * FROM ' . cita($n) . ' LIMIT 100'])) ?>">
-                <i class="bi bi-eye"></i> <?= h($n) ?></a></td>
+                <?= icono('eye') ?> <?= h($n) ?></a></td>
             <td><code class="small text-body-secondary"><?= celda($v['sql']) ?></code></td>
             <td class="small text-body-secondary text-nowrap"><?= h($v['creada'] ?? '') ?></td>
             <td class="text-end text-nowrap">
@@ -41,7 +41,7 @@ $admin  = Auth::esAdmin();
                                   'sql' => 'SELECT * FROM ' . cita($n) . ' LIMIT 100'])) ?>">Consultar</a>
               <?php if ($admin): ?>
                 <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal"
-                        data-bs-target="#bv<?= h(md5($n)) ?>"><i class="bi bi-trash"></i></button>
+                        data-bs-target="#bv<?= h(md5($n)) ?>"><?= icono('trash') ?></button>
               <?php endif; ?>
             </td>
           </tr>

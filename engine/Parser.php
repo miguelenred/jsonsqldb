@@ -28,6 +28,8 @@ namespace JsonSQLDB;
  *  ['k'=>'cast','e'=>AST,'tipo'=>string]
  *  ['k'=>'null','e'=>AST,'not'=>bool]           IS NULL / IS NOT NULL
  *  ['k'=>'sub','select'=>AST]                   subconsulta escalar
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 /**
  * @phpstan-import-type Token from Lexer

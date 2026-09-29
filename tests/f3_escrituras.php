@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Prueba de escrituras y DDL. Ejecutar: php tests/f3_escrituras.php
  * Crea una base temporal y la borra al terminar.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 // Las pruebas usan el motor directamente, sin pasar por la API
 define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -125,6 +127,20 @@ chk('INSERT sin lista de columnas', function () use ($bd) {
 chk('el autoincremento continúa tras un id explícito mayor', function () use ($bd) {
     $bd->consultar("INSERT INTO clientes (nombre) VALUES ('Óscar')");
     return uno("SELECT id FROM clientes WHERE nombre = 'Óscar'") === 101;
+});
+chk('el contador de autoincremento vive en rev.json y no reescribe la estructura', function () use ($bd, $raiz, $base) {
+    // Desde la 2.7 un INSERT no toca meta.json por mover el contador: va a
+    // rev.json, que se escribe de todas formas. meta.json conserva el valor
+    // de la creación, y al leer vale el mayor de los dos.
+    $meta = (string)file_get_contents("$raiz/$base/clientes.meta.json");
+    $bd->consultar("INSERT INTO clientes (nombre) VALUES ('Contador')");
+    if ((string)file_get_contents("$raiz/$base/clientes.meta.json") !== $meta) { return 'el INSERT reescribió meta.json'; }
+    $rev = json_decode((string)file_get_contents("$raiz/$base/clientes.rev.json"), true);
+    if (($rev['autoinc'] ?? null) !== 103) { return 'rev.json no lleva el contador: ' . json_encode($rev['autoinc'] ?? null); }
+    // Otra conexión lo ve, y sigue la secuencia
+    $otro = new Database($base, $raiz);
+    $otro->consultar("INSERT INTO clientes (nombre) VALUES ('Siguiente')");
+    return uno("SELECT id FROM clientes WHERE nombre = 'Siguiente'") === 103 ?: 'la secuencia no continuó desde rev.json';
 });
 chk('INSERT con expresión y DEFAULT', function () use ($bd) {
     $bd->consultar("INSERT INTO clientes (nombre, saldo, ciudad) VALUES ('Sara', 10 * 3 + 0.5, DEFAULT)");

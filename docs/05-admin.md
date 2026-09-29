@@ -1,41 +1,76 @@
 # 05 — jsonSQLDBadmin (administration panel)
 
 A web panel to administer jsonSQLDB from the browser. Pure PHP, no Composer and
-nothing from outside: Bootstrap and the icons are in `jsonsqldbadmin/assets/`.
+nothing from outside: Bootstrap, the stylesheet and the icons (inline SVG, no
+icon font) are in `jsonsqldbadmin/`. Light and dark theme, remembered in each
+browser.
 
-The panel **never touches the engine or the data files**: everything goes
-through the API, signed with HMAC and with bound parameters. If you move the
-API to another server tomorrow, the panel still works by changing one
-constant.
+The panel talks to the engine in one of two ways, chosen when it is installed:
 
 ```
-browser  →  jsonsqldbadmin/index.php  →  api/jsonsqldb_api.php  →  engine/  →  data/
+API:     browser → jsonsqldbadmin/ → api/jsonsqldb_api.php (HMAC) → engine/ → data/
+direct:  browser → jsonsqldbadmin/ → engine/ → data/
 ```
+
+- **Through the API** (`ADMIN_CONEXION = 'api'`): signed requests with bound
+  parameters, exactly like any other client. The API can be on another
+  machine; the panel follows it by changing one constant.
+- **Direct connection** (`ADMIN_CONEXION = 'directa'`, since 2.7): the panel
+  loads the engine and calls it without HTTP. Only when the panel and the data
+  are on the same machine. There are no keys to configure, and each query
+  saves an HTTP request — which, on the same host, is most of what a small
+  query costs.
+
+With either, **the engine applies the role of the panel user**: a read-only
+user cannot write even if a page of the panel failed to check, because the
+statement is refused before it runs — by the API key with read permission in
+API mode (if you set one, see section 2), and by the same list of allowed
+statements in direct mode. `tests/f11_asistente.php` checks the direct-mode
+case by calling the engine the way the panel does, bypassing the pages, and
+fails if that check is removed.
+
+The panel does not read or write the data files itself, with one exception:
+the ZIP backup and restore (section 3), which need the files exactly as they
+are on disk.
 
 ## 1. Installation
 
-1. Upload the `jsonsqldbadmin/` folder with the rest of the project.
-2. Open `jsonsqldbadmin/config.php` and check that `ADMIN_API_KEY` and
-   `ADMIN_HMAC_SECRET` are **the same** as in `api/jsonsqldb_api_config.php`
-   (`php configurar.php` writes both files with matching values). If you change
-   one, change the other.
-3. Open `https://yourserver/jsonsqldb/jsonsqldbadmin/`. **The first time the
-   panel is opened, and only the first, it asks you to create the administrator
-   user**: you choose the name and password right there. There is no default
-   password and no factory user, so there is nothing to change afterwards and
-   no risk of leaving `admin/admin` in place. The password is stored with bcrypt
-   and needs at least 10 characters.
+1. Upload the project, `jsonsqldbadmin/` included.
+2. Open `https://yourserver/jsonsqldb/jsonsqldbadmin/`. While the panel has no
+   `config.php`, **what you get is the setup wizard**, and nothing else is
+   served until it finishes:
+   - **Connection**: direct (suggested when the engine is found next to the
+     panel) or through the API. For the API you give its URL (empty = the one
+     of this installation) and the key and HMAC secret of its administration
+     account; if the API of this same installation is not configured yet, the
+     wizard can create its configuration with new random keys, the
+     administration one being the panel's.
+   - **Security**: whether to accept plain HTTP. Only for testing on your own
+     machine; on a server leave it unticked.
+   - **Administrator**: user and password (at least 10 characters, bcrypt).
+     There is no default password and no factory user.
 
-   Once that user exists, the sign-up screen disappears and the panel asks for
-   user and password like any other. If you ever lose access, delete
-   `jsonsqldbadmin/datos/usuarios.json` and the panel will ask you to create the
-   administrator again.
-4. Check that `jsonsqldbadmin/datos/` is writable: users and the audit trail
-   are stored there.
+   **The connection is tested before anything is written**: a wrong folder, an
+   API that does not answer or a signature it rejects is reported on the same
+   screen and no file is created. Then the wizard writes `config.php` from
+   `config.dist.php` — every option keeps its explanatory comment — with
+   permissions `0600`, and creates the user.
+3. Check that `jsonsqldbadmin/` is writable while you install (for
+   `config.php`) and that `jsonsqldbadmin/datos/` stays writable: users and the
+   audit trail live there.
 
-`ADMIN_API_URL` can stay empty: the panel derives the API URL from its own
-(`../api/jsonsqldb_api.php`). Fill it in only if the API is on another domain or
-path.
+If you prefer to configure by hand, `php configurar.php` writes the panel's and
+the API's configuration with matching keys; the panel then only asks for the
+administrator. To **change the connection** later, delete `config.php` and
+open the panel: the wizard comes back asking only for the connection, and the
+users and audit trail are kept. If you lose access, delete
+`jsonsqldbadmin/datos/usuarios.json` and the panel asks for a new
+administrator.
+
+The wizard is reachable by anyone who reaches an unconfigured panel — as with
+any web application installed from the browser. Do not leave a copy
+unconfigured on a public server, or restrict it by IP first
+(`ADMIN_IPS_PERMITIDAS`).
 
 ## 2. Panel users
 
@@ -156,6 +191,26 @@ delete them.
 **SQL** — any statement, one per run, with the result as a table and the time
 it took. With the `lectura` role only `SELECT` and `SHOW` are accepted.
 
+**Import** (2.7) — on the page of each database, for administrators:
+
+- **An SQL file**: the dump the panel generates, or any list of statements
+  separated by semicolons. It is read as a stream (only the statement in
+  progress is in memory), split respecting strings, quoted identifiers,
+  comments and the `BEGIN … END` of triggers, and run in order by the same
+  route as the rest of the panel, so it works between machines. Consecutive
+  `INSERT`s into the same table are sent as one statement of up to 200 rows.
+- **A CSV into an existing table**: the first line gives the column names; the
+  separator (comma, semicolon or tab) is taken from it; quotes follow the CSV
+  rules; an empty field is `NULL`; an Excel byte-order mark is ignored. Rows go
+  in batches of 200, with bound parameters.
+
+**There are no transactions**: if a statement or a batch fails, what came
+before is already written. The import stops there and says how many
+statements or rows went in and where it stopped. `tests/f5_admin.php` imports
+the panel's own dump of a database with foreign keys and triggers and checks
+the copy, loads a 450-row CSV with quoted separators and empty fields, and
+checks the report of a CSV with a bad value in row 250.
+
 **Export** — **CSV** and **INSERT** buttons on the data screen (exports the
 whole table, with the ordering you have set, not just the visible page) and on
 the SQL editor's result (exports what the query returned).
@@ -261,6 +316,8 @@ $cli->aceptarAutofirmado();
 
 | Constant | Default | Purpose |
 |---|---|---|
+| `ADMIN_CONEXION` | `api` | `api` or `directa` (section 1); the wizard sets it |
+| `ADMIN_MOTOR_RUTA` | empty | direct connection: the jsonSQLDB folder (with `engine/` and `config.php`); empty = the panel's parent folder |
 | `ADMIN_API_URL` | empty | URL of the API; empty = derived |
 | `ADMIN_API_KEY` | admin key | API key the panel works with |
 | `ADMIN_HMAC_SECRET` | secret | the same as the API's |
@@ -271,7 +328,7 @@ $cli->aceptarAutofirmado();
 | `ADMIN_API_KEY_LECTURA` | empty | API key for read-only users |
 | `ADMIN_HMAC_SECRET_LECTURA` | empty | its secret |
 | `ADMIN_IPS_PERMITIDAS` | empty | IPs or CIDR ranges that may open the panel |
-| `ADMIN_EXIGIR_HTTPS` | `false` | reject access over HTTP |
+| `ADMIN_EXIGIR_HTTPS` | `true` | reject access over HTTP (the wizard can turn it off for local testing) |
 | `ADMIN_CONFIAR_EN_PROXY` | `false` | trust X-Forwarded-For / -Proto |
 | `ADMIN_SESION_NOMBRE` | `jsonsqldbadmin` | session cookie name |
 | `ADMIN_SESION_MINUTOS` | `60` | maximum inactivity |
@@ -289,20 +346,26 @@ $cli->aceptarAutofirmado();
 
 | Path | What it is |
 |---|---|
-| `jsonsqldbadmin/index.php` | single entry point: session, router and actions |
-| `jsonsqldbadmin/config.php` | configuration |
-| `jsonsqldbadmin/lib/Api.php` | signed calls to the API |
+| `jsonsqldbadmin/index.php` | single entry point: setup wizard while unconfigured, then session, router and actions |
+| `jsonsqldbadmin/config.dist.php` | template; the wizard writes `config.php` from it |
+| `jsonsqldbadmin/config.php` | configuration (not in the repository) |
+| `jsonsqldbadmin/lib/Api.php` | calls to the engine, through the API or by direct connection |
+| `jsonsqldbadmin/lib/Instalador.php` | the setup wizard: checks, connection test, writing the configuration |
 | `jsonsqldbadmin/lib/Auth.php` | users, session, IP lockout and CSRF |
 | `jsonsqldbadmin/lib/Audit.php` | audit trail |
 | `jsonsqldbadmin/lib/Exportar.php` | export to CSV, INSERT statements and ZIP |
+| `jsonsqldbadmin/lib/Importar.php` | restore of a ZIP backup |
 | `jsonsqldbadmin/lib/Store.php` | reading and writing of the panel's JSON files |
+| `jsonsqldbadmin/lib/iconos.php` | the icons, inline SVG |
 | `jsonsqldbadmin/lib/util.php` | escaping, URLs, messages and validation |
 | `jsonsqldbadmin/lib/acciones.php` | every action that changes something |
 | `jsonsqldbadmin/vistas/` | pages |
-| `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 and Icons 1.11.3, local |
-| `jsonsqldbadmin/assets/panel.js` | enables the column fields according to type |
+| `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 (CSS and JS), local |
+| `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
+| `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 119 checks driving the real panel |
+| `tests/f5_admin.php` | 124 checks driving the real panel through the API |
+| `tests/f11_asistente.php` | 18 checks of the setup wizard and the direct connection |
 
 ## 8. Tests
 
@@ -313,8 +376,9 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php     → OK: 119
+php tests/f5_admin.php     → OK: 124
+php tests/f11_asistente.php → OK: 18
 ```
 
-It needs the cURL extension. On Windows with XAMPP, enable it in `php.ini`
-(`extension=curl`).
+The tests need the cURL extension (the panel itself does not). On Windows with
+XAMPP, enable it in `php.ini` (`extension=curl`).

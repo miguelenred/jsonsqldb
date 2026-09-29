@@ -4,10 +4,17 @@ $yo       = (string)Auth::usuario()['usuario'];
 $admin    = Auth::esAdmin();
 usort($usuarios, static fn($a, $b) => strcasecmp((string)$a['usuario'], (string)$b['usuario']));
 ?>
+<div class="page-head">
+  <div>
+    <h1>Usuarios</h1>
+    <p>Quién puede entrar al panel y con qué permiso</p>
+  </div>
+</div>
+
 <div class="row g-3">
   <div class="col-lg-7">
     <div class="card">
-      <div class="card-header"><i class="bi bi-people"></i> Usuarios del panel</div>
+      <div class="card-header"><?= icono('people') ?> Usuarios del panel</div>
       <div class="table-responsive">
         <table class="table table-sm align-middle mb-0">
           <thead><tr><th>Usuario</th><th>Rol</th><th>Creado</th><th>Último acceso</th>
@@ -26,15 +33,15 @@ usort($usuarios, static fn($a, $b) => strcasecmp((string)$a['usuario'], (string)
               <td class="text-end">
                 <?php if ($admin || strcasecmp($n, $yo) === 0): ?>
                   <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal"
-                          data-bs-target="#clave<?= h(md5($n)) ?>"><i class="bi bi-key"></i></button>
+                          data-bs-target="#clave<?= h(md5($n)) ?>"><?= icono('key') ?></button>
                 <?php endif; ?>
                 <?php if ($admin && strcasecmp($n, $yo) !== 0): ?>
-                  <form method="post" class="d-inline" onsubmit="return confirm('¿Borrar el usuario?');">
+                  <form method="post" class="d-inline" data-confirm="¿Borrar el usuario?">
                     <?= csrf() ?>
                     <input type="hidden" name="accion" value="borrar_usuario">
                     <input type="hidden" name="usuario" value="<?= h($n) ?>">
                     <input type="hidden" name="volver" value="usuarios">
-                    <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                    <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
                   </form>
                 <?php endif; ?>
               </td>
@@ -49,7 +56,7 @@ usort($usuarios, static fn($a, $b) => strcasecmp((string)$a['usuario'], (string)
   <?php if ($admin): ?>
   <div class="col-lg-5">
     <div class="card">
-      <div class="card-header"><i class="bi bi-person-plus"></i> Nuevo usuario</div>
+      <div class="card-header"><?= icono('person-plus') ?> Nuevo usuario</div>
       <div class="card-body">
         <form method="post" autocomplete="off">
           <?= csrf() ?>

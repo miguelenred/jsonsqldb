@@ -47,6 +47,8 @@ namespace JsonSQLDB;
  * prefijo: un índice sobre (a, b) sirve para buscar solo por a.
  *
  * Los NULL no se indexan: ninguna igualdad los encuentra nunca.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Indexes
 {
@@ -206,6 +208,73 @@ final class Indexes
         }
         $texto = Valor::aTexto($v);
         return 't' . strlen($texto) . ':' . $texto;
+    }
+
+    /**
+     * Valor numérico de la primera columna de una clave, o null si esa
+     * columna es texto. Es lo que permite saber en qué trozos de un índice
+     * puede estar una clave sin abrirlos (ver rango()).
+     *
+     * @return int|float|null
+     */
+    public static function valorNumerico(string $clave)
+    {
+        if ($clave === '' || $clave[0] !== 'n') {
+            return null;
+        }
+        $sep = strpos($clave, ':');
+        if ($sep === false) {
+            return null;
+        }
+        $texto = substr($clave, $sep + 1, (int)substr($clave, 1, $sep - 1));
+        return strpos($texto, '.') === false && strpos($texto, 'E') === false ? (int)$texto : (float)$texto;
+    }
+
+    /**
+     * Mínimo y máximo del valor numérico de la primera columna en un trozo
+     * de índice: [min, max]; [] si el trozo no tiene claves; null si alguna
+     * clave es de texto y no se puede acotar. Con una clave primaria
+     * autoincremental cada trozo cubre un tramo de ids, y una búsqueda por id
+     * abre un trozo en vez de todos.
+     *
+     * @param array<string, int|list<int>> $keys
+     * @return array{0: int|float, 1: int|float}|array{}|null
+     */
+    public static function rango(array $keys): ?array
+    {
+        $min = $max = null;
+        foreach (array_keys($keys) as $clave) {
+            $v = self::valorNumerico((string)$clave);
+            if ($v === null) {
+                return null;
+            }
+            if ($min === null || $v < $min) { $min = $v; }
+            if ($max === null || $v > $max) { $max = $v; }
+        }
+        return $min === null ? [] : [$min, $max];
+    }
+
+    /**
+     * ¿Puede estar alguna clave con estos valores numéricos en un trozo con
+     * este rango? Un valor null es una clave de texto, que puede estar en
+     * cualquiera. Con rango desconocido (null) sí; con un trozo vacío ([]) no.
+     *
+     * @param list<int|float|null> $valores los de valorNumerico() de cada clave
+     */
+    public static function cabeEnRango(array $valores, ?array $rango): bool
+    {
+        if ($rango === null) {
+            return true;
+        }
+        if ($rango === []) {
+            return false;
+        }
+        foreach ($valores as $v) {
+            if ($v === null || ($v >= $rango[0] && $v <= $rango[1])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -533,8 +602,83 @@ final class Indexes
         return $out;
     }
 
+    /**
+     * Rangos numéricos del WHERE por alias y columna: `col > 5`, `col <= 9`,
+     * `col BETWEEN 1 AND 3` y sus combinaciones en la cadena de AND de
+     * primer nivel, con literales numéricos. Cada rango es [min, max], y un
+     * extremo null es abierto. Sirven para saltar las partes de la tabla
+     * cuyo trozo de índice no puede contener ningún valor del rango (ver
+     * Storage::filasPorRango()); el WHERE se aplica igual a lo que se lee.
+     *
+     * @return array<string, array<string, array{0: int|float|null, 1: int|float|null}>>
+     */
+    public static function rangos(?array $where, ?string $aliasUnico): array
+    {
+        if ($where === null) {
+            return [];
+        }
+        $out = [];
+        foreach (self::conjunciones($where) as $n) {
+            foreach (self::acotaciones($n) as [$col, $min, $max]) {
+                $alias = $col['tabla'] === null ? $aliasUnico : strtolower((string)$col['tabla']);
+                if ($alias === null) {
+                    continue;
+                }
+                $nombre = strtolower((string)$col['nombre']);
+                $r = $out[$alias][$nombre] ?? [null, null];
+                if ($min !== null && ($r[0] === null || $min > $r[0])) { $r[0] = $min; }
+                if ($max !== null && ($r[1] === null || $max < $r[1])) { $r[1] = $max; }
+                $out[$alias][$nombre] = $r;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Las acotaciones numéricas de un nodo: [columna, min, max].
+     *
+     * @return list<array{0: array, 1: int|float|null, 2: int|float|null}>
+     */
+    private static function acotaciones(array $n): array
+    {
+        $k = $n['k'] ?? '';
+        if ($k === 'between' && empty($n['not']) && ($n['e']['k'] ?? '') === 'col') {
+            $a = self::literalNumerico($n['min']);
+            $b = self::literalNumerico($n['max']);
+            return $a === null || $b === null ? [] : [[$n['e'], $a, $b]];
+        }
+        if ($k !== 'bin' || !in_array($n['op'] ?? '', ['<', '<=', '>', '>='], true)) {
+            return [];
+        }
+        $op = $n['op'];
+        [$col, $lit] = [$n['i'], $n['d']];
+        if (($col['k'] ?? '') !== 'col') {
+            [$col, $lit] = [$n['d'], $n['i']];
+            $op = strtr($op, ['<' => '>', '>' => '<']);      // 5 < col  es  col > 5
+        }
+        if (($col['k'] ?? '') !== 'col') {
+            return [];
+        }
+        $v = self::literalNumerico($lit);
+        if ($v === null) {
+            return [];
+        }
+        // Los extremos abiertos (< y >) se tratan como cerrados: acotar de más
+        // solo lee una parte de más, y el WHERE deja fuera el igual
+        return $op === '<' || $op === '<=' ? [[$col, null, $v]] : [[$col, $v, null]];
+    }
+
+    /** @return int|float|null */
+    private static function literalNumerico(array $n)
+    {
+        if (($n['k'] ?? '') !== 'lit' || $n['v'] === null || is_bool($n['v'])) {
+            return null;
+        }
+        return is_int($n['v']) || is_float($n['v']) ? $n['v'] : (Valor::esNumerico($n['v']) ? Valor::aNumero($n['v']) : null);
+    }
+
     /** @return list<array> conjunciones de primer nivel */
-    private static function conjunciones(array $n): array
+    public static function conjunciones(array $n): array
     {
         if (($n['k'] ?? '') === 'bin' && ($n['op'] ?? '') === 'AND') {
             return array_merge(self::conjunciones($n['i']), self::conjunciones($n['d']));

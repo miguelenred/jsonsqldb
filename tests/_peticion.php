@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Lanza una petición contra el endpoint de la API simulando el entorno web.
  * Uso interno de tests/f4_api.php:  php _peticion.php '<json del POST>' '<raiz de datos>'
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 $post = json_decode($argv[1] ?? '[]', true) ?: [];
 $raiz = $argv[2] ?? sys_get_temp_dir();

@@ -12,6 +12,8 @@ declare(strict_types=1);
  *
  * Las partes se dejan pequeñas a propósito: con una sola parte el motor ni
  * siquiera intenta usar el índice, porque leer un fichero de más no ahorra nada.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_FILAS_POR_PARTE', 50);
@@ -527,6 +529,83 @@ chk('UPDATE y DELETE por índice dan lo mismo que recorriendo la tabla', functio
     }
     unset($bd);
     Database::borrar('p', $dir);
+    @rmdir($dir);
+    return true;
+});
+
+chk('el rango numérico de cada trozo acota la búsqueda sin perder claves movidas', function () use ($raiz) {
+    // Cada trozo de índice anota el mínimo y el máximo numérico de sus claves
+    // en rev.json, y una búsqueda por id abre solo los trozos que pueden
+    // contenerla. Al cambiar un id a un valor de otro tramo, o al borrar y
+    // volver a insertar, los rangos tienen que seguir diciendo la verdad.
+    $dir = $raiz . '/rangos';
+    @mkdir($dir, 0775, true);
+    Database::crear('r', $dir);
+    $bd = new Database('r', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, s VARCHAR(10), f DOUBLE)');
+    $bd->consultar('CREATE INDEX ix_n ON t (n)');
+    $bd->consultar('CREATE INDEX ix_s ON t (s)');
+    $bd->consultar('CREATE INDEX ix_nf ON t (n, s)');
+    $bd->consultar('CREATE INDEX ix_f ON t (f)');
+    $vals = [];
+    for ($i = 1; $i <= 260; $i++) { $vals[] = "($i, " . ($i % 7) . ", 's" . ($i % 3) . "', " . ($i * 1.5 - 100) . ')'; }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $vals));
+
+    $rev = json_decode((string)file_get_contents("$dir/r/t.rev.json"), true);
+    $r   = $rev['rangos'] ?? null;
+    if (!is_array($r)) { return 'rev.json no lleva los rangos'; }
+    if (($r['auto_id'] ?? null) !== [[1, 50], [51, 100], [101, 150], [151, 200], [201, 250], [251, 260]]) {
+        return 'el rango de la clave primaria no es el esperado: ' . json_encode($r['auto_id'] ?? null);
+    }
+    if (($r['ix_s'] ?? null) !== [null, null, null, null, null, null]) { return 'un índice de texto no debe tener rango'; }
+    if (($r['ix_nf'][0] ?? null) !== [0, 6]) { return 'el índice compuesto acota por su primera columna'; }
+    if (($r['ix_f'][0] ?? null) !== [-98.5, -25]) { return 'el rango de flotantes no es el esperado: ' . json_encode($r['ix_f'][0] ?? null); }
+
+    // Claves que cambian de tramo: un UPDATE del id, un borrado y una
+    // reinserción con un id de otro tramo, y una fila que se mueve al borrar
+    $ops = [
+        'UPDATE t SET id = 9000 WHERE id = 5',
+        'UPDATE t SET id = 5 WHERE id = 9000',
+        'DELETE FROM t WHERE id = 120',
+        'INSERT INTO t VALUES (120, 3, \'s0\', 80)',
+        'DELETE FROM t WHERE id IN (1, 2, 4)',
+        'UPDATE t SET n = 99 WHERE id = 200',
+        'INSERT INTO t VALUES (-5, 1, \'s1\', 0.5)',
+    ];
+    foreach ($ops as $op) {
+        $bd->consultar($op);
+        foreach ([3, 5, 9000, 120, 1, 2, 4, 200, -5, 260, 51, 100] as $id) {
+            $a = $bd->consultar('SELECT id FROM t WHERE id = ?', [$id]);
+            $b = $bd->consultar('SELECT id FROM t WHERE id + 0 = ?', [$id]);
+            if ($a !== $b) { return "tras '$op', id = $id: el índice da " . count($a) . ' y el recorrido ' . count($b); }
+        }
+        foreach ([[99, 'n'], [3, 'n'], [0, 'n']] as [$v, $c]) {
+            $a = $bd->consultar("SELECT id FROM t WHERE $c = ? ORDER BY id", [$v]);
+            $b = $bd->consultar("SELECT id FROM t WHERE $c + 0 = ? ORDER BY id", [$v]);
+            if ($a !== $b) { return "tras '$op', $c = $v: el índice da " . count($a) . ' y el recorrido ' . count($b); }
+        }
+        $a = $bd->consultar('SELECT id FROM t WHERE n = 3 AND s = ? ORDER BY id', ['s0']);
+        $b = $bd->consultar('SELECT id FROM t WHERE n + 0 = 3 AND s = ? ORDER BY id', ['s0']);
+        if ($a !== $b) { return "tras '$op', el índice compuesto no cuadra"; }
+        // Rangos: con el índice se leen solo las partes cuyo tramo cruza el
+        // rango; con `id + 0` se recorre la tabla. Tienen que coincidir.
+        foreach (['id BETWEEN 60 AND 70', 'id > 240', 'id >= 251 AND id < 253', 'id < 3', 'id BETWEEN -10 AND 1',
+                  'id BETWEEN 8990 AND 9010', 'id > 100 AND id <= 105 AND n = 3', '3 < id AND id < 6', 'f BETWEEN -50 AND -49',
+                  'f > 90', 'id BETWEEN 10 AND 200'] as $cond) {
+            $a = $bd->consultar("SELECT id FROM t WHERE $cond ORDER BY id");
+            $b = $bd->consultar('SELECT id FROM t WHERE ' . str_replace(['id ', 'f ', ' id', ' f '], ['id + 0 ', 'f + 0 ', ' id + 0', ' f + 0 '], $cond) . ' ORDER BY id');
+            if ($a !== $b) { return "tras '$op', el rango '$cond' da " . count($a) . ' y el recorrido ' . count($b); }
+        }
+    }
+    // El primer trozo tuvo el 9000 mientras duró; al deshacerlo, el rango se
+    // recalculó al reescribir el trozo y ya no lo cubre
+    $rev = json_decode((string)file_get_contents("$dir/r/t.rev.json"), true);
+    $primero = $rev['rangos']['auto_id'][0] ?? null;
+    if (!is_array($primero) || count($primero) !== 2 || $primero[1] >= 9000 || $primero[0] !== 3) {
+        return 'el rango del primer trozo no se ha recalculado: ' . json_encode($primero);
+    }
+    unset($bd);
+    Database::borrar('r', $dir);
     @rmdir($dir);
     return true;
 });

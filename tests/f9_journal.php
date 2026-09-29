@@ -16,6 +16,8 @@ declare(strict_types=1);
  *
  * No es una muestra: es la lista completa de estados por los que se puede
  * quedar una escritura a medias sobre una tabla repartida en varios ficheros.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_FILAS_POR_PARTE', 40);
@@ -40,6 +42,18 @@ function chk(string $titulo, callable $fn): void {
         global $ko; $ko++;
         echo "  FALLO $titulo -> " . get_class($e) . ': ' . $e->getMessage() . "\n";
     }
+}
+
+/**
+ * ¿Hay algún journal en la base? La carpeta .tx puede existir vacía, y un
+ * temporal de manifiesto que dejó un proceso muerto es basura, no un journal:
+ * lo barre la siguiente escritura con el exclusivo de la base.
+ */
+function hayJournal(string $base): bool {
+    foreach ((array)glob("$base/.tx/*") as $f) {
+        if (substr((string)$f, -4) !== '.tmp') { return true; }
+    }
+    return false;
 }
 function borrarArbol(string $dir): void {
     if (!is_dir($dir)) { return; }
@@ -184,7 +198,7 @@ function estadosIntermedios(string $raiz, ?string $ambito, callable $escritura, 
             }
             return "k=$k: " . implode(', ', array_slice($dif, 0, 4));
         }
-        if (is_dir("$dir/.tx")) { return "k=$k: quedó journal sin aplicar"; }
+        if (hayJournal("$dir")) { return "k=$k: quedó journal sin aplicar"; }
         if (glob("$dir/*.tmp") !== []) { return "k=$k: quedaron temporales"; }
 
         $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
@@ -240,7 +254,7 @@ chk('sin manifiesto no se toca nada, sea cual sea el estado de los temporales', 
         $bd = new Database('j', $raiz);
         $bd->consultar('SHOW TABLES');
         if (huella($dir) !== $original) { return "caso '$caso': los datos cambiaron"; }
-        if (is_dir("$dir/.tx")) { return "caso '$caso': no se limpió la carpeta"; }
+        if (hayJournal("$dir")) { return "caso '$caso': no se limpió la carpeta"; }
         // La siguiente escritura barre los temporales ajenos
         $bd->consultar("UPDATE t SET v = v WHERE id = 1");
         if (glob("$dir/*.tmp") !== []) { return "caso '$caso': quedaron temporales"; }
@@ -271,6 +285,45 @@ chk('un manifiesto que señala un temporal perdido detiene la recuperación', fu
     return true;
 });
 
+chk('un trozo de índice que no llegó al disco se da por perdido y se rehace', function () use ($raiz) {
+    // Los trozos de índice se escriben sin fsync: si un corte se lleva el
+    // temporal de uno, el manifiesto lo lista como regenerable y la
+    // recuperación sigue sin él. Hasta la siguiente escritura, la consulta
+    // por esa clave recorre la tabla; la escritura rehace el índice entero.
+    $dir = "$raiz/j";
+    preparar($raiz);
+    $bd = new Database('j', $raiz);
+    $bd->consultar("UPDATE t SET v = 'x' WHERE id = 3");
+    $esperado = $bd->consultar('SELECT id, v FROM t WHERE cat = ? ORDER BY id', ['c1']);
+    unset($bd);
+
+    $rev = json_decode((string)file_get_contents("$dir/t.rev.json"), true);
+    $trozo = 't.idx.auto_id.part2.json';
+    @unlink("$dir/$trozo");                              // el rename ocurrió, el contenido nunca llegó
+    @mkdir("$dir/.tx", 0775, true);
+    file_put_contents("$dir/.tx/t.json", json_encode([
+        'tipo' => 'redo', 'ambito' => 't', 'tablas' => ['t'],
+        'renombrar' => ["$trozo.999999.tmp" => $trozo, 't.rev.json.999999.tmp' => 't.rev.json'],
+        'borrar' => [], 'regenerables' => [$trozo],
+    ]));
+    file_put_contents("$dir/t.rev.json.999999.tmp", json_encode($rev));
+
+    $bd = new Database('j', $raiz);
+    $bd->consultar('SHOW TABLES');                         // recupera: el trozo perdido no detiene nada
+    if (hayJournal($dir)) { return 'quedó el journal'; }
+    if (is_file("$dir/$trozo")) { return 'el trozo apareció de la nada'; }
+    // Sin ese trozo el índice no sirve: se recorre, y el resultado es el mismo
+    if ($bd->consultar('SELECT id, v FROM t WHERE cat = ? ORDER BY id', ['c1']) !== $esperado) { return 'sin el trozo, el resultado cambió'; }
+    if ($bd->consultar('SELECT v FROM t WHERE id = 3') !== [['v' => 'x']]) { return 'sin el trozo, la búsqueda por clave falló'; }
+    // La siguiente escritura lo rehace
+    $bd->consultar("UPDATE t SET v = 'y' WHERE id = 4");
+    if (!is_file("$dir/$trozo")) { return 'la escritura no rehizo el trozo'; }
+    if ($bd->consultar('SELECT v FROM t WHERE id = 4') !== [['v' => 'y']]) { return 'tras rehacerlo, la búsqueda por clave falló'; }
+    return $bd->consultar('SELECT id, v FROM t WHERE cat = ? ORDER BY id', ['c1']) === array_map(
+        static fn(array $f): array => $f['id'] === 4 ? ['id' => 4, 'v' => 'y'] : $f, $esperado)
+        ?: 'tras rehacerlo, el índice y la tabla no coinciden';
+});
+
 chk('un journal a medias de otra tabla no estorba', function () use ($raiz) {
     $dir = "$raiz/j";
     preparar($raiz);
@@ -290,7 +343,7 @@ chk('un journal a medias de otra tabla no estorba', function () use ($raiz) {
     $bd = new Database('j', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'] === 200
         && (int)$bd->consultar('SELECT COUNT(*) AS n FROM otra')[0]['n'] === 1
-        && !is_dir("$dir/.tx");
+        && !hayJournal("$dir");
 });
 
 chk('repetir la recuperación muchas veces no degrada nada', function () use ($raiz) {
@@ -310,7 +363,7 @@ chk('repetir la recuperación muchas veces no degrada nada', function () use ($r
         $bd = new Database('j', $raiz);
         $bd->consultar('SHOW TABLES');
         if (huella($dir) !== $despues) { return "vuelta $v: no quedó como estaba"; }
-        if (is_dir("$dir/.tx")) { return "vuelta $v: no se limpió el journal"; }
+        if (hayJournal("$dir")) { return "vuelta $v: no se limpió el journal"; }
         unset($bd);
     }
     return true;
@@ -344,6 +397,7 @@ function caminoDeEscritura(string $raiz, string $esperado, callable $preparaBase
 
     $antes = instantanea($dir);
 
+    @rmdir("$dir/.tx");                                  // vacía: el motor la deja creada
     file_put_contents("$dir/.tx", '');
     $journalizo = false;
     try {
@@ -547,7 +601,7 @@ chk('un journal pendiente de la versión anterior se deshace igual', function ()
     $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
 
     if ($n !== 120) { return "quedaron $n filas de 120: no se deshizo el journal antiguo"; }
-    if (is_dir("$dir/.tx")) { return 'no se limpió la carpeta del journal'; }
+    if (hayJournal("$dir")) { return 'no se limpió la carpeta del journal'; }
     return true;
 });
 

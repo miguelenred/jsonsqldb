@@ -14,6 +14,8 @@ namespace JsonSQLDB;
  *
  * Se aceptan los alias habituales de SQLite para que el mismo CREATE TABLE
  * funcione en ambos motores.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Types
 {

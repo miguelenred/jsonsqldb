@@ -19,6 +19,8 @@ declare(strict_types=1);
  * repositorio. Ahora ni la API ni el panel arrancan mientras queden.
  *
  * No sobrescribe nada: si un fichero ya existe, lo dice y no lo toca.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 
 $raiz  = __DIR__;

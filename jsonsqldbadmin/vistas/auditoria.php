@@ -10,7 +10,12 @@ if ($busca !== '') {
     }));
 }
 ?>
-<h1 class="h5 mb-3"><i class="bi bi-clipboard-check"></i> Auditoría</h1>
+<div class="page-head">
+  <div>
+    <h1>Auditoría</h1>
+    <p>Quién ha hecho qué en el panel, día a día</p>
+  </div>
+</div>
 
 <form class="row g-2 align-items-end mb-3" method="get">
   <input type="hidden" name="p" value="auditoria">

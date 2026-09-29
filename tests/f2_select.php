@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Prueba del ejecutor de SELECT. Ejecutar: php tests/f2_select.php
  * Crea una base temporal con datos y la borra al terminar.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 // Las pruebas usan el motor directamente, sin pasar por la API
 define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -820,6 +822,10 @@ chk('el WHERE compilado decide lo mismo que el evaluador general', function () u
         "NOT (f > 50 OR n IS NULL)", "s LIKE 'a%'", "s NOT LIKE '%c'", "s LIKE 'z_'", "s IS NOT NULL AND n < 3",
         "n = 3 OR f = 12.5 OR s = 'zz'", "n * 2 + 1 > f", "s || 'x' = 'abcx'", "n % 3 = 0", "f / 0 IS NULL",
         "NOT n IS NULL", "-n < -5", "n <> 4 AND NOT s = 'abc'", "d >= '2026-05-01' AND d < '2026-08-01'",
+        // Los caminos rápidos con literal numérico, contra columnas de todo tipo:
+        // enteros con NULL, decimales, y textos entre los que hay números ('12', '9')
+        "s BETWEEN 1 AND 20", "s NOT BETWEEN 1 AND 20", "f BETWEEN 10 AND 50.5", "f NOT BETWEEN 10 AND 50.5",
+        "n BETWEEN 3 AND 3", "s > 5", "s = 12", "s <> 9", "f <> 12.5", "n <> 4", "n != 4", "f >= 99.9", "n < 0.5",
     ];
     foreach ($predicados as $p) {
         $a = $bd->consultar("SELECT id FROM ord WHERE $p");
@@ -871,6 +877,46 @@ chk('un agregado total sin filas y un JOIN agrupado en streaming', function () u
     foreach ($j as $f) { $visto[$f['nombre']] = $f['n']; }
     ksort($visto);
     return $visto === $esperado ?: 'el JOIN agrupado no cuadra';
+});
+
+chk('el cruce por índice y el cruce normal dan lo mismo, lado pequeño y grande', function () use ($bd) {
+    // Con pocas filas a la izquierda y un índice a la derecha se busca cada
+    // clave; con muchas, o sin índice, se cruza como siempre. Escribiendo el
+    // ON como `a.id + 0 = b.aid` no hay índice que usar: es la referencia.
+    $bd->consultar('CREATE TABLE ja (id INTEGER PRIMARY KEY, g INTEGER, nom VARCHAR(10))');
+    $bd->consultar('CREATE TABLE jb (id INTEGER PRIMARY KEY, aid INTEGER, g INTEGER, v INTEGER)');
+    $bd->consultar('CREATE INDEX ix_jb_aid ON jb (aid)');
+    $bd->consultar('CREATE INDEX ix_ja_g ON ja (g, nom)');
+    $vals = [];
+    for ($i = 1; $i <= 5000; $i++) { $vals[] = "($i, " . ($i % 40) . ", 'n" . ($i % 7) . "')"; }
+    $bd->consultar('INSERT INTO ja VALUES ' . implode(',', $vals));
+    $vals = [];
+    for ($i = 1; $i <= 3000; $i++) {
+        $aid    = ($i * 7) % 5200 + 1;                                     // aid > 5000 no casa con nadie
+        $vals[] = "($i, $aid, " . ($i % 2 === 0 ? $aid % 40 : $i % 40) . ", $i)";   // la mitad casa también por g
+    }
+    $bd->consultar('INSERT INTO jb VALUES ' . implode(',', $vals));
+    $casos = [
+        ['SELECT b.id, a.nom FROM jb b JOIN ja a ON a.id = b.aid WHERE b.id = 7', 'a.id + 0 = b.aid'],
+        ['SELECT b.id, a.nom FROM jb b LEFT JOIN ja a ON a.id = b.aid WHERE b.id BETWEEN 100 AND 130', 'a.id + 0 = b.aid'],
+        ['SELECT b.id, a.nom FROM jb b JOIN ja a ON a.id = b.aid WHERE b.v < 1500', 'a.id + 0 = b.aid'],     // 1.499 filas: cruce normal
+        ['SELECT b.id, a.nom FROM jb b JOIN ja a ON a.id = b.aid WHERE b.v < 1500 AND a.g = 3', 'a.id + 0 = b.aid'],
+        ['SELECT b.id, a.id FROM jb b JOIN ja a ON a.id = b.aid AND a.g = b.g WHERE b.id < 30', 'a.id + 0 = b.aid AND a.g = b.g'],
+        ['SELECT b.id, a.id FROM jb b JOIN ja a ON a.g = b.g AND a.nom = \'n1\' WHERE b.id = 5', 'a.g + 0 = b.g AND a.nom = \'n1\''],
+        ['SELECT a.id, b.id FROM ja a JOIN jb b ON b.aid = a.id WHERE a.id IN (1, 2, 3, 5001)', 'b.aid + 0 = a.id'],
+        ['SELECT b.id, a.nom FROM jb b LEFT JOIN ja a ON a.id = b.aid WHERE b.aid > 5000', 'a.id + 0 = b.aid'],
+        ['SELECT b.id, a.nom FROM jb b JOIN ja a ON a.id = b.aid WHERE b.id IN (1, 2) AND a.nom LIKE \'n%\'', 'a.id + 0 = b.aid'],
+    ];
+    foreach ($casos as [$sql, $sinIndice]) {
+        $con = $bd->consultar($sql);
+        $sin = $bd->consultar(preg_replace('/ON (a\.id = b\.aid|b\.aid = a\.id|a\.id = b\.aid AND a\.g = b\.g|a\.g = b\.g AND a\.nom = \'n1\')/', 'ON ' . $sinIndice, $sql));
+        sort($con); sort($sin);
+        if ($con !== $sin) { return "difieren en: $sql (" . count($con) . ' frente a ' . count($sin) . ')'; }
+        if ($con === []) { return "sin filas en: $sql"; }
+    }
+    $bd->consultar('DROP TABLE jb');
+    $bd->consultar('DROP TABLE ja');
+    return true;
 });
 
 chk('limpiar la tabla de orden', function () use ($bd) {

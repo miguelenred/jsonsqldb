@@ -8,13 +8,30 @@
 // jsonSQLDBadmin - Configuración del panel
 // Este fichero NO debe ser accesible desde el navegador.
 // El .htaccess / web.config de esta carpeta ya lo bloquea.
+//
+// https://miguelenred.es/jsonsqldb
 // ============================================================
 
 // ------------------------------------------------------------
-// CONEXIÓN CON LA API
+// CONEXIÓN CON EL MOTOR
 // ------------------------------------------------------------
-// El panel nunca toca el motor: todo pasa por la API.
-// Déjalo vacío y se calcula solo (../api/jsonsqldb_api.php).
+// 'api'      por la API firmada con HMAC (api/jsonsqldb_api.php), en esta
+//            máquina o en otra. Es la opción por defecto.
+// 'directa'  el panel carga el motor y le habla sin HTTP. Solo si el panel y
+//            los datos están en la misma máquina; no necesita claves, y cada
+//            consulta se ahorra una petición HTTP. Los permisos de cada usuario
+//            del panel los aplica el motor igual que con una API key.
+//
+// El asistente del primer arranque escribe esto por ti.
+defined('ADMIN_CONEXION') || define('ADMIN_CONEXION', 'api');
+
+// Solo para la conexión directa: carpeta de jsonSQLDB, la que contiene
+// engine/ y config.php. Vacía = la carpeta padre de este panel, que es donde
+// está en la instalación normal.
+defined('ADMIN_MOTOR_RUTA') || define('ADMIN_MOTOR_RUTA', '');
+
+// --- Solo para la conexión por API ---
+// URL de la API. Vacía = se calcula sola (../api/jsonsqldb_api.php).
 defined('ADMIN_API_URL') || define('ADMIN_API_URL', (string)getenv('ADMIN_API_URL'));
 
 // Clave de administración creada en api/jsonsqldb_api_config.php.

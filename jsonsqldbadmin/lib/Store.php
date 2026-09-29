@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Ficheros JSON del propio panel (usuarios, intentos de acceso y auditoría).
  * Escritura atómica: temporal + rename, sin dejar restos si algo falla.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Store
 {

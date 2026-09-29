@@ -9,6 +9,8 @@ declare(strict_types=1);
  * Nunca se concatena un valor en la SQL: van siempre como parámetros ligados.
  * Los nombres de tabla y columna sí forman parte de la sentencia, así que se
  * validan con identificador() y se citan con cita().
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 function ejecutarAccion(string $accion): void
 {
@@ -203,8 +205,8 @@ function ejecutarAccion(string $accion): void
             if (mismoHostQueLaApi() === false) {
                 throw new RuntimeException(
                     'Restaurar desde ZIP necesita que el panel y el motor estén en la misma '
-                    . 'máquina, porque escribe los ficheros directamente. Usa un volcado en SQL, '
-                    . 'que va por la API y funciona entre máquinas distintas.'
+                    . 'máquina, porque escribe los ficheros directamente. Usa el volcado en SQL: '
+                    . 'se importa desde la página de la base y funciona entre máquinas distintas.'
                 );
             }
             $subido = $_FILES['zip'] ?? null;
@@ -224,6 +226,28 @@ function ejecutarAccion(string $accion): void
             Audit::registrar('importar_zip', $resumen, $nombre);
             flash('success', "Base '$nombre' restaurada. $resumen");
             redirigir(['p' => 'bases']);
+
+        case 'importar_sql':
+        case 'importar_csv':
+            Auth::exigirAdmin();
+            $nombre = nombreBase(post('db'));
+            $subido = $_FILES['fichero'] ?? null;
+            if (!is_array($subido) || ($subido['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+                || !is_uploaded_file((string)$subido['tmp_name'])) {
+                throw new RuntimeException(
+                    'No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP '
+                    . '(upload_max_filesize y post_max_size).'
+                );
+            }
+            if ($accion === 'importar_sql') {
+                $resumen = Importar::sql((string)$subido['tmp_name'], $nombre);
+            } else {
+                $tabla   = identificador(post('tabla'), 'tabla');
+                $resumen = Importar::csv((string)$subido['tmp_name'], $nombre, $tabla);
+            }
+            Audit::registrar($accion, $resumen . ' (' . basename((string)$subido['name']) . ')', $nombre);
+            flash('success', $resumen);
+            redirigir(['p' => 'tablas', 'db' => $nombre]);
 
         // ---------------- Vistas ----------------
         case 'crear_vista':

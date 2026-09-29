@@ -197,11 +197,20 @@ An index is stored in one piece per part of the table (2.6), so a write
 rewrites the pieces of the parts it touched and leaves the rest alone.
 
 Measured on 20,000 rows (`php tests/benchmark.php`, mean of several runs,
-on-disk cache): a one-row `INSERT` 10 ms and 9 MB, an `UPDATE` by key 12 ms and
-10 MB, a `DELETE` by key 16 ms and 8 MB. On 100,000 rows: 30 ms / 22 MB,
-34 ms / 22 MB and 53 ms / 21 MB. The cost of a write no longer grows with the
+on-disk cache): a one-row `INSERT` 9 ms and 9 MB, an `UPDATE` by key 11 ms and
+9 MB, a `DELETE` by key 16 ms and 8 MB. On 100,000 rows: 28 ms / 22 MB,
+30 ms / 23 MB and 50 ms / 22 MB. The cost of a write no longer grows with the
 size of the table nor with the size of its indexes; what remains is checking
-uniqueness against every piece of the unique indexes.
+uniqueness, which for a numeric key looks at the pieces whose range can hold
+it (a new id is rejected as unique without opening any) and for a text key
+at every piece.
+
+On a real disk the cost is the `fsync` calls, not the encoding: five per
+write in 2.7 (the part, `rev.json`, the structure when the autoincrement
+counter moves, the manifest and the directory), down from ten in 2.6. Index
+pieces are written without one, since they can be rebuilt from the rows if a
+crash loses them. With an `fsync` of 3 ms, typical of a shared host, a one-row
+`INSERT` takes about 34 ms; see [01-core.md](01-core.md#several-files-the-redo-journal).
 
 The comparison to keep in mind: one `INSERT` with 2,000 `VALUES` costs about
 the same as one `INSERT` with one row. Batch them.
@@ -216,16 +225,16 @@ the same as one `INSERT` with one row. Batch them.
 | `engine/Integrity.php` | CHECK KEYS and REPAIR KEYS |
 | `engine/Parser.php` | extended with DML, DDL, triggers and `RAISE` |
 | `engine/Database.php` | decides the lock scope of each statement |
-| `tests/f3_escrituras.php` | 59 checks |
+| `tests/f3_escrituras.php` | 60 checks |
 
 ## 6. Tests
 
 ```
 php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
-php tests/f2_select.php       → OK: 144
-php tests/f3_escrituras.php   → OK: 59
-php tests/f8_indices.php      → OK: 59
+php tests/f2_select.php       → OK: 145
+php tests/f3_escrituras.php   → OK: 60
+php tests/f8_indices.php      → OK: 60
 php tests/f10_indices_incrementales.php → OK: 16
 ```
 

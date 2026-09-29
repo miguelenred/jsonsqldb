@@ -17,6 +17,8 @@ declare(strict_types=1);
 //   SELECT  → [ {...}, {...} ]
 //   resto   → { "success": true, "filas": n, "mensaje": "..." }
 //   error   → { "error": "..." }
+//
+// https://miguelenred.es/jsonsqldb
 // ============================================================
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);

@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Auditoría del panel: quién hizo qué y desde dónde.
  * Un fichero por día, una línea JSON por evento. Nunca interrumpe la acción.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Audit
 {

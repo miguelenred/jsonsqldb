@@ -7,9 +7,9 @@ https://github.com/miguelenred/jsonsqldb
 Concept, architecture, functional and technical specification, design
 decisions and review by Miguel Sanchez.
 
-Implementation (source code, test suites and documentation) written by
-Claude Opus 5, an AI model developed by Anthropic, working from that
-specification and under the author's direction and review.
+Implementation (source code, test suites and documentation) produced with the
+assistance of artificial intelligence (Anthropic's Claude among other models),
+working from that specification and under the author's direction and review.
 
 This product bundles the following third-party components, each under its
 own licence:
@@ -17,7 +17,3 @@ own licence:
   Bootstrap 5.3.3
   Copyright (c) 2011-2024 The Bootstrap Authors
   Licensed under the MIT License - https://getbootstrap.com
-
-  Bootstrap Icons 1.11.3
-  Copyright (c) 2019-2024 The Bootstrap Authors
-  Licensed under the MIT License - https://icons.getbootstrap.com

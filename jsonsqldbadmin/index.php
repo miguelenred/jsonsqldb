@@ -4,11 +4,18 @@ declare(strict_types=1);
 /**
  * jsonSQLDBadmin — panel de administración de jsonSQLDB.
  *
- * Todo pasa por la API (lib/Api.php): el panel nunca toca el motor ni los
- * ficheros de datos. Un único punto de entrada; las páginas están en vistas/.
+ * Habla con el motor por la API o por conexión directa (lib/Api.php); no toca
+ * los ficheros de datos salvo para la copia en ZIP. Un único punto de entrada;
+ * las páginas están en vistas/. Mientras no está configurado, lo que se
+ * muestra es el asistente de instalación (lib/Instalador.php).
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 
-require_once (string)(getenv('JSONSQLDBADMIN_CONFIG') ?: __DIR__ . '/config.php');
+// Sin config.php todavía se arranca con los valores de la plantilla, lo justo
+// para que el asistente pueda pintarse y escribir el de verdad
+$rutaConfig = (string)(getenv('JSONSQLDBADMIN_CONFIG') ?: __DIR__ . '/config.php');
+require_once is_file($rutaConfig) ? $rutaConfig : __DIR__ . '/config.dist.php';
 require_once __DIR__ . '/lib/Store.php';
 require_once __DIR__ . '/lib/Auth.php';
 require_once __DIR__ . '/lib/Audit.php';
@@ -17,6 +24,8 @@ require_once __DIR__ . '/lib/Exportar.php';
 require_once __DIR__ . '/lib/Importar.php';
 require_once __DIR__ . '/lib/util.php';
 require_once __DIR__ . '/lib/acciones.php';
+require_once __DIR__ . '/lib/iconos.php';
+require_once __DIR__ . '/lib/Instalador.php';
 
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
@@ -31,20 +40,12 @@ if (!util_ip_permitida(util_ip(), (array)ADMIN_IPS_PERMITIDAS)) {
     http_response_code(403);
     exit('Acceso no permitido desde esta IP.');
 }
-if (strpos(ADMIN_API_KEY, 'CHANGE_ME') === 0 || strpos(ADMIN_HMAC_SECRET, 'CHANGE_ME') === 0) {
-    http_response_code(500);
-    exit(
-        "El panel está sin configurar.\n\n"
-        . "jsonsqldbadmin/config.php todavía tiene valores CHANGE_ME_. Esas claves\n"
-        . "vienen en el repositorio, o sea que son públicas: con ellas cualquiera\n"
-        . "que llegue al panel entra. Por eso no arranca hasta que las cambies.\n\n"
-        . "Genera cada valor con:  php -r \"echo bin2hex(random_bytes(32));\"\n"
-        . "ADMIN_API_KEY y ADMIN_HMAC_SECRET tienen que valer lo mismo que 'key' y\n"
-        . "'hmac_secret' de la cuenta jsonSQLDBadmin en api/jsonsqldb_api_config.php."
-    );
-}
+// Sin configurar (sin config.php, o con las claves CHANGE_ME_ de la plantilla,
+// que están publicadas en el repositorio): lo único que se sirve es el
+// asistente, que no deja entrar a nada más hasta que termina
+$asistente = Instalador::faltaConfig();
 
-if (ADMIN_EXIGIR_HTTPS && !util_https()) {
+if (!$asistente && ADMIN_EXIGIR_HTTPS && !util_https()) {
     // El mensaje dice qué hacer, no solo qué pasa: en una máquina local esto es
     // lo primero con lo que se choca al instalar, y sin la indicación hay que
     // buscar la constante por el código
@@ -65,20 +66,29 @@ $base   = get('db');
 $tabla  = get('tabla');
 
 // ----------------------------------------------------------------------
-// Primer arranque: no hay ningún usuario todavía
+// Primer arranque: asistente de instalación, o solo el administrador si la
+// configuración ya está hecha (por ejemplo, con php configurar.php)
 // ----------------------------------------------------------------------
-if (!Auth::hayUsuarios()) {
+if ($asistente || !Auth::hayUsuarios()) {
+    $datos = ['completo' => $asistente];
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         try {
-            $nombre = Auth::crear(post('usuario'), (string)($_POST['clave'] ?? ''), 'admin');
-            Audit::registrar('instalar', $nombre);
-            flash('success', "Administrador '$nombre' creado. Ya puedes entrar.");
-            redirigir();
+            Auth::comprobarCsrf();
+            if ($asistente) {
+                $datos['resumen'] = Instalador::instalar($_POST);
+                Audit::registrar('instalar', post('usuario'));
+            } else {
+                $nombre = Instalador::crearAdmin(post('usuario'), (string)($_POST['clave'] ?? ''),
+                                                 (string)($_POST['clave2'] ?? ''));
+                Audit::registrar('instalar', $nombre);
+                flash('success', "Administrador '$nombre' creado. Ya puedes entrar.");
+                redirigir();
+            }
         } catch (Throwable $e) {
-            $error = $e->getMessage();
+            $datos['error'] = $e->getMessage();
         }
     }
-    vista('instalar', ['error' => $error ?? null]);
+    vista('instalar', $datos);
     exit;
 }
 
@@ -128,12 +138,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && post('accion') !== '') {
 // Páginas
 // ----------------------------------------------------------------------
 $paginas = ['bases', 'tablas', 'vistas', 'integridad', 'crear_tabla', 'estructura', 'datos',
-            'fila', 'sql', 'auditoria', 'usuarios'];
+            'sql', 'auditoria', 'usuarios', 'configuracion'];
 if (!in_array($pagina, $paginas, true)) {
     $pagina = 'bases';
 }
 if (in_array($pagina, ['tablas', 'vistas', 'integridad', 'crear_tabla', 'estructura', 'datos',
-                       'fila', 'sql'], true) && $base === '') {
+                       'sql'], true) && $base === '') {
     flash('warning', 'Elige primero una base de datos.');
     redirigir(['p' => 'bases']);
 }
@@ -149,5 +159,7 @@ function vista(string $nombre, array $datos = []): void
 {
     extract($datos, EXTR_SKIP);
     $vistaActual = $nombre;
+    // El layout pinta los avisos; el login y el asistente los pintan ellos
+    $mensajes = in_array($nombre, ['login', 'instalar'], true) ? flashes() : [];
     require __DIR__ . '/vistas/layout.php';
 }

@@ -33,30 +33,25 @@ $filas = Api::sql($base, $sql . ' LIMIT ? OFFSET ?', array_merge($paramsFiltro, 
 require __DIR__ . '/_pestanas.php';
 ?>
 
-<div class="d-flex justify-content-between align-items-center mb-2 gap-3 flex-wrap">
-  <form class="d-flex gap-2 align-items-center" method="get">
+<div class="toolbar">
+  <form class="search-box" method="get" role="search">
     <input type="hidden" name="p" value="datos">
     <input type="hidden" name="db" value="<?= h($base) ?>">
     <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
     <input type="hidden" name="orden" value="<?= h($orden) ?>">
     <input type="hidden" name="dir" value="<?= h($dir) ?>">
-    <div class="input-group input-group-sm" style="width:22rem">
-      <span class="input-group-text"><i class="bi bi-search"></i></span>
-      <input class="form-control" name="q" value="<?= h($filtro) ?>"
-             placeholder="Filtrar en todas las columnas…">
-      <button class="btn btn-outline-secondary">Filtrar</button>
-      <?php if ($filtro !== ''): ?>
-        <a class="btn btn-outline-secondary"
-           href="<?= h(url(['p' => 'datos', 'db' => $base, 'tabla' => $tabla])) ?>"
-           title="Quitar el filtro"><i class="bi bi-x-lg"></i></a>
-      <?php endif; ?>
-    </div>
-    <span class="text-body-secondary text-nowrap">
-      <?= number_format($total, 0, ',', '.') ?> fila(s)<?= $filtro === '' ? '' : ' filtradas' ?> ·
-      página <?= $pagina ?> de <?= $paginas ?>
-    </span>
+    <?= icono('search') ?>
+    <input name="q" value="<?= h($filtro) ?>" placeholder="Filtrar en todas las columnas… (Enter)" aria-label="Filtrar">
+    <?php if ($filtro !== ''): ?>
+      <a class="clear" href="<?= h(url(['p' => 'datos', 'db' => $base, 'tabla' => $tabla])) ?>"
+         title="Quitar el filtro"><?= icono('x') ?></a>
+    <?php endif; ?>
   </form>
-  <div class="d-flex gap-2">
+  <span class="toolbar-info">
+    <strong><?= number_format($total, 0, ',', '.') ?></strong> fila(s)<?= $filtro === '' ? '' : ' filtradas' ?> ·
+    página <?= $pagina ?> de <?= $paginas ?>
+  </span>
+  <div class="toolbar-actions">
     <?php foreach (['csv' => ['CSV', 'filetype-csv'], 'sql' => ['INSERT', 'filetype-sql']] as $f => $b): ?>
       <form method="post">
         <?= csrf() ?>
@@ -69,12 +64,12 @@ require __DIR__ . '/_pestanas.php';
         <input type="hidden" name="q" value="<?= h($filtro) ?>">
         <input type="hidden" name="volver" value="datos">
         <button class="btn btn-sm btn-outline-secondary" title="Exportar la tabla entera">
-          <i class="bi bi-<?= h($b[1]) ?>"></i> <?= h($b[0]) ?></button>
+          <?= icono($b[1]) ?> <?= h($b[0]) ?></button>
       </form>
     <?php endforeach; ?>
     <?php if ($admin): ?>
       <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#nuevaFila">
-        <i class="bi bi-plus-circle"></i> Insertar fila</button>
+        <?= icono('plus-circle') ?> Insertar fila</button>
     <?php endif; ?>
   </div>
 </div>
@@ -99,7 +94,7 @@ require __DIR__ . '/_pestanas.php';
                                 'q' => $filtro])) ?>">
               <?= h($cn) ?>
               <?php if ($orden === $cn): ?>
-                <i class="bi bi-caret-<?= $dir === 'ASC' ? 'up' : 'down' ?>-fill"></i>
+                <?= icono($dir === 'ASC' ? 'caret-up' : 'caret-down') ?>
               <?php endif; ?>
             </a>
           </th>
@@ -119,8 +114,8 @@ require __DIR__ . '/_pestanas.php';
           <?php if ($admin && $pk !== []): ?>
             <td class="text-end">
               <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal"
-                      data-bs-target="#edit<?= $i ?>"><i class="bi bi-pencil"></i></button>
-              <form method="post" class="d-inline" onsubmit="return confirm('¿Borrar esta fila?');">
+                      data-bs-target="#edit<?= $i ?>"><?= icono('pencil') ?></button>
+              <form method="post" class="d-inline" data-confirm="¿Borrar esta fila?">
                 <?= csrf() ?>
                 <input type="hidden" name="accion" value="borrar_fila">
                 <input type="hidden" name="db" value="<?= h($base) ?>">
@@ -129,7 +124,7 @@ require __DIR__ . '/_pestanas.php';
                 <?php foreach ($pk as $c): ?>
                   <input type="hidden" name="pk[<?= h($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
                 <?php endforeach; ?>
-                <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
               </form>
             </td>
           <?php endif; ?>

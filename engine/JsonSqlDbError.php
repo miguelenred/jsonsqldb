@@ -8,6 +8,8 @@ namespace JsonSQLDB;
  * la API pueda decidir qué mensaje devuelve al cliente.
  *
  * Tipos usados: CONFIG, SCHEMA, TYPE, CONSTRAINT, SYNTAX, IO, LOCK, PERMISSION
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class JsonSqlDbError extends \RuntimeException
 {

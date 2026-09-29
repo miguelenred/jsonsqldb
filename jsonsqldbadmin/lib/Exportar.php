@@ -6,6 +6,8 @@ declare(strict_types=1);
  *
  * Escribe directamente en la salida y termina la petición, así que no debe
  * haberse enviado nada antes.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Exportar
 {

@@ -4,6 +4,8 @@ declare(strict_types=1);
 /**
  * Prueba de la fase 1 (núcleo). Ejecutar:  php tests/f1_nucleo.php
  * No deja nada en disco: borra la base de pruebas al terminar.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 require_once __DIR__ . '/../engine/bootstrap.php';
 

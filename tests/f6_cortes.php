@@ -19,6 +19,8 @@ declare(strict_types=1);
  * Muchas de las muertes caerán fuera de la ventana crítica, y eso está bien: la
  * prueba solo puede dar falsos negativos (no llegar a probar el caso), nunca
  * falsos positivos. Al final informa de cuántas cayeron dentro.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 // Partes pequeñas: así una tabla de mil filas ocupa varios ficheros y las
@@ -46,6 +48,18 @@ function chk(string $titulo, callable $fn): void {
         global $ko; $ko++;
         echo "  FALLO $titulo -> " . get_class($e) . ': ' . $e->getMessage() . "\n";
     }
+}
+
+/**
+ * ¿Hay algún journal en la base? La carpeta .tx puede existir vacía, y un
+ * temporal de manifiesto que dejó un proceso muerto es basura, no un journal:
+ * lo barre la siguiente escritura con el exclusivo de la base.
+ */
+function hayJournal(string $base): bool {
+    foreach ((array)glob("$base/.tx/*") as $f) {
+        if (substr((string)$f, -4) !== '.tmp') { return true; }
+    }
+    return false;
 }
 
 function borrarArbol(string $dir): void {
@@ -151,14 +165,14 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
     foreach ($tuberias as $t) { @fclose($t); }
     proc_close($proc);
 
-    $huboJournal = is_dir($raiz . '/cortes/.tx');
+    $huboJournal = hayJournal($raiz . '/cortes');
     if ($huboJournal) { $dentro++; }
 
     // Se abre la base: aquí es donde debe actuar la recuperación
     $bd2    = new Database('cortes', $raiz);
     $padres = (int)$bd2->consultar('SELECT COUNT(*) AS n FROM padres')[0]['n'];
     $hijas  = (int)$bd2->consultar('SELECT COUNT(*) AS n FROM hijas')[0]['n'];
-    $quedaTx = is_dir($raiz . '/cortes/.tx');
+    $quedaTx = hayJournal($raiz . '/cortes');
     unset($bd2);
 
     $sinTocar  = $padres === $PADRES     && $hijas === $HIJAS_TOTAL;
@@ -263,7 +277,7 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
     foreach ($tuberias as $t) { @fclose($t); }
     proc_close($proc);
 
-    if (is_dir($raiz . '/cortes/.tx')) { $dentroP++; }
+    if (hayJournal($raiz . '/cortes')) { $dentroP++; }
 
     $bd2 = new Database('cortes', $raiz);
 
@@ -308,7 +322,7 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
         $problemas[] = "intento $i: la caché no coincide con el disco tras el corte";
     }
 
-    if (is_dir($raiz . '/cortes/.tx')) {
+    if (hayJournal($raiz . '/cortes')) {
         $problemas[] = "intento $i: quedó journal sin deshacer";
     }
     // Un proceso matado con SIGKILL no ejecuta ningún finally, así que puede
@@ -398,7 +412,7 @@ function matarDurante(string $raiz, string $sql, callable $sano, int $duracion):
     foreach ($tuberias as $t) { @fclose($t); }
     proc_close($proc);
 
-    $dentro = is_dir($raiz . '/cortes/.tx');
+    $dentro = hayJournal($raiz . '/cortes');
 
     try {
         $bd = new Database('cortes', $raiz);
@@ -409,16 +423,16 @@ function matarDurante(string $raiz, string $sql, callable $sano, int $duracion):
         return [$dentro, 'la base no abre: ' . $e->getMessage()];
     }
 
-    if (is_dir($raiz . '/cortes/.tx')) {
+    if (hayJournal($raiz . '/cortes')) {
         return [$dentro, 'quedó journal sin deshacer'];
     }
-    if (glob($raiz . '/cortes/*.tmp') !== []) {
+    if (glob($raiz . '/cortes/*.tmp') !== [] || glob($raiz . '/cortes/.tx/*.tmp') !== []) {
         // Un SIGKILL puede dejar el temporal; lo que no puede es acumularse.
         // Se provoca una escritura que no dependa de qué tablas o columnas hayan
         // sobrevivido a la operación interrumpida.
         $bd->consultar('CREATE TABLE _barrido (id INTEGER PRIMARY KEY)');
         $bd->consultar('DROP TABLE _barrido');
-        if (glob($raiz . '/cortes/*.tmp') !== []) {
+        if (glob($raiz . '/cortes/*.tmp') !== [] || glob($raiz . '/cortes/.tx/*.tmp') !== []) {
             return [$dentro, 'los temporales no se barrieron'];
         }
     }
@@ -695,7 +709,7 @@ chk('sin manifiesto no se toca nada: los temporales sobran', function () use ($r
     $bd->consultar("UPDATE art SET v = v WHERE id = 1");      // barre el temporal ajeno
     return $n === 300
         && (string)file_get_contents("$raiz/cortes/art.json") === $bueno
-        && !is_dir("$raiz/cortes/.tx") && glob("$raiz/cortes/*.tmp") === []
+        && !hayJournal("$raiz/cortes") && glob("$raiz/cortes/*.tmp") === []
         ?: "quedaron $n filas";
 });
 
@@ -703,7 +717,7 @@ chk('un journal se termina al abrir: temporales en su sitio y sobrantes fuera', 
     [$jd, $bueno] = baseConJournal($raiz, null);
     $bd = new Database('cortes', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
-        && !is_dir("$raiz/cortes/.tx") && glob("$raiz/cortes/*.tmp") === []
+        && !hayJournal("$raiz/cortes") && glob("$raiz/cortes/*.tmp") === []
         && glob("$raiz/cortes/art.part*.json") === [] && glob("$raiz/cortes/art.idx.*.json") === [];
 });
 
@@ -747,7 +761,7 @@ chk('un journal de una versión anterior (copias para deshacer) se deshace', fun
     $bd = new Database('cortes', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 300
         && (string)file_get_contents("$dir/art.json") === $bueno
-        && !is_dir("$dir/.tx");
+        && !hayJournal("$dir");
 });
 
 chk('un manifiesto COMMITTED de una versión anterior no deshace nada', function () use ($raiz) {
@@ -756,14 +770,14 @@ chk('un manifiesto COMMITTED de una versión anterior no deshace nada', function
     file_put_contents("$raiz/cortes/.tx/_base/manifiesto.json", '{"estado":"COMMITTED"}');
     $bd = new Database('cortes', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 300
-        && !is_dir("$raiz/cortes/.tx");
+        && !hayJournal("$raiz/cortes");
 });
 
 chk('un journal de tabla se termina sin el exclusivo de la base', function () use ($raiz) {
     [$jd, $bueno] = baseConJournal($raiz, 'art');
     $bd = new Database('cortes', $raiz);           // una lectura basta
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
-        && !is_dir("$raiz/cortes/.tx");
+        && !hayJournal("$raiz/cortes");
 });
 
 chk('la recuperación es idempotente: repetirla no rompe nada', function () use ($raiz) {
@@ -775,7 +789,7 @@ chk('la recuperación es idempotente: repetirla no rompe nada', function () use 
         unset($bd);
         if ($n !== 0) { return "en la vuelta $i quedaron $n filas"; }
     }
-    return !is_dir("$raiz/cortes/.tx");
+    return !hayJournal("$raiz/cortes");
 });
 
 chk('journals de dos tablas a la vez se terminan los dos', function () use ($raiz) {
@@ -795,7 +809,7 @@ chk('journals de dos tablas a la vez se terminan los dos', function () use ($rai
     $bd = new Database('cortes', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
         && (int)$bd->consultar('SELECT COUNT(*) AS n FROM otra')[0]['n'] === 1
-        && !is_dir("$dir/.tx") && glob("$dir/*.tmp") === [];
+        && !hayJournal("$dir") && glob("$dir/*.tmp") === [];
 });
 
 chk('la revisión sube antes que los datos: un corte solo cuesta caché', function () use ($raiz) {

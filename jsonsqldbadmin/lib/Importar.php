@@ -2,11 +2,13 @@
 declare(strict_types=1);
 
 /**
- * Restaura una base de datos desde la copia ZIP que genera Exportar::zip().
+ * Importaciones: la copia ZIP que genera Exportar::zip(), un fichero de
+ * sentencias SQL (el volcado del panel u otro) y un CSV en una tabla.
  *
- * Escribe directamente en el disco del motor, así que solo funciona cuando el
- * panel y la API están en la misma máquina. Entre máquinas distintas hay que
- * usar el volcado en SQL, que va por la API.
+ * La del ZIP escribe directamente en el disco del motor, así que solo
+ * funciona cuando el panel y el motor están en la misma máquina. Las de SQL y
+ * CSV van sentencia a sentencia por la API o por la conexión directa, y
+ * funcionan entre máquinas distintas.
  *
  * Todo lo que entra se valida antes de tocar nada:
  *
@@ -19,9 +21,192 @@ declare(strict_types=1);
  *
  * Y antes de sobrescribir se guarda una copia de lo que había, para poder
  * volver atrás si la restauración falla a medias.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Importar
 {
+    /** Filas por sentencia al cargar un CSV o juntar los INSERT de un volcado. */
+    private const LOTE = 200;
+
+    /**
+     * Ejecuta un fichero de sentencias SQL —el volcado que genera el panel, u
+     * otro— sentencia a sentencia, por la API o por la conexión directa, así
+     * que funciona entre máquinas distintas. Se lee de forma continua: en
+     * memoria solo está la sentencia en curso, sea cual sea el tamaño.
+     *
+     * Los INSERT seguidos de una misma tabla con las mismas columnas se juntan
+     * en uno de varias filas, que el motor escribe de una vez.
+     *
+     * No hay transacciones: si una sentencia falla, las anteriores ya están
+     * hechas. Se para ahí y se dice cuál era y cuántas se ejecutaron.
+     */
+    public static function sql(string $fichero, string $base): string
+    {
+        $fh = @fopen($fichero, 'rb');
+        if ($fh === false) {
+            throw new RuntimeException('No se puede leer el fichero subido.');
+        }
+        $hechas = 0;
+        $linea  = 0;
+        $prefijo = '';
+        $tuplas  = [];
+        $vaciar = static function () use (&$prefijo, &$tuplas, &$hechas, $base): void {
+            if ($tuplas === []) {
+                return;
+            }
+            Api::sql($base, substr($prefijo, 0, -1) . implode(', ', $tuplas));
+            $hechas += count($tuplas);
+            $prefijo = '';
+            $tuplas  = [];
+        };
+        try {
+            foreach (self::sentencias($fh) as [$sql, $en]) {
+                $linea = $en;
+                // INSERT INTO t (a, b) VALUES (…);  → se junta con los siguientes iguales
+                if (preg_match('/^(INSERT\s+INTO\s+.+?\)\s+VALUES\s*\()/is', $sql, $m) && substr_count($sql, '),') === 0) {
+                    $tupla = '(' . rtrim(substr($sql, strlen($m[1])), "; \t\r\n");
+                    if ($m[1] !== $prefijo || count($tuplas) >= self::LOTE) {
+                        $vaciar();
+                        $prefijo = $m[1];
+                    }
+                    $tuplas[] = $tupla;
+                    continue;
+                }
+                $vaciar();
+                Api::sql($base, $sql);
+                $hechas++;
+            }
+            $vaciar();
+        } catch (Throwable $e) {
+            throw new RuntimeException("Se ejecutaron $hechas sentencia(s) y paró cerca de la línea $linea: "
+                . rtrim($e->getMessage(), '. ') . '. Lo anterior ya está hecho: no hay transacciones.', 0, $e);
+        } finally {
+            fclose($fh);
+        }
+        return "$hechas sentencia(s) ejecutadas.";
+    }
+
+    /**
+     * Las sentencias de un fichero SQL, una a una, con la línea en que acaba
+     * cada una. Separa por punto y coma fuera de cadenas, identificadores
+     * entre comillas y comentarios, y respeta los BEGIN … END de un trigger
+     * y los CASE … END, que llevan puntos y coma o END dentro.
+     *
+     * @param resource $fh
+     * @return \Generator<int, array{0: string, 1: int}>
+     */
+    private static function sentencias($fh): \Generator
+    {
+        $actual = '';
+        $comilla = '';          // '' fuera; "'" o '"' dentro de una cadena o identificador
+        $bloque = false;        // dentro de un /* comentario */
+        $nivel = 0;             // BEGIN y CASE abiertos
+        $n = 0;
+        while (($l = fgets($fh)) !== false) {
+            $n++;
+            $largo = strlen($l);
+            for ($i = 0; $i < $largo; $i++) {
+                $c = $l[$i];
+                if ($bloque) {
+                    if ($c === '*' && ($l[$i + 1] ?? '') === '/') { $bloque = false; $i++; }
+                    continue;
+                }
+                if ($comilla !== '') {
+                    $actual .= $c;
+                    if ($c === $comilla) {
+                        if (($l[$i + 1] ?? '') === $comilla) { $actual .= $c; $i++; } else { $comilla = ''; }
+                    }
+                    continue;
+                }
+                if ($c === '-' && ($l[$i + 1] ?? '') === '-') { break; }            // comentario hasta fin de línea
+                if ($c === '/' && ($l[$i + 1] ?? '') === '*') { $bloque = true; $i++; continue; }
+                if ($c === "'" || $c === '"') { $comilla = $c; $actual .= $c; continue; }
+                if ($c === ';' && $nivel <= 0) {
+                    if (trim($actual) !== '') {
+                        yield [trim($actual) . ';', $n];
+                    }
+                    $actual = '';
+                    $nivel = 0;
+                    continue;
+                }
+                if (ctype_alpha($c) && ($i === 0 || !ctype_alnum($l[$i - 1]) && $l[$i - 1] !== '_')) {
+                    $palabra = strtoupper((string)preg_replace('/[^A-Za-z_].*$/s', '', substr($l, $i, 12)));
+                    if ($palabra === 'BEGIN' || $palabra === 'CASE') { $nivel++; }
+                    elseif ($palabra === 'END') { $nivel--; }
+                }
+                $actual .= $c;
+            }
+            $actual .= $comilla === '' && $bloque === false ? ' ' : "\n";
+        }
+        if ($comilla !== '' || $bloque) {
+            throw new RuntimeException('El fichero acaba con una cadena o un comentario sin cerrar.');
+        }
+        if (trim($actual) !== '') {
+            yield [trim($actual), $n];
+        }
+    }
+
+    /**
+     * Carga un CSV en una tabla que ya existe. La primera línea son los
+     * nombres de las columnas; el separador (coma, punto y coma o tabulador)
+     * se deduce de ella. Un campo vacío es NULL. Se lee de forma continua y
+     * se inserta en lotes, con parámetros ligados.
+     *
+     * Sin transacciones: si un lote falla (un tipo que no encaja, una clave
+     * repetida), lo anterior ya está dentro y se dice hasta qué línea.
+     */
+    public static function csv(string $fichero, string $base, string $tabla): string
+    {
+        $fh = @fopen($fichero, 'rb');
+        if ($fh === false) {
+            throw new RuntimeException('No se puede leer el fichero subido.');
+        }
+        try {
+            $primera = (string)fgets($fh);
+            $primera = preg_replace('/^\xEF\xBB\xBF/', '', $primera) ?? $primera;   // BOM de Excel
+            $sep = ',';
+            foreach ([';', "\t", ','] as $s) {
+                if (substr_count($primera, $s) > substr_count($primera, $sep)) { $sep = $s; }
+            }
+            $cols = array_map('trim', str_getcsv(rtrim($primera, "\r\n"), $sep, '"', ''));
+            if ($cols === [] || in_array('', $cols, true)) {
+                throw new RuntimeException('La primera línea tiene que traer los nombres de las columnas.');
+            }
+            $cab = 'INSERT INTO ' . cita($tabla) . ' (' . implode(', ', array_map('cita', $cols)) . ') VALUES ';
+            $marcas = '(' . implode(', ', array_fill(0, count($cols), '?')) . ')';
+            $lote = [];
+            $filas = 0;
+            $linea = 1;
+            $insertar = static function () use (&$lote, &$filas, $base, $cab, $marcas): void {
+                if ($lote === []) { return; }
+                Api::sql($base, $cab . implode(', ', array_fill(0, count($lote), $marcas)), array_merge(...$lote));
+                $filas += count($lote);
+                $lote = [];
+            };
+            try {
+                while (($r = fgetcsv($fh, 0, $sep, '"', '')) !== false) {
+                    $linea++;
+                    if ($r === [null]) { continue; }                       // línea en blanco
+                    if (count($r) !== count($cols)) {
+                        throw new RuntimeException('tiene ' . count($r) . ' campo(s) y la cabecera ' . count($cols) . '.');
+                    }
+                    $lote[] = array_map(static fn($v) => $v === '' ? null : $v, $r);
+                    if (count($lote) >= self::LOTE) {
+                        $insertar();
+                    }
+                }
+                $insertar();
+            } catch (Throwable $e) {
+                throw new RuntimeException("Se cargaron $filas fila(s); el problema está en la línea $linea o en las "
+                    . self::LOTE . ' anteriores: ' . rtrim($e->getMessage(), '. ') . '. Lo cargado ya está dentro: no hay transacciones.', 0, $e);
+            }
+        } finally {
+            fclose($fh);
+        }
+        return "$filas fila(s) cargadas en '$tabla'.";
+    }
+
     /** Ficheros sueltos que sí se aceptan además de los .json */
     private const PERMITIDOS = ['.htaccess', 'web.config'];
 

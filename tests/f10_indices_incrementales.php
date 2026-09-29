@@ -20,6 +20,8 @@ declare(strict_types=1);
  * ampliado contra el que saldría de rehacerlo entero, y las consultas contra el
  * mismo resultado sin índice. Si la salvaguarda que decide cuándo se puede
  * ampliar se quita, esta suite tiene que ponerse roja.
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 
 define('JSONSQLDB_CONEXION_DIRECTA', true);

@@ -20,11 +20,12 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     }
 }
 ?>
-<h1 class="h5 mb-3">
-  <a class="link-secondary text-decoration-none" href="<?= h(url(['p' => 'tablas', 'db' => $base])) ?>">
-    <i class="bi bi-database"></i> <?= h($base) ?></a>
-  <span class="text-body-tertiary">/</span> <i class="bi bi-terminal"></i> SQL
-</h1>
+<div class="page-head">
+  <div>
+    <h1>Consola SQL</h1>
+    <p>Sentencias contra <?= h($base) ?>. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> ejecuta.</p>
+  </div>
+</div>
 
 <div class="card mb-3">
   <div class="card-body">
@@ -36,20 +37,20 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         <div class="form-text mb-0">
           Una sentencia por ejecución. Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>.
         </div>
-        <button class="btn btn-primary"><i class="bi bi-play-fill"></i> Ejecutar</button>
+        <button class="btn btn-primary"><?= icono('play-fill') ?> Ejecutar</button>
       </div>
     </form>
   </div>
 </div>
 
 <?php if ($error !== null): ?>
-  <div class="alert alert-danger"><i class="bi bi-x-octagon"></i> <?= h($error) ?></div>
+  <div class="alert alert-danger"><?= icono('x-octagon') ?> <?= h($error) ?></div>
 <?php endif; ?>
 
 <?php if ($resultado !== null): ?>
   <?php if (isset($resultado['success'])): ?>
     <div class="alert alert-success">
-      <i class="bi bi-check2-circle"></i> <?= h($resultado['mensaje']) ?>
+      <?= icono('check2-circle') ?> <?= h($resultado['mensaje']) ?>
       <span class="text-body-secondary">(<?= number_format($ms, 1, ',', '.') ?> ms)</span>
     </div>
   <?php elseif ($resultado === []): ?>
@@ -72,7 +73,7 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
               <input type="hidden" name="sql" value="<?= h($sql) ?>">
               <input type="hidden" name="volver" value="sql">
               <button class="btn btn-sm btn-outline-secondary" title="Exportar este resultado">
-                <i class="bi bi-<?= h($b[1]) ?>"></i> <?= h($b[0]) ?></button>
+                <?= icono($b[1]) ?> <?= h($b[0]) ?></button>
             </form>
           <?php endforeach; ?>
         </div>

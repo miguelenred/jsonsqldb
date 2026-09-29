@@ -1,20 +1,21 @@
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h1 class="h5 mb-0">
-    <a class="link-secondary text-decoration-none" href="<?= h(url(['p' => 'tablas', 'db' => $base])) ?>">
-      <i class="bi bi-database"></i> <?= h($base) ?></a>
-    <span class="text-body-tertiary">/</span> <i class="bi bi-table"></i> <?= h($tabla) ?>
-  </h1>
+<?php
+/**
+ * Cabecera de las páginas de una tabla: nombre y pestañas.
+ *
+ * https://miguelenred.es/jsonsqldb
+ */
+?>
+<div class="object-head">
+  <div class="object-title">
+    <span class="object-ico"><?= icono('table') ?></span>
+    <div><h1><?= h($tabla) ?></h1><span class="object-kind">Tabla de <?= h($base) ?></span></div>
+  </div>
+  <nav class="tabs" aria-label="Secciones de la tabla">
+    <a class="tab<?= $vistaActual === 'datos' ? ' active' : '' ?>"
+       href="<?= h(url(['p' => 'datos', 'db' => $base, 'tabla' => $tabla])) ?>"><?= icono('table') ?>Datos</a>
+    <a class="tab<?= $vistaActual === 'estructura' ? ' active' : '' ?>"
+       href="<?= h(url(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla])) ?>"><?= icono('columns') ?>Estructura</a>
+    <a class="tab" href="<?= h(url(['p' => 'sql', 'db' => $base,
+       'sql' => 'SELECT * FROM ' . cita($tabla) . ' LIMIT 100'])) ?>"><?= icono('terminal') ?>SQL</a>
+  </nav>
 </div>
-
-<ul class="nav nav-tabs mb-3">
-  <li class="nav-item">
-    <a class="nav-link<?= $vistaActual === 'datos' ? ' active' : '' ?>"
-       href="<?= h(url(['p' => 'datos', 'db' => $base, 'tabla' => $tabla])) ?>">
-      <i class="bi bi-list-ul"></i> Datos</a>
-  </li>
-  <li class="nav-item">
-    <a class="nav-link<?= $vistaActual === 'estructura' ? ' active' : '' ?>"
-       href="<?= h(url(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla])) ?>">
-      <i class="bi bi-diagram-3"></i> Estructura</a>
-  </li>
-</ul>

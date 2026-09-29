@@ -14,6 +14,8 @@ namespace JsonSQLDB;
  *   - las fechas se guardan como 'yyyy-MM-dd...', así que el orden de texto
  *     coincide con el cronológico y no hace falta convertirlas
  *   - cualquier comparación con NULL da NULL (desconocido)
+ *
+ * https://miguelenred.es/jsonsqldb
  */
 final class Valor
 {

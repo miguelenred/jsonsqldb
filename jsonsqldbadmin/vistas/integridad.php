@@ -26,34 +26,33 @@ try {
     $error = $e->getMessage();
 }
 ?>
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h1 class="h5 mb-0">
-    <a class="link-secondary text-decoration-none" href="<?= h(url(['p' => 'tablas', 'db' => $base])) ?>">
-      <i class="bi bi-database"></i> <?= h($base) ?></a>
-    <span class="text-body-tertiary">/</span> <i class="bi bi-shield-check"></i> Integridad
-  </h1>
-  <a class="btn btn-sm btn-outline-secondary"
-     href="<?= h(url(['p' => 'integridad', 'db' => $base])) ?>">
-    <i class="bi bi-arrow-clockwise"></i> Volver a comprobar</a>
+<div class="page-head">
+  <div>
+    <h1>Integridad</h1>
+    <p>Claves foráneas de <?= h($base) ?> que apuntan a filas que no existen</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-outline-secondary" href="<?= h(url(['p' => 'integridad', 'db' => $base])) ?>"><?= icono('refresh') ?> Volver a comprobar</a>
+  </div>
 </div>
 
 <?php if ($error !== null): ?>
-  <div class="alert alert-danger"><i class="bi bi-x-octagon"></i> <?= h($error) ?></div>
+  <div class="alert alert-danger"><?= icono('x-octagon') ?> <?= h($error) ?></div>
 <?php endif; ?>
 
 <?php if ($mensaje !== null): ?>
-  <div class="alert alert-info"><i class="bi bi-wrench"></i> <?= h($mensaje) ?></div>
+  <div class="alert alert-info"><?= icono('wrench') ?> <?= h($mensaje) ?></div>
 <?php endif; ?>
 
 <?php if ($resultado === []): ?>
   <div class="alert alert-success">
-    <i class="bi bi-check2-circle"></i>
+    <?= icono('check2-circle') ?>
     <strong>Todo correcto.</strong> Ninguna fila apunta a un valor que no exista en su tabla
     destino.
   </div>
 <?php elseif (is_array($resultado)): ?>
   <div class="alert alert-warning">
-    <i class="bi bi-exclamation-triangle"></i>
+    <?= icono('exclamation-triangle') ?>
     <strong><?= count($resultado) ?> fila(s) huérfana(s).</strong>
     Apuntan a valores que ya no existen en la tabla destino. Trabajando por SQL esto no puede
     pasar: casi siempre es que alguien editó un <code>.json</code> a mano o restauró la copia de
@@ -104,11 +103,11 @@ try {
         <p class="small text-body-secondary">
           Haz una copia de la base antes, desde <em>Bases → Copia ZIP</em>.
         </p>
-        <form method="post" onsubmit="return confirm('¿Poner a NULL las claves huérfanas que se puedan?');">
+        <form method="post" data-confirm="¿Poner a NULL las claves huérfanas que se puedan?">
           <?= csrf() ?>
           <input type="hidden" name="corregir" value="1">
           <button class="btn btn-warning"<?= $corregibles === 0 ? ' disabled' : '' ?>>
-            <i class="bi bi-wrench"></i> Corregir <?= $corregibles ?> fila(s)</button>
+            <?= icono('wrench') ?> Corregir <?= $corregibles ?> fila(s)</button>
         </form>
       </div>
     </div>
