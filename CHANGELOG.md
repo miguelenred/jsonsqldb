@@ -232,6 +232,12 @@ single file.
 
 ### Fixed
 
+- **The writer-starvation check in `tests/f7_concurrencia.php` failed on the
+  GitHub runner with PHP 8.0**: the writer kept 29 % of its rate alone next to
+  three readers, and the check demanded 30 %. That margin was too tight for a
+  shared runner. The check now demands 15 % and allows one retry; without the
+  turnstile the writer keeps 5–7 %, so it still fails when the protection is
+  removed (verified by removing it).
 - **`?p=fila` crashed the panel.** The page was on the list of allowed pages
   but had no view behind it, so requesting it was a PHP fatal error. Removed.
 - **The documentation said things that were not true**, found while reviewing

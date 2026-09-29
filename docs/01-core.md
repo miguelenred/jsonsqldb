@@ -392,8 +392,9 @@ several cores the readers barely notice the writer, and the starvation
 without the turnstile is if anything worse, because readers overlap more
 perfectly. `tests/f7_concurrencia.php` checks it: three readers holding the
 lock in a loop for two seconds, and a writer inserting in a loop, which must
-keep at least 30 % of its rate alone (it kept 7 % without the turnstile and
-44 % with it on the machine above).
+keep at least 15 % of its rate alone, with one retry if a loaded CI runner
+gives a bad round (without the turnstile it keeps 5–7 %; with it, 41–44 % on the
+machine above and 29 % on a GitHub runner with PHP 8.0).
 
 **What was considered and not done: reads without any lock.** Since every
 file is replaced atomically, a read could skip the lock, read, and check at
