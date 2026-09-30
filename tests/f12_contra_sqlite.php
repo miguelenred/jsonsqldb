@@ -10,7 +10,9 @@ declare(strict_types=1);
  * docs/02-queries.md: `7 / 2` da 3.5 aquí y 3 en SQLite; '5' = 5 es cierto
  * aquí; ROUND redondea como PHP; ORDER BY usa el cotejamiento configurado.
  * Cada consulta se ejecuta dos veces en jsonSQLDB, con índices y sin ellos.
- * Necesita la extensión pdo_sqlite; sin ella, se salta y lo dice.
+ * Usa la extensión sqlite3 y no PDO: PDO con SQLite devuelve los números
+ * como texto hasta PHP 8.1, y la comparación saldría distinta en 8.0 por eso.
+ * Sin la extensión, se salta y lo dice.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -20,9 +22,28 @@ require dirname(__DIR__) . '/engine/bootstrap.php';
 
 use JsonSQLDB\Database;
 
-if (!extension_loaded('pdo_sqlite')) {
-    echo "Sin la extensión pdo_sqlite: esta prueba se salta.\nOK: 0   FALLOS: 0\n";
+if (!class_exists('SQLite3')) {
+    echo "Sin la extensión sqlite3: esta prueba se salta.\nOK: 0   FALLOS: 0\n";
     exit(0);
+}
+
+/** Una sentencia en SQLite, con parámetros de su tipo. */
+function enSqlite(SQLite3 $s, string $q, array $params = []): array
+{
+    $st = $s->prepare($q);
+    foreach ($params as $i => $v) {
+        $st->bindValue($i + 1, $v, $v === null ? SQLITE3_NULL
+            : (is_int($v) ? SQLITE3_INTEGER : (is_float($v) ? SQLITE3_FLOAT : SQLITE3_TEXT)));
+    }
+    $r = $st->execute();
+    $filas = [];
+    // Solo si devuelve columnas: pedir filas a un CREATE o un INSERT lo
+    // vuelve a ejecutar (así funciona fetchArray() de SQLite3)
+    while ($r !== false && $r->numColumns() > 0 && ($f = $r->fetchArray(SQLITE3_ASSOC)) !== false) {
+        $filas[] = $f;
+    }
+    $st->close();
+    return $filas;
 }
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f12';
@@ -204,12 +225,12 @@ function preparar(string $raiz, bool $indices, int $filasT, int $filasU): array 
     mkdir($raiz, 0775, true);
     Database::crear('b', $raiz);
     $j = new Database('b', $raiz);
-    $s = new PDO('sqlite::memory:');
-    $s->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $s = new SQLite3(':memory:');
+    $s->enableExceptions(true);
     foreach (['CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR(20), c DOUBLE, d INTEGER)',
               'CREATE TABLE u (id INTEGER PRIMARY KEY, tid INTEGER, x INTEGER, y VARCHAR(10))'] as $q) {
         $j->consultar($q);
-        $s->exec($q);
+        enSqlite($s, $q);
     }
     if ($indices) {
         foreach (['CREATE INDEX ia ON t (a)', 'CREATE INDEX ib ON t (b)', 'CREATE INDEX id2 ON t (d)',
@@ -223,12 +244,12 @@ function preparar(string $raiz, bool $indices, int $filasT, int $filasU): array 
         $f = [$i, mt_rand(0, 9) ? mt_rand(-5, 20) : null, mt_rand(0, 7) ? $pal[mt_rand(0, 8)] : null,
               mt_rand(0, 6) ? mt_rand(-300, 900) / 10 : null, mt_rand(0, 2) ? mt_rand(0, 3) : null];
         $j->consultar('INSERT INTO t VALUES (?,?,?,?,?)', $f);
-        $s->prepare('INSERT INTO t VALUES (?,?,?,?,?)')->execute($f);
+        enSqlite($s, 'INSERT INTO t VALUES (?,?,?,?,?)', $f);
     }
     for ($i = 1; $i <= $filasU; $i++) {
         $f = [$i, mt_rand(0, 8) ? mt_rand(1, $filasT + 10) : null, mt_rand(-3, 9), mt_rand(0, 4) ? ['p', 'q', 'r'][mt_rand(0, 2)] : null];
         $j->consultar('INSERT INTO u VALUES (?,?,?,?)', $f);
-        $s->prepare('INSERT INTO u VALUES (?,?,?,?)')->execute($f);
+        enSqlite($s, 'INSERT INTO u VALUES (?,?,?,?)', $f);
     }
     return [$j, $s];
 }
@@ -260,7 +281,7 @@ foreach ([false, true] as $indices) {
         foreach ($lista as $q) {
             $ordenada = stripos($q, 'ORDER BY') !== false;
             try { $a = comparable($j->consultar($q), $ordenada); } catch (Throwable $e) { $a = ['ERROR ' . $e->getMessage()]; }
-            try { $b = comparable($s->query($q)->fetchAll(PDO::FETCH_ASSOC), $ordenada); } catch (Throwable $e) { $b = ['ERROR ' . $e->getMessage()]; }
+            try { $b = comparable(enSqlite($s, $q), $ordenada); } catch (Throwable $e) { $b = ['ERROR ' . $e->getMessage()]; }
             if ($a !== $b) { $mal[] = $q; }
         }
         return $mal === [] ?: count($mal) . ' distinta(s), la primera: ' . $mal[0];
@@ -273,11 +294,11 @@ foreach ([false, true] as $indices) {
         foreach ($escrituras as $q) {
             $ej = $es = null;
             try { $j->consultar($q); } catch (Throwable $e) { $ej = $e->getMessage(); }
-            try { $s->exec($q); } catch (Throwable $e) { $es = $e->getMessage(); }
+            try { enSqlite($s, $q); } catch (Throwable $e) { $es = $e->getMessage(); }
             if (($ej === null) !== ($es === null)) { return "$q: jsonSQLDB " . ($ej ?? 'bien') . ', SQLite ' . ($es ?? 'bien'); }
             foreach (['t', 'u'] as $tb) {
                 $a = comparable($j->consultar("SELECT * FROM $tb ORDER BY id"), true);
-                $b = comparable($s->query("SELECT * FROM $tb ORDER BY id")->fetchAll(PDO::FETCH_ASSOC), true);
+                $b = comparable(enSqlite($s, "SELECT * FROM $tb ORDER BY id"), true);
                 if ($a !== $b) { return "tras '$q', la tabla $tb es distinta"; }
             }
         }

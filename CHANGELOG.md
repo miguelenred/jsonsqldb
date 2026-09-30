@@ -160,7 +160,8 @@ deleted row, because every row after it moves.
   correlated and uncorrelated subqueries, `UNION`, and `UPDATE`/`DELETE`/
   `INSERT … SELECT` with subqueries. The documented differences (`7 / 2`,
   `'5' = 5`, `ROUND` on binary ties, collation in `ORDER BY`) are left out on
-  purpose. It needs `pdo_sqlite`, and skips itself without it. This is what
+  purpose. It uses the `sqlite3` extension rather than PDO, which returns
+  numbers as text before PHP 8.1, and skips itself without it. This is what
   found the four faults above.
 - `tests/_azar_escrituras.php`, run by `tests/f3_escrituras.php`: three
   hundred random `INSERT`s, `UPDATE`s by key and by condition and `DELETE`s on
