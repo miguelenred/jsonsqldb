@@ -154,6 +154,27 @@ chk('una API key limitada a bases concretas exige db', function () {
     $r = firmada('SHOW DATABASES', $GLOBALS['CLAVE_LECTURA'], '');
     return str_contains($r['error'] ?? '', 'indica el parámetro db');
 });
+chk('una API key limitada solo ve sus bases en SHOW DATABASES', function () {
+    // Pidiéndolo desde una base suya, el motor lo contesta para todas: la API
+    // tiene que quitar las que no son de la clave
+    firmada('CREATE DATABASE otra_ajena', $GLOBALS['CLAVE_ADMIN'], '');
+    $r = firmada('SHOW DATABASES', $GLOBALS['CLAVE_LECTURA'], 'apibase');
+    firmada('DROP DATABASE otra_ajena', $GLOBALS['CLAVE_ADMIN'], '');
+    $bases = array_column(is_array($r) && !isset($r['error']) ? $r : [], 'base');
+    return $bases === ['apibase'] ?: 've: ' . json_encode($r);
+});
+chk('una API key limitada no puede crear ni borrar bases', function () {
+    // Aunque tuviera permiso de administración: la limitación es a unas bases,
+    // y crear o borrar una no es de ninguna de ellas
+    firmada('CREATE DATABASE otra_ajena', $GLOBALS['CLAVE_ADMIN'], '');
+    $clave = 'CLAVE_DE_PRUEBA_ADMIN_LIMITADA_000000000000000000000000000000000';
+    $r1 = firmada('DROP DATABASE otra_ajena', $clave, 'apibase');
+    $r2 = firmada('CREATE DATABASE otra_mas', $clave, 'apibase');
+    $sigue = in_array('otra_ajena', array_column((array)firmada('SHOW DATABASES', $GLOBALS['CLAVE_ADMIN'], ''), 'base'), true);
+    firmada('DROP DATABASE otra_ajena', $GLOBALS['CLAVE_ADMIN'], '');
+    return (str_contains($r1['error'] ?? '', 'limitada') && str_contains($r2['error'] ?? '', 'limitada') && $sigue)
+        ?: json_encode([$r1, $r2, $sigue]);
+});
 chk('nombre de base no válido', function () {
     $r = firmada('SELECT 1', $GLOBALS['CLAVE_ADMIN'], '../../etc');
     return str_contains($r['error'] ?? '', 'no válido');

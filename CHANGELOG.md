@@ -9,6 +9,173 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.7.1] - 2026-09-29
+
+Faster writes and five fixes, three of them security fixes found by an external
+review of 2.7.0. Nothing changes in how the engine is used: same SQL, same
+on-disk format, same configuration. Update from 2.7.0 by replacing the files;
+there is nothing to migrate.
+
+### Changed
+
+- **An `INSERT` or `UPDATE` no longer decodes and re-encodes the part it
+  touches.** An `INSERT` appends its rows to the text of the last part, and an
+  `UPDATE` replaces the lines of the rows it changes; the row offsets are
+  recomputed and the rest of the file is copied as it is. The result is the
+  same file byte for byte (`tests/f3_escrituras.php` rewrites a part with
+  quotes, backslashes, newlines, accents, emoji, `NULL`s and decimals through
+  both paths and compares them; it fails if the splice is off by one byte). A
+  part that is not in the expected shape — from before 2.7, or edited by hand
+  — is written the old way.
+- **Written parts are not copied into the cache.** Serialising a part and
+  writing the copy cost more than it saved the first reader, which decodes it
+  once and caches it then.
+- **The old rows of an `UPDATE` are read by line**, not by decoding their part.
+- **A key in a text index is searched for in the text of the pieces**, without
+  decoding them: the uniqueness check of an `INSERT` into a table with a
+  `UNIQUE` text column (an email) used to build a thousand entries per piece
+  to look up one, and a lookup by that column did the same. The key is
+  searched as `"key":` preceded by `{` or `,` after checking the header of
+  each piece; many rows in one statement switch to decoding the pieces once.
+- A part is written in 64 KB blocks instead of one `fwrite` per row, and the
+  numeric range of a piece of an integer key is computed with one regular
+  expression over all its keys.
+
+Measured with `php tests/benchmark.php` on 20,000 rows (one core, on-disk
+cache), mean of three runs of each version, 2.7.0 against 2.7.1: `INSERT` 10.0 →
+7.2 ms and 9.2 → 6.4 MB (two runs at 6.0–6.3 ms and one at 9.3), `UPDATE` by
+key 13.0 → 6.7 ms and 9.9 → 5.7 MB, `DELETE` by key 17.1 → 11.1 ms, bulk load
+−9 %, lookup by a `UNIQUE` text column 1.97 → 0.57 ms. With the kernel made to
+delay each `fsync` by 3 ms, as a shared host's disk does, and a `UNIQUE` text
+column in the table, 2.6.1 against 2.7.1: `INSERT` 64 → 42 ms, `UPDATE` 65 →
+37 ms, `DELETE` 86 → 41 ms. On 100,000 rows, one run each, 2.6.1 against
+2.7.1: `INSERT` 22.5 → 13.6 ms, `UPDATE` 26.1 → 13.9 ms, `DELETE` 22.5 →
+9.9 ms, lookup by a `UNIQUE` text column 8.6 → 1.9 ms. `DELETE` still decodes the parts after the
+deleted row, because every row after it moves.
+
+### Fixed
+
+- **An API key with administration permission limited to some databases could
+  create and drop any other database** with `CREATE DATABASE` or
+  `DROP DATABASE` sent from one of its own. Those statements go to the global
+  path, which did not look at the key's databases. A limited key can no
+  longer create or drop databases at all. `tests/f4_api.php` checks it with a
+  limited administration key; without the fix the check drops the other
+  database.
+- **A limited key saw every database in `SHOW DATABASES`** sent from one of its
+  own databases. It now sees only its own.
+- **`DROP DATABASE` did not wait for queries using that database**: it deleted
+  the files under a running read. It now takes the database's exclusive lock
+  first, through its turnstile, and deletes the lock files last (Windows does
+  not delete an open file). `tests/f7_concurrencia.php` drops a database while
+  another process holds a read open for a second; without the lock the reader
+  crashes.
+- **An `INTEGER` out of PHP's range was stored as another number**:
+  `'9223372036854775808'` became the largest integer without a word. It is now
+  an error, and so is a decimal like `1e19` for an `INTEGER` column.
+- **The API's rate limit kept recording rejected requests**, so a flood of
+  thousands of requests grew the state file that every request reads and
+  rewrites. Past the limit nothing more is recorded; the failure log has a
+  ceiling too.
+
+### Added
+
+- **The panel's configuration can be changed from its Configuration page**,
+  which until now only showed it: connection, security and data screens. A
+  new connection is tested before it is saved; an IP list without your own
+  address, or requiring HTTPS while you are on HTTP, is refused so nobody
+  locks themselves out; keys are never shown, and an empty key field keeps the
+  current one; the audit trail records which settings changed, not their
+  values. `tests/f11_asistente.php` checks saving and every refusal.
+
+### Fixed — found by looking for bugs
+
+- **Deleting a panel user, or changing their password, did not end their open
+  sessions.** The session kept the user and role from the moment of logging in
+  and was never checked again, and since it expires by inactivity, a session
+  kept busy never expired: a deleted administrator kept administering. Every
+  request now checks that the user still exists with the same password and
+  takes the role from what is stored. Everyone is logged out once when
+  upgrading, because older sessions lack the check. Two checks in
+  `tests/f11_asistente.php` fail without the fix.
+- **The panel failed with a `config.php` made by an earlier version**, which
+  lacks the options added since: the new Configuration page stopped with
+  "Undefined constant". The panel now loads `config.php` first and then the
+  template, which defines only what is missing, with its default value. And a
+  page that fails halfway is no longer sent with the error page embedded in
+  it: the page is prepared whole, and discarded if something fails. Both
+  checked in `tests/f11_asistente.php` with a `config.php` in the old shape.
+- The Configuration page showed the engine's response time as 0.0 ms: it was
+  timing an answer the sidebar had already obtained.
+- **The ZIP export did not ask the engine for permission.** It reads the files
+  directly, so a read-only panel user whose API key is limited to some
+  databases could download any other one on the same host. It now asks the
+  engine about the database with the user's credentials first.
+
+- **Importing an SQL dump doubled the line breaks inside text values.** The
+  statement splitter of the panel's SQL import passed every character of a
+  line, the line break included, and then added another; inside a string that
+  second break became part of the value. A text with line breaks exported and
+  imported again came back with twice as many. `tests/f5_admin.php` exports and
+  imports a value with `\n`, `\r\n`, `--` and `;` inside it.
+- **The SQL dump and the CSV export rounded decimals to ten places**:
+  `0.30000000000000004` came out as `0.3`. They now write the shortest decimal
+  that gives back exactly the same number (the same test checks it).
+- **A condition of the `WHERE` could be applied too early in a chain of joins
+  with a `RIGHT` or `FULL JOIN` further on.** `a JOIN b … RIGHT JOIN c …
+  WHERE a.x IS NULL OR a.x = 1` returned an extra row of `c`: removing rows of
+  `a` before the join left a row of `c` without a match, the `RIGHT JOIN` filled
+  it with `NULL`s, and the condition let it through. The `WHERE` is no longer
+  applied early when any join of the chain is `RIGHT` or `FULL`. Introduced in
+  2.7.0; `tests/f2_select.php` checks the case against a condition that cannot
+  be applied early.
+- An `INSERT` into a table whose last part was exactly full decoded and
+  rewrote that part unchanged; it now leaves it alone and writes only the new
+  part.
+- The panel's SQL import refuses files that create or drop databases: it
+  imports into one database, and a file should not be able to drop another.
+
+### Fixed — found by comparing with SQLite
+
+- **An `UPDATE` or `DELETE` with a subquery ran the subquery again for every
+  row.** `UPDATE u SET x = x + 1 WHERE x > (SELECT AVG(x) FROM u)` on 5,000
+  rows took 10.1 s, and `DELETE … WHERE id IN (SELECT …)` 2.8 s; now 48 ms and
+  42 ms. A subquery that does not look at the row being written runs once per
+  statement, and `IN (SELECT …)` looks values up in a set.
+- **A subquery in an `UPDATE` or `DELETE` could not refer to the row being
+  written**: `UPDATE u SET y = (SELECT b FROM t WHERE t.id = u.tid)` failed with
+  "Columna desconocida". It works now, as it already did in a `SELECT`.
+- **`ORDER BY 1` did not order**: a bare number was taken as a constant, and the
+  rows came in table order without a word. It now orders by that column of the
+  result, as SQLite and MySQL do, and a number beyond the columns is an error.
+- **A `HAVING` could not use the aliases of the `SELECT`**: `SELECT d,
+  COUNT(*) AS n … HAVING n > 3` failed with "Columna desconocida"; it works now.
+
+### Tests
+
+- **`tests/f12_contra_sqlite.php`** runs 139 queries and 16 writes on the same
+  data in jsonSQLDB and in SQLite, with and without indexes, and demands the
+  same results — filters with `NULL`s, `IN`, `LIKE`, arithmetic, functions,
+  aggregates, `GROUP BY`/`HAVING`, `ORDER BY`/`LIMIT`, every kind of join,
+  correlated and uncorrelated subqueries, `UNION`, and `UPDATE`/`DELETE`/
+  `INSERT … SELECT` with subqueries. The documented differences (`7 / 2`,
+  `'5' = 5`, `ROUND` on binary ties, collation in `ORDER BY`) are left out on
+  purpose. It needs `pdo_sqlite`, and skips itself without it. This is what
+  found the four faults above.
+- `tests/_azar_escrituras.php`, run by `tests/f3_escrituras.php`: three
+  hundred random `INSERT`s, `UPDATE`s by key and by condition and `DELETE`s on
+  a table with a primary key, a `UNIQUE` text column and an index, with parts
+  of 7 and of 50 rows so that writes cross their edges all the time. Every
+  twenty operations it compares the table with a model kept in memory, every
+  index with a scan that cannot use it, and the text of every part with what a
+  complete rewrite would produce.
+
+### Documentation
+
+- The concurrency table of the README has the row for writes by part, and
+  `docs/03-writes.md` explains how an `INSERT` and an `UPDATE` edit the text of
+  a part.
+
 ## [2.7.0] - 2026-09-29
 
 The release that goes to the floor: for every kind of operation, what the
@@ -2022,6 +2189,18 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[2.7.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.1
+[2.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.0
+[2.6.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.6.1
+[2.6.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.6.0
+[2.5.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.5.0
+[2.4.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.4.0
+[2.3.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.3.0
+[2.2.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.2.1
+[2.2.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.2.0
+[2.1.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.1.1
+[2.1.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.1.0
+[2.0.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.0.0
 [1.10.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.10.1
 [1.10.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.10.0
 [1.9.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v1.9.0

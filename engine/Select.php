@@ -70,6 +70,17 @@ final class Select
     }
 
     /**
+     * Una subconsulta de un UPDATE o un DELETE, que puede mirar la fila de
+     * fuera: $mapa dice cómo se llaman sus columnas (col y tabla.col) y $fila
+     * es la fila que se está escribiendo.
+     */
+    public function ejecutarExterna(array $ast, array $mapa, array $fila): array
+    {
+        $this->externo = ['mapa' => $mapa, 'fila' => $fila];
+        return $this->correr($ast)['filas'];
+    }
+
+    /**
      * Tablas de las que depende una consulta —las del FROM, las de sus
      * subconsultas y las de las vistas que use—, o null si su resultado no
      * se puede guardar: porque no es determinista (RANDOM(), la fecha de
@@ -253,16 +264,37 @@ final class Select
         }
         $agrupar = $grupoExprs !== [] || $ast['having'] !== null || $this->hayAgregados($salida, $ast);
 
-        $having = $ast['having'] === null ? null : Evaluator::resolver($ast['having'], $mapa, [], $this->externo['mapa'] ?? []);
-
-
-        // Alias de salida utilizables en ORDER BY
+        // Alias de salida, utilizables en el HAVING y en el ORDER BY
         $aliasSalida = [];
         foreach ($salida as $c) {
             $aliasSalida[strtolower($c['nombre'])] = $c['nombre'];
         }
+        // En el HAVING, un alias de la salida que no es una columna de las
+        // tablas se sustituye por su expresión: HAVING n > 3 con COUNT(*) AS n
+        // es HAVING COUNT(*) > 3, que es lo que sabe acumular la agrupación
+        $crudos = [];
+        foreach ($ast['cols'] as $c) {
+            if (empty($c['star']) && ($c['alias'] ?? null) !== null && !array_key_exists(strtolower($c['alias']), $mapa)) {
+                $crudos[strtolower((string)$c['alias'])] = $c['expr'];
+            }
+        }
+        $having = $ast['having'] === null ? null : Evaluator::resolver(
+            $crudos === [] ? $ast['having'] : self::sustituirAlias($ast['having'], $crudos),
+            $mapa, [], $this->externo['mapa'] ?? []);
+
         $orden = [];
         foreach ($ast['order'] as $o) {
+            // ORDER BY 2: la segunda columna de la salida. Un número suelto no
+            // ordenaba nada (era una constante) y el resultado salía en el
+            // orden de la tabla sin avisar
+            if (($o['expr']['k'] ?? '') === 'lit' && is_int($o['expr']['v'])) {
+                $n = $o['expr']['v'];
+                if ($n < 1 || $n > count($salida)) {
+                    throw JsonSqlDbError::syntax("ORDER BY $n: la consulta devuelve " . count($salida) . ' columna(s)');
+                }
+                $orden[] = ['expr' => $salida[$n - 1]['expr'], 'dir' => $o['dir']];
+                continue;
+            }
             $orden[] = ['expr' => Evaluator::resolver($o['expr'], $mapa, $aliasSalida, $this->externo['mapa'] ?? []), 'dir' => $o['dir']];
         }
 
@@ -1118,14 +1150,20 @@ final class Select
         $filas   = $primero['filas'];
         $fuentes = $primero['fuentes'];
 
+        $derechas = false;
+        foreach ($from as $o) {
+            $derechas = $derechas || in_array($o['join'] ?? '', ['RIGHT', 'FULL'], true);
+        }
         for ($i = 1, $n = count($from); $i < $n; $i++) {
             // Lo que el WHERE dice solo de las tablas que ya están en el
             // cruce se aplica antes de cruzar: cada fila que cae aquí es una
             // fila menos que buscar o casar. Con INNER y LEFT no cambia nada
             // del resultado; con RIGHT y FULL sí podría (una fila descartada
             // deja huérfanas a las de la otra tabla), y no se hace.
-            $tipo = $from[$i]['join'] ?? 'CROSS';
-            if ($where !== null && $tipo !== 'RIGHT' && $tipo !== 'FULL') {
+            // Tampoco si hay uno en cualquier punto de la cadena: un RIGHT JOIN
+            // posterior rellena con NULL las filas que se quedan sin pareja, y
+            // haber quitado antes filas de la izquierda cambia cuáles son
+            if ($where !== null && !$derechas) {
                 $filas = $this->empujarWhere($filas, $fuentes, $where);
             }
             // Con pocas filas a la izquierda y un índice en la tabla de la
@@ -1743,6 +1781,26 @@ final class Select
      *
      * @param list<array{0: string, 1: string, 2: string}> $fuentes
      */
+    /**
+     * Cambia en una expresión cada columna sin tabla que es un alias de la
+     * salida por la expresión de ese alias. No entra en subconsultas: allí los
+     * nombres son de otra consulta.
+     *
+     * @param array<string, array> $alias alias en minúsculas => expresión
+     */
+    private static function sustituirAlias(array $n, array $alias): array
+    {
+        if (($n['k'] ?? '') === 'col' && ($n['tabla'] ?? null) === null && isset($alias[strtolower((string)$n['nombre'])])) {
+            return $alias[strtolower((string)$n['nombre'])];
+        }
+        foreach ($n as $k => $v) {
+            if (is_array($v) && $k !== 'select') {
+                $n[$k] = self::sustituirAlias($v, $alias);
+            }
+        }
+        return $n;
+    }
+
     private function mapaColumnas(array $fuentes): array
     {
         $mapa = [];

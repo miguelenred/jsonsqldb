@@ -242,6 +242,17 @@ final class Indexes
      */
     public static function rango(array $keys): ?array
     {
+        if ($keys === []) {
+            return [];
+        }
+        // El caso de siempre —una clave primaria entera— se resuelve con una
+        // sola expresión regular sobre todas las claves juntas: la mitad de
+        // tiempo que mirarlas una a una. Si alguna no es un entero solo, por
+        // el camino general
+        $n = preg_match_all('/^n\d+:(-?\d+)$/m', implode("\n", array_keys($keys)), $m);
+        if ($n === count($keys)) {
+            return [(int)min($m[1]), (int)max($m[1])];
+        }
         $min = $max = null;
         foreach (array_keys($keys) as $clave) {
             $v = self::valorNumerico((string)$clave);

@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, storin
 data in JSON files. No database server, no Composer, no extensions beyond the
 standard ones. You copy a folder and it works.
 
-**Version 2.7.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.7.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
 
 ---
 
@@ -39,12 +39,12 @@ multi-file writes are finished or discarded whole by the journal.
 
 Rough numbers on 20,000 customers and 30,000 orders, one core, PHP 8.3,
 on-disk cache: a primary key lookup 0.6 ms and 6 MB, a lookup by a `UNIQUE` text
-column 2 ms, a scan with a numeric filter and no index 12 ms and 6 MB, a
+column 0.6 ms, a scan with a numeric filter and no index 12 ms and 6 MB, a
 `GROUP BY` 26 ms and 6 MB, an aggregate join of both tables 134 ms and 22 MB, a
-single-row `INSERT` 10 ms and 9 MB, an `UPDATE` by key 13 ms and 10 MB, and any
+single-row `INSERT` 7 ms and 6 MB, an `UPDATE` by key 7 ms and 6 MB, and any
 of those repeated on unchanged data under half a millisecond. On 100,000 rows:
-primary key lookup 0.75 ms and 6 MB, `UNIQUE` text lookup 9 ms, `GROUP BY`
-115 ms and 6 MB, single-row `INSERT` 36 ms and 22 MB. The writes are measured
+primary key lookup 0.75 ms and 6 MB, `UNIQUE` text lookup 2 ms, `GROUP BY`
+115 ms and 6 MB, single-row `INSERT` 14 ms. The writes are measured
 on a disk where an `fsync` costs 0.1 ms; on a shared host's disk, where it
 costs a few milliseconds, add that four times. A write reads and rewrites only the parts
 it touches and the pieces of the indexes that cover them; a read holds the
@@ -772,6 +772,7 @@ table — which is what makes a deadlock impossible:
 |---|---|---|
 | Reads (`SELECT`, `SHOW`, `CHECK KEYS`) | shared | **shared**, per table read |
 | A write to **one** table with no foreign keys or triggers | shared | **exclusive** |
+| An `UPDATE` or `DELETE` that depends only on each row (2.7) | shared | **shared** while it works, **exclusive** only to commit (writes by part) |
 | Cascades and triggers, when the set of tables is knowable | shared | **exclusive on every table** it can reach |
 | Schema changes, views, `REPAIR KEYS`, `INSERT ... SELECT` | **exclusive** | — |
 
@@ -844,27 +845,31 @@ and streaming do.
 #### What the engine does about it
 
 Measured with `php tests/benchmark.php` on 20,000 customers and 30,000 orders
-(on-disk cache, one core, PHP 8.3), 2.6.1 against 2.7.0, each the mean of three
+(on-disk cache, one core, PHP 8.3), 2.6.1 against 2.7, each the mean of three
 runs taken one after the other; differences under 10 % are within what two runs
-of the same version differ by:
+of the same version differ by. The writes and the lookup by a `UNIQUE` text
+column are 2.7.1, also the mean of three runs; the rest did not change in
+2.7.1:
 
-| | 2.6.1 | 2.7.0 |
+| | 2.6.1 | 2.7 |
 |---|---|---|
 | Lookup by primary key | 2.85 ms · 7.1 MB | **0.58 ms · 5.5 MB** |
 | `IN` of ten primary keys | 3.45 ms · 7.1 MB | **0.41 ms · 5.5 MB** |
-| Lookup by a `UNIQUE` text column | 2.40 ms · 7.3 MB | 1.97 ms · 6.8 MB |
+| Lookup by a `UNIQUE` text column | 2.40 ms · 7.3 MB | **0.57 ms · 5.3 MB** |
 | `BETWEEN` on the primary key (1,000 rows) | 19.5 ms (scan) | **1.89 ms · 6.3 MB** |
 | Numeric range, no index | 19.5 ms · 5.7 MB | **12.0 ms · 6.3 MB** |
 | `JOIN` of one order with its customer | ~20 ms · 25 MB | **0.46 ms · 5.6 MB** |
 | `LEFT JOIN` of twenty orders | ~60 ms · 23 MB | **3.7 ms · 6.1 MB** |
 | `GROUP BY`, `ORDER BY`, `LIKE`, aggregated `JOIN`, subquery | — | same, ±8 % |
-| `INSERT` / `UPDATE` / `DELETE` one row | 11.0 / 13.6 / 18.3 ms | 10.0 / 13.0 / 17.1 ms |
+| `INSERT` / `UPDATE` / `DELETE` one row | 11.0 / 13.6 / 18.3 ms | **7.2 / 6.7 / 11.1 ms** |
 
 On 100,000 rows: a primary key lookup from 9.3 ms and 13 MB to 0.75 ms and
 5.5 MB, ten keys by `IN` from 9.1 ms to 0.56 ms, a range without index from
 92 ms to 58 ms, and the rest the same. A lookup by a `UNIQUE` text column
-stays at 9 ms: a text key can be in any piece of the index, so all of them are
-read (see "Where the floor is" in [`docs/01-core.md`](docs/01-core.md)). The
+goes from 8.6 ms to 1.9 ms: a text key can be in any piece of the index, so all
+of them are read, but as text, searching for the key, without decoding them.
+Writes of one row on 100,000 rows: `INSERT` 22.5 → 13.6 ms, `UPDATE` 26.1 →
+13.9 ms, `DELETE` 22.5 → 9.9 ms. The
 writes do not change here because this machine's disk makes an `fsync` cost
 0.1 ms; on a shared host's disk, where it costs 3 ms, a one-row `INSERT` goes
 from 50 ms to 28 ms because 2.7 makes four `fsync` calls where 2.6 made ten.
@@ -941,17 +946,18 @@ touch your data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 145   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 60    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 52    real requests against the API
+php tests/f2_select.php       → OK: 146   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
+php tests/f4_api.php          → OK: 54    real requests against the API
 php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 124   the panel, driven like a user
+php tests/f5_admin.php        → OK: 126   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 27    real simultaneous processes and locking
+php tests/f7_concurrencia.php → OK: 28    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 18    panel setup wizard and direct connection
+php tests/f11_asistente.php    → OK: 31    panel setup wizard and direct connection
+php tests/f12_contra_sqlite.php → OK: 4    139 queries and 16 writes, same results as SQLite
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that

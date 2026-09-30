@@ -588,6 +588,37 @@ chk('dos escrituras sobre grupos de tablas sin relación no se esperan', functio
     return true;
 });
 
+echo "\n== Borrar una base en uso ==\n";
+
+chk('DROP DATABASE espera a que acabe una lectura larga de esa base', function () use ($raiz) {
+    // Un proceso lee la base con su bloqueo cogido durante un segundo; el
+    // borrado tiene que esperar a que lo suelte, no borrar los ficheros por
+    // debajo de la lectura
+    $dir = $raiz . '/borrado';
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('b', $dir);
+    $bd = new Database('b', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+    $bd->consultar('INSERT INTO t VALUES (1), (2), (3)');
+    unset($bd);
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$st = new JsonSQLDB\\Storage(' . var_export($dir, true) . ', "b"); $st->bloquear(false); echo "dentro\\n"; flush();'
+            . 'usleep(1000000); $n = 0; foreach ($st->filas("t") as $f) { $n++; } $st->desbloquear(); echo $n;';
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+    fgets($tub[1]);                                     // el lector ya tiene el bloqueo
+    $t = microtime(true);
+    Database::borrar('b', $dir);
+    $espera = microtime(true) - $t;
+    $leidas = trim((string)stream_get_contents($tub[1]));
+    $err = trim((string)stream_get_contents($tub[2]));
+    fclose($tub[1]); fclose($tub[2]); proc_close($p);
+    if ($err !== '') { return 'el lector falló: ' . substr($err, 0, 200); }
+    if ($leidas !== '3') { return "el lector vio $leidas filas en vez de 3: se le borró la base por debajo"; }
+    if (is_dir("$dir/b")) { return 'la base no se borró'; }
+    return $espera > 0.8 ?: sprintf('el borrado no esperó (%.2f s)', $espera);
+});
+
 echo "\n== Escritura por partes ==\n";
 
 /**

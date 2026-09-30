@@ -1160,16 +1160,16 @@ Measured on the one-core benchmark machine (PHP 8.3, on-disk cache, 20,000
 customers and 30,000 orders unless said otherwise); the floor is what the same
 machine takes to do only the unavoidable part:
 
-| Operation | 2.7.0 | Floor | What separates them |
+| Operation | 2.7.1 | Floor | What separates them |
 |---|---|---|---|
 | Scan with a numeric filter | 0.6 ms per part of 1,000 rows | ~0.45 ms: decoding the part | yielding each row through the pipeline and counting it, in PHP |
 | Scan with other filters, `GROUP BY`, `ORDER BY … LIMIT` | 1.0–1.2 ms per part | ~0.45 ms | evaluating the `WHERE` and accumulating, in PHP, one row at a time |
 | Lookup of one row by a numeric key | 0.58 ms (0.75 ms on 100,000 rows) | ~0.3 ms | reading one piece of the index and three small reads of the part; the lock, the parse and the log are the rest |
-| Lookup of one row by a text key (`UNIQUE` on a text column) | 1.97 ms (9 ms on 100,000 rows) | same as a numeric key | every piece of the index has to be read, since a text key can be in any; a numeric key knows its piece from its value. This one is **not** at the floor: see below |
+| Lookup of one row by a text key (`UNIQUE` on a text column) | 0.57 ms (1.9 ms on 100,000 rows) | same as a numeric key | every piece of the index has to be read, since a text key can be in any; since 2.7.1 they are read as text and searched for the key, not decoded. The reading grows with the table: see below |
 | `JOIN` of two big tables | 134 ms for 30,000 × 20,000 | ~50 ms: decoding both sides | hashing one side and matching every row of the other, in PHP |
 | `JOIN` after a selective `WHERE` (one order and its customer) | 0.46 ms | ~0.3 ms | one lookup by key per row on the left; nothing else |
 | Full `ORDER BY` | 36 ms for 20,000 rows | ~20 ms: decoding plus `asort` | building the sort keys and the result rows |
-| Write of one row | 4 `fsync` calls (5 when it opens a new part) plus ~1 ms of encoding | 4 `fsync` calls | nothing: the part and `rev.json` must each be forced to disk, plus the manifest and the directory |
+| Write of one row | 4 `fsync` calls (5 when it opens a new part); `INSERT` 7.2 ms, `UPDATE` 6.7 ms on 20,000 rows | 4 `fsync` calls plus rewriting one part and one piece per index | an `INSERT` or `UPDATE` edits the text of the part without decoding it; what remains is checking uniqueness, the index pieces and the journal |
 | Writes to the same table from two processes | by part since 2.7 (see [Writes by part](#writes-by-part-27)); the commit, one at a time | the commit, one at a time | three of the four `fsync` calls belong to the commit, so two writers overlap only in the fourth and in their computing |
 
 Everything in the third column is the cost of PHP arrays and readable JSON.
@@ -1179,7 +1179,8 @@ never builds a PHP array per row. This engine exists for the hosting where
 SQLite is not available; on that hosting, these are the numbers.
 
 What is **not** on the floor and could still move, if someone needs it:
-lookups by a text key. A per-piece filter saying which keys a piece cannot
+lookups by a text key, which read the text of every piece of the index (about
+2 ms on 100,000 rows) where a numeric key reads one. A per-piece filter saying which keys a piece cannot
 contain, or an index split by a hash of the key instead of by position, would
 cut the reads to one or two pieces — the first at the price of data that is not
 readable by eye, the second at the price of changing how indexes are stored and

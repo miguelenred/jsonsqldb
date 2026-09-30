@@ -30,7 +30,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, zip
+          extensions: curl, zip, pdo_sqlite
           coverage: none
 
       - name: Create configuration
@@ -56,6 +56,9 @@ jobs:
 
       - name: Admin panel setup wizard and direct connection
         run: php tests/f11_asistente.php
+
+      - name: Same results as SQLite
+        run: php tests/f12_contra_sqlite.php
 
       - name: Crash recovery
         run: php tests/f6_cortes.php

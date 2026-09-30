@@ -20,6 +20,14 @@ $API_KEYS['Panel de solo lectura'] = [
     'hmac_secret' => 'SECRETO_DE_PRUEBA_SOLO_LECTURA_000000000000000000000000000000',
 ];
 
+// Administración, pero limitada a una base: no puede crear ni borrar bases
+$API_KEYS['Admin de una base'] = [
+    'key'     => 'CLAVE_DE_PRUEBA_ADMIN_LIMITADA_000000000000000000000000000000000',
+    'permiso' => 'admin',
+    'bases'   => ['apibase'],
+    'hmac_secret' => 'SECRETO_DE_PRUEBA_ADMIN_LIMITADA_0000000000000000000000000000',
+];
+
 // Clave sin 'hmac_secret': tiene que rechazarse con un mensaje claro
 $API_KEYS['Clave sin secreto'] = [
     'key'     => 'CLAVE_DE_PRUEBA_SIN_SECRETO_00000000000000000000000000000000',

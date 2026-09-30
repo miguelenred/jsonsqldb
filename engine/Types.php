@@ -101,8 +101,17 @@ final class Types
         switch ($col['type']) {
             case self::INTEGER:
                 if (is_int($valor)) return $valor;
-                if (is_float($valor) && floor($valor) === $valor) return (int)$valor;
-                if (is_string($valor) && preg_match('/^[+-]?\d+$/', trim($valor))) return (int)trim($valor);
+                // Fuera del rango de un entero de PHP no se guarda otro número:
+                // PHP lo convertiría en el máximo sin avisar, y eso es un error
+                if (is_float($valor) && floor($valor) === $valor) {
+                    if ($valor >= -9.2233720368547758E18 && $valor < 9.2233720368547758E18) return (int)$valor;
+                    throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
+                }
+                if (is_string($valor) && preg_match('/^([+-]?)0*(\d+)$/', trim($valor), $m)) {
+                    $i = (int)trim($valor);
+                    if ((string)abs($i) === $m[2] || ($i === PHP_INT_MIN && $m[2] === '9223372036854775808')) return $i;
+                    throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
+                }
                 throw JsonSqlDbError::type("Valor no entero para '{$col['name']}': " . self::texto($valor));
 
             case self::DOUBLE:

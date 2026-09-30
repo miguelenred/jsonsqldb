@@ -31,7 +31,14 @@ fails if that check is removed.
 
 The panel does not read or write the data files itself, with one exception:
 the ZIP backup and restore (section 3), which need the files exactly as they
-are on disk.
+are on disk. Before exporting a ZIP, the panel asks the engine about that
+database with the credentials of whoever asks, so a key limited to other
+databases cannot take it.
+
+**Sessions follow the stored user** (2.7.1): on every request the panel checks
+that the user still exists with the same password and takes their role from
+what is stored. Deleting a user or changing their password ends their open
+sessions; changing your own password keeps the session you are using.
 
 ## 1. Installation
 
@@ -204,8 +211,9 @@ it took. With the `lectura` role only `SELECT` and `SHOW` are accepted.
   rules; an empty field is `NULL`; an Excel byte-order mark is ignored. Rows go
   in batches of 200, with bound parameters.
 
-**There are no transactions**: if a statement or a batch fails, what came
-before is already written. The import stops there and says how many
+A file that creates or drops databases is refused: the import is into one
+database. **There are no transactions**: if a statement or a batch fails, what
+came before is already written. The import stops there and says how many
 statements or rows went in and where it stopped. `tests/f5_admin.php` imports
 the panel's own dump of a database with foreign keys and triggers and checks
 the copy, loads a 450-row CSV with quoted separators and empty fields, and
@@ -314,6 +322,27 @@ $cli->aceptarAutofirmado();
 
 ## 6. Configuration
 
+Administrators change it from the panel's **Configuration** page (2.7.1): the
+connection (mode, engine folder, API URL, keys, certificate, timeout), security
+(allowed IPs, HTTPS, proxy, session length, login lockout, bcrypt cost, audit
+retention) and the data screens (rows per page, characters per cell, CSV
+separator, dump limit). What it saves goes into `config.php`, replacing each
+`define()` in place so the comments stay.
+
+- **A new connection is tested before it is saved**; if it does not answer,
+  nothing is written.
+- **Nothing that would lock out the person making the change is accepted**: an
+  IP list that does not include their current address, or requiring HTTPS
+  while they are on HTTP.
+- **Keys are never shown.** An empty key field keeps the current one; the audit
+  trail records which settings changed, never their values.
+- Where the users are kept (`ADMIN_DATA_PATH`), the engine's data folder for the
+  ZIP copy and the session cookie name are only changed by hand: changing them
+  with the panel running would leave whoever is using it out.
+
+`tests/f11_asistente.php` saves settings and checks the file, and checks each
+refusal leaves `config.php` untouched.
+
 | Constant | Default | Purpose |
 |---|---|---|
 | `ADMIN_CONEXION` | `api` | `api` or `directa` (section 1); the wizard sets it |
@@ -364,8 +393,8 @@ $cli->aceptarAutofirmado();
 | `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
 | `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 124 checks driving the real panel through the API |
-| `tests/f11_asistente.php` | 18 checks of the setup wizard and the direct connection |
+| `tests/f5_admin.php` | 126 checks driving the real panel through the API |
+| `tests/f11_asistente.php` | 31 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
 ## 8. Tests
 
@@ -376,8 +405,8 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php     → OK: 124
-php tests/f11_asistente.php → OK: 18
+php tests/f5_admin.php     → OK: 126
+php tests/f11_asistente.php → OK: 31
 ```
 
 The tests need the cURL extension (the panel itself does not). On Windows with

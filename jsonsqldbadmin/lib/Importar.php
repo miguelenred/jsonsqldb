@@ -63,6 +63,11 @@ final class Importar
         try {
             foreach (self::sentencias($fh) as [$sql, $en]) {
                 $linea = $en;
+                // Se importa en una base: crear o borrar otras no es cosa suya,
+                // y un fichero ajeno no debería poder hacerlo por descuido
+                if (preg_match('/^\s*(CREATE|DROP)\s+DATABASE\b/i', $sql)) {
+                    throw new RuntimeException('El fichero intenta crear o borrar una base de datos; eso no se importa.');
+                }
                 // INSERT INTO t (a, b) VALUES (…);  → se junta con los siguientes iguales
                 if (preg_match('/^(INSERT\s+INTO\s+.+?\)\s+VALUES\s*\()/is', $sql, $m) && substr_count($sql, '),') === 0) {
                     $tupla = '(' . rtrim(substr($sql, strlen($m[1])), "; \t\r\n");
@@ -119,7 +124,10 @@ final class Importar
                     }
                     continue;
                 }
-                if ($c === '-' && ($l[$i + 1] ?? '') === '-') { break; }            // comentario hasta fin de línea
+                if ($c === '-' && ($l[$i + 1] ?? '') === '-') {                   // comentario hasta fin de línea
+                    $actual .= "\n";
+                    break;
+                }
                 if ($c === '/' && ($l[$i + 1] ?? '') === '*') { $bloque = true; $i++; continue; }
                 if ($c === "'" || $c === '"') { $comilla = $c; $actual .= $c; continue; }
                 if ($c === ';' && $nivel <= 0) {
@@ -137,7 +145,8 @@ final class Importar
                 }
                 $actual .= $c;
             }
-            $actual .= $comilla === '' && $bloque === false ? ' ' : "\n";
+            // El salto de línea ya ha pasado por el bucle como un carácter más:
+            // dentro de una cadena es parte del valor y no se añade otro
         }
         if ($comilla !== '' || $bloque) {
             throw new RuntimeException('El fichero acaba con una cadena o un comentario sin cerrar.');

@@ -72,6 +72,12 @@ final class Api
     /** @var array<string,array> respuestas de SHOW ya pedidas en esta petición */
     private static array $memoShow = [];
 
+    /** Olvida los SHOW ya pedidos: para medir de verdad lo que tarda el motor. */
+    public static function olvidarShow(): void
+    {
+        self::$memoShow = [];
+    }
+
     private static function sqlApi(string $base, string $sql, array $params): array
     {
         $json = $params === [] ? '' : (string)json_encode(array_values($params), JSON_UNESCAPED_UNICODE);
@@ -223,15 +229,17 @@ final class Api
         if (self::$url !== '') {
             return self::$url;
         }
-        if (ADMIN_API_URL !== '') {
-            return self::$url = ADMIN_API_URL;
-        }
+        return self::$url = ADMIN_API_URL !== '' ? ADMIN_API_URL : self::urlDeducida();
+    }
+
+    /** La URL de la API de esta instalación, deducida de la petición: ../api/jsonsqldb_api.php. */
+    public static function urlDeducida(): string
+    {
         $https  = ($_SERVER['HTTPS'] ?? '') !== '' && ($_SERVER['HTTPS'] ?? 'off') !== 'off';
         $host   = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
         $script = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? ''));
         $raiz   = rtrim(dirname(dirname($script)), '/');
-
-        return self::$url = ($https ? 'https' : 'http') . '://' . $host . $raiz . '/api/jsonsqldb_api.php';
+        return ($https ? 'https' : 'http') . '://' . $host . $raiz . '/api/jsonsqldb_api.php';
     }
 
     /** POST al endpoint. Usa cURL si está, si no, el envoltorio de PHP. */

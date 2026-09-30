@@ -919,6 +919,24 @@ chk('el cruce por índice y el cruce normal dan lo mismo, lado pequeño y grande
     return true;
 });
 
+chk('el WHERE no se adelanta al cruce si hay un RIGHT JOIN detrás', function () use ($bd) {
+    // a JOIN b RIGHT JOIN c WHERE (a.x IS NULL OR a.x = 1): quitar antes las
+    // filas de a con x = 2 dejaría sin pareja a una fila de c, que el RIGHT
+    // JOIN rellenaría con NULL y el WHERE dejaría pasar. Tiene que salir lo
+    // mismo que con una condición que no se puede adelantar
+    $bd->consultar('CREATE TABLE ra (id INTEGER PRIMARY KEY, x INTEGER)');
+    $bd->consultar('CREATE TABLE rb (id INTEGER PRIMARY KEY, aid INTEGER)');
+    $bd->consultar('CREATE TABLE rc (id INTEGER PRIMARY KEY, bid INTEGER)');
+    $bd->consultar('INSERT INTO ra VALUES (1, 1), (2, 2)');
+    $bd->consultar('INSERT INTO rb VALUES (10, 1), (20, 2)');
+    $bd->consultar('INSERT INTO rc VALUES (100, 10), (200, 20), (300, 99)');
+    $q = 'SELECT rc.id AS cid FROM ra JOIN rb ON rb.aid = ra.id RIGHT JOIN rc ON rc.bid = rb.id WHERE %s ORDER BY rc.id';
+    $a = $bd->consultar(sprintf($q, 'ra.x IS NULL OR ra.x = 1'));
+    $b = $bd->consultar(sprintf($q, '(ra.x IS NULL OR ra.x = 1) OR rc.id < 0'));
+    foreach (['rc', 'rb', 'ra'] as $t) { $bd->consultar("DROP TABLE $t"); }
+    return $a === $b && array_column($a, 'cid') === [100, 300] ?: 'da ' . json_encode(array_column($a, 'cid'));
+});
+
 chk('limpiar la tabla de orden', function () use ($bd) {
     $bd->consultar('DROP TABLE ord');
     return true;

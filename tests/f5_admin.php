@@ -873,6 +873,29 @@ chk('cargar un CSV: separador deducido, comillas, campos vacíos como NULL y en 
     return (str_contains($nulos, '<td>9</td>') && str_contains($raro, 'Pérez; &quot;el grande&quot;, Juan'))
         ?: 'los vacíos no son NULL o las comillas no se respetaron';
 });
+chk('exportar e importar conserva textos de varias líneas y decimales exactos', function () use ($raizDatos) {
+    // Un valor con saltos de línea sale en el volcado tal cual, dentro de su
+    // cadena, y al importarlo no puede ganar ni perder ninguno; un decimal
+    // como 0.1 + 0.2 tiene que volver con todas sus cifras
+    enviar('p=sql&db=importada', ['sql' => 'CREATE TABLE raros (id INTEGER PRIMARY KEY, t VARCHAR(80), d DOUBLE)']);
+    enviar('p=sql&db=importada', ['sql' => "INSERT INTO raros VALUES (1, 'uno\ndos\r\ntres -- no es comentario; ni esto', 0.30000000000000004)"]);
+    $sql = enviar('p=bases', ['accion' => 'exportar_base', 'formato' => 'sql', 'nombre' => 'importada']);
+    $fichero = $raizDatos . '/volcado2.sql';
+    file_put_contents($fichero, $sql);
+    enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'importada2']);
+    $html = subir('p=tablas&db=importada2', ['accion' => 'importar_sql', 'db' => 'importada2'], 'fichero', $fichero);
+    @unlink($fichero);
+    if (!str_contains($html, 'sentencia(s) ejecutadas')) { return 'la importación falló'; }
+    $q = "SELECT COUNT(*) AS n FROM raros WHERE t = 'uno\ndos\r\ntres -- no es comentario; ni esto' AND d = 0.30000000000000004";
+    return str_contains(enviar('p=sql&db=importada2', ['sql' => $q]), '<td>1</td>') ?: 'el texto o el decimal no volvieron iguales';
+});
+chk('importar un fichero que crea o borra bases se rechaza', function () use ($raizDatos) {
+    $fichero = $raizDatos . '/peligro.sql';
+    file_put_contents($fichero, "CREATE TABLE ok1 (id INTEGER PRIMARY KEY);\nDROP DATABASE tienda;\n");
+    $html = subir('p=tablas&db=importada2', ['accion' => 'importar_sql', 'db' => 'importada2'], 'fichero', $fichero);
+    @unlink($fichero);
+    return str_contains($html, 'crear o borrar una base') && str_contains(pedir('p=bases'), 'tienda') ?: 'no lo rechazó';
+});
 chk('un CSV con un dato que no encaja dice cuánto cargó y dónde paró', function () use ($raizDatos) {
     $csv = "nombre,edad\n";
     for ($i = 1; $i <= 300; $i++) { $csv .= "otra $i," . ($i === 250 ? 'abc' : '30') . "\n"; }

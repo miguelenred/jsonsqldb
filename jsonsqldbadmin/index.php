@@ -12,10 +12,15 @@ declare(strict_types=1);
  * https://miguelenred.es/jsonsqldb
  */
 
-// Sin config.php todavía se arranca con los valores de la plantilla, lo justo
-// para que el asistente pueda pintarse y escribir el de verdad
+// Primero config.php, si existe; después la plantilla, que solo define lo que
+// falte. Así un config.php de una versión anterior, sin las opciones nuevas,
+// sigue funcionando con sus valores por defecto, y sin config.php se arranca
+// con los de la plantilla, lo justo para que el asistente pueda pintarse
 $rutaConfig = (string)(getenv('JSONSQLDBADMIN_CONFIG') ?: __DIR__ . '/config.php');
-require_once is_file($rutaConfig) ? $rutaConfig : __DIR__ . '/config.dist.php';
+if (is_file($rutaConfig)) {
+    require_once $rutaConfig;
+}
+require_once __DIR__ . '/config.dist.php';
 require_once __DIR__ . '/lib/Store.php';
 require_once __DIR__ . '/lib/Auth.php';
 require_once __DIR__ . '/lib/Audit.php';
@@ -60,6 +65,10 @@ if (!$asistente && ADMIN_EXIGIR_HTTPS && !util_https()) {
 }
 
 Auth::iniciarSesion();
+if (!Auth::revalidar()) {
+    Auth::iniciarSesion();
+    flash('warning', 'La sesión se ha cerrado: tu usuario ya no existe o su contraseña ha cambiado.');
+}
 
 $pagina = get('p', 'bases');
 $base   = get('db');
@@ -148,9 +157,15 @@ if (in_array($pagina, ['tablas', 'vistas', 'integridad', 'crear_tabla', 'estruct
     redirigir(['p' => 'bases']);
 }
 
+// La página se prepara entera antes de enviarla: si algo falla a mitad, lo
+// pintado se descarta y sale solo la página de error, no media página con el
+// error metido dentro
+ob_start();
 try {
     vista($pagina, ['base' => $base, 'tabla' => $tabla]);
+    ob_end_flush();
 } catch (Throwable $e) {
+    ob_end_clean();
     vista('error', ['base' => $base, 'tabla' => $tabla, 'mensaje' => $e->getMessage()]);
 }
 

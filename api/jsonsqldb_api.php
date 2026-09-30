@@ -369,8 +369,15 @@ Logger::contexto($origen, $ip);
 $operacion = '';
 
 try {
-    $autorizar = static function (string $tipo) use ($permiso, &$operacion): void {
+    $limitada = !in_array('*', $permitidas, true);
+    $autorizar = static function (string $tipo) use ($permiso, $limitada, &$operacion): void {
         $operacion = strtoupper(str_replace('_', ' ', $tipo));
+
+        // Una clave limitada a unas bases no gestiona bases: crear o borrar una
+        // no es cosa de ninguna base concreta, y podría ser de otra
+        if ($limitada && ($tipo === 'create_database' || $tipo === 'drop_database')) {
+            throw JsonSqlDbError::permission('Esta API key está limitada a bases concretas: no puede crear ni borrar bases');
+        }
 
         $lectura   = ['select', 'union', 'show_databases', 'show_tables', 'show_views',
                       'show_schema', 'show_keys', 'show_triggers', 'show_indexes',
@@ -388,6 +395,12 @@ try {
     $res = $baseDatos === ''
         ? Database::consultarGlobal($sql, $params, $autorizar)
         : (new Database($baseDatos))->consultar($sql, $params, $autorizar);
+
+    // SHOW DATABASES con una clave limitada: solo las suyas. Sin esto, los
+    // nombres de las bases de los demás se verían aunque no se pudiera entrar
+    if ($limitada && $operacion === 'SHOW DATABASES' && is_array($res) && !isset($res['success'])) {
+        $res = array_values(array_filter($res, static fn($f): bool => in_array($f['base'] ?? null, $permitidas, true)));
+    }
 
     $filas = is_array($res) && isset($res['success']) ? (int)$res['filas'] : count($res);
 

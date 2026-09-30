@@ -205,6 +205,14 @@ uniqueness, which for a numeric key looks at the pieces whose range can hold
 it (a new id is rejected as unique without opening any) and for a text key
 at every piece.
 
+An `INSERT` appends its rows to the text of the last part and an `UPDATE`
+replaces the lines of the rows it changes, without decoding or re-encoding the
+rest of the part (2.7.1); the file ends up byte for byte as if written whole. An
+`UPDATE` or `DELETE` that depends only on each row does its work with the
+table's shared lock and locks the table only to commit ("writes by part", see
+[01-core.md](01-core.md#writes-by-part-27)). Measured on 20,000 rows, mean of
+three runs: `INSERT` 7.2 ms, `UPDATE` by key 6.7 ms, `DELETE` by key 11.1 ms.
+
 On a real disk the cost is the `fsync` calls, not the encoding: five per
 write in 2.7 (the part, `rev.json`, the structure when the autoincrement
 counter moves, the manifest and the directory), down from ten in 2.6. Index
@@ -225,15 +233,15 @@ the same as one `INSERT` with one row. Batch them.
 | `engine/Integrity.php` | CHECK KEYS and REPAIR KEYS |
 | `engine/Parser.php` | extended with DML, DDL, triggers and `RAISE` |
 | `engine/Database.php` | decides the lock scope of each statement |
-| `tests/f3_escrituras.php` | 60 checks |
+| `tests/f3_escrituras.php` | 64 checks |
 
 ## 6. Tests
 
 ```
 php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
-php tests/f2_select.php       → OK: 145
-php tests/f3_escrituras.php   → OK: 60
+php tests/f2_select.php       → OK: 146
+php tests/f3_escrituras.php   → OK: 63
 php tests/f8_indices.php      → OK: 60
 php tests/f10_indices_incrementales.php → OK: 16
 ```

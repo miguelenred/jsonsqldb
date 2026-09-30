@@ -52,6 +52,42 @@ final class Auth
         return isset($_SESSION['usuario']['usuario']);
     }
 
+    /**
+     * Comprueba en cada petición que el usuario de la sesión sigue existiendo
+     * con la misma contraseña, y toma su rol de lo guardado. Sin esto, borrar
+     * un usuario o cambiarle la contraseña no le echaba: su sesión seguía
+     * valiendo, y como la caducidad es por inactividad, podía no caducar
+     * nunca. Devuelve false si la sesión se ha cerrado por eso.
+     */
+    public static function revalidar(): bool
+    {
+        if (!self::identificado()) {
+            return true;
+        }
+        $u = self::buscar((string)$_SESSION['usuario']['usuario']);
+        if ($u === null || !hash_equals(self::huella($u), (string)($_SESSION['usuario']['huella'] ?? ''))) {
+            self::cerrar();
+            return false;
+        }
+        $_SESSION['usuario']['rol'] = (string)$u['rol'];
+        return true;
+    }
+
+    /** Huella de la contraseña guardada: cambia cuando cambia la contraseña. */
+    private static function huella(array $u): string
+    {
+        return substr(hash('sha256', (string)($u['hash'] ?? '')), 0, 16);
+    }
+
+    /** Tras cambiar la propia contraseña, la sesión en curso sigue valiendo. */
+    public static function renovarHuella(): void
+    {
+        $u = self::identificado() ? self::buscar((string)$_SESSION['usuario']['usuario']) : null;
+        if ($u !== null) {
+            $_SESSION['usuario']['huella'] = self::huella($u);
+        }
+    }
+
     public static function esAdmin(): bool
     {
         return (($_SESSION['usuario']['rol'] ?? '') === 'admin');
@@ -203,7 +239,7 @@ final class Auth
 
         self::limpiarFallos($ip);
         session_regenerate_id(true);
-        $_SESSION['usuario'] = ['usuario' => $u['usuario'], 'rol' => $u['rol']];
+        $_SESSION['usuario'] = ['usuario' => $u['usuario'], 'rol' => $u['rol'], 'huella' => self::huella($u)];
         $_SESSION['visto']   = time();
         $_SESSION['csrf']    = bin2hex(random_bytes(32));
 

@@ -426,6 +426,11 @@ function ejecutarAccion(string $accion): void
             $formato = post('formato') === 'zip' ? 'zip' : 'sql';
 
             if ($formato === 'zip') {
+                // El ZIP lee los ficheros directamente, sin pasar por la API: antes
+                // se pregunta a la API por la base, con las credenciales de quien
+                // pide, para que una clave limitada a otras bases no pueda
+                // llevarse esta
+                Api::sql($nombre, 'SHOW TABLES');
                 $ruta = rutaDeLaBase($nombre);
                 Audit::registrar('exportar_zip', $nombre, $nombre);
                 Exportar::zip($nombre, $ruta);       // termina la petición
@@ -455,6 +460,17 @@ function ejecutarAccion(string $accion): void
             // Exportar termina la petición
 
         // ---------------- Usuarios ----------------
+        case 'guardar_configuracion':
+            Auth::exigirAdmin();
+            $cambios = Instalador::guardarConfiguracion($_POST);
+            // En la auditoría van los nombres de lo cambiado, nunca los valores:
+            // entre ellos puede haber claves
+            Audit::registrar('configuracion', $cambios === [] ? 'sin cambios' : implode(', ', $cambios));
+            flash($cambios === [] ? 'info' : 'success', $cambios === []
+                ? 'No había nada que cambiar.'
+                : 'Configuración guardada (' . count($cambios) . ' cambio(s)). Se aplica desde esta página.');
+            redirigir(['p' => 'configuracion']);
+
         case 'crear_usuario':
             Auth::exigirAdmin();
             $nombre = Auth::crear(post('usuario'), (string)($_POST['clave'] ?? ''), post('rol'));
@@ -480,6 +496,9 @@ function ejecutarAccion(string $accion): void
                 Auth::exigirAdmin();
             }
             Auth::cambiarClave($nombre, (string)($_POST['clave'] ?? ''));
+            if (strcasecmp($nombre, $propio) === 0) {
+                Auth::renovarHuella();              // las demás sesiones de ese usuario sí caducan
+            }
             Audit::registrar('cambiar_clave', $nombre);
             flash('success', 'Contraseña cambiada.');
             redirigir(['p' => 'usuarios']);

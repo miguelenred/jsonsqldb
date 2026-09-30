@@ -163,8 +163,14 @@ And these behavioural differences are worth keeping in mind:
   `ROUND(2.675, 2)` gives 2.68 here and 2.67 in SQLite: 2.675 does not exist
   exactly in floating point and each engine breaks the tie its own way. If the
   cent has to add up, store cents in an `INTEGER`.
+- `/` always divides exactly, as in MySQL: `7 / 2` is `3.5`. SQLite divides
+  two integers as integers and gives 3. For the integer part, use
+  `CAST(7 / 2 AS INTEGER)`.
 - `%` works with integers, as in SQLite: if the divisor truncates to zero
   (`5 % 0.4`), the result is `NULL`.
+- `ORDER BY 2` orders by the second column of the result, and a `HAVING` can
+  use the aliases of the `SELECT` (`HAVING n > 3` with `COUNT(*) AS n`), as in
+  SQLite and MySQL (2.7.1).
 
 ## 2. Supported syntax
 
@@ -252,7 +258,7 @@ the mean of several repetitions; two runs of the same thing differ by up to
 | Query | Time · peak memory |
 |---|---|
 | Lookup by primary key | 0.58 ms · 5.5 MB |
-| Lookup by a `UNIQUE` text column | 1.97 ms · 6.8 MB |
+| Lookup by a `UNIQUE` text column | 0.57 ms · 5.3 MB |
 | `BETWEEN` on the primary key (1,000 rows) | 1.9 ms · 6.3 MB |
 | Equality on an indexed column (2,000 matches) | 18 ms · 7.6 MB |
 | Numeric range, no index | 12 ms · 6.3 MB |
@@ -343,13 +349,13 @@ silently wrong result.
 | `engine/Config.php` | reads `config.php` with defaults |
 | `engine/Logger.php` | query log |
 | `tests/f2_parser.php` | 70 checks of the parser |
-| `tests/f2_select.php` | 145 checks of the executor, with real data |
+| `tests/f2_select.php` | 146 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
 php tests/f1_nucleo.php     → OK: 66
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 145
+php tests/f2_select.php     → OK: 146
 php tests/f8_indices.php    → OK: 60
 ```

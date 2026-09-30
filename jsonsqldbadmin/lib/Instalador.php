@@ -194,6 +194,180 @@ final class Instalador
         }
     }
 
+    /**
+     * Los ajustes que se pueden cambiar desde la página de Configuración, con
+     * cómo se validan. Lo demás (dónde viven los usuarios, el nombre de la
+     * cookie) solo se cambia a mano: cambiarlo con el panel en marcha dejaría
+     * fuera a quien lo está usando.
+     *
+     * @return array<string, array{0: string, 1: mixed, 2: mixed}> campo => [constante, mínimo o lista, máximo]
+     */
+    public static function ajustes(): array
+    {
+        return [
+            'timeout'          => ['ADMIN_TIMEOUT', 5, 600],
+            'sesion_minutos'   => ['ADMIN_SESION_MINUTOS', 5, 1440],
+            'login_max_fallos' => ['ADMIN_LOGIN_MAX_FALLOS', 3, 50],
+            'bloqueo_min'      => ['ADMIN_LOGIN_BLOQUEO_MIN', 1, 1440],
+            'bcrypt'           => ['ADMIN_BCRYPT_COSTE', 10, 14],
+            'audit_dias'       => ['ADMIN_AUDIT_DIAS', 1, 3650],
+            'filas_pagina'     => ['ADMIN_FILAS_PAGINA', 10, 1000],
+            'celda_max'        => ['ADMIN_CELDA_MAX', 20, 5000],
+            'export_max'       => ['ADMIN_EXPORT_MAX', 1000, 10000000],
+        ];
+    }
+
+    /**
+     * Guarda los cambios de la página de Configuración en config.php. Valida
+     * cada valor, se niega a lo que dejaría fuera a quien lo está haciendo
+     * (una lista de IPs sin la suya, exigir HTTPS entrando por HTTP), prueba
+     * la conexión nueva antes de escribir nada si ha cambiado, y escribe el
+     * fichero de una pieza. Devuelve los nombres de lo que ha cambiado; lanza
+     * RuntimeException sin haber escrito nada si algo no vale.
+     *
+     * Los secretos no se muestran nunca: un campo de clave vacío deja la que
+     * hay.
+     *
+     * @return list<string>
+     */
+    public static function guardarConfiguracion(array $d): array
+    {
+        $v = [];
+        // --- Conexión
+        $modo = (string)($d['conexion'] ?? ADMIN_CONEXION);
+        if (!in_array($modo, ['api', 'directa'], true)) {
+            throw new RuntimeException('Conexión no válida.');
+        }
+        $v['ADMIN_CONEXION'] = $modo;
+        $motor = rtrim(str_replace('\\', '/', trim((string)($d['motor'] ?? ''))), '/');
+        $v['ADMIN_MOTOR_RUTA'] = $motor === self::motorDetectado() ? '' : $motor;
+        $url = trim((string)($d['api_url'] ?? ''));
+        if ($url !== '' && !preg_match('#^https?://[^\s]+$#i', $url)) {
+            throw new RuntimeException('La URL de la API tiene que empezar por http:// o https://.');
+        }
+        $v['ADMIN_API_URL'] = $url;
+        foreach ([['api_key', 'ADMIN_API_KEY'], ['api_secret', 'ADMIN_HMAC_SECRET'],
+                  ['lectura_key', 'ADMIN_API_KEY_LECTURA'], ['lectura_secret', 'ADMIN_HMAC_SECRET_LECTURA']] as [$campo, $c]) {
+            $nuevo = trim((string)($d[$campo] ?? ''));
+            $v[$c] = $nuevo !== '' ? $nuevo : (string)constant($c);
+        }
+        if (!empty($d['quitar_lectura'])) {
+            $v['ADMIN_API_KEY_LECTURA'] = $v['ADMIN_HMAC_SECRET_LECTURA'] = '';
+        }
+        if (($v['ADMIN_API_KEY_LECTURA'] === '') !== ($v['ADMIN_HMAC_SECRET_LECTURA'] === '')) {
+            throw new RuntimeException('La clave de solo lectura necesita también su secreto, o ninguno de los dos.');
+        }
+        $ca = trim((string)($d['ssl_ca'] ?? ''));
+        if ($ca !== '' && !is_file($ca)) {
+            throw new RuntimeException("No existe el fichero del certificado: $ca");
+        }
+        $v['ADMIN_SSL_CA'] = $ca;
+        $v['ADMIN_SSL_AUTOFIRMADO'] = !empty($d['ssl_autofirmado']);
+
+        // --- Números con su rango
+        foreach (self::ajustes() as $campo => [$c, $min, $max]) {
+            $n = filter_var($d[$campo] ?? null, FILTER_VALIDATE_INT);
+            if ($n === false || $n < $min || $n > $max) {
+                throw new RuntimeException("'" . str_replace('_', ' ', $campo) . "' tiene que ser un número entre $min y $max.");
+            }
+            $v[$c] = $n;
+        }
+        $sep = (string)($d['csv_separador'] ?? ';');
+        if ($sep === 'tab') {
+            $sep = "\t";
+        }
+        if (!in_array($sep, [';', ',', "\t"], true)) {
+            throw new RuntimeException('El separador del CSV tiene que ser punto y coma, coma o tabulador.');
+        }
+        $v['ADMIN_CSV_SEPARADOR'] = $sep;
+
+        // --- Seguridad: nada que deje fuera a quien lo está cambiando
+        $ips = [];
+        foreach (preg_split('/[\s,]+/', trim((string)($d['ips'] ?? ''))) ?: [] as $ip) {
+            if ($ip === '') {
+                continue;
+            }
+            [$dir, $bits] = array_pad(explode('/', $ip, 2), 2, null);
+            $esV6 = filter_var($dir, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+            if (filter_var($dir, FILTER_VALIDATE_IP) === false
+                || ($bits !== null && (!ctype_digit($bits) || (int)$bits > ($esV6 ? 128 : 32)))) {
+                throw new RuntimeException("No es una IP ni un rango válido: $ip");
+            }
+            $ips[] = $ip;
+        }
+        if ($ips !== [] && !util_ip_permitida(util_ip(), $ips)) {
+            throw new RuntimeException('Tu IP (' . util_ip() . ') no está en la lista: te quedarías fuera. Añádela.');
+        }
+        $v['ADMIN_IPS_PERMITIDAS'] = $ips;
+        $v['ADMIN_EXIGIR_HTTPS'] = !empty($d['exigir_https']);
+        if ($v['ADMIN_EXIGIR_HTTPS'] && !util_https()) {
+            throw new RuntimeException('Estás entrando por HTTP: exigir HTTPS te dejaría fuera. Entra por HTTPS y actívalo desde ahí.');
+        }
+        $v['ADMIN_CONFIAR_EN_PROXY'] = !empty($d['confiar_proxy']);
+
+        // --- Qué cambia de verdad
+        $cambios = [];
+        foreach ($v as $c => $nuevo) {
+            if (!defined($c) || constant($c) !== $nuevo) {
+                $cambios[] = $c;
+            }
+        }
+        if ($cambios === []) {
+            return [];
+        }
+        // Una conexión nueva se prueba antes de guardarla
+        $deConexion = ['ADMIN_CONEXION', 'ADMIN_MOTOR_RUTA', 'ADMIN_API_URL', 'ADMIN_API_KEY', 'ADMIN_HMAC_SECRET'];
+        if (array_intersect($cambios, $deConexion) !== []) {
+            if ($modo === 'directa') {
+                $ruta = $motor !== '' ? $motor : self::motorDetectado();
+                // En este proceso solo se puede cargar un motor: si ya está
+                // cargado el de otra carpeta, se comprueba que la nueva lo es
+                if (class_exists('JsonSQLDB\\Database', false) && $ruta !== Api::rutaMotor()) {
+                    if (!is_file("$ruta/engine/bootstrap.php") || !is_file("$ruta/config.php")) {
+                        throw new RuntimeException('En esa carpeta no está jsonSQLDB: tiene que contener engine/ y config.php.');
+                    }
+                } else {
+                    self::probarDirecta($ruta);
+                }
+            } else {
+                if (strpos($v['ADMIN_API_KEY'], 'CHANGE_ME') === 0 || $v['ADMIN_API_KEY'] === '' || $v['ADMIN_HMAC_SECRET'] === '') {
+                    throw new RuntimeException('Para conectar por la API hacen falta la API key y el secreto de administración.');
+                }
+                Api::probar($url !== '' ? $url : Api::urlDeducida(), $v['ADMIN_API_KEY'], $v['ADMIN_HMAC_SECRET']);
+            }
+        }
+        $texto = (string)@file_get_contents(self::rutaConfig());
+        if ($texto === '') {
+            throw new RuntimeException('No se puede leer ' . self::rutaConfig() . '.');
+        }
+        $cambiados = [];
+        foreach ($cambios as $c) {
+            $cambiados[$c] = $v[$c];
+        }
+        self::escribir(self::rutaConfig(), self::fijar($texto, $cambiados));
+        return $cambios;
+    }
+
+    /**
+     * Pone valores en un config.php: sustituye el define() de cada constante,
+     * y si el fichero es de una versión que no la tenía, la añade al final.
+     */
+    private static function fijar(string $texto, array $valores): string
+    {
+        foreach ($valores as $constante => $valor) {
+            $literal = is_array($valor)
+                ? '[' . implode(', ', array_map(static fn($x) => var_export($x, true), $valor)) . ']'
+                : var_export($valor, true);
+            $patron = "/define\\('" . $constante . "',\\s*(?:[^;]|\\n)*?\\);/";
+            $texto  = preg_replace_callback($patron,
+                static fn(): string => "define('" . $constante . "', " . $literal . ');', $texto, 1, $n) ?? $texto;
+            if ($n !== 1) {
+                $texto = rtrim($texto) . "\n\ndefined('" . $constante . "') || define('" . $constante . "', " . $literal . ");\n";
+            }
+        }
+        return $texto;
+    }
+
     /** Carga el motor de esa carpeta y lista sus bases. Devuelve cuántas hay. */
     private static function probarDirecta(string $ruta): int
     {

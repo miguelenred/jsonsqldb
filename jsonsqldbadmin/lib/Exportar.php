@@ -26,7 +26,7 @@ final class Exportar
             foreach ($filas as $f) {
                 $linea = [];
                 foreach ($f as $v) {
-                    $linea[] = $v === null ? '' : (is_bool($v) ? ($v ? '1' : '0') : (string)$v);
+                    $linea[] = $v === null ? '' : (is_bool($v) ? ($v ? '1' : '0') : (is_float($v) ? var_export($v, true) : (string)$v));
                 }
                 fputcsv($salida, $linea, $sep, '"', '\\');
             }
@@ -265,7 +265,9 @@ final class Exportar
         if ($v === null)    { return 'NULL'; }
         if (is_bool($v))    { return $v ? '1' : '0'; }
         if (is_int($v))     { return (string)$v; }
-        if (is_float($v))   { return rtrim(rtrim(sprintf('%.10F', $v), '0'), '.'); }
+        // El decimal más corto que vuelve a dar exactamente el mismo número:
+        // con diez decimales fijos, 0.30000000000000004 salía como 0.3
+        if (is_float($v))   { return var_export($v, true); }
         return "'" . str_replace("'", "''", (string)$v) . "'";
     }
 

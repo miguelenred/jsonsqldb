@@ -128,6 +128,95 @@ chk('el autoincremento continúa tras un id explícito mayor', function () use (
     $bd->consultar("INSERT INTO clientes (nombre) VALUES ('Óscar')");
     return uno("SELECT id FROM clientes WHERE nombre = 'Óscar'") === 101;
 });
+chk('empalmar filas en una parte deja el mismo fichero que escribirla entera', function () use ($raiz) {
+    // Un INSERT añade sus filas al texto de la última parte y un UPDATE cambia
+    // sus líneas, sin decodificar ni recodificar las demás. El fichero tiene
+    // que quedar byte a byte como si se hubiera escrito entero, con los
+    // desfases apuntando a cada fila. Valores con comillas, barras, saltos de
+    // línea, acentos, emojis, NULL y decimales
+    $dir = "$raiz/empalme";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/e")) { Database::borrar('e', $dir); }   // de una ejecución anterior interrumpida
+    Database::crear('e', $dir);
+    $bd = new Database('e', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, s VARCHAR(80), d DOUBLE, n INTEGER)');
+    $raros = ["con \"comillas\"", "barra \\ y /", "salto\nde línea", "acentos áéíóú ñ", "emoji 😀", '', 'normal'];
+    $vals = [];
+    for ($i = 0; $i < 1500; $i++) { $vals[] = [$raros[$i % 7], $i % 5 === 0 ? null : $i / 3, $i]; }
+    foreach (array_chunk($vals, 500) as $b) {
+        $bd->consultar('INSERT INTO t (s, d, n) VALUES ' . implode(',', array_fill(0, count($b), '(?,?,?)')), array_merge(...$b));
+    }
+    for ($i = 0; $i < 20; $i++) {
+        $bd->consultar('INSERT INTO t (s, d, n) VALUES (?, ?, ?)', [$raros[$i % 7] . " $i", $i === 3 ? null : 1.5, $i]);
+        $bd->consultar('UPDATE t SET s = ?, d = ? WHERE id = ?', [$raros[($i + 3) % 7], $i % 2 ? null : 0.25, 1 + $i * 71]);
+    }
+    foreach (glob("$dir/e/t*.json") as $f) {
+        if (!preg_match('/\/t(\.part\d+)?\.json$/', $f)) { continue; }
+        $texto = (string)file_get_contents($f);
+        $filas = json_decode($texto, true)['rows'];
+        $esperado = "{\n  \"table\": \"t\",\n  \"rows\": [";
+        $desf = [];
+        $sep  = "\n    ";
+        foreach ($filas as $fila) {
+            $desf[] = strlen($esperado) + strlen($sep);
+            $esperado .= $sep . json_encode($fila, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
+            $sep = ",\n    ";
+        }
+        $esperado .= $filas === [] ? "],\n" : "\n  ],\n";
+        $aqui = strlen($esperado);
+        $esperado .= '  "offsets": [' . implode(',', $desf) . "],\n  \"offsets_at\": $aqui\n}\n";
+        if ($texto !== $esperado) { return basename($f) . ' no es lo que escribiría la escritura completa'; }
+    }
+    $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'];
+    $f71 = $bd->consultar('SELECT s FROM t WHERE id = 72')[0]['s'];
+    unset($bd);
+    Database::borrar('e', $dir);
+    @rmdir($dir);
+    return $n === 1520 && $f71 === $raros[4] ?: "filas: $n, id 72: " . var_export($f71, true);
+});
+chk('cientos de escrituras al azar dejan tabla, índices y partes como un modelo en memoria', function () use ($raiz) {
+    // En otro proceso, con partes de 7 y de 50 filas para que las escrituras
+    // crucen sus bordes todo el rato (ver tests/_azar_escrituras.php)
+    foreach ([[11, 7], [12, 50]] as [$semilla, $parte]) {
+        $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/_azar_escrituras.php')
+            . " $semilla $parte 300 " . escapeshellarg("$raiz/azar") . ' 2>&1');
+        if (!str_contains($salida, 'todo coincide')) { return trim($salida); }
+    }
+    @rmdir("$raiz/azar");
+    return true;
+});
+chk('una subconsulta que no mira fuera se ejecuta una vez por sentencia, no por fila', function () use ($bd) {
+    // UPDATE … WHERE x > (SELECT AVG(x) …) sobre 5.000 filas repetía el AVG
+    // 5.000 veces: diez segundos. Ahora, una sola: menos de uno
+    $bd->consultar('CREATE TABLE sq (id INTEGER PRIMARY KEY, x INTEGER)');
+    $v = [];
+    for ($i = 1; $i <= 5000; $i++) { $v[] = "($i, " . ($i % 100) . ')'; }
+    $bd->consultar('INSERT INTO sq VALUES ' . implode(',', $v));
+    $t = microtime(true);
+    $n = $bd->consultar('UPDATE sq SET x = x + 1000 WHERE x > (SELECT AVG(x) FROM sq)')['filas'];
+    $ms = (microtime(true) - $t) * 1000;
+    $bd->consultar('DROP TABLE sq');
+    return $n === 2500 && $ms < 3000 ?: sprintf('%d filas en %.0f ms', $n, $ms);
+});
+chk('un entero fuera de rango se rechaza, no se convierte en otro número', function () use ($bd) {
+    // PHP convierte "9223372036854775808" en el máximo entero sin avisar: el
+    // motor tiene que dar un error en vez de guardar otro número
+    $bd->consultar('CREATE TABLE enteros (id INTEGER PRIMARY KEY, n INTEGER)');
+    $bd->consultar('INSERT INTO enteros VALUES (1, ?)', ['9223372036854775807']);
+    $bd->consultar('INSERT INTO enteros VALUES (2, ?)', ['-9223372036854775808']);
+    foreach (['9223372036854775808', '-9223372036854775809', 1.0e19] as $i => $v) {
+        try {
+            $bd->consultar('INSERT INTO enteros VALUES (?, ?)', [10 + $i, $v]);
+            $bd->consultar('DROP TABLE enteros');
+            return 'aceptó ' . var_export($v, true);
+        } catch (JsonSqlDbError $e) {
+            if (!str_contains($e->getMessage(), 'fuera de rango')) { return $e->getMessage(); }
+        }
+    }
+    $ok = $bd->consultar('SELECT n FROM enteros ORDER BY id') === [['n' => PHP_INT_MAX], ['n' => PHP_INT_MIN]];
+    $bd->consultar('DROP TABLE enteros');
+    return $ok ?: 'los extremos no se guardaron exactos';
+});
 chk('el contador de autoincremento vive en rev.json y no reescribe la estructura', function () use ($bd, $raiz, $base) {
     // Desde la 2.7 un INSERT no toca meta.json por mover el contador: va a
     // rev.json, que se escribe de todas formas. meta.json conserva el valor

@@ -67,6 +67,8 @@ final class Storage
     private array  $indicesMemo = [];
     /** @var array<string,int> partes de cada tabla, dentro del bloqueo */
     private array  $partesMemo = [];
+    /** @var array<string,array<string,int>> preguntas por claves de texto a cada índice, dentro del bloqueo */
+    private array  $preguntasTexto = [];
     /** @var array<string,int> siguiente autoincremento a anotar en rev.json en la escritura en curso */
     private array  $autoincPendiente = [];
     /** @var array<string,mixed> últimas entradas de caché, compartidas por todo el proceso (ver recordar()) */
@@ -198,7 +200,30 @@ final class Storage
         if (!is_file("$dir/_database.json")) {
             throw JsonSqlDbError::config("La base de datos '$base' no existe");
         }
-        self::borrarRecursivo($dir);
+        // Con el bloqueo exclusivo de la base, pasando por su torno: se espera
+        // a que acaben las consultas que la están usando, y las que lleguen
+        // después esperan a que termine el borrado en vez de ver ficheros
+        // desapareciendo a mitad de una lectura
+        $torno = @fopen("$dir/.turno", 'c');
+        $lock  = @fopen("$dir/.lock", 'c');
+        if ($torno === false || $lock === false) {
+            throw JsonSqlDbError::lock("No se puede bloquear la base '$base' para borrarla");
+        }
+        flock($torno, LOCK_EX);
+        flock($lock, LOCK_EX);
+        flock($torno, LOCK_UN);
+        try {
+            // Los dos ficheros de bloqueo, los últimos: en Windows no se puede
+            // borrar un fichero que alguien tiene abierto
+            self::borrarRecursivo($dir, ["$dir/.lock", "$dir/.turno"]);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+            fclose($torno);
+        }
+        @unlink("$dir/.lock");
+        @unlink("$dir/.turno");
+        @rmdir($dir);
 
         // Si algo quedó sin borrar, decirlo: una base a medias es peor que un
         // error, porque parece que existe y no se puede usar
@@ -212,14 +237,18 @@ final class Storage
         }
     }
 
-    private static function borrarRecursivo(string $dir): void
+    /** @param list<string> $salvo ficheros que no se tocan (se borran aparte) */
+    private static function borrarRecursivo(string $dir, array $salvo = []): void
     {
         foreach ((array)scandir($dir) as $e) {
             if ($e === '.' || $e === '..') continue;
             $ruta = "$dir/$e";
+            if (in_array($ruta, $salvo, true)) {
+                continue;
+            }
             is_dir($ruta) ? self::borrarRecursivo($ruta) : @unlink($ruta);
         }
-        @rmdir($dir);
+        @rmdir($dir);                       // falla sola si quedan los que se salvan
     }
 
     // ------------------------------------------------------------------
@@ -274,6 +303,7 @@ final class Storage
         $this->estados       = [];     // releer revisiones dentro del bloqueo
         $this->indicesMemo   = [];
         $this->partesMemo    = [];
+        $this->preguntasTexto = [];
         $this->revsLegadas   = null;
 
         // La recuperación va antes de coger ningún bloqueo de tabla: así puede
@@ -378,6 +408,7 @@ final class Storage
         $this->estados       = [];
         $this->indicesMemo   = [];
         $this->partesMemo    = [];
+        $this->preguntasTexto = [];
         $this->revsLegadas   = null;
     }
 
@@ -1396,13 +1427,30 @@ final class Storage
                 array_chunk($filas, $this->filasPorParte) ?: [[]], count($filas), null, null, [], $partesAntes);
             return;
         }
-        $cola = $filasAntes === 0 ? [] : $this->parte($tabla, $ultima, $this->ficheroDatos($tabla, $ultima));
-        foreach ($nuevas as $fila) {
-            $cola[] = $fila;
-        }
-        $partes = [];
-        foreach (array_chunk($cola, $this->filasPorParte) ?: [[]] as $i => $bloque) {
-            $partes[$ultima - 1 + $i] = $bloque;
+        // Lo que cabe en la última parte se empalma en su texto, sin leer ni
+        // volver a escribir sus filas; lo que no, va a partes nuevas
+        $partes  = [];
+        $enUltima = $filasAntes - ($ultima - 1) * $this->filasPorParte;
+        $caben    = max(0, $this->filasPorParte - $enUltima);
+        $texto    = $filasAntes > 0 && $caben > 0
+            ? $this->empalmarParte($tabla, $ultima, $enUltima, [], array_slice($nuevas, 0, $caben)) : null;
+        if ($texto !== null || ($filasAntes > 0 && $caben === 0)) {
+            // Con la última parte llena, las filas van enteras a partes nuevas
+            // y la última no se toca
+            if ($texto !== null) {
+                $partes[$ultima - 1] = $texto;
+            }
+            foreach (array_chunk(array_slice($nuevas, $caben), $this->filasPorParte) as $i => $bloque) {
+                $partes[$ultima + $i] = $bloque;
+            }
+        } else {
+            $cola = $filasAntes === 0 ? [] : $this->parte($tabla, $ultima, $this->ficheroDatos($tabla, $ultima));
+            foreach ($nuevas as $fila) {
+                $cola[] = $fila;
+            }
+            foreach (array_chunk($cola, $this->filasPorParte) ?: [[]] as $i => $bloque) {
+                $partes[$ultima - 1 + $i] = $bloque;
+            }
         }
         $this->escribirTabla($tabla, $meta, $definiciones, $todas, $partes, $filasAntes + count($nuevas),
             $filasAntes, $nuevas, [], $partesAntes);
@@ -1443,12 +1491,25 @@ final class Storage
         $fuera   = array_fill_keys($borradas, true);
         $partes  = [];
         $sueltas = [];
+        $porParte = [];
         foreach ($cambios as $pos => $fila) {
             if ($pos < $desde) {
                 $sueltas[$pos] = $fila;
-                $i = intdiv($pos, $chunk);
-                $partes[$i] ??= $this->parte($tabla, $i + 1, $this->ficheroDatos($tabla, $i + 1));
-                $partes[$i][$pos - $i * $chunk] = $fila;
+                $porParte[intdiv($pos, $chunk)][$pos - intdiv($pos, $chunk) * $chunk] = $fila;
+            }
+        }
+        foreach ($porParte as $i => $enParte) {
+            // Sin borrados, cada fila cambia en su sitio: se empalma en el texto
+            // de la parte. Con borrados, las partes se rehacen más abajo
+            $texto = $borradas === []
+                ? $this->empalmarParte($tabla, $i + 1, min($chunk, $filasAntes - $i * $chunk), $enParte, []) : null;
+            if ($texto !== null) {
+                $partes[$i] = $texto;
+                continue;
+            }
+            $partes[$i] = $this->parte($tabla, $i + 1, $this->ficheroDatos($tabla, $i + 1));
+            foreach ($enParte as $j => $fila) {
+                $partes[$i][$j] = $fila;
             }
         }
         $cola = null;
@@ -1489,19 +1550,37 @@ final class Storage
         $this->bloquearLectura($tabla);
         $chunk = max(1, (int)($this->estado($tabla)['chunk'] ?? $this->filasPorParte));
         sort($posiciones);
-        $out    = [];
-        $actual = 0;                                 // la parte que se tiene abierta: van ordenadas
-        $filas  = [];
+        $porParte = [];
         foreach ($posiciones as $pos) {
-            $parte = intdiv($pos, $chunk) + 1;
-            if ($parte !== $actual) {
-                $fichero = $this->ficheroDatos($tabla, $parte);
-                $filas   = is_file($fichero) ? $this->parte($tabla, $parte, $fichero) : [];
-                $actual  = $parte;
+            $porParte[intdiv($pos, $chunk) + 1][] = $pos;
+        }
+        $out = [];
+        foreach ($porParte as $parte => $enParte) {
+            $fichero = $this->ficheroDatos($tabla, $parte);
+            if (!is_file($fichero)) {
+                continue;
             }
-            $fila = $filas[$pos - ($parte - 1) * $chunk] ?? null;
-            if ($fila !== null) {
-                $out[$pos] = $fila;
+            // Pocas filas de una parte: se leen sus líneas, sin decodificarla
+            if (count($enParte) <= self::FILAS_POR_LINEA) {
+                $sueltas = [];
+                foreach ($enParte as $pos) {
+                    $fila = $this->filaEnParte($tabla, $parte, $fichero, $pos - ($parte - 1) * $chunk);
+                    if ($fila === null) {
+                        $sueltas = null;
+                        break;
+                    }
+                    $sueltas[$pos] = $fila;
+                }
+                if ($sueltas !== null) {
+                    $out += $sueltas;
+                    continue;
+                }
+            }
+            $filas = $this->parte($tabla, $parte, $fichero);
+            foreach ($enParte as $pos) {
+                if (isset($filas[$pos - ($parte - 1) * $chunk])) {
+                    $out[$pos] = $filas[$pos - ($parte - 1) * $chunk];
+                }
             }
         }
         return $out;
@@ -1607,10 +1686,18 @@ final class Storage
         }
 
         $indicesAntes = $this->indicesEnDisco($tabla);
+        // Cada parte llega como filas o, si se ha podido empalmar sobre la de
+        // antes (ver empalmarParte()), como su texto ya hecho. Las partes no se
+        // guardan en la caché al escribirlas: serializarlas y escribir la copia
+        // costaba más que lo que ahorra a la primera lectura, que la decodifica
+        // una vez y la guarda entonces
         foreach ($partes as $i => $bloque) {
-            $this->escribirParte($this->ficheroDatos($tabla, $i + 1), $tabla, $bloque);
-            $revsPartes[$i]  = $rev;
-            $this->txCache[] = [$this->claveParte($tabla, $i + 1, $rev), $bloque];
+            if (is_string($bloque)) {
+                $this->escribirAtomico($this->ficheroDatos($tabla, $i + 1), $bloque);
+            } else {
+                $this->escribirParte($this->ficheroDatos($tabla, $i + 1), $tabla, $bloque);
+            }
+            $revsPartes[$i] = $rev;
         }
         unset($partes, $bloque);
         for ($parte = $total + 1; $parte <= $partesAntes; $parte++) {
@@ -1845,14 +1932,18 @@ final class Storage
     private function escribirParte(string $fichero, string $tabla, array $filas): void
     {
         $this->escribirTemporal($fichero, static function ($fh) use ($tabla, $filas, $fichero): void {
-            $pos      = 0;
-            $escribir = static function (string $texto) use ($fh, $fichero, &$pos): void {
-                if (@fwrite($fh, $texto) !== strlen($texto)) {
+            // Se escribe en bloques de unos 64 KB: una llamada a fwrite() por
+            // fila eran mil por parte, y el texto entero de golpe tendría la
+            // parte dos veces en memoria
+            $bloque = "{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [";
+            $pos    = 0;
+            $volcar = static function (string &$bloque) use ($fh, $fichero, &$pos): void {
+                if (@fwrite($fh, $bloque) !== strlen($bloque)) {
                     throw JsonSqlDbError::io('Escritura incompleta de ' . basename($fichero));
                 }
-                $pos += strlen($texto);
+                $pos   += strlen($bloque);
+                $bloque = '';
             };
-            $escribir("{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [");
             // Dónde empieza cada fila: con ello una lectura por clave lee
             // una línea del fichero en vez de decodificarlo entero (ver
             // filaEnParte()). Van al final, con la posición del propio
@@ -1864,14 +1955,104 @@ final class Storage
                 if ($json === false) {
                     throw JsonSqlDbError::io("No se puede codificar una fila de '$tabla' a JSON");
                 }
-                $desfases[] = $pos + strlen($sep);
-                $escribir($sep . $json);
-                $sep = ",\n    ";
+                $desfases[] = $pos + strlen($bloque) + strlen($sep);
+                $bloque    .= $sep . $json;
+                $sep        = ",\n    ";
+                if (strlen($bloque) >= 65536) {
+                    $volcar($bloque);
+                }
             }
-            $escribir($filas === [] ? "],\n" : "\n  ],\n");
-            $aqui = $pos;
-            $escribir('  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n");
+            $bloque .= $filas === [] ? "],\n" : "\n  ],\n";
+            $aqui    = $pos + strlen($bloque);
+            $bloque .= '  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n";
+            $volcar($bloque);
         });
+    }
+
+    /**
+     * El texto nuevo de una parte, hecho sobre el de antes sin decodificar ni
+     * volver a codificar sus filas: cambia las líneas de $cambios (desfase en
+     * la parte => fila nueva), añade $nuevas al final y rehace los desfases.
+     * El resultado es, byte a byte, el que escribiría escribirParte() con
+     * todas las filas (lo comprueba tests/f3_escrituras.php). Null si la parte
+     * no tiene la forma esperada —de antes de la 2.7, editada a mano, o con un
+     * número de filas que no es $filas— y entonces se escribe como siempre.
+     *
+     * @param array<int,array> $cambios
+     * @param list<array>      $nuevas
+     */
+    private function empalmarParte(string $tabla, int $parte, int $filas, array $cambios, array $nuevas): ?string
+    {
+        $fichero = $this->ficheroDatos($tabla, $parte);
+        $desf    = $this->desfasesDeParte($tabla, $parte, $fichero);
+        $texto   = $desf === null ? false : @file_get_contents($fichero);
+        if ($texto === false || strlen($desf) !== 4 * $filas
+            || !preg_match('/"offsets_at": (\d+)\n\}\n$/', substr($texto, -40), $m)) {
+            return null;
+        }
+        $finFilas = (int)$m[1];
+        $cierre   = $filas === 0 ? "],\n" : "\n  ],\n";
+        $cabecera = "{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [";
+        if (strncmp($texto, $cabecera, strlen($cabecera)) !== 0
+            || substr($texto, $finFilas - strlen($cierre), strlen($cierre)) !== $cierre) {
+            return null;
+        }
+        // La lista de desfases se escribió junto con las filas y offsets_at dice
+        // dónde acaba la última: si alguien hubiera cambiado la longitud de una
+        // línea, el final de las filas ya no estaría ahí y no se habría llegado
+        // hasta aquí. Se trabaja por tramos del texto, sin recorrer las filas
+        $desfases = $filas === 0 ? [] : array_values(unpack('N*', $desf));
+        $finUltima = $finFilas - strlen($cierre);
+        if ($filas > 0 && ($desfases[0] !== strlen($cabecera) + 5 || $texto[$desfases[$filas - 1]] !== '{')) {
+            return null;
+        }
+        ksort($cambios);
+        $nuevo  = '';
+        $desde  = 0;
+        $delta  = 0;
+        $ajuste = [];                                 // fila => cuánto se mueve su desfase
+        foreach ($cambios as $k => $fila) {
+            if ($k < 0 || $k >= $filas) {
+                return null;
+            }
+            $ini = $desfases[$k];
+            $fin = $k + 1 < $filas ? $desfases[$k + 1] - 6 : $finUltima;
+            if ($texto[$ini] !== '{' || $texto[$fin - 1] !== '}') {
+                return null;
+            }
+            $json = json_encode($fila, self::JSON_FILA);
+            if ($json === false) {
+                throw JsonSqlDbError::io("No se puede codificar una fila de '$tabla' a JSON");
+            }
+            $nuevo .= substr($texto, $desde, $ini - $desde) . $json;
+            $desde  = $fin;
+            $delta += strlen($json) - ($fin - $ini);
+            $ajuste[$k + 1] = $delta;
+        }
+        $nuevo .= substr($texto, $desde, $finUltima - $desde);
+        if ($ajuste !== []) {
+            $mover = 0;
+            for ($k = 0; $k < $filas; $k++) {
+                $mover = $ajuste[$k] ?? $mover;
+                $desfases[$k] += $mover;
+            }
+        }
+        if ($filas === 0) {
+            $nuevo = $cabecera;                       // "rows": [ … sin nada detrás todavía
+        }
+        $sep = $filas === 0 ? "\n    " : ",\n    ";
+        foreach ($nuevas as $fila) {
+            $json = json_encode($fila, self::JSON_FILA);
+            if ($json === false) {
+                throw JsonSqlDbError::io("No se puede codificar una fila de '$tabla' a JSON");
+            }
+            $desfases[] = strlen($nuevo) + strlen($sep);
+            $nuevo     .= $sep . $json;
+            $sep        = ",\n    ";
+        }
+        $nuevo .= $desfases === [] ? "],\n" : "\n  ],\n";
+        $aqui   = strlen($nuevo);
+        return $nuevo . '  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n";
     }
 
     /**
@@ -2431,6 +2612,23 @@ final class Storage
             return null;
         }
         $this->bloquearLectura($tabla);
+        // Claves de texto exactas: se buscan en el texto de los trozos, sin
+        // decodificarlos, porque pueden estar en cualquiera (ver clavesEnTexto())
+        if (!$prefijo && $claves !== [] && !isset($this->indicesMemo[$tabla][$def['name']]['*'])) {
+            $texto = true;
+            foreach ($claves as $c) {
+                $texto = $texto && Indexes::valorNumerico($c) === null;
+            }
+            $plan = $texto ? $this->planIndice($tabla, $def) : null;
+            if ($plan !== null && $plan['legado'] === null) {
+                $hallado = $this->clavesEnTexto($tabla, $def, $plan['partes'], $claves, false);
+                if ($hallado !== null) {
+                    $posiciones = array_keys($hallado);
+                    sort($posiciones);
+                    return $posiciones;
+                }
+            }
+        }
         $trozos = $this->trozosParaClaves($tabla, $def, $claves);
         if ($trozos === null) {
             return null;
@@ -2485,8 +2683,20 @@ final class Storage
             return false;
         }
         if ($v === null) {
-            // Una clave de texto puede estar en cualquier trozo: se miran todos,
-            // que quedan cargados en una lista para la siguiente pregunta
+            // Una clave de texto puede estar en cualquier trozo: hay que mirarlos
+            // todos. Las primeras preguntas se contestan buscando la clave en el
+            // texto de cada trozo, sin decodificarlo (ver clavesEnTexto()): un
+            // INSERT de una fila no arma mil entradas por trozo para mirar una.
+            // Una escritura de muchas filas pregunta muchas veces: a partir de
+            // la novena, los trozos se decodifican una vez y se quedan
+            $cuenta = &$this->preguntasTexto[$tabla][$def['name']];
+            $cuenta = ($cuenta ?? 0) + 1;
+            if ($cuenta <= 8 && !isset($this->indicesMemo[$tabla][$def['name']]['*'])) {
+                $hay = $this->clavesEnTexto($tabla, $def, $plan['partes'], [$clave], true);
+                if ($hay !== null) {
+                    return $hay !== [];
+                }
+            }
             $todos = $this->indicesMemo[$tabla][$def['name']]['*'] ?? null;
             if ($todos === null) {
                 $todos = [];
@@ -2520,6 +2730,71 @@ final class Storage
             }
         }
         return false;
+    }
+
+    /**
+     * Busca claves en el texto de los trozos de un índice, sin decodificarlos:
+     * cada clave está escrita en el fichero como `"clave":posición` o
+     * `"clave":[posiciones]`, detrás de una coma o de la llave de apertura, y
+     * un `"` dentro de una clave va escapado, así que no se puede confundir con
+     * el principio de otra. Antes de buscar se comprueba la cabecera del trozo
+     * (índice, columnas, parte, revisión) y su final, como trozoSano().
+     * Devuelve posición => true de lo encontrado (con $parar, en cuanto hay
+     * una), o null si algún trozo no se puede usar así.
+     *
+     * @param list<string> $claves
+     * @return array<int, true>|null
+     */
+    private function clavesEnTexto(string $tabla, array $def, int $partes, array $claves, bool $parar): ?array
+    {
+        $revs    = $this->estado($tabla)['indexes'][$def['name']] ?? null;
+        if (!is_array($revs)) {
+            return null;
+        }
+        $agujas = [];
+        foreach ($claves as $c) {
+            $agujas[] = json_encode($c, self::JSON_FILA) . ':';
+        }
+        $hallado = [];
+        for ($p = 1; $p <= $partes; $p++) {
+            $texto = @file_get_contents($this->ficheroIndice($tabla, $def['name'], $p));
+            if ($texto === false || substr($texto, -3) !== "}}\n") {
+                return null;
+            }
+            $cabecera = '{' . substr((string)json_encode([
+                'index' => $def['name'], 'table' => $tabla, 'columns' => $def['columns'],
+                'part' => $p, 'rev' => (int)($revs[$p - 1] ?? -1),
+            ], self::JSON_FILA), 1, -1) . ',';
+            if (strncmp($texto, $cabecera, strlen($cabecera)) !== 0) {
+                return null;
+            }
+            $desde = strpos($texto, '"keys":{', strlen($cabecera));
+            if ($desde === false) {
+                return null;
+            }
+            foreach ($agujas as $aguja) {
+                for ($i = $desde; ($i = strpos($texto, $aguja, $i)) !== false; $i++) {
+                    $antes = $texto[$i - 1];
+                    if ($antes !== '{' && $antes !== ',') {
+                        continue;                       // dentro de otra clave
+                    }
+                    $v = $i + strlen($aguja);
+                    if ($texto[$v] === '[') {
+                        $fin = strpos($texto, ']', $v);
+                        foreach ((array)json_decode(substr($texto, $v, (int)$fin - $v + 1), true) as $pos) {
+                            $hallado[(int)$pos] = true;
+                        }
+                    } else {
+                        $hallado[(int)substr($texto, $v, strspn($texto, '0123456789', $v))] = true;
+                    }
+                    if ($parar) {
+                        return $hallado;
+                    }
+                    break;
+                }
+            }
+        }
+        return $hallado;
     }
 
     /** ¿Está el índice al día en todos sus trozos? */

@@ -136,8 +136,12 @@ final class ApiStore
             return;
         }
         $this->transaccion(static function (array $e) use ($ip): array {
-            $e['fallos'][] = time();
-            if ($ip !== null) {
+            // Con tope, por lo mismo que en nonceYContar(): lo que pase de ahí no
+            // cambia ninguna decisión y solo engordaría el fichero
+            if (count($e['fallos']) < 10 * RATE_LIMIT_MAX) {
+                $e['fallos'][] = time();
+            }
+            if ($ip !== null && count($e['ips'][$ip] ?? []) < RATE_LIMIT_MAX) {
                 $e['ips'][$ip][] = time();
             }
             return [$e, null];
@@ -178,7 +182,12 @@ final class ApiStore
             $limite = time() - RATE_LIMIT_SECONDS;
             $marcas = array_values(array_filter($e['ips'][$ip] ?? [], static fn(int $t): bool => $t >= $limite));
             $dentro = count($marcas) < RATE_LIMIT_MAX;
-            $marcas[] = time();
+            // Pasado el límite ya no se anota nada más: el rechazo no depende de
+            // cuántas marcas haya por encima, y un ataque de miles de peticiones
+            // haría crecer el fichero de estado, que cada petición lee y reescribe
+            if ($dentro) {
+                $marcas[] = time();
+            }
             $e['ips'][$ip] = $marcas;
             return [$e, $dentro ? true : 'limite'];
         });

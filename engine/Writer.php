@@ -30,6 +30,10 @@ final class Writer
     private array $sucioMeta  = [];
     private array $astCache   = [];   // sql de trigger => árbol ya analizado
     private array $idxPadre   = [];   // tabla|cols => definición de índice, o claves recogidas
+    /** @var array<string,array> resultados de subconsultas que no miran fuera, por su texto */
+    private array $subsFijas = [];
+    /** @var array<string,array> sus conjuntos de valores, para IN */
+    private array $conjuntosFijos = [];
     /** @var array<string,int> siguiente autoincremento por tabla, movido en esta sentencia */
     private array $autoinc    = [];
     private int   $anidamiento = 0;
@@ -514,11 +518,12 @@ final class Writer
         // reescriben solo esas partes
         $parcial = $this->sinLeer($tabla, $meta) ? $this->porIndice($tabla, $where) : null;
         $indices = $this->indicesUnicos($tabla, $meta);
-        $sub     = fn(array $s, int $sid): array => $this->seleccionar($s);
+        $sub     = $this->subconsultas($mapa);
+        $conj    = $this->conjuntos($sub);       // una vez, no en cada fila
         $tocadas = 0;
 
         foreach ($parcial ?? $this->candidatas($tabla, $where) as $pos0 => $vieja) {
-            $ctx = ['fila' => $vieja, 'sub' => $sub];
+            $ctx = ['fila' => $vieja, 'sub' => $sub, 'conjunto' => $conj];
             if ($where !== null && !self::cumple($where, $simple, $vieja, $ctx)) {
                 continue;
             }
@@ -569,7 +574,8 @@ final class Writer
         $mapa  = $this->mapaColumnas($tabla, $meta);
         $where  = $ast['where'] === null ? null : Evaluator::resolver($ast['where'], $mapa);
         $simple = $where === null ? null : Select::comparacionSimple($where);
-        $sub   = fn(array $s, int $sid): array => $this->seleccionar($s);
+        $sub   = $this->subconsultas($mapa);
+        $conj  = $this->conjuntos($sub);
 
         // Se guarda la posición de cada fila: casi siempre sigue ahí, y
         // encontrarla otra vez recorriendo la tabla era lo que volvía cuadrático
@@ -578,7 +584,7 @@ final class Writer
         $objetivo = [];
         foreach ($parcial ?? $this->candidatas($tabla, $where) as $pos => $fila) {
             if ($where === null
-                || self::cumple($where, $simple, $fila, ['fila' => $fila, 'sub' => $sub])) {
+                || self::cumple($where, $simple, $fila, ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conj])) {
                 $objetivo[$pos] = $fila;
             }
         }
@@ -1234,6 +1240,61 @@ final class Writer
     private function seleccionar(array $ast): array
     {
         return (new Select($this->cat, fn(string $t): array => $this->filas($t)))->ejecutar($ast);
+    }
+
+    /**
+     * Las subconsultas de un UPDATE o un DELETE. Pueden mirar la fila que se
+     * está escribiendo (`WHERE u.tid = t.id`), y entonces se ejecutan con ella;
+     * las que no, se ejecutan una vez para toda la sentencia. Antes no podían
+     * mirar fuera («Columna desconocida») y las demás se repetían para cada
+     * fila. La memoria va por el texto de la subconsulta, no por su número:
+     * los triggers ejecutan otras sentencias con este mismo Writer y sus
+     * números podrían repetirse.
+     *
+     * @param array<string,string> $mapa columnas de la tabla que se escribe
+     */
+    private function subconsultas(array $mapa): callable
+    {
+        return function (array $sel, int $sid, array $filaExterna = []) use ($mapa): array {
+            $clave = md5(serialize($sel));
+            if (isset($this->subsFijas[$clave])) {
+                return $this->subsFijas[$clave];
+            }
+            $marca = Evaluator::$correlacionada;
+            Evaluator::$correlacionada = false;
+            try {
+                $filas = (new Select($this->cat, fn(string $t): array => $this->filas($t)))
+                    ->ejecutarExterna($sel, $mapa, $filaExterna);
+                $mira = Evaluator::$correlacionada;
+            } finally {
+                Evaluator::$correlacionada = $marca;
+            }
+            if (!$mira) {
+                $this->subsFijas[$clave] = $filas;
+            }
+            return $filas;
+        };
+    }
+
+    /** El conjunto de valores de una subconsulta con IN, para no recorrerla en cada fila. */
+    private function conjuntos(callable $sub): callable
+    {
+        return function (array $sel, int $sid, array $filaExterna = []) use ($sub): array {
+            $filas = $sub($sel, $sid, $filaExterna);
+            $clave = md5(serialize($sel));
+            if (isset($this->subsFijas[$clave]) && isset($this->conjuntosFijos[$clave])) {
+                return $this->conjuntosFijos[$clave];
+            }
+            $valores = [];
+            foreach ($filas as $fila) {
+                $valores[] = reset($fila);
+            }
+            $c = Indexes::conjunto($valores);
+            if (isset($this->subsFijas[$clave])) {
+                $this->conjuntosFijos[$clave] = $c;
+            }
+            return $c;
+        };
     }
 
     /** 'col' => 'col' y 'tabla.col' => 'col' */

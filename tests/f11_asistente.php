@@ -158,7 +158,7 @@ chk('el log del motor lleva quién lo hizo desde el panel', function () use ($tm
 });
 chk('la página de configuración describe la conexión', function () {
     $html = peticion('p=configuracion');
-    return str_contains($html, 'Directa: el panel carga el motor') && str_contains($html, 'Respuesta del motor');
+    return str_contains($html, 'Directa al motor') && str_contains($html, 'Respuesta del motor');
 });
 chk('una página que no existe no rompe el panel', fn() =>
     str_contains(peticion('p=fila&db=tienda'), 'Bases de datos'));
@@ -179,6 +179,78 @@ chk('ninguna página muestra avisos ni errores de PHP', function () use ($tmp) {
     $log = (string)@file_get_contents("$tmp/server.log");
     return !preg_match('/PHP (Warning|Notice|Deprecated|Fatal)/', $log) ?: 'el servidor registró: '
         . substr((string)preg_replace('/.*?(PHP (Warning|Notice|Deprecated|Fatal)[^\n]*).*/s', '$1', $log), 0, 200);
+});
+
+echo "\n== Configuración desde el panel ==\n";
+$guardar = static function (array $campos): string {
+    // El formulario tal como viene de la página, con los cambios encima
+    $html = peticion('p=configuracion');
+    $base = ['csrf' => csrf('p=configuracion'), 'accion' => 'guardar_configuracion', 'conexion' => 'directa'];
+    foreach (['timeout', 'sesion_minutos', 'login_max_fallos', 'bloqueo_min', 'bcrypt', 'audit_dias',
+              'filas_pagina', 'celda_max', 'export_max'] as $c) {
+        if (preg_match('/name="' . $c . '"[^>]*value="(\d+)"/', $html, $m)) { $base[$c] = $m[1]; }
+    }
+    $base['csv_separador'] = ';';
+    return peticion('p=configuracion', $campos + $base);
+};
+chk('un config.php de una versión anterior, sin las opciones nuevas, funciona con sus valores por defecto', function () use ($config) {
+    // Como uno hecho por php configurar.php en la 2.6: sin la carpeta del
+    // motor, la clave de lectura ni el tiempo máximo
+    $antes = (string)file_get_contents($config);
+    $viejo = (string)preg_replace("/^.*define\\('(ADMIN_MOTOR_RUTA|ADMIN_API_KEY_LECTURA|ADMIN_HMAC_SECRET_LECTURA|ADMIN_TIMEOUT)'.*\\n/m", '', $antes);
+    if ($viejo === $antes) { return 'no se pudo simular el fichero antiguo'; }
+    file_put_contents($config, $viejo);
+    $html = peticion('p=configuracion');
+    file_put_contents($config, $antes);
+    if (str_contains($html, 'Undefined constant')) { return 'falta una constante: ' . (preg_match('/Undefined constant[^<]*/', $html, $m) ? $m[0] : ''); }
+    return str_contains($html, 'Guardar la configuración') ?: 'la página no salió';
+});
+chk('si una página falla a mitad, sale solo la página de error', function () {
+    $html = peticion('p=datos&db=tienda&tabla=noexiste');
+    return substr_count($html, '<html') === 1 && str_contains($html, 'No se ha podido completar')
+        ?: 'salen ' . substr_count($html, '<html') . ' páginas';
+});
+chk('la página de configuración es un formulario', fn() =>
+    str_contains(peticion('p=configuracion'), 'Guardar la configuración'));
+chk('guardar cambia config.php y se ve al momento', function () use ($guardar, $config) {
+    $html = $guardar(['filas_pagina' => '20', 'celda_max' => '200', 'csv_separador' => ',']);
+    $texto = (string)file_get_contents($config);
+    return str_contains($html, 'Configuración guardada') && str_contains($texto, "define('ADMIN_FILAS_PAGINA', 20)")
+        && str_contains($texto, "define('ADMIN_CSV_SEPARADOR', ',')")
+        && preg_match('/name="filas_pagina"[^>]*value="20"/', $html) === 1 ?: 'no se guardó o no se ve';
+});
+chk('un valor fuera de rango no se guarda', function () use ($guardar, $config) {
+    $antes = (string)file_get_contents($config);
+    $html = $guardar(['filas_pagina' => '5']);
+    return str_contains($html, 'entre 10 y 1000') && file_get_contents($config) === $antes ?: 'lo aceptó';
+});
+chk('una lista de IPs sin la propia no se acepta: dejaría fuera', function () use ($guardar, $config) {
+    $antes = (string)file_get_contents($config);
+    $html = $guardar(['ips' => "10.9.9.9\n192.168.50.0/24"]);
+    return str_contains($html, 'te quedarías fuera') && file_get_contents($config) === $antes ?: 'la aceptó';
+});
+chk('exigir HTTPS entrando por HTTP no se acepta', function () use ($guardar, $config) {
+    $antes = (string)file_get_contents($config);
+    $html = $guardar(['exigir_https' => '1']);
+    return str_contains($html, 'te dejaría fuera') && file_get_contents($config) === $antes ?: 'lo aceptó';
+});
+chk('una conexión nueva que no responde no se guarda', function () use ($guardar, $config) {
+    $antes = (string)file_get_contents($config);
+    $html = $guardar(['conexion' => 'api', 'api_url' => 'http://127.0.0.1:1/api.php', 'api_key' => 'k', 'api_secret' => 's']);
+    return str_contains($html, 'alert-danger') && file_get_contents($config) === $antes ?: 'la guardó';
+});
+chk('las claves no se muestran y la auditoría no guarda valores', function () use ($guardar, $config, $tmp) {
+    $guardar(['lectura_key' => 'CLAVE-LECTURA-SECRETA-123', 'lectura_secret' => 'SECRETO-LECTURA-456']);
+    $texto = (string)file_get_contents($config);
+    $html = peticion('p=configuracion');
+    $audit = '';
+    foreach ((array)glob("$tmp/admin/auditoria-*.json") as $f) { $audit .= (string)file_get_contents((string)$f); }
+    if (!str_contains($texto, 'SECRETO-LECTURA-456')) { return 'no guardó la clave de lectura'; }
+    if (str_contains($html, 'SECRETO-LECTURA-456') || str_contains($html, 'CLAVE-LECTURA-SECRETA-123')) { return 'la página muestra la clave'; }
+    if (str_contains($audit, 'SECRETO-LECTURA-456')) { return 'la auditoría guarda el secreto'; }
+    // Quitarla deja las dos vacías
+    $guardar(['quitar_lectura' => '1']);
+    return !str_contains((string)file_get_contents($config), 'SECRETO-LECTURA-456') ?: 'no la quitó';
 });
 
 echo "\n== El motor aplica el rol del usuario ==\n";
@@ -209,6 +281,41 @@ chk('y es el motor quien lo rechaza, no solo el panel', function () use ($prepen
             . 'try { Api::sql("tienda", "DELETE FROM t"); echo "PASO"; } catch (Throwable $e) { echo $e->getMessage(); }';
     $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
     return str_contains($salida, 'solo tiene permiso de lectura') ?: 'salida: ' . substr($salida, 0, 200);
+});
+
+chk('un usuario de solo lectura no puede cambiar la configuración', function () use ($config) {
+    $antes = (string)file_get_contents($config);
+    $html = peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'guardar_configuracion', 'filas_pagina' => '30']);
+    return str_contains($html, 'permiso de administrador') && file_get_contents($config) === $antes ?: 'pudo';
+});
+
+echo "\n== Las sesiones siguen al usuario guardado ==\n";
+chk('cambiarle la contraseña a un usuario cierra sus sesiones abiertas', function () use ($admin) {
+    global $cookies;
+    $suya = $cookies;                                   // mirona tiene aquí su sesión abierta
+    $cookies = $suya . '.admin';
+    peticion('', ['usuario' => $admin['usuario'], 'clave' => $admin['clave']]);
+    peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'cambiar_clave',
+                            'usuario' => 'mirona', 'clave' => 'otra-clave-lectura-2']);
+    $cookies = $suya;
+    $html = peticion('p=bases');
+    return str_contains($html, 'La sesión se ha cerrado') && str_contains($html, 'Iniciar sesión') ?: 'la sesión seguía abierta';
+});
+chk('borrar un usuario cierra sus sesiones abiertas', function () use ($admin) {
+    global $cookies;
+    $suya = $cookies;
+    peticion('', ['usuario' => 'mirona', 'clave' => 'otra-clave-lectura-2']);
+    if (!str_contains(peticion('p=bases'), 'Bases de datos')) { return 'mirona no pudo entrar'; }
+    $cookies = $suya . '.admin';
+    peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'borrar_usuario', 'usuario' => 'mirona']);
+    $cookies = $suya;
+    return str_contains(peticion('p=bases'), 'La sesión se ha cerrado') ?: 'la sesión seguía abierta';
+});
+chk('cambiar la propia contraseña no cierra la propia sesión', function () use ($admin) {
+    global $cookies;
+    $cookies .= '.admin';
+    peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'cambiar_clave', 'clave' => 'clave-muy-larga-2']);
+    return str_contains(peticion('p=bases'), 'Bases de datos') ?: 'la cerró';
 });
 
 echo "\n---------------------------------------\n";
