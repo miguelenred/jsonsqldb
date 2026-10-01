@@ -75,6 +75,9 @@ function peticion(string $query, ?array $campos = null): string {
         CURLOPT_COOKIEFILE     => $cookies,
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_TIMEOUT        => 60,
+        // Las pruebas miran los textos en español: se piden en español, salvo
+        // las del idioma, que cambian $idiomaPrueba
+        CURLOPT_HTTPHEADER     => ['Accept-Language: ' . ($GLOBALS['idiomaPrueba'] ?? 'es')],
     ] + ($campos === null ? [] : [CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query($campos)]));
     $r = curl_exec($ch);
     curl_close($ch);
@@ -275,9 +278,9 @@ chk('y es el motor quien lo rechaza, no solo el panel', function () use ($prepen
     // -r no aplica auto_prepend_file: el prepend se carga a mano
     $codigo = 'require ' . var_export($prepend, true) . '; $_SERVER["REQUEST_METHOD"] = "GET"; '
             . 'foreach (["config.php" => getenv("JSONSQLDBADMIN_CONFIG"), "lib/Store.php" => 0, "lib/Auth.php" => 0, '
-            . '"lib/Audit.php" => 0, "lib/Api.php" => 0, "lib/util.php" => 0] as $f => $r) { '
+            . '"lib/Audit.php" => 0, "lib/Api.php" => 0, "lib/util.php" => 0, "lib/Idioma.php" => 0] as $f => $r) { '
             . 'require_once $r ?: ' . var_export("$raizProyecto/jsonsqldbadmin/", true) . ' . $f; } '
-            . '$_SESSION = ["usuario" => ["usuario" => "mirona", "rol" => "lectura"]]; '
+            . '$_SESSION = ["usuario" => ["usuario" => "mirona", "rol" => "lectura"], "idioma" => "es"]; '
             . 'try { Api::sql("tienda", "DELETE FROM t"); echo "PASO"; } catch (Throwable $e) { echo $e->getMessage(); }';
     $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
     return str_contains($salida, 'solo tiene permiso de lectura') ?: 'salida: ' . substr($salida, 0, 200);
@@ -316,6 +319,56 @@ chk('cambiar la propia contraseña no cierra la propia sesión', function () use
     $cookies .= '.admin';
     peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'cambiar_clave', 'clave' => 'clave-muy-larga-2']);
     return str_contains(peticion('p=bases'), 'Bases de datos') ?: 'la cerró';
+});
+
+echo "\n== Idiomas ==\n";
+chk('sin pedir idioma, o pidiendo uno que no hay, el panel sale en inglés', function () {
+    global $cookies, $idiomaPrueba;
+    $antes = [$cookies, $idiomaPrueba ?? null];
+    $cookies = sys_get_temp_dir() . '/f11_idioma_' . getmypid();
+    $mal = [];
+    foreach (['' => 'en', 'fr-FR,fr;q=0.9' => 'en', 'sv-SE' => 'en', 'fr-FR,es;q=0.8' => 'es', 'es-ES,es;q=0.9' => 'es'] as $cab => $esp) {
+        @unlink($cookies);
+        $idiomaPrueba = $cab;
+        $html = peticion('');
+        if (!str_contains($html, '<html lang="' . $esp . '"') || !str_contains($html, $esp === 'en' ? 'Sign in' : 'Iniciar sesión')) {
+            $mal[] = "«$cab»";
+        }
+    }
+    @unlink($cookies);
+    [$cookies, $idiomaPrueba] = $antes;
+    return $mal === [] ?: 'mal con ' . implode(', ', $mal);
+});
+chk('el selector guarda el idioma en el usuario y le sigue en otra sesión y otro navegador', function () use ($admin) {
+    global $cookies;
+    $html = peticion('p=bases&idioma=en');
+    if (!str_contains($html, '<html lang="en"') || !str_contains($html, 'Databases')) { return 'el selector no cambió el idioma'; }
+    $suya = $cookies;
+    $cookies = $suya . '.otra';                         // otro navegador, que pide español
+    @unlink($cookies);
+    peticion('', ['usuario' => $admin['usuario'], 'clave' => 'clave-muy-larga-2']);
+    $html = peticion('p=bases');
+    @unlink($cookies);
+    $cookies = $suya;
+    return str_contains($html, '<html lang="en"') && str_contains($html, 'Databases') ?: 'en otra sesión no siguió en inglés';
+});
+chk('las páginas en inglés no dejan textos en español', function () {
+    $paginas = ['p=bases', 'p=tablas&db=tienda', 'p=datos&db=tienda&tabla=t', 'p=estructura&db=tienda&tabla=t', 'p=sql&db=tienda',
+                'p=vistas&db=tienda', 'p=integridad&db=tienda', 'p=usuarios', 'p=auditoria', 'p=configuracion', 'p=crear_tabla&db=tienda'];
+    foreach ($paginas as $q) {
+        $html = peticion($q);
+        if (!str_contains($html, '<html lang="en"')) { return "$q no está en inglés"; }
+        // Fuera lo que son datos o código: celdas, código, opciones y las entradas de la auditoría
+        $texto = (string)preg_replace('#<(script|style|td|code|pre|textarea|option|kbd)\b.*?</\1>#si', ' ', $html);
+        $texto = html_entity_decode(strip_tags($texto), ENT_QUOTES, 'UTF-8');
+        if (preg_match('/\S*[áéíóúñ¿¡]\S*/iu', $texto, $m)) { return "$q: «{$m[0]}»"; }
+        foreach (['Guardar', 'Borrar', 'Tablas', 'Bases de datos', 'Cerrar sesión', 'Configuración', 'Exportar', 'Importar', 'Consola',
+                  'Usuarios', 'Estructura', 'Insertar', 'Filtrar', 'Contraseña', 'Nueva', 'Nuevo', 'Volver', 'Columnas'] as $palabra) {
+            if (preg_match('/\b' . preg_quote($palabra, '/') . '\b/u', $texto)) { return "{$q}: «{$palabra}»"; }
+        }
+    }
+    peticion('p=bases&idioma=es');                     // como estaba, para lo que venga después
+    return true;
 });
 
 echo "\n---------------------------------------\n";

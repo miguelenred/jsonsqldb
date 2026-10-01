@@ -25,18 +25,18 @@ function ejecutarAccion(string $accion): void
             $nombre = nombreBase(post('nombre'));
             Api::sql('', 'CREATE DATABASE ' . cita($nombre));
             Audit::registrar('crear_base', $nombre, $nombre);
-            flash('success', "Base de datos '$nombre' creada.");
+            flash('success', t('Base de datos \'{nombre}\' creada.', ['nombre' => $nombre]));
             redirigir(['p' => 'tablas', 'db' => $nombre]);
 
         case 'borrar_base':
             Auth::exigirAdmin();
             $nombre = nombreBase(post('nombre'));
             if (post('confirmacion') !== $nombre) {
-                throw new RuntimeException('Para borrar la base hay que escribir su nombre exacto.');
+                throw new RuntimeException(t('Para borrar la base hay que escribir su nombre exacto.'));
             }
             Api::sql('', 'DROP DATABASE ' . cita($nombre));
             Audit::registrar('borrar_base', $nombre, $nombre);
-            flash('success', "Base de datos '$nombre' borrada.");
+            flash('success', t('Base de datos \'{nombre}\' borrada.', ['nombre' => $nombre]));
             redirigir(['p' => 'bases']);
 
         // ---------------- Tablas ----------------
@@ -50,7 +50,7 @@ function ejecutarAccion(string $accion): void
                 }
             }
             if ($activas === []) {
-                throw new RuntimeException('La tabla necesita al menos una columna.');
+                throw new RuntimeException(t('La tabla necesita al menos una columna.'));
             }
 
             // Clave primaria compuesta: va a nivel de tabla, no en cada columna
@@ -69,7 +69,7 @@ function ejecutarAccion(string $accion): void
             }
             Api::sql($base, 'CREATE TABLE ' . cita($nombre) . " (\n  " . implode(",\n  ", $cols) . "\n)");
             Audit::registrar('crear_tabla', $nombre, $base);
-            flash('success', "Tabla '$nombre' creada.");
+            flash('success', t('Tabla \'{nombre}\' creada.', ['nombre' => $nombre]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $nombre]);
 
         case 'borrar_tabla':
@@ -77,7 +77,7 @@ function ejecutarAccion(string $accion): void
             identificador($tabla, 'tabla');
             Api::sql($base, 'DROP TABLE ' . cita($tabla));
             Audit::registrar('borrar_tabla', $tabla, $base);
-            flash('success', "Tabla '$tabla' borrada.");
+            flash('success', t('Tabla \'{tabla}\' borrada.', ['tabla' => $tabla]));
             redirigir(['p' => 'tablas', 'db' => $base]);
 
         case 'vaciar_tabla':
@@ -85,7 +85,7 @@ function ejecutarAccion(string $accion): void
             identificador($tabla, 'tabla');
             $r = Api::sql($base, 'DELETE FROM ' . cita($tabla));
             Audit::registrar('vaciar_tabla', $tabla, $base);
-            flash('success', "Tabla '$tabla' vaciada ({$r['filas']} fila(s)).");
+            flash('success', t('Tabla \'{tabla}\' vaciada ({r} fila(s)).', ['tabla' => $tabla, 'r' => $r['filas']]));
             redirigir(['p' => 'datos', 'db' => $base, 'tabla' => $tabla]);
 
         case 'renombrar_tabla':
@@ -94,7 +94,7 @@ function ejecutarAccion(string $accion): void
             $nuevo = identificador(post('nuevo'), 'tabla');
             Api::sql($base, 'ALTER TABLE ' . cita($tabla) . ' RENAME TO ' . cita($nuevo));
             Audit::registrar('renombrar_tabla', "$tabla → $nuevo", $base);
-            flash('success', "Tabla renombrada a '$nuevo'.");
+            flash('success', t('Tabla renombrada a \'{nuevo}\'.', ['nuevo' => $nuevo]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $nuevo]);
 
         // ---------------- Columnas ----------------
@@ -104,7 +104,7 @@ function ejecutarAccion(string $accion): void
             $def = definicionColumna($_POST);
             Api::sql($base, 'ALTER TABLE ' . cita($tabla) . ' ADD COLUMN ' . $def);
             Audit::registrar('anadir_columna', "$tabla.$def", $base);
-            flash('success', 'Columna añadida.');
+            flash('success', t('Columna añadida.'));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'editar_columna':
@@ -122,7 +122,7 @@ function ejecutarAccion(string $accion): void
                    . definicionColumna(array_merge($_POST, ['nombre' => $nombre])));
 
             Audit::registrar('editar_columna', "$tabla.$col" . ($col === $nombre ? '' : " → $nombre"), $base);
-            flash('success', 'Columna guardada.');
+            flash('success', t('Columna guardada.'));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'borrar_columna':
@@ -131,7 +131,7 @@ function ejecutarAccion(string $accion): void
             $col = identificador(post('columna'), 'columna');
             Api::sql($base, 'ALTER TABLE ' . cita($tabla) . ' DROP COLUMN ' . cita($col));
             Audit::registrar('borrar_columna', "$tabla.$col", $base);
-            flash('success', "Columna '$col' borrada.");
+            flash('success', t('Columna \'{col}\' borrada.', ['col' => $col]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         // ---------------- Restricciones ----------------
@@ -145,7 +145,7 @@ function ejecutarAccion(string $accion): void
             }
             Api::sql($base, $sql . 'UNIQUE (' . implode(', ', array_map('cita', $cols)) . ')');
             Audit::registrar('anadir_unica', $tabla . ' (' . implode(',', $cols) . ')', $base);
-            flash('success', 'Clave única añadida.');
+            flash('success', t('Clave única añadida.'));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'anadir_fk':
@@ -155,7 +155,7 @@ function ejecutarAccion(string $accion): void
             $destino = identificador(post('tabla_destino'), 'tabla');
             $refs    = columnasSeleccionadas('referencias');
             if (count($refs) !== count($cols)) {
-                throw new RuntimeException('La clave foránea necesita el mismo número de columnas a cada lado.');
+                throw new RuntimeException(t('La clave foránea necesita el mismo número de columnas a cada lado.'));
             }
             $sql = 'ALTER TABLE ' . cita($tabla) . ' ADD ';
             if (post('nombre') !== '') {
@@ -167,7 +167,7 @@ function ejecutarAccion(string $accion): void
                   . ' ON UPDATE ' . accionFk(post('on_update'));
             Api::sql($base, $sql);
             Audit::registrar('anadir_fk', "$tabla → $destino", $base);
-            flash('success', 'Clave foránea añadida.');
+            flash('success', t('Clave foránea añadida.'));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'anadir_pk':
@@ -177,7 +177,7 @@ function ejecutarAccion(string $accion): void
             Api::sql($base, 'ALTER TABLE ' . cita($tabla) . ' ADD PRIMARY KEY ('
                    . implode(', ', array_map('cita', $cols)) . ')');
             Audit::registrar('anadir_pk', $tabla . ' (' . implode(',', $cols) . ')', $base);
-            flash('success', 'Clave primaria creada.');
+            flash('success', t('Clave primaria creada.'));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'borrar_pk':
@@ -185,7 +185,7 @@ function ejecutarAccion(string $accion): void
             identificador($tabla, 'tabla');
             Api::sql($base, 'ALTER TABLE ' . cita($tabla) . ' DROP PRIMARY KEY');
             Audit::registrar('borrar_pk', $tabla, $base);
-            flash('success', 'Clave primaria eliminada.');
+            flash('success', t('Clave primaria eliminada.'));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'borrar_restriccion':
@@ -194,7 +194,7 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'restricción');
             Api::sql($base, 'ALTER TABLE ' . cita($tabla) . ' DROP CONSTRAINT ' . cita($nombre));
             Audit::registrar('borrar_restriccion', "$tabla.$nombre", $base);
-            flash('success', "Restricción '$nombre' eliminada.");
+            flash('success', t('Restricción \'{nombre}\' eliminada.', ['nombre' => $nombre]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         // ---------------- Restaurar desde ZIP ----------------
@@ -203,28 +203,21 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'base de datos');
 
             if (mismoHostQueLaApi() === false) {
-                throw new RuntimeException(
-                    'Restaurar desde ZIP necesita que el panel y el motor estén en la misma '
-                    . 'máquina, porque escribe los ficheros directamente. Usa el volcado en SQL: '
-                    . 'se importa desde la página de la base y funciona entre máquinas distintas.'
-                );
+                throw new RuntimeException(t('Restaurar desde ZIP necesita que el panel y el motor estén en la misma máquina, porque escribe los ficheros directamente. Usa el volcado en SQL: se importa desde la página de la base y funciona entre máquinas distintas.'));
             }
             $subido = $_FILES['zip'] ?? null;
             if (!is_array($subido) || ($subido['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
-                throw new RuntimeException(
-                    'No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP '
-                    . '(upload_max_filesize y post_max_size).'
-                );
+                throw new RuntimeException(t('No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP (upload_max_filesize y post_max_size).'));
             }
             if (!is_uploaded_file((string)$subido['tmp_name'])) {
-                throw new RuntimeException('El fichero recibido no es una subida válida.');
+                throw new RuntimeException(t('El fichero recibido no es una subida válida.'));
             }
 
             // rutaDeLaBase() ya comprueba que la carpeta existe y que el motor
             // está en esta máquina, y explica el motivo si no es así
             $resumen = Importar::zip((string)$subido['tmp_name'], $nombre, rutaDeLaBase($nombre));
             Audit::registrar('importar_zip', $resumen, $nombre);
-            flash('success', "Base '$nombre' restaurada. $resumen");
+            flash('success', t('Base \'{nombre}\' restaurada. {resumen}', ['nombre' => $nombre, 'resumen' => $resumen]));
             redirigir(['p' => 'bases']);
 
         case 'importar_sql':
@@ -234,13 +227,10 @@ function ejecutarAccion(string $accion): void
             $subido = $_FILES['fichero'] ?? null;
             if (!is_array($subido) || ($subido['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
                 || !is_uploaded_file((string)$subido['tmp_name'])) {
-                throw new RuntimeException(
-                    'No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP '
-                    . '(upload_max_filesize y post_max_size).'
-                );
+                throw new RuntimeException(t('No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP (upload_max_filesize y post_max_size).'));
             }
             if ($accion === 'importar_sql') {
-                $resumen = Importar::sql((string)$subido['tmp_name'], $nombre);
+                $resumen = Importar::sql((string)$subido['tmp_name'], $nombre, (string)post('formato', 'auto'));
             } else {
                 $tabla   = identificador(post('tabla'), 'tabla');
                 $resumen = Importar::csv((string)$subido['tmp_name'], $nombre, $tabla);
@@ -255,11 +245,11 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'vista');
             $sql    = trim(post('sql'));
             if (!preg_match('/^\s*SELECT\b/i', $sql)) {
-                throw new RuntimeException('Una vista tiene que ser un SELECT.');
+                throw new RuntimeException(t('Una vista tiene que ser un SELECT.'));
             }
             Api::sql($base, 'CREATE VIEW ' . cita($nombre) . ' AS ' . rtrim($sql, "; \t\n"));
             Audit::registrar('crear_vista', $nombre, $base);
-            flash('success', "Vista '$nombre' creada.");
+            flash('success', t('Vista \'{nombre}\' creada.', ['nombre' => $nombre]));
             redirigir(['p' => 'vistas', 'db' => $base]);
 
         case 'borrar_vista':
@@ -267,7 +257,7 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'vista');
             Api::sql($base, 'DROP VIEW ' . cita($nombre));
             Audit::registrar('borrar_vista', $nombre, $base);
-            flash('success', "Vista '$nombre' borrada.");
+            flash('success', t('Vista \'{nombre}\' borrada.', ['nombre' => $nombre]));
             redirigir(['p' => 'vistas', 'db' => $base]);
 
         // ---------------- Triggers ----------------
@@ -278,11 +268,11 @@ function ejecutarAccion(string $accion): void
             $timing = strtoupper(post('timing')) === 'BEFORE' ? 'BEFORE' : 'AFTER';
             $evento = strtoupper(post('evento'));
             if (!in_array($evento, ['INSERT', 'UPDATE', 'DELETE'], true)) {
-                throw new RuntimeException('El evento del trigger debe ser INSERT, UPDATE o DELETE.');
+                throw new RuntimeException(t('El evento del trigger debe ser INSERT, UPDATE o DELETE.'));
             }
             $cuerpo = trim(post('cuerpo'));
             if ($cuerpo === '') {
-                throw new RuntimeException('El trigger necesita al menos una sentencia.');
+                throw new RuntimeException(t('El trigger necesita al menos una sentencia.'));
             }
             if (!str_ends_with($cuerpo, ';')) {
                 $cuerpo .= ';';
@@ -296,7 +286,7 @@ function ejecutarAccion(string $accion): void
 
             Api::sql($base, $sql);
             Audit::registrar('crear_trigger', "$nombre · $timing $evento en $tabla", $base);
-            flash('success', "Trigger '$nombre' creado.");
+            flash('success', t('Trigger \'{nombre}\' creado.', ['nombre' => $nombre]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'borrar_trigger':
@@ -304,7 +294,7 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'trigger');
             Api::sql($base, 'DROP TRIGGER ' . cita($nombre));
             Audit::registrar('borrar_trigger', $nombre, $base);
-            flash('success', "Trigger '$nombre' borrado.");
+            flash('success', t('Trigger \'{nombre}\' borrado.', ['nombre' => $nombre]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         // ---------------- Índices ----------------
@@ -314,7 +304,7 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'índice');
             $cols   = (array)($_POST['columnas'] ?? []);
             if ($cols === []) {
-                throw new RuntimeException('Elige al menos una columna para el índice.');
+                throw new RuntimeException(t('Elige al menos una columna para el índice.'));
             }
             foreach ($cols as $i => $c) {
                 $cols[$i] = cita(identificador((string)$c, 'columna'));
@@ -322,7 +312,7 @@ function ejecutarAccion(string $accion): void
             Api::sql($base, 'CREATE INDEX ' . cita($nombre) . ' ON ' . cita($tabla)
                           . ' (' . implode(', ', $cols) . ')');
             Audit::registrar('crear_indice', $tabla . '.' . $nombre, $base);
-            flash('success', "Índice '$nombre' creado.");
+            flash('success', t('Índice \'{nombre}\' creado.', ['nombre' => $nombre]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         case 'borrar_indice':
@@ -331,7 +321,7 @@ function ejecutarAccion(string $accion): void
             $nombre = identificador(post('nombre'), 'índice');
             Api::sql($base, 'DROP INDEX ' . cita($nombre) . ' ON ' . cita($tabla));
             Audit::registrar('borrar_indice', $tabla . '.' . $nombre, $base);
-            flash('success', "Índice '$nombre' borrado.");
+            flash('success', t('Índice \'{nombre}\' borrado.', ['nombre' => $nombre]));
             redirigir(['p' => 'estructura', 'db' => $base, 'tabla' => $tabla]);
 
         // ---------------- Filas ----------------
@@ -340,13 +330,13 @@ function ejecutarAccion(string $accion): void
             identificador($tabla, 'tabla');
             [$cols, $vals] = valoresDelFormulario();
             if ($cols === []) {
-                throw new RuntimeException('No hay ningún valor que insertar.');
+                throw new RuntimeException(t('No hay ningún valor que insertar.'));
             }
             Api::sql($base,
                 'INSERT INTO ' . cita($tabla) . ' (' . implode(', ', array_map('cita', $cols)) . ') VALUES ('
                 . implode(', ', array_fill(0, count($cols), '?')) . ')', $vals);
             Audit::registrar('insertar_fila', $tabla, $base);
-            flash('success', 'Fila insertada.');
+            flash('success', t('Fila insertada.'));
             redirigir(['p' => 'datos', 'db' => $base, 'tabla' => $tabla]);
 
         case 'actualizar_fila':
@@ -354,7 +344,7 @@ function ejecutarAccion(string $accion): void
             identificador($tabla, 'tabla');
             [$cols, $vals] = valoresDelFormulario();
             if ($cols === []) {
-                throw new RuntimeException('No hay ningún valor que guardar.');
+                throw new RuntimeException(t('No hay ningún valor que guardar.'));
             }
             [$donde, $clave] = condicionClave();
             $sets = [];
@@ -362,7 +352,7 @@ function ejecutarAccion(string $accion): void
             Api::sql($base, 'UPDATE ' . cita($tabla) . ' SET ' . implode(', ', $sets) . ' WHERE ' . $donde,
                      array_merge($vals, $clave));
             Audit::registrar('actualizar_fila', $tabla, $base);
-            flash('success', 'Fila guardada.');
+            flash('success', t('Fila guardada.'));
             redirigir(['p' => 'datos', 'db' => $base, 'tabla' => $tabla, 'pag' => get('pag', '1')]);
 
         case 'borrar_fila':
@@ -371,7 +361,7 @@ function ejecutarAccion(string $accion): void
             [$donde, $clave] = condicionClave();
             $r = Api::sql($base, 'DELETE FROM ' . cita($tabla) . ' WHERE ' . $donde, $clave);
             Audit::registrar('borrar_fila', $tabla, $base);
-            flash('success', "{$r['filas']} fila(s) borrada(s).");
+            flash('success', t('{r} fila(s) borrada(s).', ['r' => $r['filas']]));
             redirigir(['p' => 'datos', 'db' => $base, 'tabla' => $tabla]);
 
         // ---------------- Exportación ----------------
@@ -397,20 +387,18 @@ function ejecutarAccion(string $accion): void
             } else {
                 // Exportación del resultado de una consulta del editor
                 if (!preg_match('/^\s*(SELECT|SHOW)\b/i', $sql)) {
-                    throw new RuntimeException('Solo se pueden exportar los resultados de SELECT y SHOW.');
+                    throw new RuntimeException(t('Solo se pueden exportar los resultados de SELECT y SHOW.'));
                 }
                 $nombre = tablaDeLaConsulta($sql);
             }
 
             $filas = Api::sql($base, $sql, $params);
             if (isset($filas['success'])) {
-                throw new RuntimeException('Esa sentencia no devuelve filas que exportar.');
+                throw new RuntimeException(t('Esa sentencia no devuelve filas que exportar.'));
             }
             if (count($filas) > ADMIN_EXPORT_MAX) {
-                throw new RuntimeException(
-                    'La exportación supera el tope de ' . number_format((int)ADMIN_EXPORT_MAX, 0, ',', '.')
-                    . ' filas (ADMIN_EXPORT_MAX). Acota la consulta con WHERE o LIMIT.'
-                );
+                throw new RuntimeException(t('La exportación supera el tope de {n} filas (ADMIN_EXPORT_MAX). Acota la consulta con WHERE o LIMIT.',
+                    ['n' => Idioma::numero((int)ADMIN_EXPORT_MAX)]));
             }
 
             Audit::registrar('exportar_' . $formato, $nombre . ' · ' . count($filas) . ' fila(s)', $base);
@@ -423,7 +411,7 @@ function ejecutarAccion(string $accion): void
 
         case 'exportar_base':
             $nombre  = nombreBase(post('nombre'));
-            $formato = post('formato') === 'zip' ? 'zip' : 'sql';
+            $formato = in_array(post('formato'), ['zip', 'mysql', 'postgresql', 'sqlserver'], true) ? post('formato') : 'sql';
 
             if ($formato === 'zip') {
                 // El ZIP lee los ficheros directamente, sin pasar por la API: antes
@@ -443,10 +431,8 @@ function ejecutarAccion(string $accion): void
                 $datos = Api::sql($nombre, 'SELECT * FROM ' . cita($tabla));
                 $filas += count($datos);
                 if ($filas > ADMIN_EXPORT_MAX) {
-                    throw new RuntimeException(
-                        'El volcado supera el tope de ' . number_format((int)ADMIN_EXPORT_MAX, 0, ',', '.')
-                        . ' filas (ADMIN_EXPORT_MAX). Exporta las tablas por separado o usa el ZIP.'
-                    );
+                    throw new RuntimeException(t('El volcado supera el tope de {n} filas (ADMIN_EXPORT_MAX). Exporta las tablas por separado o usa el ZIP.',
+                        ['n' => Idioma::numero((int)ADMIN_EXPORT_MAX)]));
                 }
                 $tablas[] = [
                     'tabla'    => $tabla,
@@ -456,7 +442,8 @@ function ejecutarAccion(string $accion): void
                 ];
             }
             Audit::registrar('exportar_base', $nombre . ' · ' . $filas . ' fila(s)', $nombre);
-            Exportar::base($nombre, $tablas, Api::sql($nombre, 'SHOW TRIGGERS'));
+            Exportar::base($nombre, $tablas, Api::sql($nombre, 'SHOW TRIGGERS'), Api::sql($nombre, 'SHOW VIEWS'),
+                           Api::sql($nombre, 'SHOW INDEXES'), $formato === 'sql' ? 'sqlite' : $formato);
             // Exportar termina la petición
 
         // ---------------- Usuarios ----------------
@@ -467,26 +454,26 @@ function ejecutarAccion(string $accion): void
             // entre ellos puede haber claves
             Audit::registrar('configuracion', $cambios === [] ? 'sin cambios' : implode(', ', $cambios));
             flash($cambios === [] ? 'info' : 'success', $cambios === []
-                ? 'No había nada que cambiar.'
-                : 'Configuración guardada (' . count($cambios) . ' cambio(s)). Se aplica desde esta página.');
+                ? t('No había nada que cambiar.')
+                : t('Configuración guardada ({n} cambio(s)). Se aplica desde esta página.', ['n' => count($cambios)]));
             redirigir(['p' => 'configuracion']);
 
         case 'crear_usuario':
             Auth::exigirAdmin();
             $nombre = Auth::crear(post('usuario'), (string)($_POST['clave'] ?? ''), post('rol'));
             Audit::registrar('crear_usuario', $nombre);
-            flash('success', "Usuario '$nombre' creado.");
+            flash('success', t('Usuario \'{nombre}\' creado.', ['nombre' => $nombre]));
             redirigir(['p' => 'usuarios']);
 
         case 'borrar_usuario':
             Auth::exigirAdmin();
             $nombre = post('usuario');
             if (strcasecmp($nombre, (string)Auth::usuario()['usuario']) === 0) {
-                throw new RuntimeException('No puedes borrar tu propio usuario.');
+                throw new RuntimeException(t('No puedes borrar tu propio usuario.'));
             }
             Auth::borrar($nombre);
             Audit::registrar('borrar_usuario', $nombre);
-            flash('success', "Usuario '$nombre' borrado.");
+            flash('success', t('Usuario \'{nombre}\' borrado.', ['nombre' => $nombre]));
             redirigir(['p' => 'usuarios']);
 
         case 'cambiar_clave':
@@ -500,11 +487,11 @@ function ejecutarAccion(string $accion): void
                 Auth::renovarHuella();              // las demás sesiones de ese usuario sí caducan
             }
             Audit::registrar('cambiar_clave', $nombre);
-            flash('success', 'Contraseña cambiada.');
+            flash('success', t('Contraseña cambiada.'));
             redirigir(['p' => 'usuarios']);
     }
 
-    throw new RuntimeException("Acción desconocida: '$accion'");
+    throw new RuntimeException(t('Acción desconocida: \'{accion}\'', ['accion' => $accion]));
 }
 
 // ----------------------------------------------------------------------
@@ -527,10 +514,10 @@ function definicionColumna(array $c, bool $pkEnLinea = true): string
     if (!empty($c['pk']) && $pkEnLinea) { $def .= ' PRIMARY KEY'; }
     if (!empty($c['auto'])) {
         if (strtoupper(trim((string)($c['tipo'] ?? ''))) !== 'INTEGER') {
-            throw new RuntimeException("AUTOINCREMENT solo vale en columnas INTEGER ('$nombre').");
+            throw new RuntimeException(t('AUTOINCREMENT solo vale en columnas INTEGER (\'{nombre}\').', ['nombre' => $nombre]));
         }
         if (empty($c['pk']) || !$pkEnLinea) {
-            throw new RuntimeException('AUTOINCREMENT necesita que la columna sea clave primaria simple.');
+            throw new RuntimeException(t('AUTOINCREMENT necesita que la columna sea clave primaria simple.'));
         }
         $def .= ' AUTOINCREMENT';
     }
@@ -562,7 +549,7 @@ function columnasSeleccionadas(string $campo = 'columnas'): array
         }
     }
     if ($cols === []) {
-        throw new RuntimeException('Hay que elegir al menos una columna.');
+        throw new RuntimeException(t('Hay que elegir al menos una columna.'));
     }
     return $cols;
 }
@@ -609,7 +596,7 @@ function valoresDelFormulario(): array
         }
         if (isset($nulos[$col])) {
             if (isset($noNulas[$col])) {
-                throw new RuntimeException("La columna '$col' no admite nulos.");
+                throw new RuntimeException(t('La columna \'{col}\' no admite nulos.', ['col' => $col]));
             }
             $cols[] = $col;
             $vals[] = null;
@@ -643,7 +630,7 @@ function condicionClave(): array
         $vals[]   = is_scalar($v) ? (string)$v : null;
     }
     if ($partes === []) {
-        throw new RuntimeException('Esta tabla no tiene clave primaria: no se puede identificar la fila.');
+        throw new RuntimeException(t('Esta tabla no tiene clave primaria: no se puede identificar la fila.'));
     }
     return [implode(' AND ', $partes), $vals];
 }

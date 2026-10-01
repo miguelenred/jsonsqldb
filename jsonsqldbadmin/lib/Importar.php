@@ -41,12 +41,19 @@ final class Importar
      * No hay transacciones: si una sentencia falla, las anteriores ya están
      * hechas. Se para ahí y se dice cuál era y cuántas se ejecutaron.
      */
-    public static function sql(string $fichero, string $base): string
+    public static function sql(string $fichero, string $base, string $dialecto = 'auto'): string
     {
         $fh = @fopen($fichero, 'rb');
         if ($fh === false) {
-            throw new RuntimeException('No se puede leer el fichero subido.');
+            throw new RuntimeException(t('No se puede leer el fichero subido.'));
         }
+        if (!in_array($dialecto, ['jsonsqldb', 'sqlite', 'mysql', 'postgresql', 'sqlserver'], true)) {
+            $dialecto = Traductor::detectar((string)fread($fh, 8192));
+            rewind($fh);
+        }
+        // Un volcado de SQLite o de MySQL pasa sentencia a sentencia por el
+        // traductor; uno de jsonSQLDB va tal cual
+        $traductor = $dialecto === 'jsonsqldb' ? null : new Traductor($dialecto);
         $hechas = 0;
         $linea  = 0;
         $prefijo = '';
@@ -60,56 +67,118 @@ final class Importar
             $prefijo = '';
             $tuplas  = [];
         };
+        $ejecutar = static function (string $sql) use (&$prefijo, &$tuplas, &$hechas, $vaciar, $base): void {
+            // INSERT INTO t [(a, b)] VALUES (…);  → se junta con los siguientes iguales
+            if (preg_match('/^(INSERT\s+INTO\s+(?:"(?:[^"]|"")+"|[^\s(]+)\s*(?:\([^()]*\)\s*)?VALUES\s*\()/is', $sql, $m)
+                && substr_count($sql, '),') === 0) {
+                $tupla = '(' . rtrim(substr($sql, strlen($m[1])), "; \t\r\n");
+                if ($m[1] !== $prefijo || count($tuplas) >= self::LOTE) {
+                    $vaciar();
+                    $prefijo = $m[1];
+                }
+                $tuplas[] = $tupla;
+                return;
+            }
+            $vaciar();
+            Api::sql($base, $sql);
+            $hechas++;
+        };
+        // PostgreSQL y SQL Server declaran la clave primaria, el autoincremento
+        // o los valores por defecto después de crear la tabla, a veces después
+        // de sus datos: una primera pasada los recoge para el CREATE TABLE
+        if ($traductor !== null && in_array($dialecto, ['postgresql', 'sqlserver'], true)) {
+            foreach (self::sentencias($fh, $dialecto) as [$sql]) {
+                $traductor->observar($sql);
+            }
+            rewind($fh);
+        }
         try {
-            foreach (self::sentencias($fh) as [$sql, $en]) {
+            foreach (self::sentencias($fh, $dialecto) as [$sql, $en]) {
                 $linea = $en;
+                if ($traductor !== null) {
+                    foreach ($traductor->traducir($sql) as $traducida) {
+                        $ejecutar($traducida);
+                    }
+                    continue;
+                }
                 // Se importa en una base: crear o borrar otras no es cosa suya,
                 // y un fichero ajeno no debería poder hacerlo por descuido
                 if (preg_match('/^\s*(CREATE|DROP)\s+DATABASE\b/i', $sql)) {
-                    throw new RuntimeException('El fichero intenta crear o borrar una base de datos; eso no se importa.');
+                    throw new RuntimeException(t('El fichero intenta crear o borrar una base de datos; eso no se importa.'));
                 }
-                // INSERT INTO t (a, b) VALUES (…);  → se junta con los siguientes iguales
-                if (preg_match('/^(INSERT\s+INTO\s+.+?\)\s+VALUES\s*\()/is', $sql, $m) && substr_count($sql, '),') === 0) {
-                    $tupla = '(' . rtrim(substr($sql, strlen($m[1])), "; \t\r\n");
-                    if ($m[1] !== $prefijo || count($tuplas) >= self::LOTE) {
-                        $vaciar();
-                        $prefijo = $m[1];
-                    }
-                    $tuplas[] = $tupla;
-                    continue;
-                }
-                $vaciar();
-                Api::sql($base, $sql);
-                $hechas++;
+                $ejecutar($sql);
             }
             $vaciar();
+            // Las claves foráneas de un volcado ajeno, al final: ya están todas
+            // las tablas y sus filas
+            if ($traductor !== null) {
+                $linea = t('el final (claves foráneas)');
+                foreach ($traductor->aplazadas() as $alter) {
+                    Api::sql($base, $alter);
+                    $hechas++;
+                }
+            }
         } catch (Throwable $e) {
-            throw new RuntimeException("Se ejecutaron $hechas sentencia(s) y paró cerca de la línea $linea: "
-                . rtrim($e->getMessage(), '. ') . '. Lo anterior ya está hecho: no hay transacciones.', 0, $e);
+            throw new RuntimeException(t('Se ejecutaron {n} sentencia(s) y paró cerca de la línea {linea}: {error}. Lo anterior ya está hecho: no hay transacciones.',
+                ['n' => $hechas, 'linea' => $linea, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
         } finally {
             fclose($fh);
         }
-        return "$hechas sentencia(s) ejecutadas.";
+        $nombres = ['jsonsqldb' => 'jsonSQLDB', 'sqlite' => 'SQLite', 'mysql' => 'MySQL / MariaDB',
+                    'postgresql' => 'PostgreSQL', 'sqlserver' => 'SQL Server'];
+        $avisos = $traductor === null ? [] : $traductor->avisos();
+        return t('{n} sentencia(s) ejecutadas (volcado de {motor}).', ['n' => $hechas, 'motor' => $nombres[$dialecto]])
+            . ($avisos === [] ? '' : ' ' . t('Lo que no ha llegado igual: {avisos}.', ['avisos' => implode('; ', $avisos)]));
     }
 
     /**
      * Las sentencias de un fichero SQL, una a una, con la línea en que acaba
      * cada una. Separa por punto y coma fuera de cadenas, identificadores
      * entre comillas y comentarios, y respeta los BEGIN … END de un trigger
-     * y los CASE … END, que llevan puntos y coma o END dentro.
+     * y los CASE … END, que llevan puntos y coma o END dentro. Según el
+     * dialecto del volcado:
+     *  - mysql: la barra invertida escapa dentro de una cadena; `nombres`.
+     *  - postgresql: cadenas $$…$$ (el cuerpo de una función), E'…' con
+     *    escapes, las órdenes de psql (\restrict) se saltan, y un COPY … FROM
+     *    stdin se devuelve junto con sus líneas de datos, hasta \.
+     *  - sqlserver: una línea GO termina el lote; [nombres]; y como sus
+     *    scripts no suelen llevar punto y coma, una línea que empieza por
+     *    INSERT, CREATE, ALTER, SET… empieza otra sentencia, salvo dentro del
+     *    cuerpo de un procedimiento, una vista o un trigger.
      *
      * @param resource $fh
      * @return \Generator<int, array{0: string, 1: int}>
      */
-    private static function sentencias($fh): \Generator
+    private static function sentencias($fh, string $dialecto = 'jsonsqldb'): \Generator
     {
+        $mysql = $dialecto === 'mysql';
+        $pg    = $dialecto === 'postgresql';
+        $ss    = $dialecto === 'sqlserver';
         $actual = '';
-        $comilla = '';          // '' fuera; "'" o '"' dentro de una cadena o identificador
+        $comilla = '';          // '' fuera; el carácter que cierra la cadena o el nombre
+        $escapes = false;       // la cadena admite escapes de barra invertida
+        $dolar = '';            // dentro de $etiqueta$ … $etiqueta$ (PostgreSQL)
         $bloque = false;        // dentro de un /* comentario */
         $nivel = 0;             // BEGIN y CASE abiertos
         $n = 0;
         while (($l = fgets($fh)) !== false) {
             $n++;
+            $vacia = trim($actual) === '' && $comilla === '' && $dolar === '' && !$bloque;
+            if ($vacia && $pg && preg_match('/^\s*\\\\/', $l)) {
+                continue;                               // \restrict y otras órdenes de psql
+            }
+            if ($ss && $comilla === '' && !$bloque && preg_match('/^\s*GO\s*(\d+)?\s*$/i', $l)) {
+                if (trim($actual) !== '') { yield [trim($actual), $n]; }
+                $actual = '';
+                $nivel = 0;
+                continue;
+            }
+            if ($ss && $comilla === '' && !$bloque && trim($actual) !== '' && $nivel <= 0
+                && preg_match('/^\s*(INSERT|CREATE|ALTER|SET|DROP|IF|EXEC|EXECUTE|USE|PRINT|UPDATE|DELETE|DECLARE|DBCC)\b/i', $l)
+                && !preg_match('/^\s*(CREATE|ALTER)\s+(PROC|PROCEDURE|VIEW|TRIGGER|FUNCTION)\b/i', $actual)) {
+                yield [trim($actual), $n - 1];
+                $actual = '';
+            }
             $largo = strlen($l);
             for ($i = 0; $i < $largo; $i++) {
                 $c = $l[$i];
@@ -117,8 +186,22 @@ final class Importar
                     if ($c === '*' && ($l[$i + 1] ?? '') === '/') { $bloque = false; $i++; }
                     continue;
                 }
+                if ($dolar !== '') {
+                    $actual .= $c;
+                    if ($c === '$' && substr($l, $i, strlen($dolar)) === $dolar) {
+                        $actual .= substr($dolar, 1);
+                        $i += strlen($dolar) - 1;
+                        $dolar = '';
+                    }
+                    continue;
+                }
                 if ($comilla !== '') {
                     $actual .= $c;
+                    // \' no cierra una cadena que admite escapes (MySQL, E'…')
+                    if ($escapes && $c === '\\' && $i + 1 < $largo) {
+                        $actual .= $l[++$i];
+                        continue;
+                    }
                     if ($c === $comilla) {
                         if (($l[$i + 1] ?? '') === $comilla) { $actual .= $c; $i++; } else { $comilla = ''; }
                     }
@@ -129,18 +212,46 @@ final class Importar
                     break;
                 }
                 if ($c === '/' && ($l[$i + 1] ?? '') === '*') { $bloque = true; $i++; continue; }
-                if ($c === "'" || $c === '"') { $comilla = $c; $actual .= $c; continue; }
+                if ($pg && $c === '$' && preg_match('/\G\$[A-Za-z_]*\$/', $l, $m, 0, $i)) {
+                    $dolar = $m[0];
+                    $actual .= $dolar;
+                    $i += strlen($dolar) - 1;
+                    continue;
+                }
+                if ($c === "'" || $c === '"' || ($mysql && $c === '`') || ($ss && $c === '[')) {
+                    $comilla = $c === '[' ? ']' : $c;
+                    $escapes = $c === "'" && ($mysql || ($pg && $i > 0 && ($l[$i - 1] === 'E' || $l[$i - 1] === 'e')
+                        && ($i < 2 || !ctype_alnum($l[$i - 2]))));
+                    $actual .= $c;
+                    continue;
+                }
                 if ($c === ';' && $nivel <= 0) {
-                    if (trim($actual) !== '') {
-                        yield [trim($actual) . ';', $n];
-                    }
+                    $sentencia = trim($actual);
                     $actual = '';
                     $nivel = 0;
+                    if ($sentencia === '') {
+                        continue;
+                    }
+                    // COPY … FROM stdin: lo que sigue, hasta \., son datos y no SQL
+                    if ($pg && preg_match('/^COPY\s.+\sFROM\s+stdin$/is', $sentencia)) {
+                        $datos = '';
+                        while (($l2 = fgets($fh)) !== false) {
+                            $n++;
+                            if (rtrim($l2, "\r\n") === '\\.') { break; }
+                            $datos .= $l2;
+                        }
+                        yield [$sentencia . ";\n" . $datos, $n];
+                        continue 2;            // a la línea siguiente al \\.
+                    }
+                    yield [$sentencia . ';', $n];
                     continue;
                 }
                 if (ctype_alpha($c) && ($i === 0 || !ctype_alnum($l[$i - 1]) && $l[$i - 1] !== '_')) {
                     $palabra = strtoupper((string)preg_replace('/[^A-Za-z_].*$/s', '', substr($l, $i, 12)));
-                    if ($palabra === 'BEGIN' || $palabra === 'CASE') { $nivel++; }
+                    // BEGIN abre un bloque solo dentro de un CREATE (el cuerpo de un
+                    // trigger); suelto es BEGIN TRANSACTION, que los volcados de
+                    // SQLite ponen al principio y no se cierra con END
+                    if ($palabra === 'CASE' || ($palabra === 'BEGIN' && stripos(ltrim($actual), 'CREATE') === 0)) { $nivel++; }
                     elseif ($palabra === 'END') { $nivel--; }
                 }
                 $actual .= $c;
@@ -148,8 +259,8 @@ final class Importar
             // El salto de línea ya ha pasado por el bucle como un carácter más:
             // dentro de una cadena es parte del valor y no se añade otro
         }
-        if ($comilla !== '' || $bloque) {
-            throw new RuntimeException('El fichero acaba con una cadena o un comentario sin cerrar.');
+        if ($comilla !== '' || $bloque || $dolar !== '') {
+            throw new RuntimeException(t('El fichero acaba con una cadena o un comentario sin cerrar.'));
         }
         if (trim($actual) !== '') {
             yield [trim($actual), $n];
@@ -169,7 +280,7 @@ final class Importar
     {
         $fh = @fopen($fichero, 'rb');
         if ($fh === false) {
-            throw new RuntimeException('No se puede leer el fichero subido.');
+            throw new RuntimeException(t('No se puede leer el fichero subido.'));
         }
         try {
             $primera = (string)fgets($fh);
@@ -180,7 +291,7 @@ final class Importar
             }
             $cols = array_map('trim', str_getcsv(rtrim($primera, "\r\n"), $sep, '"', ''));
             if ($cols === [] || in_array('', $cols, true)) {
-                throw new RuntimeException('La primera línea tiene que traer los nombres de las columnas.');
+                throw new RuntimeException(t('La primera línea tiene que traer los nombres de las columnas.'));
             }
             $cab = 'INSERT INTO ' . cita($tabla) . ' (' . implode(', ', array_map('cita', $cols)) . ') VALUES ';
             $marcas = '(' . implode(', ', array_fill(0, count($cols), '?')) . ')';
@@ -207,13 +318,13 @@ final class Importar
                 }
                 $insertar();
             } catch (Throwable $e) {
-                throw new RuntimeException("Se cargaron $filas fila(s); el problema está en la línea $linea o en las "
-                    . self::LOTE . ' anteriores: ' . rtrim($e->getMessage(), '. ') . '. Lo cargado ya está dentro: no hay transacciones.', 0, $e);
+                throw new RuntimeException(t('Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: no hay transacciones.',
+                    ['n' => $filas, 'linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
             }
         } finally {
             fclose($fh);
         }
-        return "$filas fila(s) cargadas en '$tabla'.";
+        return t("{n} fila(s) cargadas en '{tabla}'.", ['n' => $filas, 'tabla' => $tabla]);
     }
 
     /** Ficheros sueltos que sí se aceptan además de los .json */
@@ -233,22 +344,20 @@ final class Importar
     {
         if (!class_exists('ZipArchive')) {
             throw new RuntimeException(
-                'La extensión zip de PHP no está activada. Actívala en php.ini (extension=zip) '
-                . 'o restaura desde un volcado en SQL.'
+                t('La extensión zip de PHP no está activada. Actívala en php.ini (extension=zip) o restaura desde un volcado en SQL.')
             );
         }
 
         $arch = new ZipArchive();
         if ($arch->open($zip) !== true) {
-            throw new RuntimeException('El fichero no es un ZIP válido o está dañado.');
+            throw new RuntimeException(t('El fichero no es un ZIP válido o está dañado.'));
         }
 
         try {
             $entradas = self::entradasValidas($arch, $rutaBase);
             if ($entradas === []) {
                 throw new RuntimeException(
-                    'El ZIP no contiene ninguna tabla. ¿Seguro que es una copia generada por '
-                    . 'este panel? Dentro debe haber una carpeta con los ficheros .json.'
+                    t('El ZIP no contiene ninguna tabla. ¿Seguro que es una copia generada por este panel? Dentro debe haber una carpeta con los ficheros .json.')
                 );
             }
 
@@ -259,20 +368,20 @@ final class Importar
                 foreach ($entradas as $interna => $destino) {
                     $contenido = $arch->getFromName($interna);
                     if ($contenido === false) {
-                        throw new RuntimeException("No se pudo leer '$interna' del ZIP.");
+                        throw new RuntimeException(t('No se pudo leer \'{interna}\' del ZIP.', ['interna' => $interna]));
                     }
                     $dir = dirname($destino);
                     if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
-                        throw new RuntimeException("No se puede crear la carpeta '$dir'.");
+                        throw new RuntimeException(t('No se puede crear la carpeta \'{dir}\'.', ['dir' => $dir]));
                     }
                     if (@file_put_contents($destino, $contenido) === false) {
-                        throw new RuntimeException('No se puede escribir ' . basename($destino) . '.');
+                        throw new RuntimeException(t('No se puede escribir {fichero}.', ['fichero' => basename($destino)]));
                     }
                 }
             } catch (Throwable $e) {
                 self::restaurar($respaldo, $rutaBase);
                 throw new RuntimeException(
-                    'La restauración falló y se ha dejado la base como estaba. ' . $e->getMessage()
+                    t('La restauración falló y se ha dejado la base como estaba. {error}', ['error' => $e->getMessage()])
                 );
             }
 
@@ -299,8 +408,7 @@ final class Importar
     {
         if ($arch->numFiles > self::MAX_FICHEROS) {
             throw new RuntimeException(
-                'El ZIP tiene demasiados ficheros (' . $arch->numFiles . '). '
-                . 'Una copia de este panel no debería pasar de unos pocos cientos.'
+                t('El ZIP tiene demasiados ficheros ({n}). Una copia de este panel no debería pasar de unos pocos cientos.', ['n' => $arch->numFiles])
             );
         }
 
@@ -317,8 +425,7 @@ final class Importar
             if (strpos($limpia, '../') !== false || strpos($limpia, './') === 0
                 || $limpia[0] === '/' || preg_match('/^[A-Za-z]:/', $limpia) === 1) {
                 throw new RuntimeException(
-                    "El ZIP contiene una ruta que sale de la carpeta de destino: '$interna'. "
-                    . 'No se ha tocado nada.'
+                    t("El ZIP contiene una ruta que sale de la carpeta de destino: '{ruta}'. No se ha tocado nada.", ['ruta' => $interna])
                 );
             }
 
@@ -374,8 +481,7 @@ final class Importar
         );
         if (!is_string($tabla) || preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $tabla) !== 1) {
             throw new RuntimeException(
-                "El ZIP contiene un fichero con un nombre que no es de tabla: '$fichero'. "
-                . 'No se ha tocado nada.'
+                t("El ZIP contiene un fichero con un nombre que no es de tabla: '{fichero}'. No se ha tocado nada.", ['fichero' => $fichero])
             );
         }
     }
@@ -385,12 +491,12 @@ final class Importar
     {
         $texto = $arch->getFromIndex($i);
         if ($texto === false) {
-            throw new RuntimeException("No se pudo leer '$fichero' del ZIP.");
+            throw new RuntimeException(t('No se pudo leer \'{fichero}\' del ZIP.', ['fichero' => $fichero]));
         }
         $datos = json_decode($texto, true);
         if (!is_array($datos)) {
             throw new RuntimeException(
-                "'$fichero' no es un JSON válido. No se ha tocado nada."
+                t('\'{fichero}\' no es un JSON válido. No se ha tocado nada.', ['fichero' => $fichero])
             );
         }
         // Solo los ficheros de datos tienen 'rows'. La estructura, la revisión y
@@ -401,8 +507,7 @@ final class Importar
                  || $fichero[0] === '_';
         if (!$sinFilas && !isset($datos['rows'])) {
             throw new RuntimeException(
-                "'$fichero' no tiene la forma de un fichero de datos del motor. "
-                . 'No se ha tocado nada.'
+                t("'{fichero}' no tiene la forma de un fichero de datos del motor. No se ha tocado nada.", ['fichero' => $fichero])
             );
         }
     }
@@ -418,8 +523,7 @@ final class Importar
         }
         if (!@rename($rutaBase, $respaldo)) {
             throw new RuntimeException(
-                'No se pudo apartar la base actual antes de restaurar. Comprueba los permisos '
-                . 'de escritura en la carpeta de datos.'
+                t('No se pudo apartar la base actual antes de restaurar. Comprueba los permisos de escritura en la carpeta de datos.')
             );
         }
         return $respaldo;

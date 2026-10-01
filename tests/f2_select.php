@@ -919,6 +919,18 @@ chk('el cruce por índice y el cruce normal dan lo mismo, lado pequeño y grande
     return true;
 });
 
+chk('AVG devuelve siempre un decimal, también cuando la media es exacta', function () use ($bd) {
+    // Con / de PHP, AVG de -5 y -15 daba el entero -10 y AVG de 1 y 2 el
+    // decimal 1.5: el tipo dependía de los datos. SQLite y MySQL dan decimal
+    $bd->consultar('CREATE TABLE medias (id INTEGER PRIMARY KEY, g INTEGER, v INTEGER)');
+    $bd->consultar('INSERT INTO medias VALUES (1, 1, -5), (2, 1, -15), (3, 2, 1), (4, 2, 2)');
+    $a = $bd->consultar('SELECT AVG(v) AS m FROM medias WHERE g = 1')[0]['m'];
+    $b = $bd->consultar('SELECT g, AVG(v) AS m FROM medias GROUP BY g ORDER BY g');
+    $c = $bd->consultar('SELECT AVG(DISTINCT v) AS m FROM medias WHERE g = 1')[0]['m'];
+    $bd->consultar('DROP TABLE medias');
+    return $a === -10.0 && $b[0]['m'] === -10.0 && $b[1]['m'] === 1.5 && $c === -10.0
+        ?: 'tipos: ' . get_debug_type($a) . ', ' . get_debug_type($b[0]['m']) . ', ' . get_debug_type($c);
+});
 chk('el WHERE no se adelanta al cruce si hay un RIGHT JOIN detrás', function () use ($bd) {
     // a JOIN b RIGHT JOIN c WHERE (a.x IS NULL OR a.x = 1): quitar antes las
     // filas de a con x = 2 dejaría sin pareja a una fila de c, que el RIGHT

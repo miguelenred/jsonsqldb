@@ -179,7 +179,7 @@ final class Functions
                 if ($limpios === []) { return null; }
                 $s = 0;
                 foreach ($limpios as $v) { $s += Valor::aNumero($v); }
-                return $s / count($limpios);
+                return (float)($s / count($limpios));        // siempre decimal, como SQLite y MySQL
             case 'GROUP_CONCAT':
                 if ($limpios === []) { return null; }
                 // El orden es el de las filas del grupo. SQLite no lo garantiza;

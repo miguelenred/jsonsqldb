@@ -2028,7 +2028,9 @@ final class Select
                 } elseif ($d['nombre'] === 'SUM') {
                     $valores[$id] = $cuenta === 0 ? null : $g['suma'][$id];
                 } elseif ($d['nombre'] === 'AVG') {
-                    $valores[$id] = $cuenta === 0 ? null : $g['suma'][$id] / $cuenta;
+                    // Siempre decimal, como SQLite y MySQL: con / de PHP, una
+                    // media exacta salía entera (-10) y otra decimal (-5.33)
+                    $valores[$id] = $cuenta === 0 ? null : (float)($g['suma'][$id] / $cuenta);
                 } else {
                     $valores[$id] = $g['mejor'][$id] ?? null;   // MIN / MAX
                 }

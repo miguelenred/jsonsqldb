@@ -13,10 +13,10 @@ $usuario  = Auth::usuario();
 $baseAct  = $base ?? '';
 $tablaAct = $tabla ?? '';
 $mensajes = $suelto ? $mensajes : flashes();
-$titulos  = ['bases' => 'Bases de datos', 'tablas' => 'Tablas', 'vistas' => 'Vistas', 'sql' => 'Consola SQL',
-             'integridad' => 'Integridad', 'crear_tabla' => 'Nueva tabla', 'auditoria' => 'Auditoría',
-             'usuarios' => 'Usuarios', 'configuracion' => 'Configuración', 'error' => 'Error',
-             'login' => 'Acceso', 'instalar' => 'Instalación'];
+$titulos  = ['bases' => t('Bases de datos'), 'tablas' => t('Tablas'), 'vistas' => t('Vistas'), 'sql' => t('Consola SQL'),
+             'integridad' => t('Integridad'), 'crear_tabla' => t('Nueva tabla'), 'auditoria' => t('Auditoría'),
+             'usuarios' => t('Usuarios'), 'configuracion' => t('Configuración'), 'error' => 'Error',
+             'login' => 'Acceso', 'instalar' => t('Instalación')];
 $titulo   = $titulos[$vistaActual] ?? '';
 
 // Lo que enseña la barra lateral. Si el motor no responde, el panel se pinta
@@ -43,7 +43,7 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
          . ($on !== '' ? ' aria-current="page"' : '') . '>' . icono($ico) . '<span>' . h($texto) . '</span></a>';
 };
 ?><!doctype html>
-<html lang="es">
+<html lang="<?= h(Idioma::actual()) ?>">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -63,39 +63,39 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 <?php return; endif; ?>
 <body class="app">
 
-<aside class="sidebar" id="sidebar" aria-label="Navegación">
+<aside class="sidebar" id="sidebar" aria-label="<?= h(t('Navegación')) ?>">
     <a class="brand" href="<?= h(url(['p' => 'bases'])) ?>">
         <span class="brand-logo"><?= icono('database') ?></span>
         <span class="brand-text">jsonSQLDBadmin<?php if (version() !== ''): ?><small>v<?= h(version()) ?></small><?php endif; ?></span>
     </a>
     <nav class="nav-main">
-        <?= $nav('bases', 'home', 'Inicio') ?>
+        <?= $nav('bases', 'home', t('Inicio')) ?>
         <?php if ($baseAct !== ''): ?>
-            <?= $nav('sql', 'terminal', 'Consola SQL', ['db' => $baseAct]) ?>
-            <?= $nav('vistas', 'view', 'Vistas', ['db' => $baseAct]) ?>
-            <?= $nav('integridad', 'shield', 'Integridad', ['db' => $baseAct]) ?>
+            <?= $nav('sql', 'terminal', t('Consola SQL'), ['db' => $baseAct]) ?>
+            <?= $nav('vistas', 'view', t('Vistas'), ['db' => $baseAct]) ?>
+            <?= $nav('integridad', 'shield', t('Integridad'), ['db' => $baseAct]) ?>
         <?php endif; ?>
-        <?= $nav('auditoria', 'history', 'Auditoría') ?>
-        <?= $nav('usuarios', 'users', 'Usuarios') ?>
+        <?= $nav('auditoria', 'history', t('Auditoría')) ?>
+        <?= $nav('usuarios', 'users', t('Usuarios')) ?>
         <?php if (Auth::esAdmin()): ?>
-            <?= $nav('configuracion', 'settings', 'Configuración') ?>
+            <?= $nav('configuracion', 'settings', t('Configuración')) ?>
         <?php endif; ?>
     </nav>
 
     <div class="side-head">
-        <span>Bases y tablas</span>
+        <span><?= h(t('Bases y tablas')) ?></span>
         <?php if (Auth::esAdmin()): ?>
-            <a href="<?= h(url(['p' => 'bases'])) ?>#nuevaBase" class="side-add" title="Nueva base de datos"><?= icono('plus') ?></a>
+            <a href="<?= h(url(['p' => 'bases'])) ?>#nuevaBase" class="side-add" title="<?= h(t('Nueva base de datos')) ?>"><?= icono('plus') ?></a>
         <?php endif; ?>
     </div>
     <?php if (count($sideTablas) + count($sideVistas) > 8): ?>
-        <div class="side-filter"><?= icono('search') ?><input type="search" id="tableFilter" placeholder="Filtrar tablas…" aria-label="Filtrar tablas"></div>
+        <div class="side-filter"><?= icono('search') ?><input type="search" id="tableFilter" placeholder="<?= h(t('Filtrar tablas…')) ?>" aria-label="<?= h(t('Filtrar tablas')) ?>"></div>
     <?php endif; ?>
     <div class="side-tables" id="sideTables">
         <?php if ($sinConexion !== ''): ?>
-            <div class="side-empty">Sin conexión con el motor.</div>
+            <div class="side-empty"><?= h(t('Sin conexión con el motor.')) ?></div>
         <?php elseif ($sideBases === []): ?>
-            <div class="side-empty">Aún no hay bases de datos.</div>
+            <div class="side-empty"><?= h(t('Aún no hay bases de datos.')) ?></div>
         <?php endif; ?>
         <?php foreach ($sideBases as $b): $esta = $b === $baseAct; ?>
             <a class="side-db<?= $esta ? ' active' : '' ?>" href="<?= h(url(['p' => 'tablas', 'db' => $b])) ?>" title="<?= h($b) ?>">
@@ -104,8 +104,8 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
             <?php if ($esta): ?>
                 <div class="side-sub">
                     <?php if ($sideTablas === [] && $sideVistas === []): ?>
-                        <div class="side-empty">Sin tablas.
-                            <?php if (Auth::esAdmin()): ?><a href="<?= h(url(['p' => 'crear_tabla', 'db' => $b])) ?>">Crear la primera</a><?php endif; ?>
+                        <div class="side-empty"><?= h(t('Sin tablas.')) ?>
+                            <?php if (Auth::esAdmin()): ?><a href="<?= h(url(['p' => 'crear_tabla', 'db' => $b])) ?>"><?= h(t('Crear la primera')) ?></a><?php endif; ?>
                         </div>
                     <?php endif; ?>
                     <?php foreach ($sideTablas as $t): ?>
@@ -129,7 +129,7 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 
 <div class="main">
     <header class="topbar">
-        <button class="icon-btn d-lg-none" type="button" id="sidebarToggle" aria-label="Menú"><?= icono('menu') ?></button>
+        <button class="icon-btn d-lg-none" type="button" id="sidebarToggle" aria-label="<?= h(t('Menú')) ?>"><?= icono('menu') ?></button>
         <div class="crumbs">
             <?php if ($baseAct !== ''): ?>
                 <a class="crumb-db" href="<?= h(url(['p' => 'tablas', 'db' => $baseAct])) ?>"><?= icono('database') ?><?= h($baseAct) ?></a>
@@ -140,20 +140,21 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
             <?php endif; ?>
         </div>
         <div class="topbar-right">
-            <span class="db-meta d-none d-md-inline-flex" title="<?= h(Api::directa() ? 'El panel carga el motor y le habla sin HTTP' : 'El panel habla con el motor por la API: ' . Api::url()) ?>">
-                <span class="engine"><?= Api::directa() ? 'Directa' : 'API' ?></span><?= $sinConexion === '' ? count($sideBases) . ' ' . (count($sideBases) === 1 ? 'base' : 'bases') : 'sin conexión' ?>
+            <span class="db-meta d-none d-md-inline-flex" title="<?= h(Api::directa() ? t('El panel carga el motor y le habla sin HTTP') : t('El panel habla con el motor por la API: {url}', ['url' => Api::url()])) ?>">
+                <span class="engine"><?= Api::directa() ? h(t('Directa')) : 'API' ?></span><?= $sinConexion === '' ? count($sideBases) . ' ' . h(count($sideBases) === 1 ? t('base') : t('bases')) : h(t('sin conexión')) ?>
             </span>
-            <button class="icon-btn" type="button" id="themeToggle" title="Tema claro u oscuro" aria-label="Cambiar tema"><?= icono('moon', 'when-light') ?><?= icono('sun', 'when-dark') ?></button>
+            <?= selectorIdioma() ?>
+            <button class="icon-btn" type="button" id="themeToggle" title="<?= h(t('Tema claro u oscuro')) ?>" aria-label="<?= h(t('Cambiar tema')) ?>"><?= icono('moon', 'when-light') ?><?= icono('sun', 'when-dark') ?></button>
             <div class="dropdown">
                 <button class="user-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false">
                     <span class="avatar"><?= h(strtoupper(substr((string)($usuario['usuario'] ?? '?'), 0, 1))) ?></span>
                     <span class="d-none d-sm-inline"><?= h($usuario['usuario'] ?? '') ?></span>
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end">
-                    <li><span class="dropdown-item-text small text-body-secondary">Rol: <?= h($usuario['rol'] ?? '') ?></span></li>
-                    <li><a class="dropdown-item" href="<?= h(url(['p' => 'usuarios'])) ?>"><?= icono('key') ?> Cambiar mi contraseña</a></li>
+                    <li><span class="dropdown-item-text small text-body-secondary"><?= t('Rol: {1}', [1 => h($usuario['rol'] ?? '')]) ?></span></li>
+                    <li><a class="dropdown-item" href="<?= h(url(['p' => 'usuarios'])) ?>"><?= icono('key') ?> <?= h(t('Cambiar mi contraseña')) ?></a></li>
                     <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item" href="<?= h(url(['p' => 'salir'])) ?>"><?= icono('logout') ?> Cerrar sesión</a></li>
+                    <li><a class="dropdown-item" href="<?= h(url(['p' => 'salir'])) ?>"><?= icono('logout') ?> <?= h(t('Cerrar sesión')) ?></a></li>
                 </ul>
             </div>
         </div>
@@ -161,20 +162,19 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 
     <main class="content">
         <?php if ($sinConexion !== ''): ?>
-            <div class="alert alert-danger"><strong>Sin conexión con el motor.</strong> <?= h($sinConexion) ?></div>
+            <div class="alert alert-danger"><?= t('<strong>Sin conexión con el motor.</strong> {1}', [1 => h($sinConexion)]) ?></div>
         <?php endif; ?>
         <?php foreach ($mensajes as $m): ?>
             <div class="alert alert-<?= h($m['tipo']) ?> alert-dismissible fade show" role="alert">
                 <?= h($m['texto']) ?>
-                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="<?= h(t('Cerrar')) ?>"></button>
             </div>
         <?php endforeach; ?>
 
         <?php require __DIR__ . '/' . $vistaActual . '.php'; ?>
     </main>
     <footer class="app-footer">
-        jsonSQLDBadmin<?= version() !== '' ? ' v' . h(version()) : '' ?> ·
-        <?= Api::directa() ? 'conexión directa' : 'conexión por API' ?> · PHP <?= h(PHP_VERSION) ?>
+        <?= t('jsonSQLDBadmin{1} · {2} · PHP {3}', [1 => version() !== '' ? ' v' . h(version()) : '', 2 => Api::directa() ? t('conexión directa') : t('conexión por API'), 3 => h(PHP_VERSION)]) ?>
     </footer>
 </div>
 <script src="assets/bootstrap.bundle.min.js"></script>

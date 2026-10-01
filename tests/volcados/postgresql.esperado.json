@@ -1,0 +1,72 @@
+{
+    "clientes": [
+        {
+            "id": "1",
+            "email": "ana@e.es",
+            "nombre": "Ana O'Brien\ttab",
+            "saldo": "10.50",
+            "ratio": "0.333333333333333",
+            "activo": 1,
+            "alta": "2026-01-02",
+            "uid": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+            "zona": "2026-01-02 01:04:05",
+            "foto": null
+        },
+        {
+            "id": "2",
+            "email": "bea@e.es",
+            "nombre": "línea 1\nlínea 2 \\ barra",
+            "saldo": "-3.00",
+            "ratio": null,
+            "activo": 0,
+            "alta": null,
+            "uid": null,
+            "zona": null,
+            "foto": "hello"
+        },
+        {
+            "id": "3",
+            "email": "cris@e.es",
+            "nombre": "Cris 😀 emoji",
+            "saldo": "0.00",
+            "ratio": "1e+20",
+            "activo": 1,
+            "alta": "2026-12-31",
+            "uid": null,
+            "zona": null,
+            "foto": null
+        },
+        {
+            "id": "4",
+            "email": "dani@e.es",
+            "nombre": null,
+            "saldo": "99999.99",
+            "ratio": "-2.5",
+            "activo": 1,
+            "alta": "2026-06-15",
+            "uid": null,
+            "zona": null,
+            "foto": "\\xdeadbeef"
+        }
+    ],
+    "pedidos": [
+        {
+            "id": "1",
+            "cliente_id": "1",
+            "total": "120.50",
+            "pagado": 1,
+            "creado": "2026-05-01 10:00:00.123",
+            "etiquetas": "{a,b}",
+            "datos": "{\"k\": 1}"
+        },
+        {
+            "id": "3",
+            "cliente_id": "1",
+            "total": null,
+            "pagado": null,
+            "creado": "2026-05-03 12:00:00",
+            "etiquetas": "{}",
+            "datos": "[]"
+        }
+    ]
+}

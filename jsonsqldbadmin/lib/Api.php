@@ -99,10 +99,14 @@ final class Api
         $datos  = json_decode($cuerpo, true);
 
         if (!is_array($datos)) {
-            throw new RuntimeException('Respuesta no válida de la API: ' . substr($cuerpo, 0, 300));
+            throw new RuntimeException(t('Respuesta no válida de la API: {cuerpo}', ['cuerpo' => substr($cuerpo, 0, 300)]));
         }
         if (isset($datos['error'])) {
-            throw new RuntimeException((string)$datos['error']);
+            // El mensaje es del motor y llega en español; su comienzo, que es
+            // de la API, va en el idioma del panel
+            $error = (string)$datos['error'];
+            throw new RuntimeException(strpos($error, 'Error en la consulta: ') === 0
+                ? t('Error en la consulta: ') . substr($error, strlen('Error en la consulta: ')) : $error);
         }
         return $datos;
     }
@@ -127,7 +131,7 @@ final class Api
         ]);
         $datos = json_decode(self::enviar($post, $url), true);
         if (!is_array($datos)) {
-            throw new RuntimeException("La URL no responde como la API de jsonSQLDB: $url");
+            throw new RuntimeException(t('La URL no responde como la API de jsonSQLDB: {url}', ['url' => $url]));
         }
         if (isset($datos['error'])) {
             throw new RuntimeException((string)$datos['error']);
@@ -165,8 +169,7 @@ final class Api
         $raiz = self::rutaMotor();
         if (!is_file($raiz . '/engine/bootstrap.php') || !is_file($raiz . '/config.php')) {
             throw new RuntimeException(
-                "No se encuentra el motor en $raiz: falta engine/bootstrap.php o config.php. "
-                . 'Indica la carpeta de jsonSQLDB en ADMIN_MOTOR_RUTA.'
+                t('No se encuentra el motor en {ruta}: falta engine/bootstrap.php o config.php. Indica la carpeta de jsonSQLDB en ADMIN_MOTOR_RUTA.', ['ruta' => $raiz])
             );
         }
         defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -189,7 +192,7 @@ final class Api
         $lectura   = class_exists('Auth') && Auth::identificado() && !Auth::esAdmin();
         $autorizar = static function (string $tipo) use ($lectura): void {
             if ($lectura && !in_array($tipo, self::LECTURA, true)) {
-                throw \JsonSQLDB\JsonSqlDbError::permission('Tu usuario solo tiene permiso de lectura');
+                throw \JsonSQLDB\JsonSqlDbError::permission(t('Tu usuario solo tiene permiso de lectura'));
             }
         };
         $usuario = class_exists('Auth') ? (string)(Auth::usuario()['usuario'] ?? '') : '';
@@ -200,7 +203,7 @@ final class Api
                 : (new \JsonSQLDB\Database($base))->consultar($sql, array_values($params), $autorizar);
         } catch (\JsonSQLDB\JsonSqlDbError $e) {
             // El mismo texto que devuelve la API, para que el panel no distinga
-            throw new RuntimeException('Error en la consulta: ' . $e->sqlState . ': ' . $e->getMessage(), 0, $e);
+            throw new RuntimeException(t('Error en la consulta: ') . $e->sqlState . ': ' . $e->getMessage(), 0, $e);
         }
     }
 
@@ -268,7 +271,7 @@ final class Api
             $error = curl_error($ch);
             curl_close($ch);
             if ($r === false) {
-                throw new RuntimeException("No se pudo llamar a la API ($url): $error");
+                throw new RuntimeException(t('No se pudo llamar a la API ({url}): {error}', ['url' => $url, 'error' => $error]));
             }
             return (string)$r;
         }
@@ -291,7 +294,7 @@ final class Api
         ]);
         $r = @file_get_contents($url, false, $ctx);
         if ($r === false) {
-            throw new RuntimeException("No se pudo llamar a la API ($url)");
+            throw new RuntimeException(t('No se pudo llamar a la API ({url})', ['url' => $url]));
         }
         return $r;
     }
@@ -305,7 +308,7 @@ final class Api
         }
         if (!is_file($ca) || !is_readable($ca)) {
             throw new RuntimeException(
-                "No se puede leer el certificado indicado en ADMIN_SSL_CA: $ca"
+                t('No se puede leer el certificado indicado en ADMIN_SSL_CA: {ca}', ['ca' => $ca])
             );
         }
         return $ca;

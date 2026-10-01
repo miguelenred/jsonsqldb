@@ -30,7 +30,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, zip, sqlite3
+          extensions: curl, zip, sqlite3, mysqli, pgsql
           coverage: none
 
       - name: Create configuration
@@ -59,6 +59,27 @@ jobs:
 
       - name: Same results as SQLite
         run: php tests/f12_contra_sqlite.php
+
+      - name: Panel translations
+        run: php tests/f15_idiomas.php
+
+      - name: Dumps to and from SQLite, MySQL, PostgreSQL and SQL Server
+        run: |
+          sudo systemctl start mysql.service
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+          php tests/f14_volcados.php
+        env:
+          JSONSQLDB_TEST_MYSQL: 127.0.0.1:root:root
+          JSONSQLDB_TEST_MYSQL_EXIGIR: 1
+          JSONSQLDB_TEST_POSTGRESQL: 127.0.0.1:postgres:postgres
+          JSONSQLDB_TEST_POSTGRESQL_EXIGIR: 1
+          JSONSQLDB_TEST_NORTHWIND: 1
+
+      - name: Random queries against SQLite (fixed seed, with and without indexes)
+        run: |
+          php tests/f13_fuzz_contra_sqlite.php --semilla=20260930 --n=3000
+          php tests/f13_fuzz_contra_sqlite.php --semilla=20260930 --n=3000 --sin-indices
 
       - name: Crash recovery
         run: php tests/f6_cortes.php

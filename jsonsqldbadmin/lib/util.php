@@ -131,6 +131,22 @@ function redirigir(array $params = []): void
     exit;
 }
 
+/**
+ * El selector de idioma: un enlace por idioma a la página en la que se está,
+ * con ?idioma=xx (ver index.php).
+ */
+function selectorIdioma(): string
+{
+    $out = '<nav class="lang-switch" aria-label="' . h(t('Idioma')) . '">';
+    foreach (Idioma::DISPONIBLES as $codigo => $nombre) {
+        $actual = Idioma::actual() === $codigo;
+        $out .= '<a href="' . h(url(['idioma' => $codigo] + $_GET)) . '" hreflang="' . $codigo . '" lang="' . $codigo . '"'
+              . ' title="' . h($nombre) . '"' . ($actual ? ' class="active" aria-current="true"' : '') . '>'
+              . strtoupper($codigo) . '</a>';
+    }
+    return $out . '</nav>';
+}
+
 /** Guarda un mensaje para la siguiente página. */
 function flash(string $tipo, string $texto): void
 {
@@ -167,7 +183,7 @@ function get(string $nombre, string $defecto = ''): string
 function identificador(string $valor, string $que): string
 {
     if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $valor)) {
-        throw new RuntimeException("Nombre de $que no válido: '$valor'");
+        throw new RuntimeException(t('Nombre de {que} no válido: \'{valor}\'', ['que' => t($que), 'valor' => $valor]));
     }
     return $valor;
 }
@@ -176,7 +192,7 @@ function identificador(string $valor, string $que): string
 function nombreBase(string $valor): string
 {
     if (!preg_match('/^[A-Za-z0-9_-]{1,64}$/', $valor)) {
-        throw new RuntimeException("Nombre de base de datos no válido: '$valor'");
+        throw new RuntimeException(t('Nombre de base de datos no válido: \'{valor}\'', ['valor' => $valor]));
     }
     return $valor;
 }
@@ -253,11 +269,8 @@ function rutaDeLaBase(string $base): string
     $mismoHost = mismoHostQueLaApi();
     if ($mismoHost === false) {
         throw new RuntimeException(
-            'La copia en ZIP necesita que el panel y el motor estén en la misma máquina, '
-            . 'porque lee los ficheros directamente del disco. La API está en '
-            . h(parse_url(Api::url(), PHP_URL_HOST) ?: '?') . ' y el panel se está sirviendo desde '
-            . h((string)($_SERVER['HTTP_HOST'] ?? '?')) . '. Usa el volcado en SQL, que va por la API '
-            . 'y funciona entre máquinas distintas.'
+            t('La copia en ZIP necesita que el panel y el motor estén en la misma máquina, porque lee los ficheros directamente del disco. La API está en {api} y el panel se está sirviendo desde {panel}. Usa el volcado en SQL, que va por la API y funciona entre máquinas distintas.',
+              ['api' => h(parse_url(Api::url(), PHP_URL_HOST) ?: '?'), 'panel' => h((string)($_SERVER['HTTP_HOST'] ?? '?'))])
         );
     }
 
@@ -275,9 +288,8 @@ function rutaDeLaBase(string $base): string
 
     if (!is_dir($ruta)) {
         throw new RuntimeException(
-            "No se encuentra la carpeta de la base '$base' en $raiz. Indica la ruta de la "
-            . 'carpeta data/ del motor en ADMIN_RUTA_DATOS_MOTOR, o usa el volcado en SQL, '
-            . 'que va por la API y no necesita acceso al disco.'
+            t("No se encuentra la carpeta de la base '{base}' en {ruta}. Indica la ruta de la carpeta data/ del motor en ADMIN_RUTA_DATOS_MOTOR, o usa el volcado en SQL, que va por la API y no necesita acceso al disco.",
+              ['base' => $base, 'ruta' => $raiz])
         );
     }
     return $ruta;

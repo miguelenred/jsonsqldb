@@ -41,15 +41,14 @@ require __DIR__ . '/_pestanas.php';
     <input type="hidden" name="orden" value="<?= h($orden) ?>">
     <input type="hidden" name="dir" value="<?= h($dir) ?>">
     <?= icono('search') ?>
-    <input name="q" value="<?= h($filtro) ?>" placeholder="Filtrar en todas las columnas… (Enter)" aria-label="Filtrar">
+    <input name="q" value="<?= h($filtro) ?>" placeholder="<?= h(t('Filtrar en todas las columnas… (Enter)')) ?>" aria-label="<?= h(t('Filtrar')) ?>">
     <?php if ($filtro !== ''): ?>
       <a class="clear" href="<?= h(url(['p' => 'datos', 'db' => $base, 'tabla' => $tabla])) ?>"
-         title="Quitar el filtro"><?= icono('x') ?></a>
+         title="<?= h(t('Quitar el filtro')) ?>"><?= icono('x') ?></a>
     <?php endif; ?>
   </form>
   <span class="toolbar-info">
-    <strong><?= number_format($total, 0, ',', '.') ?></strong> fila(s)<?= $filtro === '' ? '' : ' filtradas' ?> ·
-    página <?= $pagina ?> de <?= $paginas ?>
+    <?= t('<strong>{1}</strong> fila(s){2} · página {3} de {4}', [1 => number_format($total, 0, ',', '.'), 2 => $filtro === '' ? '' : ' filtradas', 3 => $pagina, 4 => $paginas]) ?>
   </span>
   <div class="toolbar-actions">
     <?php foreach (['csv' => ['CSV', 'filetype-csv'], 'sql' => ['INSERT', 'filetype-sql']] as $f => $b): ?>
@@ -63,21 +62,20 @@ require __DIR__ . '/_pestanas.php';
         <input type="hidden" name="dir" value="<?= h($dir) ?>">
         <input type="hidden" name="q" value="<?= h($filtro) ?>">
         <input type="hidden" name="volver" value="datos">
-        <button class="btn btn-sm btn-outline-secondary" title="Exportar la tabla entera">
+        <button class="btn btn-sm btn-outline-secondary" title="<?= h(t('Exportar la tabla entera')) ?>">
           <?= icono($b[1]) ?> <?= h($b[0]) ?></button>
       </form>
     <?php endforeach; ?>
     <?php if ($admin): ?>
       <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#nuevaFila">
-        <?= icono('plus-circle') ?> Insertar fila</button>
+        <?= t('{1} Insertar fila', [1 => icono('plus-circle')]) ?></button>
     <?php endif; ?>
   </div>
 </div>
 
 <?php if ($admin && $pk === []): ?>
   <div class="alert alert-warning py-2 small">
-    Esta tabla no tiene clave primaria, así que no se pueden editar ni borrar filas sueltas desde el panel.
-    Usa la pestaña SQL.
+    <?= h(t('Esta tabla no tiene clave primaria, así que no se pueden editar ni borrar filas sueltas desde el panel. Usa la pestaña SQL.')) ?>
   </div>
 <?php endif; ?>
 
@@ -99,12 +97,12 @@ require __DIR__ . '/_pestanas.php';
             </a>
           </th>
         <?php endforeach; ?>
-        <?php if ($admin && $pk !== []): ?><th class="text-end">Acciones</th><?php endif; ?>
+        <?php if ($admin && $pk !== []): ?><th class="text-end"><?= h(t('Acciones')) ?></th><?php endif; ?>
       </tr></thead>
       <tbody>
       <?php if ($filas === []): ?>
         <tr><td colspan="<?= count($columnas) + 1 ?>" class="text-body-secondary">
-          <?= $filtro === '' ? 'Sin filas.' : 'Ninguna fila coincide con el filtro.' ?></td></tr>
+          <?= $filtro === '' ? t('Sin filas.') : t('Ninguna fila coincide con el filtro.') ?></td></tr>
       <?php endif; ?>
       <?php foreach ($filas as $i => $f): ?>
         <tr>
@@ -115,7 +113,7 @@ require __DIR__ . '/_pestanas.php';
             <td class="text-end">
               <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal"
                       data-bs-target="#edit<?= $i ?>"><?= icono('pencil') ?></button>
-              <form method="post" class="d-inline" data-confirm="¿Borrar esta fila?">
+              <form method="post" class="d-inline" data-confirm="<?= h(t('¿Borrar esta fila?')) ?>">
                 <?= csrf() ?>
                 <input type="hidden" name="accion" value="borrar_fila">
                 <input type="hidden" name="db" value="<?= h($base) ?>">
@@ -173,9 +171,9 @@ require __DIR__ . '/_pestanas.php';
                 <?= h($cn) ?>
                 <span class="text-body-tertiary small"><?= h($c['tipo']) ?></span>
                 <?php if ((int)$c['pk'] === 1): ?><span class="badge text-bg-primary">PK</span><?php endif; ?>
-                <?php if ($auto): ?><span class="badge text-bg-secondary">auto</span><?php endif; ?>
+                <?php if ($auto): ?><span class="badge text-bg-secondary"><?= h(t('auto')) ?></span><?php endif; ?>
                 <?php if ($noNulo && !$auto): ?>
-                  <span class="badge text-bg-light border" title="No admite nulos">obligatorio</span>
+                  <span class="badge text-bg-light border" title="<?= h(t('No admite nulos')) ?>"><?= h(t('obligatorio')) ?></span>
                 <?php endif; ?>
               </label>
               <input type="hidden" name="tipo[<?= h($cn) ?>]" value="<?= h($c['tipo']) ?>">
@@ -183,11 +181,11 @@ require __DIR__ . '/_pestanas.php';
               <?php if ($noNulo): ?><input type="hidden" name="nn[<?= h($cn) ?>]" value="1"><?php endif; ?>
               <div class="input-group input-group-sm">
                 <input class="form-control" id="<?= h($id) ?>" name="valor[<?= h($cn) ?>]"
-                       value="<?= h($val ?? '') ?>"<?= $auto ? ' placeholder="(automático)" readonly' : '' ?>>
+                       value="<?= h($val ?? '') ?>"<?= $auto ? ' placeholder="' . h(t('(automático)')) . '" readonly' : '' ?>>
                 <?php if ($auto): ?>
-                  <span class="input-group-text text-body-tertiary">lo pone la base</span>
+                  <span class="input-group-text text-body-tertiary"><?= h(t('lo pone la base')) ?></span>
                 <?php elseif ($noNulo): ?>
-                  <span class="input-group-text text-body-tertiary">sin nulos</span>
+                  <span class="input-group-text text-body-tertiary"><?= h(t('sin nulos')) ?></span>
                 <?php else: ?>
                   <div class="input-group-text">
                     <input class="form-check-input mt-0 me-1" type="checkbox"
@@ -212,18 +210,15 @@ require __DIR__ . '/_pestanas.php';
       <input type="hidden" name="db" value="<?= h($base) ?>">
       <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
       <input type="hidden" name="volver" value="datos">
-      <div class="modal-header"><h5 class="modal-title">Insertar fila en «<?= h($tabla) ?>»</h5></div>
+      <div class="modal-header"><h5 class="modal-title"><?= t('Insertar fila en «{1}»', [1 => h($tabla)]) ?></h5></div>
       <div class="modal-body"><?php $campos($columnas, null, 'nueva'); ?>
         <div class="form-text">
-          Una casilla vacía significa «sin valor»: en las columnas automáticas, numéricas y de
-          fecha la columna no se manda, y toma su valor por defecto. Marca NULL para guardar
-          un nulo, y deja el texto vacío para guardar una cadena vacía. Las columnas marcadas
-          como «obligatorio» no admiten nulos, así que no ofrecen la casilla.
+          <?= h(t('Una casilla vacía significa «sin valor»: en las columnas automáticas, numéricas y de fecha la columna no se manda, y toma su valor por defecto. Marca NULL para guardar un nulo, y deja el texto vacío para guardar una cadena vacía. Las columnas marcadas como «obligatorio» no admiten nulos, así que no ofrecen la casilla.')) ?>
         </div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-        <button class="btn btn-primary">Insertar</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><?= h(t('Cancelar')) ?></button>
+        <button class="btn btn-primary"><?= h(t('Insertar')) ?></button>
       </div>
     </form>
   </div></div>
@@ -242,11 +237,11 @@ require __DIR__ . '/_pestanas.php';
       <?php foreach ($pk as $c): ?>
         <input type="hidden" name="pk[<?= h($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
       <?php endforeach; ?>
-      <div class="modal-header"><h5 class="modal-title">Editar fila</h5></div>
+      <div class="modal-header"><h5 class="modal-title"><?= h(t('Editar fila')) ?></h5></div>
       <div class="modal-body"><?php $campos($columnas, $f, (string)$i); ?></div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-        <button class="btn btn-primary">Guardar</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><?= h(t('Cancelar')) ?></button>
+        <button class="btn btn-primary"><?= h(t('Guardar')) ?></button>
       </div>
     </form>
   </div></div>

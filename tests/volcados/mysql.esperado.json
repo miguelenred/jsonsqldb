@@ -1,0 +1,68 @@
+{
+    "z_clientes": [
+        {
+            "id": 10,
+            "email": "ana@e.es",
+            "nombre": "Ana O'Brien",
+            "saldo": "10.50",
+            "ratio": 0.333333333333333,
+            "activo": 1,
+            "tipo": "particular",
+            "notas": "línea 1\nlínea 2",
+            "alta": "2026-01-02 03:04:05"
+        },
+        {
+            "id": 11,
+            "email": "bea@e.es",
+            "nombre": "Bea \"comillas\" \\ barra",
+            "saldo": "-3.00",
+            "ratio": null,
+            "activo": 0,
+            "tipo": "empresa",
+            "notas": null,
+            "alta": "2026-02-03 04:05:06"
+        },
+        {
+            "id": 12,
+            "email": "cris@e.es",
+            "nombre": "Cris 😀 emoji",
+            "saldo": "0.00",
+            "ratio": 1.0e+20,
+            "activo": 1,
+            "tipo": null,
+            "notas": "tab\there\r\nCRLF",
+            "alta": "2026-03-04 05:06:07"
+        },
+        {
+            "id": 13,
+            "email": "dani@e.es",
+            "nombre": null,
+            "saldo": "99999.99",
+            "ratio": -2.5,
+            "activo": 1,
+            "tipo": "particular",
+            "notas": "%_ comodines y ;punto y coma",
+            "alta": "2026-04-05 06:07:08"
+        }
+    ],
+    "a_pedidos": [
+        {
+            "id": 1,
+            "cliente_id": 10,
+            "total": "120.50",
+            "creado": "2026-05-01 10:00:00"
+        },
+        {
+            "id": 2,
+            "cliente_id": 11,
+            "total": "0.10",
+            "creado": "2026-05-02 11:00:00"
+        },
+        {
+            "id": 3,
+            "cliente_id": 10,
+            "total": null,
+            "creado": "2026-05-03 12:00:00"
+        }
+    ]
+}

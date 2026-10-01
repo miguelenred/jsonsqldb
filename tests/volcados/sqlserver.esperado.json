@@ -1,0 +1,12 @@
+{
+    "Clientes": [
+        {"Id": 1, "Email": "ana@e.es", "Nombre": "Ana O'Brien", "Saldo": 10.5, "Activo": 1, "Alta": "2026-01-02 03:04:05.123", "Guid": "6f9619ff-8b86-d011-b42d-00c04fc964ff"},
+        {"Id": 2, "Email": "bea@e.es", "Nombre": "Bea [corchetes]; y punto y coma", "Saldo": -3, "Activo": 0, "Alta": null, "Guid": null},
+        {"Id": 3, "Email": "cris@e.es", "Nombre": "Cris 😀 ñandú", "Saldo": 0, "Activo": 1, "Alta": "2026-12-31 00:00:00", "Guid": null}
+    ],
+    "Pedidos": [
+        {"Id": 1, "ClienteId": 1, "Total": 120.5, "Fecha": "2026-05-01 10:00:00", "Notas": "primero"},
+        {"Id": 2, "ClienteId": 2, "Total": null, "Fecha": "2026-05-02 11:00:00", "Notas": null},
+        {"Id": 3, "ClienteId": 1, "Total": 0.1, "Fecha": "2026-05-03 12:00:00", "Notas": "con\nsalto de línea"}
+    ]
+}

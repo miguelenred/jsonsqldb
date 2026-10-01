@@ -12,15 +12,15 @@ if ($busca !== '') {
 ?>
 <div class="page-head">
   <div>
-    <h1>Auditoría</h1>
-    <p>Quién ha hecho qué en el panel, día a día</p>
+    <h1><?= h(t('Auditoría')) ?></h1>
+    <p><?= h(t('Quién ha hecho qué en el panel, día a día')) ?></p>
   </div>
 </div>
 
 <form class="row g-2 align-items-end mb-3" method="get">
   <input type="hidden" name="p" value="auditoria">
   <div class="col-auto">
-    <label class="form-label" for="dia">Día</label>
+    <label class="form-label" for="dia"><?= h(t('Día')) ?></label>
     <select class="form-select form-select-sm" id="dia" name="dia" onchange="this.form.submit()">
       <?php if ($dias === []): ?><option><?= h($dia) ?></option><?php endif; ?>
       <?php foreach ($dias as $d): ?>
@@ -29,24 +29,23 @@ if ($busca !== '') {
     </select>
   </div>
   <div class="col-auto">
-    <label class="form-label" for="q">Buscar</label>
+    <label class="form-label" for="q"><?= h(t('Buscar')) ?></label>
     <input class="form-control form-control-sm" id="q" name="q" value="<?= h(get('q')) ?>"
-           placeholder="usuario, acción, tabla…">
+           placeholder="<?= h(t('usuario, acción, tabla…')) ?>">
   </div>
-  <div class="col-auto"><button class="btn btn-sm btn-outline-primary">Filtrar</button></div>
+  <div class="col-auto"><button class="btn btn-sm btn-outline-primary"><?= h(t('Filtrar')) ?></button></div>
   <div class="col-auto text-body-secondary small pb-2">
-    <?= count($eventos) ?> evento(s) · se conservan
-    <?= ADMIN_AUDIT_DIAS > 0 ? (int)ADMIN_AUDIT_DIAS . ' días' : 'siempre' ?>
+    <?= t('{1} evento(s) · se conservan {2}', [1 => count($eventos), 2 => ADMIN_AUDIT_DIAS > 0 ? t('{n} días', ['n' => (int)ADMIN_AUDIT_DIAS]) : t('siempre')]) ?>
   </div>
 </form>
 
 <div class="card">
   <div class="table-responsive">
     <table class="table table-sm table-striped mb-0 align-middle">
-      <thead><tr><th>Hora</th><th>Usuario</th><th>IP</th><th>Base</th><th>Acción</th><th>Detalle</th></tr></thead>
+      <thead><tr><th><?= h(t('Hora')) ?></th><th><?= h(t('Usuario')) ?></th><th>IP</th><th><?= h(t('Base')) ?></th><th><?= h(t('Acción')) ?></th><th><?= h(t('Detalle')) ?></th></tr></thead>
       <tbody>
       <?php if ($eventos === []): ?>
-        <tr><td colspan="6" class="text-body-secondary">Sin eventos.</td></tr>
+        <tr><td colspan="6" class="text-body-secondary"><?= h(t('Sin eventos.')) ?></td></tr>
       <?php endif; ?>
       <?php foreach ($eventos as $e): ?>
         <tr>

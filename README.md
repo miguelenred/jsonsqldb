@@ -1,33 +1,68 @@
 # jsonSQLDB
 
-A SQL database engine, HTTP API and web admin panel written in plain PHP, storing
-data in JSON files. No database server, no Composer, no extensions beyond the
-standard ones. You copy a folder and it works.
+A SQL database engine, HTTP API and web admin panel written in plain PHP, with
+the data stored as JSON files you can read. No database server, no Composer, no
+extensions beyond the standard ones. You copy a folder and it works.
 
-**Version 2.7.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5)
+**Version 2.7.2** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
+8.1 or later recommended, [see why](#php-80-works-but-81-or-later-is-recommended))
 
 ---
 
-## What this is for, and what it is not
+## What it gives you
 
-**This is not trying to compete with MySQL, PostgreSQL, SQLite or anything
-else.** Those are better at being databases than this will ever be, and if you
-can use one, use one.
+Real SQL for the hosting that has no database, only one, or one too small for
+what you need — which is common on shared hosting, while disk space and PHP are
+not scarce. Joins of every kind, subqueries, aggregates, `GROUP BY`/`HAVING`,
+foreign keys with cascades, triggers, views and indexes, over files you already
+have room for. You reach it through an HTTP API signed with HMAC, or directly
+from PHP, and you manage it from a web panel.
 
-jsonSQLDB exists to cover a specific, annoying gap: **you need to store
-structured data and your hosting gives you no database, or a limited number of
-them, or one so small it does not fit what you need.** Plenty of shared hosting
-plans include a single MySQL database, or cap you at two, or none at all on the
-cheapest tier. Meanwhile you have plenty of disk space and PHP.
+## Why you can rely on it
 
-That is the hole this fills. If you have that problem, this gives you real SQL —
-joins, aggregates, foreign keys and triggers — over files you already have room
-for. If you do not have that problem, you probably do not need this.
+- **It gives the same answers as SQLite.** Every CI run compares 139
+  hand-written queries, 16 writes and 6,000 randomly generated queries against
+  SQLite on the same data, with and without indexes
+  (`tests/f12_contra_sqlite.php`, `tests/f13_fuzz_contra_sqlite.php`). The few
+  places where it behaves differently on purpose are listed in
+  [`docs/02-queries.md`](docs/02-queries.md).
+- **A crash does not leave it half-written.** Every statement is atomic: writes
+  go through a redo journal, and the tests kill real PHP processes in the middle
+  of writes and check what they leave (`tests/f6_cortes.php`,
+  `tests/f9_journal.php`).
+- **Concurrent writes do not lose updates.** Four processes adding 1 fifty times
+  to the same row end at exactly 200, every run (`tests/f7_concurrencia.php`).
+- **You can arrive and leave whenever you want.** The data is JSON, one row
+  per line, readable in any editor. The panel exports each database as an SQL
+  dump for SQLite, MySQL / MariaDB, PostgreSQL or SQL Server, and imports the
+  dumps those make (`sqlite3 .dump`, `mysqldump`, `pg_dump`, Management
+  Studio's scripts), saying what did not translate — checked with real dumps
+  and real servers, except loading into SQL Server, which the tests could not
+  reach.
+- **The on-disk format is stable.** Any 2.x version reads data written by an
+  earlier 2.x; see the [compatibility policy](docs/01-core.md#compatibility-policy).
+- **Every figure is measured.** The numbers in this documentation come from
+  benchmarks you can run yourself (`php tests/benchmark.php`), and the
+  [changelog](CHANGELOG.md) records what failed, how it was found and what was
+  tried and dropped.
 
-**There are no transactions.** There is no `BEGIN`, `COMMIT` or `ROLLBACK`. Each
-statement is atomic on its own — it either completes or leaves the data as it
-was — but you cannot group several statements into one unit of work that rolls
-back together. If your data needs that, this is not the right tool.
+## When to use something else
+
+If your hosting gives you MySQL, PostgreSQL or SQLite and they fit what you
+need, use them: a database server is faster, and the difference grows with the
+size of the tables and the number of simultaneous writers. And know the limits
+before you choose this one:
+
+- **There are no transactions.** Each statement is atomic on its own — it either
+  completes or leaves the data as it was — but there is no `BEGIN`, `COMMIT` or
+  `ROLLBACK` to group several into one unit of work. If your data needs that,
+  this is not the right tool.
+- **Writes to the same table commit one at a time.** Reads never wait for most
+  of a write, and writes to different tables run in parallel, but two writes to
+  the same table take turns to commit.
+- **Everything runs inside PHP**, one request at a time. It is built for the
+  size of data a small business or a web application keeps, not for millions of
+  rows under constant load.
 
 **If a query does not fit in memory**, the engine stops it by 85 % of PHP's
 `memory_limit` at the latest — earlier if its next step would not fit — with an
@@ -946,18 +981,21 @@ touch your data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 146   SELECT execution and collation
+php tests/f2_select.php       → OK: 147   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 54    real requests against the API
 php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 126   the panel, driven like a user
+php tests/f5_admin.php        → OK: 129   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 28    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 31    panel setup wizard and direct connection
+php tests/f11_asistente.php    → OK: 34    panel setup wizard and direct connection
 php tests/f12_contra_sqlite.php → OK: 4    139 queries and 16 writes, same results as SQLite
+php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
+php tests/f14_volcados.php     → OK: 9 (21 with every server)  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
+php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that

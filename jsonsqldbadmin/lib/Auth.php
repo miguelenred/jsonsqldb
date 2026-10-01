@@ -37,7 +37,7 @@ final class Auth
         if (isset($_SESSION['visto']) && time() - (int)$_SESSION['visto'] > $limite) {
             self::cerrar();
             session_start();
-            $_SESSION['aviso'] = 'La sesión ha caducado por inactividad.';
+            $_SESSION['aviso'] = t('La sesión ha caducado por inactividad.');
         }
         $_SESSION['visto'] = time();
     }
@@ -97,7 +97,7 @@ final class Auth
     public static function exigirAdmin(): void
     {
         if (!self::esAdmin()) {
-            throw new RuntimeException('Esta acción necesita permiso de administrador.');
+            throw new RuntimeException(t('Esta acción necesita permiso de administrador.'));
         }
     }
 
@@ -142,7 +142,7 @@ final class Auth
     public static function validarNuevo(string $usuario, string $clave): void
     {
         if (!preg_match('/^[A-Za-z0-9_.@-]{3,32}$/', trim($usuario))) {
-            throw new RuntimeException('El usuario admite de 3 a 32 caracteres: letras, números y . _ - @');
+            throw new RuntimeException(t('El usuario admite de 3 a 32 caracteres: letras, números y . _ - @'));
         }
         self::validarClave($clave);
         if (self::buscar(trim($usuario)) !== null) {
@@ -155,7 +155,7 @@ final class Auth
     {
         $usuario = trim($usuario);
         if (!in_array($rol, ['admin', 'lectura'], true)) {
-            throw new RuntimeException('Rol no válido');
+            throw new RuntimeException(t('Rol no válido'));
         }
         self::validarNuevo($usuario, $clave);
 
@@ -171,6 +171,26 @@ final class Auth
         return $usuario;
     }
 
+    /** El idioma que ha elegido un usuario, o null si no ha elegido ninguno. */
+    public static function idiomaDe(string $usuario): ?string
+    {
+        $u = self::buscar($usuario);
+        return isset($u['idioma']) ? (string)$u['idioma'] : null;
+    }
+
+    /** Guarda el idioma de un usuario: le sigue en cualquier navegador. */
+    public static function guardarIdioma(string $usuario, string $idioma): void
+    {
+        $usuarios = self::usuarios();
+        foreach ($usuarios as $i => $u) {
+            if (strcasecmp((string)$u['usuario'], $usuario) === 0) {
+                $usuarios[$i]['idioma'] = $idioma;
+                Store::guardar(self::USUARIOS, $usuarios);
+                return;
+            }
+        }
+    }
+
     public static function cambiarClave(string $usuario, string $clave): void
     {
         self::validarClave($clave);
@@ -182,7 +202,7 @@ final class Auth
                 return;
             }
         }
-        throw new RuntimeException("El usuario '$usuario' no existe");
+        throw new RuntimeException(t('El usuario \'{usuario}\' no existe', ['usuario' => $usuario]));
     }
 
     public static function borrar(string $usuario): void
@@ -198,10 +218,10 @@ final class Auth
             $quedan[] = $u;
         }
         if (count($quedan) === count($usuarios)) {
-            throw new RuntimeException("El usuario '$usuario' no existe");
+            throw new RuntimeException(t('El usuario \'{usuario}\' no existe', ['usuario' => $usuario]));
         }
         if ($admins === 0) {
-            throw new RuntimeException('Tiene que quedar al menos un administrador');
+            throw new RuntimeException(t('Tiene que quedar al menos un administrador'));
         }
         Store::guardar(self::USUARIOS, $quedan);
     }
@@ -209,7 +229,7 @@ final class Auth
     private static function validarClave(string $clave): void
     {
         if (strlen($clave) < 10) {
-            throw new RuntimeException('La contraseña necesita al menos 10 caracteres');
+            throw new RuntimeException(t('La contraseña necesita al menos 10 caracteres'));
         }
     }
 
@@ -226,7 +246,7 @@ final class Auth
     {
         $espera = self::bloqueoRestante($ip);
         if ($espera > 0) {
-            throw new RuntimeException("Demasiados intentos fallidos. Prueba dentro de $espera minuto(s).");
+            throw new RuntimeException(t('Demasiados intentos fallidos. Prueba dentro de {espera} minuto(s).', ['espera' => $espera]));
         }
 
         $u = self::buscar($usuario);
@@ -234,7 +254,7 @@ final class Auth
         $hash = (string)($u['hash'] ?? '$2y$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
         if (!password_verify($clave, $hash) || $u === null) {
             self::apuntarFallo($ip);
-            throw new RuntimeException('Usuario o contraseña incorrectos');
+            throw new RuntimeException(t('Usuario o contraseña incorrectos'));
         }
 
         self::limpiarFallos($ip);
@@ -309,7 +329,7 @@ final class Auth
     {
         $enviado = (string)($_POST['csrf'] ?? '');
         if ($enviado === '' || !hash_equals(self::csrf(), $enviado)) {
-            throw new RuntimeException('Formulario caducado. Vuelve a intentarlo.');
+            throw new RuntimeException(t('Formulario caducado. Vuelve a intentarlo.'));
         }
     }
 }

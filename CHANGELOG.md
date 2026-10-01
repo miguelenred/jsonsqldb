@@ -9,6 +9,163 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.7.2] - 2026-09-30
+
+Evidence and a way out, after a second external review: random queries
+compared with SQLite on every CI run, an SQL dump that loads unchanged into
+SQLite, a written compatibility policy, and a check that the data folder cannot
+be downloaded. Nothing changes in the on-disk format.
+
+### Changed
+
+- **`AVG` always returns a decimal.** With PHP's division, the average of −5 and
+  −15 came out as the integer −10 and that of 1 and 2 as the decimal 1.5: the
+  type depended on the data, which a client with strict types would notice.
+  SQLite and MySQL always return a decimal. Checked in `tests/f2_select.php`.
+- **The panel's SQL dump loads unchanged into SQLite**, as well as into
+  jsonSQLDB: `sqlite3 base.db < base.sql`. Unique and foreign keys now go
+  inside each `CREATE TABLE`, which is the only place SQLite accepts them, with
+  the tables in the order of their foreign keys and the rows of a table that
+  refers to itself written parents first. Only a foreign key in a cycle between
+  tables, or on a row that refers to itself, still goes at the end with
+  `ALTER TABLE`, which SQLite does not accept, and the dump says so. Views and
+  non-unique indexes are now included in the dump; both were missing, so
+  restoring a dump lost them. `tests/f5_admin.php` exports a
+  database with a self-referencing table stored child before parent, a
+  composite unique key, triggers and a view, and loads the dump into SQLite and
+  into a new jsonSQLDB database; without the parents-first order the check
+  fails.
+
+### Added
+
+- **SQL dump for MySQL and MariaDB**, next to the one for jsonSQLDB and SQLite,
+  from the export buttons of each database: `mysql nombre_base <
+  base.mysql.sql`. Integers as `BIGINT`, decimals with the digits the data
+  need, dates as `DATETIME(3)`, text in `utf8mb4_bin` (so unique keys still
+  tell capitals apart, as here), text columns in keys as `VARCHAR` long enough
+  for their data, backslashes escaped, `InnoDB` and strict mode. Views and
+  triggers go commented out, because their SQL would not mean the same in
+  MySQL. Loaded and compared in `tests/f14_volcados.php` (new), against MySQL 8
+  in CI; writing it showed that without strict mode MariaDB clamped a large
+  decimal to the column's maximum without an error, which is why the dump sets
+  it.
+- **The panel speaks Spanish and English.** A language selector (ES/EN) sits
+  in the top bar, on the sign-in page and in the setup wizard. By default the
+  panel follows the browser: the first language of its `Accept-Language` list
+  that the panel has, and English if there is none. A language chosen with the
+  selector is saved with the panel user, so it follows them to any browser.
+  Texts are written in Spanish inside `t()` in the code and translated in
+  `jsonsqldbadmin/idiomas/en.php` (571 texts), with whole sentences — markup
+  and values included — translated as one, not word by word. Messages that come
+  from the engine stay in Spanish. SQL dumps carry a fixed
+  `-- jsonsqldb-dialecto:` line so the importer recognises them whatever the
+  language of their header. `tests/f15_idiomas.php` (new) checks that every
+  text of the panel has its translation and that none is left over, that each
+  translation keeps its `{placeholders}` and tags, and the choice of language
+  from the browser's list; `tests/f11_asistente.php` checks the panel in
+  English with the server running, the selector saving the language in the
+  user and following them to another session, and eleven pages in English
+  without Spanish left in them.
+- **PostgreSQL and SQL Server, both ways.** The dump of a database can be
+  exported for PostgreSQL (`psql -v ON_ERROR_STOP=1 -f base.pg.sql`: one
+  transaction, `IDENTITY` columns with their sequence moved past the last id,
+  `TIMESTAMP(3)`, `NUMERIC` with the digits the data need) and for SQL Server
+  (`sqlcmd -i base.sqlserver.sql` or Management Studio: one transaction,
+  `[names]`, `N'…'`, `IDENTITY` with `IDENTITY_INSERT`, `NVARCHAR` with a binary
+  collation so it compares as here, `DATETIME2(3)`, a single-column unique key
+  as a filtered unique index because SQL Server counts `NULL` as a value, no
+  `ON DELETE`/`ON UPDATE` on a foreign key from a table to itself because SQL
+  Server rejects them, and `RESTRICT` as `NO ACTION`). And dumps from both can
+  be imported: `pg_dump` in plain format (its `COPY … FROM stdin` data, the
+  primary key and the `IDENTITY`/`serial` declared after the data, `t`/`f`
+  booleans, `bytea`, `$$…$$` bodies, `::casts`, schema names) and the script of
+  Management Studio's "Generate Scripts" (`GO`, `[dbo].[…]`, `N'…'`,
+  `CAST(N'…' AS DateTime)`, `IDENTITY`, defaults added with `ALTER TABLE … ADD
+  DEFAULT … FOR`, `WITH (…) ON [PRIMARY]`, `SET DATEFORMAT`, and statements
+  without semicolons). Both read the file twice: the first pass collects what
+  is declared outside `CREATE TABLE`. Names that are not valid here
+  (`Order Details`) become valid (`Order_Details`), and binary data that is
+  not text is kept as its hexadecimal `\x…` instead of stopping the import;
+  both are listed in the summary, as are dates with more precision than the
+  millisecond. Checked in `tests/f14_volcados.php` (now 21 checks with every
+  server): the PostgreSQL dump loaded into PostgreSQL 16 here and in CI; a real
+  `pg_dump` imported, and in CI one made by the runner's PostgreSQL; a script
+  in the shape of Management Studio's imported; both exports imported back;
+  and Microsoft's **Northwind** sample script (`instnwnd.sql`, downloaded in CI)
+  imported whole — 91 customers, 830 orders, 2,155 order lines, its `mdy`
+  dates and its table with a space in the name. **What is not verified:** no
+  SQL Server was available to load the SQL Server dump into; it was checked
+  with sqlglot's T-SQL parser (all 129 statements parse) and by importing it
+  back, not by SQL Server itself.
+- **Import of SQLite and MySQL / MariaDB dumps** in the panel, next to the
+  panel's own: one made with `sqlite3 base.db .dump` or with `mysqldump` /
+  `mariadb-dump`, detected from its first lines or chosen by hand. Each
+  statement goes through a translator (`jsonsqldbadmin/lib/Traductor.php`,
+  new) that turns the other dialect into jsonSQLDB's: names, MySQL's backslash
+  escapes, hexadecimal and bit literals, SQLite's `char(10)`, MySQL types,
+  `KEY`s inside `CREATE TABLE` as indexes, unique indexes as `UNIQUE`
+  constraints, and foreign keys at the end, because dumps create tables in any
+  order. Session statements, `sqlite_sequence` and mysqldump's `/*! … */`
+  blocks are skipped. What has no equivalent here — `CHECK`, computed
+  defaults, `ON UPDATE`, `ENUM` values, binary data, MySQL views and
+  triggers — is dropped and listed in the summary. `tests/f14_volcados.php`
+  imports a real `sqlite3 .dump` and a real `mariadb-dump` (in
+  `tests/volcados/`) and compares with the source data; in CI it also creates
+  the source in MySQL 8 and imports what its `mysqldump` writes. Writing it
+  found that the statement splitter took `BEGIN TRANSACTION`, which SQLite
+  dumps start with, for the start of a trigger body and swallowed the whole
+  file; `BEGIN` now opens a block only inside a `CREATE`. And the splitter now
+  understands MySQL's `\'` inside strings and backtick names.
+- **The panel checks whether the data folder can be downloaded.** It requests
+  `data/web.config`, a file that is always there, over HTTP: if the server
+  hands it out, anyone can download the databases — which is what happens with
+  nginx when its rules were not added, or with Apache when it ignores
+  `.htaccess`. The setup wizard lists the result among its checks, and the
+  Configuration page shows it, in red when the folder is exposed. It cannot be
+  checked from PHP's built-in server, which says so.
+- **A compatibility policy**, in `docs/01-core.md`: the on-disk format, the SQL,
+  the API protocol and the configuration stay compatible for the whole 2.x
+  series; an incompatible change would be 3.0, announced a version in advance
+  and with a migration tool.
+- **`tests/f13_fuzz_contra_sqlite.php`**, written during an external review:
+  it generates random queries — filters with `NULL`s, `IN`, `BETWEEN`, `LIKE`,
+  nested `AND`/`OR`/`NOT`, aggregates, `GROUP BY`/`HAVING`, expressions,
+  joins, `IN`/`NOT IN` subqueries — runs each in jsonSQLDB and in SQLite on the
+  same data and compares; with `ORDER BY` it compares the order too. Every
+  query is reproducible from its seed and number (`--semilla=… --solo=…`). CI
+  runs 3,000 with a fixed seed, with and without indexes; run it by hand with
+  `--n=50000` before a release. A query the engine rejects and SQLite accepts
+  counts as a failure. Verified here: 16,000 queries over four seeds, with and
+  without indexes, no divergence; changing `>` to `>=` in the engine's fast
+  comparison path makes it fail. It leaves out, on purpose, the documented
+  differences (text ordering, `/`, `'5' = 5`, `ROUND` ties).
+
+### Checked before release
+
+- 24,000 more random queries against SQLite over four seeds, with and without
+  indexes, 2,000 random writes against the in-memory model with parts of 5 to
+  13 rows and with APCu, and a third hand-written set of 44 queries against
+  SQLite (`RIGHT` and `FULL JOIN`, `EXCEPT`/`INTERSECT`, `LIKE … ESCAPE`,
+  integer overflow, empty groups, `HAVING` on an alias): no divergence. The only
+  difference found is that the engine does not accept row values such as
+  `(a, b) IN (SELECT …)`; it says so with a syntax error, and it is now in the
+  list of what is not supported, next to `CHECK`.
+- The SQL dump orders the rows of a self-referencing table without recursion,
+  so a long chain stored in reverse (checked with 5,000 rows, loaded into
+  SQLite with foreign keys on) cannot exhaust PHP's stack; and the data-folder
+  check says it cannot tell, instead of reporting "protected", when the API or
+  the engine is not where a normal installation puts them.
+
+### Documentation
+
+- The README now opens with what the project gives and the evidence behind it —
+  comparison with SQLite, crash and concurrency tests, the way out to SQLite,
+  the compatibility policy — and then says when to use something else and the
+  limits, instead of opening with the limits. Nothing was removed: no
+  transactions, one commit at a time per table and PHP's speed are all still
+  said, now in their own section.
+- `docs/02-queries.md` says that `AVG` returns a decimal.
+
 ## [2.7.1] - 2026-09-29
 
 Faster writes and five fixes, three of them security fixes found by an external
@@ -2190,6 +2347,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[2.7.2]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.2
 [2.7.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.1
 [2.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.0
 [2.6.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.6.1

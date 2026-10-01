@@ -163,6 +163,7 @@ And these behavioural differences are worth keeping in mind:
   `ROUND(2.675, 2)` gives 2.68 here and 2.67 in SQLite: 2.675 does not exist
   exactly in floating point and each engine breaks the tie its own way. If the
   cent has to add up, store cents in an `INTEGER`.
+- `AVG` always returns a decimal, as SQLite and MySQL do (2.7.2).
 - `/` always divides exactly, as in MySQL: `7 / 2` is `3.5`. SQLite divides
   two integers as integers and gives 3. For the integer part, use
   `CAST(7 / 2 AS INTEGER)`.
@@ -330,6 +331,8 @@ Decisions that make this possible:
 | `WITH RECURSIVE` | Plain CTEs are there |
 | Window functions (`OVER`) | — |
 | `GLOB` | Use `LIKE` or `REGEXP` |
+| Row values: `(a, b) IN (SELECT …)`, `(a, b) = (1, 2)` | `a = 1 AND b = 2`, or `EXISTS` with both conditions |
+| `CHECK` constraints | A `BEFORE INSERT`/`BEFORE UPDATE` trigger with `RAISE(ABORT, …)` |
 
 Anything unsupported returns a clear error with the line number, never a
 silently wrong result.
@@ -349,13 +352,13 @@ silently wrong result.
 | `engine/Config.php` | reads `config.php` with defaults |
 | `engine/Logger.php` | query log |
 | `tests/f2_parser.php` | 70 checks of the parser |
-| `tests/f2_select.php` | 146 checks of the executor, with real data |
+| `tests/f2_select.php` | 147 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
 php tests/f1_nucleo.php     → OK: 66
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 146
+php tests/f2_select.php     → OK: 147
 php tests/f8_indices.php    → OK: 60
 ```

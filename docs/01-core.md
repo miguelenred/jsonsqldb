@@ -1192,6 +1192,30 @@ Looking rows up by their numeric id meanwhile costs 0.58 ms.
 
 ## 12. Upgrading from an earlier version
 
+### Compatibility policy
+
+From 2.7.2 on, these are promises, not just what has happened so far:
+
+- **The on-disk format of `data/` is stable for the whole 2.x series.** A later
+  2.x version can *add* keys to the files (as 2.7 added `rangos`, `offsets` and
+  `autoinc`), and fills them in as tables are written; it never stops reading
+  data written by an earlier 2.x. The files stay JSON a person can read.
+- **An incompatible change means 3.0**, announced in the changelog at least one
+  minor version in advance, with a migration tool in the same release.
+- **The SQL accepted, the API protocol (fields and HMAC signature) and the
+  configuration files** follow the same rule: within 2.x, what works keeps
+  working. A `config.php` from an earlier version keeps working with default
+  values for the options added since.
+- **The way out does not depend on this project.** The panel's SQL dump loads
+  unchanged into SQLite, and the data files can be read by anything that reads
+  JSON.
+
+What this does not promise: support for old versions. Only the latest release
+receives fixes (see [SECURITY.md](../SECURITY.md)), so upgrading within 2.x is
+always the way to get one.
+
+### How to upgrade
+
 Replace the folder and keep your two configuration files
 (`api/jsonsqldb_api_config.php` and `jsonsqldbadmin/config.php`, both
 gitignored and not shipped).

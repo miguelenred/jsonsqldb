@@ -181,6 +181,8 @@ function subir(string $query, array $campos, string $campoFichero, string $ruta)
         CURLOPT_POSTFIELDS     => $campos,      // array => multipart/form-data
         CURLOPT_COOKIEJAR      => $cookies,
         CURLOPT_COOKIEFILE     => $cookies,
+        // Las pruebas miran los textos en español: se piden en español
+        CURLOPT_HTTPHEADER     => ['Accept-Language: ' . ($GLOBALS['idiomaPrueba'] ?? 'es')],
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_TIMEOUT        => 60,
     ]);
@@ -211,6 +213,8 @@ function peticion(string $query, ?array $post): string {
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_COOKIEJAR      => $cookies,
         CURLOPT_COOKIEFILE     => $cookies,
+        // Las pruebas miran los textos en español: se piden en español
+        CURLOPT_HTTPHEADER     => ['Accept-Language: ' . ($GLOBALS['idiomaPrueba'] ?? 'es')],
         CURLOPT_TIMEOUT        => 30,
     ]);
     if ($post !== null) {
@@ -820,7 +824,8 @@ chk('volcado en SQL con estructura, datos, claves y triggers', function () {
     return str_contains($sql, 'CREATE TABLE "clientes"')
         && str_contains($sql, '"id" INTEGER PRIMARY KEY AUTOINCREMENT')
         && str_contains($sql, 'INSERT INTO "clientes"')
-        && str_contains($sql, 'ALTER TABLE "pedidos" ADD CONSTRAINT "fk_pedidos_cliente"')
+        && str_contains($sql, 'CONSTRAINT "fk_pedidos_cliente" FOREIGN KEY')
+        && !str_contains($sql, 'ALTER TABLE')
         && str_contains($sql, 'CREATE TRIGGER "trg_pedidos_ins"');
 });
 chk('el volcado recrea la base tal cual', function () {
@@ -889,6 +894,57 @@ chk('exportar e importar conserva textos de varias líneas y decimales exactos',
     $q = "SELECT COUNT(*) AS n FROM raros WHERE t = 'uno\ndos\r\ntres -- no es comentario; ni esto' AND d = 0.30000000000000004";
     return str_contains(enviar('p=sql&db=importada2', ['sql' => $q]), '<td>1</td>') ?: 'el texto o el decimal no volvieron iguales';
 });
+chk('el volcado de una base se carga tal cual en SQLite y en jsonSQLDB', function () use ($raizDatos) {
+    // La puerta de salida: el mismo volcado vale para SQLite. Con una tabla
+    // que se apunta a sí misma cuyas filas están guardadas hijo antes que
+    // padre, y una vista: todo tiene que llegar a los dos sitios
+    enviar('p=sql&db=importada2', ['sql' => 'CREATE TABLE emp (id INTEGER PRIMARY KEY, jefe INTEGER, n VARCHAR(10), FOREIGN KEY (jefe) REFERENCES emp (id))']);
+    enviar('p=sql&db=importada2', ['sql' => "INSERT INTO emp VALUES (1, NULL, 'a'), (2, 1, 'b'), (3, 1, 'c')"]);
+    enviar('p=sql&db=importada2', ['sql' => 'UPDATE emp SET jefe = 3 WHERE id = 2']);
+    enviar('p=sql&db=importada2', ['sql' => 'CREATE TABLE p2 (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, UNIQUE (a, b))']);
+    enviar('p=sql&db=importada2', ['sql' => 'INSERT INTO p2 VALUES (1, 1, 1), (2, 1, 2)']);
+    enviar('p=vistas&db=importada2', ['accion' => 'crear_vista', 'db' => 'importada2', 'nombre' => 'jefes',
+                                      'sql' => 'SELECT id, n FROM emp WHERE jefe IS NULL']);
+    $sql = enviar('p=bases', ['accion' => 'exportar_base', 'formato' => 'sql', 'nombre' => 'importada2']);
+    if (!str_contains($sql, 'CREATE TABLE')) { return 'no hay volcado'; }
+    // En jsonSQLDB
+    $fichero = $raizDatos . '/salida.sql';
+    file_put_contents($fichero, $sql);
+    enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'importada3']);
+    $html = subir('p=tablas&db=importada3', ['accion' => 'importar_sql', 'db' => 'importada3'], 'fichero', $fichero);
+    @unlink($fichero);
+    if (!str_contains($html, 'sentencia(s) ejecutadas')) {
+        return 'jsonSQLDB no lo cargó: ' . (preg_match('/alert-danger[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
+    }
+    if (!str_contains(enviar('p=sql&db=importada3', ['sql' => 'SELECT COUNT(*) AS n FROM jefes']), '<td>1</td>')) { return 'la vista no llegó a jsonSQLDB'; }
+    // En SQLite
+    if (!class_exists('SQLite3')) { return true; }
+    $s = new SQLite3(':memory:');
+    $s->enableExceptions(true);
+    try { $s->exec($sql); } catch (Throwable $e) { return 'SQLite no lo cargó: ' . $e->getMessage(); }
+    foreach (['emp' => 3, 'p2' => 2, 'raros' => 1, 'jefes' => 1] as $t => $n) {
+        if ((int)$s->querySingle("SELECT COUNT(*) FROM \"$t\"") !== $n) { return "en SQLite, $t no tiene $n filas"; }
+    }
+    return $s->querySingle('SELECT jefe FROM emp WHERE id = 2') === 3 ?: 'en SQLite, los datos no son los mismos';
+});
+chk('el volcado para MySQL sale con su dialecto: comillas invertidas, InnoDB, BIGINT', function () {
+    $sql = enviar('p=bases', ['accion' => 'exportar_base', 'formato' => 'mysql', 'nombre' => 'tienda']);
+    return str_contains($sql, 'CREATE TABLE `clientes`') && str_contains($sql, 'ENGINE=InnoDB')
+        && str_contains($sql, 'BIGINT') && str_contains($sql, 'SET FOREIGN_KEY_CHECKS = 1')
+        && !str_contains($sql, 'CREATE TABLE "') ?: 'no es el volcado para MySQL';
+});
+chk('importar desde el panel un volcado de SQLite y otro de MySQL, detectando el formato', function () {
+    foreach (['sqlite' => 'SQLite', 'mysql' => 'MySQL / MariaDB'] as $f => $nombre) {
+        enviar('p=bases', ['accion' => 'crear_base', 'nombre' => "desde_$f"]);
+        $html = subir("p=tablas&db=desde_$f", ['accion' => 'importar_sql', 'db' => "desde_$f", 'formato' => 'auto'],
+                      'fichero', dirname(__DIR__) . "/tests/volcados/$f.sql");
+        if (!str_contains($html, "volcado de $nombre")) {
+            return "$f: " . (preg_match('/alert-[a-z]+[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
+        }
+    }
+    return str_contains(enviar('p=sql&db=desde_mysql', ['sql' => 'SELECT COUNT(*) AS n FROM z_clientes']), '<td>4</td>')
+        ?: 'los datos de MySQL no llegaron';
+});
 chk('importar un fichero que crea o borra bases se rechaza', function () use ($raizDatos) {
     $fichero = $raizDatos . '/peligro.sql';
     file_put_contents($fichero, "CREATE TABLE ok1 (id INTEGER PRIMARY KEY);\nDROP DATABASE tienda;\n");
@@ -918,6 +974,8 @@ chk('con la API en otra máquina, el ZIP se desactiva y se explica', function ()
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/config.php', true) . ";"
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Api.php', true) . ";"
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Idioma.php', true) . ";"
+        . "Idioma::elegir('es');"
         . "var_export(mismoHostQueLaApi());"
         . "try { rutaDeLaBase('tienda'); echo '|sin aviso'; }"
         . "catch (Throwable \$e) { echo '|', \$e->getMessage(); }"
@@ -935,6 +993,8 @@ chk('con el mismo host sí está disponible', function () use ($raizDatos, $puer
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/config.php', true) . ";"
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Api.php', true) . ";"
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Idioma.php', true) . ";"
+        . "Idioma::elegir('es');"
         . "var_export(mismoHostQueLaApi());"
     ) . ' 2>&1');
     return trim($salida) === 'true' ?: $salida;
@@ -1125,6 +1185,8 @@ chk('ADMIN_SSL_CA con una ruta que no existe se explica', function () use ($raiz
         "define('ADMIN_API_URL', 'https://127.0.0.1:1/api/jsonsqldb_api.php');"
         . "require " . var_export($conf, true) . ";"
         . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Api.php', true) . ";"
+        . "require " . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/Idioma.php', true) . ";"
+        . "Idioma::elegir('es');"
         . "try { Api::sql('', 'SHOW DATABASES'); echo 'sin error'; }"
         . "catch (Throwable \$e) { echo \$e->getMessage(); }"
     ) . ' 2>&1');

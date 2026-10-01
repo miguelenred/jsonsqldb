@@ -14,7 +14,7 @@ final class Store
     {
         $dir = rtrim(str_replace('\\', '/', ADMIN_DATA_PATH), '/');
         if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
-            throw new RuntimeException("No se puede crear la carpeta de datos del panel: $dir");
+            throw new RuntimeException(t('No se puede crear la carpeta de datos del panel: {dir}', ['dir' => $dir]));
         }
         return $dir;
     }
@@ -42,11 +42,11 @@ final class Store
         $json    = json_encode($datos, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
         if ($json === false) {
-            throw new RuntimeException("No se pudo serializar $fichero");
+            throw new RuntimeException(t('No se pudo serializar {fichero}', ['fichero' => $fichero]));
         }
         try {
             if (@file_put_contents($tmp, $json . "\n", LOCK_EX) === false || !@rename($tmp, $destino)) {
-                throw new RuntimeException("No se pudo escribir $destino");
+                throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => $destino]));
             }
         } finally {
             if (is_file($tmp)) { @unlink($tmp); }

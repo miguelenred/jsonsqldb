@@ -198,10 +198,65 @@ delete them.
 **SQL** — any statement, one per run, with the result as a table and the time
 it took. With the `lectura` role only `SELECT` and `SHOW` are accepted.
 
+The **SQL dump of a database** comes in four flavours (2.7.2), chosen in the
+list of databases; the PostgreSQL and SQL Server ones are described in the
+changelog and their headers say how to load them:
+
+- **jsonSQLDB and SQLite** (`base.sql`): loads unchanged into either
+  (`sqlite3 base.db < base.sql`). Each table carries its unique and foreign
+  keys in its `CREATE TABLE`, the tables come in the order of their foreign
+  keys, the rows of a self-referencing table parents first, then its indexes;
+  views and triggers at the end. Only a foreign key in a cycle between tables
+  goes after the data with `ALTER TABLE`, which SQLite does not accept; the
+  dump marks it.
+- **MySQL and MariaDB** (`base.mysql.sql`, for MySQL 8 and MariaDB 10.3 or
+  later): `mysql nombre_base < base.mysql.sql`. Integers as `BIGINT` (PHP's are
+  64-bit), decimals with as many digits as the data need, dates as
+  `DATETIME(3)`, text in `utf8mb4_bin` so that comparisons and unique keys
+  behave as in jsonSQLDB (they tell capitals and accents apart), a text column
+  used in a key as `VARCHAR` long enough for its data, backslashes escaped, and
+  strict mode on, so a value that does not fit is an error rather than a
+  number changed in silence. Views and triggers go **commented out** at the
+  end: their SQL is jsonSQLDB's — `||` is a logical OR in MySQL, and a MySQL
+  trigger needs `FOR EACH ROW`, `DELIMITER` and `SIGNAL` instead of `RAISE` —
+  so they have to be reviewed before creating them there.
+
+`tests/f14_volcados.php` builds a database with every type, foreign keys with
+their actions, a self-referencing table stored child before parent, a cycle,
+composite keys, indexes with the same name in two tables, autoincrement, and
+text with quotes, backslashes, line breaks, accents and emoji; it loads the
+first dump into SQLite with foreign keys on and the second into MySQL (MySQL 8
+in CI; MariaDB 10.11 where it was written) and demands the same data, the
+foreign keys enforced, the indexes, unique keys that tell capitals apart and
+the autoincrement continuing.
+
 **Import** (2.7) — on the page of each database, for administrators:
 
-- **An SQL file**: the dump the panel generates, or any list of statements
-  separated by semicolons. It is read as a stream (only the statement in
+- **An SQL dump from jsonSQLDB, SQLite, MySQL / MariaDB, PostgreSQL or SQL
+  Server** (2.7.2): the panel's own dump, one made with `sqlite3 base.db .dump`,
+  with `mysqldump` / `mariadb-dump`, with `pg_dump` (plain format), or Management
+  Studio's "Generate Scripts" (schema and data). PostgreSQL's `COPY` data,
+  primary keys and `IDENTITY` declared after the table, and SQL Server's `GO`,
+  `IDENTITY` and `ALTER TABLE … ADD DEFAULT … FOR` are understood; names that
+  are not valid here become valid (`Order Details` → `Order_Details`). The format is detected from the first lines,
+  or chosen by hand. SQLite and MySQL dumps are translated statement by
+  statement (`lib/Traductor.php`): backtick and bracket names, MySQL's
+  backslash escapes, `X'…'`, `0x…`, `b'…'` and SQLite's `char(10)`; MySQL
+  types to the ones here (`INT(11) UNSIGNED` → `INTEGER`, `LONGTEXT` → `TEXT`,
+  `ENUM` → `TEXT`…); the `KEY`s inside a `CREATE TABLE` become `CREATE INDEX`;
+  a `CREATE UNIQUE INDEX` becomes a `UNIQUE` constraint; the foreign keys go at
+  the end, because dumps create tables in any order and load data with checks
+  off; and session statements (`PRAGMA`, `SET`, `LOCK TABLES`, `BEGIN`…), the
+  `sqlite_sequence` table and mysqldump's `/*! … */` blocks are skipped. What
+  has no equivalent here — `CHECK`, computed defaults such as
+  `CURRENT_TIMESTAMP`, `ON UPDATE`, `ENUM`'s list of values, binary `BLOB`
+  data, MySQL views and triggers — is dropped, and the summary at the end says
+  exactly what. `tests/f14_volcados.php` imports a real `sqlite3 .dump` and a
+  real `mariadb-dump`, kept in `tests/volcados/`, and compares the data with
+  the source databases; in CI it also creates the source in MySQL 8, dumps it
+  with its `mysqldump` and imports that.
+- **An SQL file** of jsonSQLDB statements: any list of statements separated by
+  semicolons. It is read as a stream (only the statement in
   progress is in memory), split respecting strings, quoted identifiers,
   comments and the `BEGIN … END` of triggers, and run in order by the same
   route as the rest of the panel, so it works between machines. Consecutive
@@ -320,7 +375,19 @@ $cli->aceptarAutofirmado();
 - `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
   `Referrer-Policy: same-origin` headers.
 
-## 6. Configuration
+## 6. Language
+
+The panel is in Spanish and English. It follows the browser's language (the
+first of its `Accept-Language` list that the panel has; English if there is
+none) until the user picks one with the ES/EN selector in the top bar, on the
+sign-in page or in the wizard; that choice is saved with the panel user and
+follows them to any browser. Messages that come from the engine (a table that
+does not exist, a constraint that fails) stay in Spanish: they belong to the
+engine. To add a language, copy `idiomas/en.php`, translate the values (the
+keys are the Spanish texts) and add it to `Idioma::DISPONIBLES` in
+`lib/Idioma.php`; `tests/f15_idiomas.php` will tell you if a text is missing.
+
+## 7. Configuration
 
 Administrators change it from the panel's **Configuration** page (2.7.1): the
 connection (mode, engine folder, API URL, keys, certificate, timeout), security
@@ -336,6 +403,10 @@ separator, dump limit). What it saves goes into `config.php`, replacing each
   while they are on HTTP.
 - **Keys are never shown.** An empty key field keeps the current one; the audit
   trail records which settings changed, never their values.
+- **It checks that the data folder cannot be downloaded** (2.7.2): it requests
+  `data/web.config` over HTTP and shows in red if the server hands it out, as
+  nginx does without its rules. The setup wizard shows the same check. It
+  cannot be done from PHP's built-in server.
 - Where the users are kept (`ADMIN_DATA_PATH`), the engine's data folder for the
   ZIP copy and the session cookie name are only changed by hand: changing them
   with the panel running would leave whoever is using it out.
@@ -371,7 +442,7 @@ refusal leaves `config.php` untouched.
 | `ADMIN_EXPORT_MAX` | `100000` | row cap per export |
 | `ADMIN_RUTA_DATOS_MOTOR` | empty | the engine's `data/` folder, for the ZIP copy |
 
-## 7. Files
+## 8. Files
 
 | Path | What it is |
 |---|---|
@@ -393,10 +464,10 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
 | `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 126 checks driving the real panel through the API |
-| `tests/f11_asistente.php` | 31 checks of the setup wizard, the configuration page, sessions and the direct connection |
+| `tests/f5_admin.php` | 129 checks driving the real panel through the API |
+| `tests/f11_asistente.php` | 34 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
-## 8. Tests
+## 9. Tests
 
 `tests/f5_admin.php` starts two PHP built-in servers (one for the panel and one
 for the API, so they do not wait for each other) and drives the panel with real
@@ -405,7 +476,7 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php     → OK: 126
+php tests/f5_admin.php     → OK: 129
 php tests/f11_asistente.php → OK: 31
 ```
 

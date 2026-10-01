@@ -26,11 +26,13 @@ require_once __DIR__ . '/lib/Auth.php';
 require_once __DIR__ . '/lib/Audit.php';
 require_once __DIR__ . '/lib/Api.php';
 require_once __DIR__ . '/lib/Exportar.php';
+require_once __DIR__ . '/lib/Traductor.php';
 require_once __DIR__ . '/lib/Importar.php';
 require_once __DIR__ . '/lib/util.php';
 require_once __DIR__ . '/lib/acciones.php';
 require_once __DIR__ . '/lib/iconos.php';
 require_once __DIR__ . '/lib/Instalador.php';
+require_once __DIR__ . '/lib/Idioma.php';
 
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
@@ -43,7 +45,7 @@ header("Content-Security-Policy: default-src 'self'; img-src 'self' data:; "
 // --- Quién y por dónde ---
 if (!util_ip_permitida(util_ip(), (array)ADMIN_IPS_PERMITIDAS)) {
     http_response_code(403);
-    exit('Acceso no permitido desde esta IP.');
+    exit(t('Acceso no permitido desde esta IP.'));
 }
 // Sin configurar (sin config.php, o con las claves CHANGE_ME_ de la plantilla,
 // que están publicadas en el repositorio): lo único que se sirve es el
@@ -55,19 +57,22 @@ if (!$asistente && ADMIN_EXIGIR_HTTPS && !util_https()) {
     // lo primero con lo que se choca al instalar, y sin la indicación hay que
     // buscar la constante por el código
     http_response_code(403);
-    exit(
-        "Este panel solo admite conexiones HTTPS y esta petición ha llegado por HTTP.\n\n"
-        . "En un servidor de verdad: pon un certificado (Let's Encrypt es gratis).\n"
-        . "En tu máquina, para probar: cambia ADMIN_EXIGIR_HTTPS a false en\n"
-        . "jsonsqldbadmin/config.php, y haz lo mismo con EXIGIR_HTTPS en\n"
-        . "api/jsonsqldb_api_config.php. Vuelve a ponerlas a true antes de publicar."
-    );
+    exit(t("Este panel solo admite conexiones HTTPS y esta petición ha llegado por HTTP.\n\nEn un servidor de verdad: pon un certificado (Let's Encrypt es gratis).\nEn tu máquina, para probar: cambia ADMIN_EXIGIR_HTTPS a false en jsonsqldbadmin/config.php, y haz lo mismo con EXIGIR_HTTPS en api/jsonsqldb_api_config.php. Vuelve a ponerlas a true antes de publicar."));
 }
 
 Auth::iniciarSesion();
 if (!Auth::revalidar()) {
     Auth::iniciarSesion();
-    flash('warning', 'La sesión se ha cerrado: tu usuario ya no existe o su contraseña ha cambiado.');
+    flash('warning', t('La sesión se ha cerrado: tu usuario ya no existe o su contraseña ha cambiado.'));
+}
+
+// Selector de idioma: ?idioma=en. Solo cambia el idioma (en la sesión y, si
+// alguien ha entrado, en su usuario) y vuelve a la misma página sin el parámetro
+if (isset($_GET['idioma']) && is_string($_GET['idioma'])) {
+    Idioma::elegir($_GET['idioma']);
+    $params = $_GET;
+    unset($params['idioma']);
+    redirigir($params);
 }
 
 $pagina = get('p', 'bases');
@@ -90,7 +95,7 @@ if ($asistente || !Auth::hayUsuarios()) {
                 $nombre = Instalador::crearAdmin(post('usuario'), (string)($_POST['clave'] ?? ''),
                                                  (string)($_POST['clave2'] ?? ''));
                 Audit::registrar('instalar', $nombre);
-                flash('success', "Administrador '$nombre' creado. Ya puedes entrar.");
+                flash('success', t('Administrador \'{nombre}\' creado. Ya puedes entrar.', ['nombre' => $nombre]));
                 redirigir();
             }
         } catch (Throwable $e) {
@@ -153,7 +158,7 @@ if (!in_array($pagina, $paginas, true)) {
 }
 if (in_array($pagina, ['tablas', 'vistas', 'integridad', 'crear_tabla', 'estructura', 'datos',
                        'sql'], true) && $base === '') {
-    flash('warning', 'Elige primero una base de datos.');
+    flash('warning', t('Elige primero una base de datos.'));
     redirigir(['p' => 'bases']);
 }
 
