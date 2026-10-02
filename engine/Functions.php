@@ -6,7 +6,7 @@ namespace JsonSQLDB;
 /**
  * Funciones SQL. Nombres y comportamiento iguales a los de SQLite.
  *
- * Texto:     UPPER LOWER LENGTH SUBSTR/SUBSTRING TRIM LTRIM RTRIM REPLACE INSTR
+ * Texto:     UPPER LOWER LENGTH SUBSTR/SUBSTRING TRIM LTRIM RTRIM REPLACE TRANSLATE INSTR
  * Números:   ABS ROUND RANDOM
  * Fecha:     DATE TIME DATETIME STRFTIME  (acepta 'now')
  * Nulos:     COALESCE NULLIF IFNULL
@@ -57,6 +57,19 @@ final class Functions
                 $c = isset($args[1]) ? Valor::aTexto($args[1]) : " \t\n\r\0\x0B";
                 if ($c === '') { return $s; }
                 return $nombre === 'TRIM' ? trim($s, $c) : ($nombre === 'LTRIM' ? ltrim($s, $c) : rtrim($s, $c));
+            case 'TRANSLATE':
+                // TRANSLATE(texto, de, a): cada carácter de «de» pasa a ser el que
+                // está en su misma posición en «a»; los que sobran en «de», fuera
+                // (como en PostgreSQL, Oracle y SQL Server)
+                self::exige($nombre, $args, 3);
+                if ($args[0] === null || $args[1] === null || $args[2] === null) { return null; }
+                $de = (array)preg_split('//u', Valor::aTexto($args[1]), -1, PREG_SPLIT_NO_EMPTY);
+                $a  = (array)preg_split('//u', Valor::aTexto($args[2]), -1, PREG_SPLIT_NO_EMPTY);
+                $mapa = [];
+                foreach ($de as $i => $c) {
+                    $mapa[$c] ??= $a[$i] ?? '';
+                }
+                return strtr(Valor::aTexto($args[0]), $mapa);
             case 'REPLACE':
                 self::exige($nombre, $args, 3);
                 if ($args[0] === null || $args[1] === null || $args[2] === null) { return null; }
@@ -128,8 +141,8 @@ final class Functions
             case 'DATETIME':
                 return self::fecha($args, 'Y-m-d H:i:s');
             case 'STRFTIME':
-                self::exige($nombre, $args, 2);
-                $d = self::aFecha($args[1]);
+                self::exige($nombre, $args, 2, 12);
+                $d = self::conModificadores($args[1], array_slice($args, 2));
                 return $d === null ? null : self::strftime(Valor::aTexto($args[0]), $d);
         }
 
@@ -294,8 +307,79 @@ final class Functions
         // Sin argumentos, la fecha de ahora. CON argumento NULL, el resultado es
         // NULL: un ?? aquí confundía las dos cosas y DATE(NULL) devolvía hoy.
         $v = $args === [] ? 'now' : $args[0];
-        $d = self::aFecha($v);
+        $d = self::conModificadores($v, array_slice($args, 1));
         return $d === null ? null : $d->format($formato);
+    }
+
+    /**
+     * Una fecha con sus modificadores. 'unixepoch', el primero, dice que el
+     * valor son segundos desde 1970 (en UTC, como en SQLite).
+     *
+     * @param array<int,mixed> $mods
+     */
+    private static function conModificadores($v, array $mods): ?\DateTimeImmutable
+    {
+        if ($mods !== [] && is_string($mods[0]) && strcasecmp(trim($mods[0]), 'unixepoch') === 0) {
+            if ($v === null || !is_numeric($v)) {
+                return null;
+            }
+            $d = (new \DateTimeImmutable('@' . (int)floor((float)$v)))->modify(sprintf('+%d microseconds', (int)round(fmod((float)$v, 1) * 1e6)));
+            return self::modificar($d, array_slice($mods, 1));
+        }
+        return self::modificar(self::aFecha($v), $mods);
+    }
+
+    /**
+     * Los modificadores de SQLite que van detrás de la fecha: '+N days' (y
+     * seconds, minutes, hours, months, years, con o sin signo y en singular o
+     * plural) y 'start of day' / 'start of month' / 'start of year'. Hasta
+     * 2.7.3 se ignoraban sin avisar: DATE(x, '+1 day') daba la misma x. Uno que
+     * no se reconoce es un error, no un resultado equivocado.
+     *
+     * Los meses y los años se suman como en SQLite: el 31 de enero más un mes
+     * es el 3 de marzo, no el 28 de febrero.
+     *
+     * @param array<int,mixed> $mods
+     */
+    private static function modificar(?\DateTimeImmutable $d, array $mods): ?\DateTimeImmutable
+    {
+        foreach ($mods as $m) {
+            if ($d === null || $m === null) {
+                return null;
+            }
+            $texto = strtolower(trim(Valor::aTexto($m)));
+            if (preg_match('/^([+-]?)(\d+(?:\.\d+)?)\s*(second|minute|hour|day|month|year)s?$/', $texto, $p)) {
+                $n = (float)$p[2] * ($p[1] === '-' ? -1 : 1);
+                if ($p[3] === 'month' || $p[3] === 'year') {
+                    if ($n != (int)$n) {
+                        throw JsonSqlDbError::syntax("Modificador de fecha no soportado: '$texto' (los meses y los años, enteros)");
+                    }
+                    $d = $d->modify(sprintf('%+d %s', (int)$n, $p[3]));
+                } else {
+                    // En segundos, para admitir '+1.5 days' como SQLite
+                    $seg = (int)round($n * ['second' => 1, 'minute' => 60, 'hour' => 3600, 'day' => 86400][$p[3]]);
+                    $d = $d->modify(sprintf('%+d seconds', $seg));
+                }
+                continue;
+            }
+            // weekday N: el siguiente día de la semana N (0 = domingo), o el mismo
+            if (preg_match('/^weekday\s+([0-6])$/', $texto, $p)) {
+                $d = $d->modify('+' . (((int)$p[1] - (int)$d->format('w') + 7) % 7) . ' days');
+                continue;
+            }
+            switch ($texto) {
+                // Aquí las fechas no llevan zona horaria: 'localtime' y 'utc' no
+                // cambian nada (antes de 2.7.3 ningún modificador lo hacía, y
+                // DATETIME('now', 'localtime') es muy común en SQL de SQLite)
+                case 'localtime':
+                case 'utc':            continue 2;
+                case 'start of day':   $d = $d->setTime(0, 0); continue 2;
+                case 'start of month': $d = $d->setDate((int)$d->format('Y'), (int)$d->format('m'), 1)->setTime(0, 0); continue 2;
+                case 'start of year':  $d = $d->setDate((int)$d->format('Y'), 1, 1)->setTime(0, 0); continue 2;
+            }
+            throw JsonSqlDbError::syntax("Modificador de fecha no soportado: '$texto'");
+        }
+        return $d;
     }
 
     /** Convierte un valor a fecha. Acepta 'now' y el formato propio del motor. */

@@ -9,6 +9,299 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.7.3] - 2026-10-01
+
+Security fixes found by four external reviews of 2.7.2 (Arena, ChatGPT, Grok and
+Gemini), each one checked in the code before fixing it, and each with a test
+that fails without the fix. **Update recommended; if you ran `configurar.php`
+with an earlier version, change the key of the «Clientes de ejemplo» account**
+(see the first item and SECURITY.md).
+
+### Fixed after an external audit of 2.7.2
+
+A third audit, of 2.7.2. Its first two findings (the example clients' keys and
+the global API lockout) were already fixed above; this is the rest.
+
+- **Taking over a panel published before being set up** (F-03): the wizard
+  now asks for an installation code that is only in a file on the server
+  (`codigo-instalacion.txt` in the panel's data folder; `php configurar.php`
+  prints it), and deletes it when done. `configurar.php` only runs from the
+  command line and Apache, IIS, nginx and LiteSpeed refuse it over HTTP.
+- **ZIP copy and restore outside the engine's locks** (F-04): both now take the
+  engine's exclusive lock on the database (its `.turno` and `.lock` files) for as
+  long as they touch its folder, and a restore rewrites the folder in place
+  instead of renaming it, so whoever waits for the lock keeps waiting for the
+  same file. The same for the all-or-nothing import's copy and roll-back.
+  `tests/f7_concurrencia.php` copies a database over and over while four
+  processes write into it: every copy has the same rows in two tables a trigger
+  keeps equal (without the lock, some copies did not).
+- **Panel users changed without a common lock** (F-05): creating, changing,
+  deleting a user, their language and their last login now read, change and
+  save under one lock, as the login attempts already did.
+- **Login CSRF** (F-09): the login form carries a token and the panel checks it.
+- **Inline scripts** (F-10): the panel's CSP allows scripts only from its own
+  files or with the nonce of each response; the one `onchange` in a page moved
+  to `panel.js`. `style-src` still allows inline styles.
+- **PHP 8.0** (F-06): the panel warns that writes are not durable across a power
+  cut there (no `fsync()` before PHP 8.1). PHP 8.0 is still supported.
+- **HTTP status codes of API errors** (F-08): left as they are, and now
+  documented (docs/04-api.md): errors come with HTTP 200 and an `error` key,
+  except four cases before the API can answer (403, 500). Changing it would
+  change what existing clients receive; PowerShell's `Invoke-RestMethod`, for
+  one, throws on a 4xx instead of returning the JSON with the reason.
+- Not done in this version, with the reason: a different store for the API's rate limits and nonces (F-07),
+  splitting the large engine classes (F-11) and health reporting of
+  suppressed I/O errors (F-12) are improvements with no fault behind them.
+
+### Fixed after two more external audits
+
+Two further audits of 2.7.3 before its release. Each finding was reproduced
+first; this is what was real and what was done.
+
+- **A dump that is not in UTF-8 could not be imported.** One Latin-1 byte (an
+  old MySQL dump, `--default-character-set=latin1`) broke the analysis of the
+  whole statement: «Sentencia no soportada: 'I'». Statements and CSV fields
+  that are not valid UTF-8 are now read as Latin-1 / Windows-1252, and the
+  summary says how many. Tested with a real `mariadb-dump` in Latin-1.
+- **Two tables whose names became the same one lost data.** `ventas-2024`
+  becomes `ventas_2024`; a second table already called `ventas_2024` dropped
+  it with its `DROP TABLE IF EXISTS`. The second now gets a suffix
+  (`ventas_2024_2`) and a warning. Tested with a real dump.
+- **mysqldump's `BIT` values** (raw bytes) now become numbers, **`0000-00-00`**
+  becomes `NULL` with a warning, and **`ALTER … OWNER TO`** of a `pg_dump`
+  without `--no-owner` is skipped; each stopped the import before.
+- **Importing is all or nothing when the panel reaches the database's folder**
+  (same machine as the engine): a copy is made first and, on failure, the
+  database is put back as it was. With the panel elsewhere, as before.
+  APCu's cache of the database is emptied after putting it back, also after a
+  ZIP restore, so no result of the undone writes can be served.
+- **Integers beyond 64 bits were silently clipped** to 9223372036854775807 in
+  a literal (a `BIGINT UNSIGNED` id, for one). They are now read as decimals,
+  as SQLite does, `-9223372036854775808` is exact, and storing one in an
+  `INTEGER` column is an error. `tests/f12_contra_sqlite.php` compares them
+  with SQLite.
+- **The SQL dump of a database is written table by table**, with one table in
+  memory at a time instead of all of them; a medium-sized database could run
+  out of PHP memory.
+- **The dump for SQLite** wrote `AUTOINCREMENT` on a column that was not the
+  primary key, which SQLite rejects.
+- **`CAST(x AS INTEGER)` in views exported to MySQL, PostgreSQL and Access**
+  rounded there and truncated here; it now truncates everywhere.
+  `tests/f16_vistas_triggers.php` has a row with decimals that shows it.
+- **The API address worked out from the `Host` header** (see SECURITY.md): the
+  wizard and the Configuration page now always write it down.
+- **ZIP restore**: a path with `..`, `.` or an empty component is rejected as a
+  whole and every destination is checked to be inside the database. The
+  reported escape through paths ending in `..` did not actually write anything
+  (only `.json`, `.htaccess` and `web.config` files are written), but such paths
+  were accepted silently.
+- A `DECIMAL` of more than 15 digits is warned about on import; the panel's
+  names are limited to 64 characters, as the engine's.
+- A last review before release also made sure that a view or trigger with
+  something the translator does not expect (a malformed dump) is skipped and
+  named in the summary instead of stopping the import or the dump, and that
+  putting a database back after a failed import or ZIP restore never leaves it
+  without either copy: the current one is set aside first and only removed once
+  the copy is in place.
+- **Views, one more round.** `tests/f16_vistas_triggers.php` now exports 25
+  shapes of view (every kind of `SELECT` the engine takes: joins of every kind,
+  subqueries, CTEs, set operations, `CASE`, `LIKE … ESCAPE`, dates, `GROUP_CONCAT
+  … ORDER BY`…) to MySQL and PostgreSQL and compares the results; and
+  `tests/f17_rutinas_importadas.php` sends them there and back through
+  `mysqldump` and `pg_dump`, and through the SQL Server and Access dumps
+  (`tests/f18_access.php`). What it found, now fixed: `SUBSTR` with a negative
+  start (from the end here and in MySQL, empty in PostgreSQL and SQL Server);
+  `ROUND` of a `DOUBLE` in MySQL (rounds to even there); a condition used as a
+  value with `NULL` in Access; and, importing, MySQL's `join` without `ON`
+  (a cross join), PostgreSQL's `OFFSET … LIMIT` order, `~~ like_escape(…)`,
+  `::time(0) without time zone` and `x + interval -2 hour`, SQL Server's
+  `DATALENGTH` and `DATEFROMPARTS`, and Access's `InStr` with binary compare.
+- **`TRANSLATE(text, from, to)`** is a new text function (as in PostgreSQL,
+  Oracle and SQL Server): views exported to PostgreSQL and SQL Server sort with
+  it, so they come back with it.
+- Not changed, with the reason: grouping single-row `INSERT`s only ever falls
+  back to not grouping; an empty CSV field is `NULL` (documented); the order of
+  `GROUP_CONCAT` without `ORDER BY` is undefined in every engine (documented).
+
+### Fixed
+
+- **Date modifiers were silently ignored**: `DATE(x, '+1 day')`,
+  `DATETIME(x, '+2 hours')` or `STRFTIME(f, x, 'start of month')` returned
+  `x` unchanged. They now work as in SQLite — `±N seconds/minutes/hours/days/
+  months/years`, `start of day/month/year`, `weekday N` and `unixepoch` — and
+  an unknown one is an error. `localtime` and `utc` are accepted and change
+  nothing (dates carry no time zone here), so the common
+  `DATETIME('now', 'localtime')` keeps working. Found while checking the exported views against MySQL and
+  PostgreSQL; `tests/f12_contra_sqlite.php` now compares three queries with
+  modifiers against SQLite, month overflow included (31 January + 1 month =
+  3 March).
+- **The example clients' key could be downloaded.** `php configurar.php` wrote
+  the key and secret of the «Clientes de ejemplo» account — write access to the
+  `pruebas` database — into `api/cliente_ejemplo.php`, `.py` and `.ps1`, and the
+  web server handed out the `.py` and `.ps1` as plain text. The clients now read
+  the key from environment variables (`JSONSQLDB_API_KEY`,
+  `JSONSQLDB_HMAC_SECRET`, `JSONSQLDB_URL`), `configurar.php` prints the values
+  instead of writing them into the files, and `api/.htaccess`,
+  `api/web.config` and `nginx/jsonsqldb.conf` refuse to serve
+  `cliente_ejemplo.*`. Found by Arena.
+- **The API could be locked for everyone without a key.** 30 requests with an
+  invented API key, from anywhere, tripped a global switch that closed the API
+  to every client for up to 24 hours. The global switch is gone: authentication
+  failures now block only the IP they come from (`RATE_LIMIT_FALLOS_IP`, 10 by
+  default), checked before anything else. `RATE_LIMIT_GLOBAL_MAX` is no longer
+  read. Going over the request limit no longer counts as an authentication
+  failure (a well-signed request over its quota would otherwise get the IP
+  blocked for the whole window). Found by Arena.
+- **Rejected requests could fill the disk.** The request log stored the `db`
+  field of a rejected request whole (up to 200 KB) and had no limit per day. The
+  field is now cut to 64 characters and the error to 1,000, and once a day has
+  20 full log files, requests rejected before their key is known are no longer
+  logged. Found by Arena.
+- **A CSV could carry spreadsheet formulas.** A text cell starting with `=`,
+  `+`, `-` or `@`, written by any application with write access, was exported
+  as is, and Excel runs it as a formula when the file is opened. Such cells now
+  get an apostrophe in front, which Excel does not show; numbers are not
+  touched. Found by Arena.
+- **The nginx rule for hidden files missed those at the root** of the
+  installation (`/jsonsqldb/.env`, `/jsonsqldb/.git/config`): it needed a folder
+  before the dot. Found by Arena; the test checks the rule's expression against
+  those URLs.
+- **Behind a TLS proxy, the panel's session cookie went out without `Secure`**:
+  it looked only at `$_SERVER['HTTPS']`, while the HTTPS check already trusted
+  the proxy's header. It now uses the same check. Found by Arena.
+- **Failed sign-in attempts to the panel could be lost** when they arrived at
+  the same time: the counter was read, increased and saved without a lock, so
+  two attempts could count as one. It now goes under an exclusive lock
+  (`Store::actualizar()`), as the API's state already did; eight processes
+  adding 25 failures each now count exactly 200. Found by ChatGPT.
+- **Signing out was a link (GET)**: any page could sign a user out with an
+  image. It is now a POST with the CSRF token. Found by ChatGPT.
+- **`SECURITY.md` said the supported version was 1.x**; it is the latest 2.x,
+  and it now lists the two advisories above. Found by Arena.
+- The API's `salirConError()` declared the `never` return type, which only
+  PHP 8.1 understands: on 8.0 it worked by accident, read as a class name. It is
+  `void` now. Found by ChatGPT.
+- The zip handed out for 2.7.2 carried a request log from the author's own test
+  runs (test databases, no user data): it never reached the repository, which
+  ignores `logs/`. CI now fails if a file under `data/`, `logs/` or
+  `jsonsqldbadmin/datos/` other than their protection files is ever tracked.
+  Found by ChatGPT.
+
+### Added
+
+- **Trigger bodies accept `IF … THEN … ELSEIF … ELSE … END IF` and
+  `SET NEW.column = …`** (in `BEFORE INSERT` / `BEFORE UPDATE`), as in MySQL
+  and PostgreSQL. Several assignments in one `SET` go left to right, each one
+  seeing the previous ones, and the value is converted to the column's type;
+  the changed row goes through `NOT NULL`, unique and foreign-key checks again
+  (a last review found that a `SET NEW.col = NULL` slipped past `NOT NULL`).
+  Triggers stored by earlier versions are read as before.
+- **`GROUP_CONCAT(x [, sep] ORDER BY …)`** orders the values inside each group,
+  as MySQL and SQLite 3.44; with `DISTINCT` too. Same results as SQLite
+  (`tests/f2_select.php`).
+- **Views and triggers of a MySQL / MariaDB dump are imported**, translated,
+  instead of being skipped. The importer now reads what mysqldump writes
+  around them — `DELIMITER ;;` and the `/*!50003 … */` comments — and
+  `TraductorRutinas` rewrites MySQL's functions and syntax (`IF()`,
+  `CONCAT_WS`, `x + interval 1 day`, `to_days()`, `DATE_FORMAT`, `YEAR()`,
+  `LOCATE`, `LEFT`/`RIGHT`, `GREATEST`, `FLOOR`/`CEIL`, `TRUNCATE`, `MOD`,
+  `GROUP_CONCAT … SEPARATOR`, joins in parentheses…) and trigger bodies
+  (`IF/ELSEIF/ELSE`, `SET NEW`, `SIGNAL`, `INSERT … SET`). Triggers are created
+  at the end, after the data. A view or trigger the engine does not accept, or
+  that uses something with no equivalent here (local variables, loops), is
+  skipped and named in the summary; the rest goes on.
+  `tests/f17_rutinas_importadas.php` (new) creates in MySQL a database with 7
+  views and 7 triggers written the MySQL way, dumps it with mysqldump, imports
+  it, runs the same ten writes there and here — some rejected by a trigger —
+  and checks that every table and every view ends up the same.
+- **Views and triggers of PostgreSQL and SQL Server dumps are imported too**,
+  translated. PostgreSQL: casts, intervals, `IS DISTINCT FROM`, `ANY (ARRAY…)`,
+  `~~` (its `LIKE`, case-sensitive, so a literal pattern becomes a `REGEXP`),
+  `to_char`, `date_trunc`, `EXTRACT`, `string_agg`; the trigger's plpgsql
+  function goes with it, and a trigger for several events becomes one per
+  event with `TG_OP` set. SQL Server: `TOP`, `ISNULL`, `LEN`, `IIF`, `DATEADD`,
+  `DATEDIFF`, `FORMAT`, `+` as concatenation, `STRING_AGG … WITHIN GROUP`; its
+  triggers, which run once per statement over `inserted` and `deleted`, are
+  rewritten to run per row (`JOIN inserted` → `WHERE … NEW.col`,
+  `IF EXISTS (SELECT … FROM inserted …)`, `IF UPDATE(col)`, variables loaded
+  from `inserted`, `RAISERROR`/`THROW`/`ROLLBACK`), and one that updates its
+  own row becomes a `BEFORE` trigger with `SET NEW`, because here it would fire
+  itself again. `tests/f17_rutinas_importadas.php` checks PostgreSQL with
+  pg_dump as it does MySQL (8 views, 8 triggers), and an SSMS-style script
+  with the same rules against the result already checked in MySQL (there is no
+  SQL Server here).
+- **Microsoft Access, both ways.** *Import*: the panel offers
+  `access-to-jsonsqldb.ps1`, a PowerShell script (Windows; right-click → *Run
+  with PowerShell*) that asks for the `.mdb`/`.accdb` file and the folder for
+  the dump, reads it read-only through OLEDB and writes the tables, keys,
+  indexes, relationships, data and saved select queries. Without the Access
+  Database Engine it says so, explains the 32/64-bit match and offers the
+  download page. The importer reads that dump (and mdbtools' `access` output):
+  Access types, `#dates#`, `COUNTER`, and the queries translated to views —
+  double-quoted text, `&`, `IIf`, `Nz`, `Mid`, `InStr`, `Format`, `DateAdd`,
+  `DateDiff`, `CCur`…, `Like` with `*`, `?` and `#`, `Table!Field`, joins in
+  parentheses, `TOP`. *Export*: a new *SQL: Microsoft Access* dump with
+  `TEXT(n)`/`MEMO`, `LONG`, `COUNTER`, `#dates#`, relationships and the views as
+  saved queries; Access has no triggers, so they go commented with the reason.
+  The panel text, in both languages, says that the script needs Windows and how
+  to run it. `tests/f18_access.php` (new) checks the script's syntax with
+  PowerShell and that its own functions write exactly the test dump, imports
+  that dump (4 tables, 8 queries checked against what Access returns), and
+  exports to Access and imports it back unchanged. Reading a real `.mdb` with
+  OLEDB needs Windows and could not be run here.
+- **Views and triggers are exported to MySQL / MariaDB, PostgreSQL, SQL Server
+  and Access**, translated, instead of being left commented out. The view or
+  trigger is analysed with the engine's own parser and written again in the
+  target's SQL (`GeneradorSql`): functions, quoting, `LIMIT`, conditions used
+  as values, and the differences that would change a result — `LIKE` without
+  case, division that does not truncate and gives `NULL` by zero, concatenation
+  with `NULL`, `AVG` of integers in SQL Server, and text ordered as here (no
+  case, no accents, `ñ` after `n`). MySQL triggers use `FOR EACH ROW` with
+  `IF` and `SIGNAL`, and one that updates its own row becomes a `BEFORE` with
+  `SET NEW` (MySQL forbids a trigger to touch its own table). PostgreSQL gets a
+  plpgsql function and the trigger that calls it. SQL Server walks the rows one
+  by one with a cursor, and a `BEFORE` becomes an `INSTEAD OF` that does the
+  write at the end. Access has no triggers, so they stay commented with that
+  reason; what a target cannot express at all (`GROUP_CONCAT` or `OFFSET` in
+  Access) is commented with its reason and listed at the top of the dump.
+  `tests/f16_vistas_triggers.php` (new) loads 11 views and 7 triggers into
+  MariaDB and PostgreSQL, runs the same nine writes there and here — three of
+  them rejected by a trigger — and checks that every table and every view ends
+  up the same. SQL Server could not be run here; its output is checked for
+  shape.
+- **A per-API-key request limit** (`RATE_LIMIT_POR_CLAVE`, off by default):
+  requests of one key from any IP, so that a leaked key or a runaway
+  application cannot use up everything. Suggested by Grok.
+- **SQL Server scripts saved as «Unicode»** — UTF-16, what Management Studio
+  proposes — are converted to UTF-8 on import, in pieces of 1 MB without
+  splitting a character, and a UTF-8 byte-order mark is skipped.
+- **A guide to making a dump of each database** (SQLite, MySQL / MariaDB,
+  PostgreSQL and SQL Server) for the panel's import, in `docs/05-admin.md`, with
+  a link from the import box of the panel.
+
+### Not changed, on purpose
+
+- Folders are still created as `0775` (ChatGPT suggested `0750`): on shared
+  hosting PHP and the FTP user often need the group to write. SECURITY.md now
+  says how to tighten them where PHP runs as its own user.
+- Gemini's report listed missing CSRF protection, path traversal, non-atomic
+  writes, no rate limiting and plain-text passwords; all of them were already in
+  place and tested, and nothing was changed for it.
+
+### Documentation
+
+- `README.md`, `NOTICE`, `AUTHORS`, `CONTRIBUTING.md` and `composer.json` no
+  longer name a particular AI model: the implementation was produced with
+  several AI models, under the author's direction and review.
+- `docs/02-queries.md` explains how to add and subtract time with date
+  modifiers.
+- `docs/05-admin.md` opens with a table of what is new in the panel in 2.7.1
+  and 2.7.2 and where each thing is described, has a section on languages, and
+  its list of files and of tests includes the translator, the languages and the
+  new tests. The README's section on the panel lists the imports and exports
+  with other engines, the Configuration page and the two languages.
+
+
 ## [2.7.2] - 2026-09-30
 
 Evidence and a way out, after a second external review: random queries
@@ -2347,6 +2640,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[2.7.3]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.3
 [2.7.2]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.2
 [2.7.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.1
 [2.7.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.0

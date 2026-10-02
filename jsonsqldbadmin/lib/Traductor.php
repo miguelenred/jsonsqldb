@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/TraductorRutinas.php';
+
 /**
  * Traduce las sentencias de un volcado de SQLite (`sqlite3 base.db .dump`), de
  * MySQL / MariaDB (`mysqldump`), de PostgreSQL (`pg_dump`, en texto) o de SQL
@@ -49,11 +51,26 @@ final class Traductor
     private array $avisos = [];
     /** @var list<string> claves foráneas para el final */
     private array $aplazadas = [];
+    /** @var list<array{0: string, 1: string}> triggers para el final, después de los datos: [nombre, sql] */
+    private array $triggers = [];
+    /** @var array<string,string> cuerpos de las funciones de PostgreSQL, para sus triggers */
+    private array $funciones = [];
+    /** ¿Se conservan los ::tipo? Solo al traducir vistas y triggers, donde cambian el resultado */
+    private bool $conCasts = false;
     private bool $mysql;
     private bool $pg;
     private bool $ss;
+    private bool $access;
     /** @var array<string,array{pk: list<string>, auto: array<string,true>, defecto: array<string,string>, tipos: array<string,string>}> lo visto en la primera pasada, por tabla */
     private array $tablas = [];
+    /** @var array<string,array{cols: list<string>, bits: array<string,true>}> columnas de cada tabla de MySQL y cuáles son BIT */
+    private array $columnasMysql = [];
+    /** ¿La sentencia en curso venía en Latin-1 y se ha pasado a UTF-8? (lo marca Importar) */
+    private bool $latin1 = false;
+    /** @var array<string,string> nombre de destino (en minúsculas) de cada tabla o vista → nombre de origen */
+    private array $destinos = [];
+    /** @var array<string,string> nombre de origen → nombre de destino, cuando el saneado chocaba con otro */
+    private array $reemplazos = [];
     /** @var array<string,true> nombres ya cambiados, para avisar una sola vez */
     private array $renombrados = [];
     /** Orden de las fechas d/m/a de SET DATEFORMAT (SQL Server), o '' */
@@ -64,14 +81,18 @@ final class Traductor
         $this->mysql = $dialecto === 'mysql';
         $this->pg    = $dialecto === 'postgresql';
         $this->ss    = $dialecto === 'sqlserver';
+        $this->access = $dialecto === 'access';
     }
 
     /** ¿Qué dialecto parece un volcado, por sus primeras líneas? */
     public static function detectar(string $inicio): string
     {
         // Los volcados del propio panel dicen para qué motor son en su cabecera
-        if (preg_match('/^-- jsonsqldb-dialecto: (sqlite|mysql|postgresql|sqlserver)$/m', $inicio, $m)) {
+        if (preg_match('/^-- jsonsqldb-dialecto: (sqlite|mysql|postgresql|sqlserver|access)$/m', $inicio, $m)) {
             return $m[1] === 'sqlite' ? 'jsonsqldb' : $m[1];
+        }
+        if (preg_match('/MDB Tools - A library for reading MS Access/', $inicio)) {
+            return 'access';
         }
         if (preg_match('/^--\s*PostgreSQL database dump|^SET standard_conforming_strings|^COPY .+ FROM stdin;/mi', $inicio)) {
             return 'postgresql';
@@ -154,6 +175,17 @@ final class Traductor
         }
     }
 
+    /**
+     * Los triggers traducidos, para crearlos al final: si se crearan donde van
+     * en el volcado, saltarían con los datos que se cargan después.
+     *
+     * @return list<array{0: string, 1: string}> [nombre, sql]
+     */
+    public function triggers(): array
+    {
+        return $this->triggers;
+    }
+
     /** @return list<string> lo que queda para el final: las claves foráneas */
     public function aplazadas(): array
     {
@@ -172,7 +204,7 @@ final class Traductor
 
     private function sqliteOJson(): bool
     {
-        return !$this->mysql && !$this->pg && !$this->ss;
+        return !$this->mysql && !$this->pg && !$this->ss && !$this->access;
     }
 
     /**
@@ -282,7 +314,7 @@ final class Traductor
         return '\\x' . strtolower($hex);
     }
 
-    private function avisar(string $texto): void
+    public function avisar(string $texto): void
     {
         $this->avisos[$texto] = ($this->avisos[$texto] ?? 0) + 1;
     }
@@ -307,7 +339,7 @@ final class Traductor
             $this->formatoFecha = strtolower($t[2]['v'] ?? '');
             return [];
         }
-        if (in_array($p1, self::CONTROL, true) || (($this->pg || $this->ss) && $p1 === 'SELECT')) {
+        if (in_array($p1, self::CONTROL, true) || (($this->pg || $this->ss || $this->access) && $p1 === 'SELECT')) {
             $this->avisar(t('Sentencias de control saltadas (PRAGMA, SET, LOCK, BEGIN, COMMIT…)'));
             return [];
         }
@@ -320,19 +352,45 @@ final class Traductor
             $this->avisar(t('Sentencias de administración saltadas (COMMENT, GRANT, IF, EXEC, CREATE SEQUENCE…)'));
             return [];
         }
-        if ($p1 === 'DROP' && in_array($p2, ['PROCEDURE', 'PROC', 'VIEW', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'TYPE', 'INDEX', 'SCHEMA'], true)) {
+        if ($p1 === 'DROP' && in_array($p2, ['VIEW', 'TRIGGER'], true) && !$this->sqliteOJson()) {
+            // Una vista provisional de mysqldump (o un --clean de pg_dump) se
+            // borra antes de crear la de verdad
+            $k = strtoupper($t[2]['v'] ?? '') === 'IF' ? 4 : 2;
+            return isset($t[$k]) ? ["DROP $p2 IF EXISTS " . ($p2 === 'VIEW' ? $this->nombreTabla((string)$t[$k]['v']) : $this->texto([$t[$k]]))] : [];
+        }
+        if ($p1 === 'DROP' && in_array($p2, ['PROCEDURE', 'PROC', 'FUNCTION', 'SEQUENCE', 'TYPE', 'INDEX', 'SCHEMA'], true)) {
             return [];                              // lo que borra lo crea el propio volcado, y eso se salta
         }
-        if ($p1 === 'DROP' && $p2 === 'TABLE' && $p3 !== 'IF') {
-            // «IF EXISTS (…) DROP TABLE t» de SQL Server, partido en dos: el IF se
-            // salta, y el DROP solo debe borrar si la tabla existe
-            array_splice($t, 2, 0, [['k' => 'id', 'v' => 'IF'], ['k' => 'id', 'v' => 'EXISTS']]);
+        if ($this->mysql && $p1 === 'ALTER' && $p2 === 'TABLE' && preg_match('/\b(DISABLE|ENABLE) KEYS\s*;?$/i', $sql)) {
+            return [];                              // /*!40000 ALTER TABLE t DISABLE KEYS */ de mysqldump
         }
-        if ($p1 === 'ALTER' && $p2 === 'TABLE' && ($this->pg || $this->ss)) {
+        if ($p1 === 'DROP' && $p2 === 'TABLE') {
+            // «IF EXISTS (…) DROP TABLE t» de SQL Server, partido en dos: el IF se
+            // salta, y el DROP solo debe borrar si la tabla existe. Cada nombre,
+            // sin chocar con otro (nombreTabla)
+            $sentencias = [];
+            foreach (array_slice($t, $p3 === 'IF' ? 4 : 2) as $x) {
+                if ($x['k'] === 'id' && !in_array(strtoupper($x['v']), ['CASCADE', 'RESTRICT'], true) || !empty($x['q'])) {
+                    $sentencias[] = 'DROP TABLE IF EXISTS ' . $this->nombreTabla((string)$x['v']);
+                }
+            }
+            return $sentencias;
+        }
+        if ($p1 === 'ALTER' && $p2 === 'TABLE' && ($this->pg || $this->ss || $this->access)) {
             return $this->alterarTabla($t);
         }
         if ($this->ss && $p1 === 'INSERT' && $p2 !== 'INTO') {
             array_splice($t, 1, 0, [['k' => 'id', 'v' => 'INTO']]);  // INSERT [t] … de SQL Server
+        }
+        if ($this->mysql && ($p1 === 'INSERT' || $p1 === 'REPLACE')) {
+            $t = $this->valoresMysql($t);
+        }
+        // ALTER VIEW/FUNCTION/TYPE/SEQUENCE/SCHEMA … OWNER TO de pg_dump (sin
+        // --no-owner) y demás ALTER que no son de una tabla: aquí no hay nada
+        // que cambiar
+        if ($p1 === 'ALTER' && $p2 !== 'TABLE') {
+            $this->avisar(t('Sentencias de administración saltadas (COMMENT, GRANT, IF, EXEC, CREATE SEQUENCE…)'));
+            return [];
         }
         if (($p1 === 'CREATE' || $p1 === 'DROP') && ($p2 === 'DATABASE' || $p2 === 'SCHEMA')) {
             if ($p1 === 'DROP') {
@@ -351,10 +409,205 @@ final class Traductor
             return $this->crearIndice($t);
         }
         if ($p1 === 'CREATE' && !$this->sqliteOJson()) {
-            $this->avisar(t('Vistas, triggers, funciones y procedimientos saltados: su SQL es de otro dialecto'));
-            return [];
+            return $this->rutina($t, $sql);
         }
         return [$this->texto($t)];
+    }
+
+    /**
+     * CREATE VIEW o CREATE TRIGGER de otro motor, traducido al SQL de aquí.
+     * Las funciones y los procedimientos se saltan: aquí no existen. Lo que no
+     * se puede traducir se salta y se dice por qué en el resumen.
+     *
+     * @return list<string>
+     */
+    /** Los tokens de una sentencia conservando los ::tipo de PostgreSQL. */
+    public function tokensConCasts(string $sql): array
+    {
+        $this->conCasts = true;
+        try {
+            return $this->tokens($sql);
+        } finally {
+            $this->conCasts = false;
+        }
+    }
+
+    /**
+     * Las columnas de una tabla del volcado con su tipo tal como venía, en
+     * minúsculas (de la primera pasada; solo PostgreSQL y SQL Server).
+     *
+     * @return array<string,string>
+     */
+    public function columnas(string $tabla): array
+    {
+        foreach ($this->tablas as $t => $info) {
+            if (strcasecmp((string)$t, $tabla) === 0) {
+                return array_change_key_case(array_map('strtolower', $info['tipos']), CASE_LOWER);
+            }
+        }
+        return [];
+    }
+
+    /** ¿Hay en el volcado una columna de texto con este nombre? (para el + de SQL Server) */
+    public function esColumnaTexto(string $col): bool
+    {
+        foreach ($this->tablas as $info) {
+            foreach ($info['tipos'] as $c => $tipo) {
+                if (strcasecmp((string)$c, $col) === 0 && preg_match('/CHAR|TEXT|STRING/i', (string)$tipo)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * El nombre de una tabla o una vista, sin chocar con otra. Al sanearlo, dos
+     * nombres distintos del volcado podían acabar en el mismo (ventas-2024 y
+     * ventas_2024): la segunda tabla, con su DROP TABLE IF EXISTS, borraba la
+     * primera. Ahora la segunda recibe un sufijo (_2, _3…) y se avisa.
+     */
+    public function nombreTabla(string $n): string
+    {
+        if (isset($this->reemplazos[$n])) {
+            return '"' . $this->reemplazos[$n] . '"';
+        }
+        $destino = trim($this->nombre($n), '"');
+        $ya = $this->destinos[strtolower($destino)] ?? null;
+        if ($ya === null || $ya === $n) {
+            $this->destinos[strtolower($destino)] = $n;
+            return '"' . $destino . '"';
+        }
+        for ($i = 2; ; $i++) {
+            $otro = substr($destino, 0, 64 - strlen("_$i")) . "_$i";
+            if (!isset($this->destinos[strtolower($otro)])) {
+                break;
+            }
+        }
+        $this->destinos[strtolower($otro)] = $n;
+        $this->reemplazos[$n] = $otro;
+        $this->avisar(t("Nombre '{n}' cambiado a '{otro}': '{ya}' ya se llamaba '{destino}' aquí", ['n' => $n, 'otro' => $otro, 'ya' => $ya, 'destino' => $destino]));
+        return '"' . $otro . '"';
+    }
+
+    /** Importar dice si la sentencia que viene venía en Latin-1 (ya pasada a UTF-8). */
+    public function venidaDeLatin1(bool $si): void
+    {
+        $this->latin1 = $si;
+    }
+
+    /**
+     * Los valores de un INSERT de mysqldump que aquí no se entienden tal cual:
+     *  - una columna BIT llega como sus bytes en crudo ('\x01', '\xAA'): pasa a
+     *    ser el número que forman;
+     *  - una fecha «0000-00-00» (la fecha cero de MySQL) no existe: pasa a NULL.
+     */
+    private function valoresMysql(array $t): array
+    {
+        $k = strtoupper((string)($t[1]['v'] ?? '')) === 'INTO' ? 2 : 1;
+        $tabla = strtolower((string)($t[$k]['v'] ?? ''));
+        $info = $this->columnasMysql[$tabla] ?? ['cols' => [], 'bits' => []];
+        // Con lista de columnas, su orden; si no, el del CREATE TABLE
+        $cols = $info['cols'];
+        if (($t[$k + 1]['v'] ?? '') === '(') {
+            $cols = [];
+            for ($j = $k + 2; isset($t[$j]) && $t[$j]['v'] !== ')'; $j++) {
+                if ($t[$j]['k'] === 'id') { $cols[] = (string)$t[$j]['v']; }
+            }
+        }
+        $esBit = array_map(fn($c) => isset($info['bits'][strtolower($c)]), $cols);
+        $valores = null;
+        foreach ($t as $i => $x) {
+            if (strtoupper((string)$x['v']) === 'VALUES' && empty($x['q'])) { $valores = $i; break; }
+        }
+        if ($valores === null) {
+            return $t;
+        }
+        $nivel = 0;
+        $pos = 0;
+        for ($i = $valores + 1, $n = count($t); $i < $n; $i++) {
+            $v = $t[$i]['v'];
+            if ($t[$i]['k'] === 'op' && $v === '(') { $nivel++; if ($nivel === 1) { $pos = 0; } continue; }
+            if ($t[$i]['k'] === 'op' && $v === ')') { $nivel--; continue; }
+            if ($nivel === 1 && $t[$i]['k'] === 'op' && $v === ',') { $pos++; continue; }
+            if ($nivel !== 1 || $t[$i]['k'] !== 'str') {
+                continue;
+            }
+            if (!empty($esBit[$pos])) {
+                // Los bytes que mandó MySQL: si la sentencia venía en Latin-1, deshacer el paso a UTF-8
+                $bytes = $this->latin1 ? (string)mb_convert_encoding((string)$v, 'Windows-1252', 'UTF-8') : (string)$v;
+                $numero = 0;
+                foreach (str_split($bytes) as $c) {
+                    $numero = ($numero << 8) | ord($c);
+                }
+                $t[$i] = ['k' => 'num', 'v' => (string)$numero];
+            } elseif (preg_match('/^0000-00-00( 00:00:00(\.0+)?)?$/', (string)$v)) {
+                $t[$i] = ['k' => 'id', 'v' => 'NULL'];
+                $this->avisar(t('Fechas «0000-00-00» de MySQL importadas como NULL: aquí no existen'));
+            }
+        }
+        return $t;
+    }
+
+    /** El cuerpo de una función de PostgreSQL guardada antes (CREATE FUNCTION). */
+    public function funcion(string $nombre): ?string
+    {
+        return $this->funciones[strtolower($nombre)] ?? null;
+    }
+
+    private function rutina(array $t, string $sql): array
+    {
+        if ($this->pg) {
+            $t = $this->tokensConCasts($sql);
+        }
+        // CREATE [OR REPLACE] [ALGORITHM=…] [DEFINER=…] [SQL SECURITY …] VIEW|TRIGGER …
+        $objeto = '';
+        foreach (array_slice($t, 1, 20) as $k => $x) {
+            $u = empty($x['q']) ? strtoupper($x['v']) : '';
+            if (in_array($u, ['VIEW', 'TRIGGER', 'FUNCTION', 'PROCEDURE', 'PROC', 'EVENT'], true)) {
+                $objeto = $u;
+                $t = array_merge([$t[0]], array_slice($t, $k + 1));
+                break;
+            }
+        }
+        $nombre = (string)($t[2]['v'] ?? '');
+        $r = new TraductorRutinas($this, $this->mysql ? 'mysql' : ($this->pg ? 'postgresql' : ($this->access ? 'access' : 'sqlserver')));
+        // Una función de PostgreSQL que devuelve trigger se guarda para el
+        // trigger que la use; las demás no existen aquí
+        if ($objeto === 'FUNCTION' && $this->pg) {
+            $cuerpo = '';
+            foreach ($t as $x) {
+                if ($x['k'] === 'str' && strlen($x['v']) > strlen($cuerpo)) { $cuerpo = $x['v']; }
+            }
+            if (preg_match('/\bRETURNS\s+trigger\b/i', $sql)) {
+                $this->funciones[strtolower($nombre)] = $cuerpo;
+                return [];
+            }
+        }
+        // Una vista o un trigger con algo que el traductor no espera se salta y
+        // se dice, como lo que no tiene traducción: nunca para la importación
+        // (ni un aviso de PHP por un índice que falta se queda en el camino)
+        set_error_handler(static function (int $n, string $msg): bool {
+            throw new NoTraducible($msg);
+        }, E_WARNING | E_NOTICE);                  // no los avisos de obsoleto de versiones nuevas de PHP
+        try {
+            switch ($objeto) {
+                case 'VIEW':
+                    return [$r->vista($t)];
+                case 'TRIGGER':
+                    foreach ($r->trigger($t) as $trg) {
+                        $this->triggers[] = $trg;
+                    }
+                    return [];
+            }
+        } catch (Throwable $e) {
+            $this->avisar(t("{que} '{n}' sin importar: {motivo}", ['que' => $objeto === 'VIEW' ? t('Vista') : 'Trigger', 'n' => $nombre, 'motivo' => $e->getMessage()]));
+            return [];
+        } finally {
+            restore_error_handler();
+        }
+        $this->avisar(t('Funciones y procedimientos almacenados saltados: aquí no existen'));
+        return [];
     }
 
     // ------------------------------------------------------------------
@@ -368,7 +621,7 @@ final class Traductor
      *
      * @return list<array{k: string, v: string, q?: bool}>
      */
-    private function tokens(string $sql): array
+    public function tokens(string $sql): array
     {
         $out = [];
         $n = strlen($sql);
@@ -412,11 +665,37 @@ final class Traductor
                 continue;
             }
             // $$…$$ y $etiqueta$…$etiqueta$ de PostgreSQL: el cuerpo de una función
+            // #2026-03-01 10:00:00# (y #3/1/2026# de las consultas de Access): una fecha
+            if ($this->access && $c === '#' && preg_match('/\G#([^#\n]{1,30})#/', $sql, $m, 0, $i)) {
+                $f = trim($m[1]);
+                if (preg_match('#^(\d{1,2})/(\d{1,2})/(\d{2,4})(.*)$#', $f, $p)) {
+                    $anio = strlen($p[3]) === 2 ? (int)$p[3] + ((int)$p[3] < 30 ? 2000 : 1900) : (int)$p[3];
+                    $f = sprintf('%04d-%02d-%02d', $anio, (int)$p[1], (int)$p[2]) . rtrim($p[4]);
+                }
+                $out[] = ['k' => 'str', 'v' => $this->fecha($f)];
+                $i += strlen($m[0]);
+                continue;
+            }
             if ($this->pg && $c === '$' && preg_match('/\G(\$[A-Za-z_]*\$)/', $sql, $m, 0, $i)) {
                 $fin = strpos($sql, $m[1], $i + strlen($m[1]));
                 $fin = $fin === false ? $n : $fin;
                 $out[] = ['k' => 'str', 'v' => substr($sql, $i + strlen($m[1]), $fin - $i - strlen($m[1]))];
                 $i = $fin + strlen($m[1]);
+                continue;
+            }
+            // En las consultas de Access, "…" es un texto, no un nombre
+            if ($this->access && $c === '"') {
+                $fin = $i + 1;
+                $v = '';
+                for (; $fin < $n; $fin++) {
+                    if ($sql[$fin] === '"') {
+                        if (($sql[$fin + 1] ?? '') === '"') { $v .= '"'; $fin++; continue; }
+                        break;
+                    }
+                    $v .= $sql[$fin];
+                }
+                $out[] = ['k' => 'str', 'v' => $v];
+                $i = $fin + 1;
                 continue;
             }
             if ($c === '"' || $c === '`' || ($c === '[' && !$this->pg && !$this->mysql)) {
@@ -490,7 +769,7 @@ final class Traductor
                 $k++;                                   // dbo.tabla → tabla
                 continue;
             }
-            if ($x['k'] === 'op' && $x['v'] === '::') {
+            if ($x['k'] === 'op' && $x['v'] === '::' && !$this->conCasts) {
                 // ::tipo, ::character varying, ::numeric(12,2), ::text[]
                 while (($t[$k + 1]['k'] ?? '') === 'id' && empty($t[$k + 1]['q'])) { $k++; }
                 if (($t[$k + 1]['v'] ?? '') === '(') { $k = $this->saltarExpresion($t, $k + 1) - 1; }
@@ -564,7 +843,7 @@ final class Traductor
     }
 
     /** Los tokens otra vez como texto, en el SQL de aquí. */
-    private function texto(array $t): string
+    public function texto(array $t): string
     {
         $out = '';
         $antes = null;
@@ -601,6 +880,7 @@ final class Traductor
         $cabecera = array_values(array_filter(array_slice($t, 0, $abre),
             static fn(array $x): bool => !in_array(strtoupper($x['v']), ['TEMP', 'TEMPORARY'], true) || !empty($x['q'])));
         $tabla = $t[$abre - 1]['v'];
+        $this->nombreTabla($tabla);                 // registrada: ningún otro nombre acabará en el suyo
         // Definiciones separadas por comas de primer nivel, hasta el paréntesis que cierra
         $defs = [[]];
         $nivel = 0;
@@ -630,6 +910,12 @@ final class Traductor
             $w = strtoupper($d[0]['v']);
             $esRestriccion = empty($d[0]['q']) && in_array($w, ['CONSTRAINT', 'PRIMARY', 'UNIQUE', 'KEY', 'INDEX', 'FULLTEXT', 'SPATIAL', 'FOREIGN', 'CHECK'], true);
             if (!$esRestriccion) {
+                if ($this->mysql) {
+                    $this->columnasMysql[strtolower($tabla)]['cols'][] = (string)$d[0]['v'];
+                    if (strtoupper((string)($d[1]['v'] ?? '')) === 'BIT') {
+                        $this->columnasMysql[strtolower($tabla)]['bits'][strtolower((string)$d[0]['v'])] = true;
+                    }
+                }
                 [$col, $auto] = $this->columna($tabla, $d);
                 $columnas[] = $col;
                 if ($auto) { $autoinc = $d[0]['v']; }
@@ -720,7 +1006,8 @@ final class Traductor
         $t = $this->tipo($tipo);
         if ($t !== '') { $partes[] = $t; }
         // SERIAL de PostgreSQL: un entero con autoincremento
-        $auto = (bool)preg_match('/^(SMALL|BIG)?SERIAL\d?$/i', (string)($tipo[0]['v'] ?? ''));
+        $auto = (bool)preg_match('/^(SMALL|BIG)?SERIAL\d?$/i', (string)($tipo[0]['v'] ?? ''))
+            || ($this->access && preg_match('/^(COUNTER|AUTOINCREMENT)$/i', (string)($tipo[0]['v'] ?? '')));
         if ($auto) { $partes[] = 'AUTOINCREMENT'; }
         while ($k < count($d)) {
             $w = strtoupper($d[$k]['v']);
@@ -779,6 +1066,13 @@ final class Traductor
             if ($w === 'CONSTRAINT') { $k += 2; continue; }
             $k++;                                          // VISIBLE, STORED, VIRTUAL, ROWGUIDCOL, ASC…
         }
+        // Un autonumérico de Access que no es la clave primaria: aquí el
+        // autoincremento solo existe en ella
+        if ($this->access && $auto && !in_array('PRIMARY KEY', $partes, true)) {
+            $partes = array_values(array_diff($partes, ['AUTOINCREMENT']));
+            $auto = false;
+            $this->avisar(t('Autonuméricos que no son la clave primaria: importados como enteros'));
+        }
         return [implode(' ', $partes), $auto];
     }
 
@@ -809,6 +1103,28 @@ final class Traductor
                 'SERIAL', 'BIGSERIAL', 'SMALLSERIAL', 'SERIAL4', 'SERIAL8', 'INT2', 'INT4', 'INT8'], true)) {
             return 'INTEGER';
         }
+        if ($this->access) {
+            // Los de Access, en DDL y como los escribe mdbtools («Long Integer», «Memo/Hyperlink»…)
+            if (in_array($base, ['LONG', 'SHORT', 'BYTE', 'COUNTER', 'AUTOINCREMENT', 'YESNO', 'LOGICAL', 'LOGICAL1'], true)) {
+                return 'INTEGER';
+            }
+            if (in_array($base, ['SINGLE', 'IEEESINGLE', 'IEEEDOUBLE', 'NUMBER'], true)) {
+                return 'DOUBLE';
+            }
+            if ($base === 'CURRENCY') {
+                return 'DECIMAL(19,4)';
+            }
+            if ($base === 'TEXT' && isset($args[0])) {
+                return "VARCHAR({$args[0]})";
+            }
+            if (in_array($base, ['MEMO', 'HYPERLINK', 'NOTE', 'GUID', 'REPLICATION'], true)) {
+                return 'TEXT';
+            }
+            if (in_array($base, ['OLEOBJECT', 'LONGBINARY', 'OLE', 'GENERAL', 'ATTACHMENT'], true)) {
+                $this->avisar(t('BLOB y BINARY importados como TEXT: solo llegan los que son texto UTF-8'));
+                return 'TEXT';
+            }
+        }
         if (in_array($base, ['FLOAT', 'DOUBLE', 'REAL', 'FLOAT4', 'FLOAT8'], true)) {
             return 'DOUBLE';
         }
@@ -838,6 +1154,9 @@ final class Traductor
             return 'TEXT';
         }
         if (in_array($base, ['DECIMAL', 'NUMERIC', 'DEC', 'FIXED'], true)) {
+            if ((int)($args[0] ?? 0) > 15) {
+                $this->avisar(t('DECIMAL de más de 15 cifras: aquí se guarda como número de coma flotante, con unas 15 cifras exactas'));
+            }
             return count($args) >= 2 ? "DECIMAL({$args[0]},{$args[1]})" : 'DECIMAL(20,6)';
         }
         if (in_array($base, ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'CHARACTER'], true)) {
@@ -980,8 +1299,11 @@ final class Traductor
      * Un nombre entre comillas dobles. Aquí un nombre es de letras, números y
      * _, y empieza por letra o _: "Order Details" pasa a Order_Details.
      */
-    private function nombre(string $n): string
+    public function nombre(string $n): string
     {
+        if (isset($this->reemplazos[$n])) {
+            return '"' . $this->reemplazos[$n] . '"';
+        }
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $n)) {
             $limpio = substr((string)preg_replace('/[^A-Za-z0-9_]/', '_', $n), 0, 64);
             $limpio = preg_match('/^[A-Za-z_]/', $limpio) ? $limpio : '_' . $limpio;

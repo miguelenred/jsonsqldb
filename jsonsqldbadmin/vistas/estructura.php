@@ -637,7 +637,7 @@ require __DIR__ . '/_pestanas.php';
           <textarea class="form-control sql-area" id="trgCuerpo" name="cuerpo" rows="5" required
                     placeholder="<?= h(t('UPDATE clientes SET saldo = saldo + NEW.total WHERE id = NEW.cliente_id;')) ?>"></textarea>
           <div class="form-text">
-            <?= t('Una o varias sentencias separadas por <code>;</code>. Dentro puedes usar <code>NEW.columna</code> (el valor que entra, en INSERT y UPDATE), <code>OLD.columna</code> (el que había, en UPDATE y DELETE) y <code>RAISE(ABORT, \'mensaje\')</code> para cancelar la operación con un error.') ?>
+            <?= t('Una o varias sentencias separadas por <code>;</code>. Dentro puedes usar <code>NEW.columna</code> (el valor que entra, en INSERT y UPDATE), <code>OLD.columna</code> (el que había, en UPDATE y DELETE), <code>RAISE(ABORT, \'mensaje\')</code> para cancelar la operación con un error, <code>IF … THEN … ELSE … END IF</code>, y en un BEFORE INSERT o BEFORE UPDATE <code>SET NEW.columna = …</code> para cambiar la fila antes de guardarla.') ?>
           </div>
         </div>
 
@@ -652,7 +652,7 @@ require __DIR__ . '/_pestanas.php';
   </div></div>
 </div>
 
-<script>
+<script nonce="<?= h(nonce()) ?>">
 // Vista previa del trigger, montada igual que en el servidor
 (function () {
     const campos = ['trgNombre', 'trgTiming', 'trgEvento', 'trgCuando', 'trgCuerpo']

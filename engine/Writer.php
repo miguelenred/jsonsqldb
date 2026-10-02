@@ -475,7 +475,12 @@ final class Writer
 
             $nueva = $this->prepararFila($tabla, $meta, $nueva, true);
 
-            $this->lanzarTriggers($tabla, 'BEFORE', 'INSERT', $nueva, null);
+            $preparada = $nueva;
+            $nueva = $this->lanzarTriggers($tabla, 'BEFORE', 'INSERT', $nueva, null);
+            if ($nueva !== $preparada) {
+                // Un SET NEW la ha cambiado: otra vez tipos y NOT NULL
+                $nueva = $this->prepararFila($tabla, $meta, $nueva, true);
+            }
             $this->comprobarUnicos($tabla, $meta, $nueva, $indices, null);
             $this->comprobarForaneas($tabla, $meta, $nueva);
             $this->anadirAIndices($meta, $nueva, $indices);
@@ -536,7 +541,11 @@ final class Writer
             }
             $nueva = $this->prepararFila($tabla, $meta, $nueva, false);
 
-            $this->lanzarTriggers($tabla, 'BEFORE', 'UPDATE', $nueva, $vieja);
+            $preparada = $nueva;
+            $nueva = $this->lanzarTriggers($tabla, 'BEFORE', 'UPDATE', $nueva, $vieja);
+            if ($nueva !== $preparada) {
+                $nueva = $this->prepararFila($tabla, $meta, $nueva, false);
+            }
             $this->comprobarUnicos($tabla, $meta, $nueva, $indices, $vieja);
             $this->comprobarForaneas($tabla, $meta, $nueva);
             $this->propagarHijos($tabla, $meta, $vieja, $nueva);
@@ -1001,11 +1010,16 @@ final class Writer
     // Triggers
     // ==================================================================
 
-    private function lanzarTriggers(string $tabla, string $timing, string $evento, ?array $new, ?array $old): void
+    /**
+     * Ejecuta los triggers de una tabla para un momento y un evento. Devuelve
+     * NEW tal como lo dejan: un trigger BEFORE INSERT o BEFORE UPDATE puede
+     * cambiarlo con SET NEW.col = expr, y lo que se escribe es esa fila.
+     */
+    private function lanzarTriggers(string $tabla, string $timing, string $evento, ?array $new, ?array $old): ?array
     {
         $meta = $this->meta($tabla);
         if ($meta['triggers'] === []) {
-            return;
+            return $new;
         }
         if ($this->anidamiento >= self::MAX_ANIDAMIENTO) {
             throw JsonSqlDbError::constraint('Los triggers se están llamando en cadena demasiadas veces');
@@ -1018,25 +1032,77 @@ final class Writer
 
             $this->anidamiento++;
             try {
-                if ($trg['when'] !== null) {
-                    $cond = $this->sustituir($this->analizarExpr($trg['when']), $new, $old);
-                    $ctx  = ['fila' => [], 'sub' => fn(array $s, int $sid): array => $this->seleccionar($s)];
-                    if (Valor::verdadero(Evaluator::evaluar(Evaluator::resolver($cond, []), $ctx)) !== true) {
-                        continue;
-                    }
+                if ($trg['when'] !== null && !$this->cumpleCondicion($trg['when'], $new, $old)) {
+                    continue;
                 }
-                foreach ($trg['body'] as $sql) {
-                    $ast = $this->sustituir($this->analizar($sql), $new, $old);
-                    if ($ast['k'] === 'select' || $ast['k'] === 'union') {
-                        $this->seleccionar($ast);
-                    } else {
-                        $this->ejecutarSinVolcar($ast, $trg['name']);
-                    }
-                }
+                $new = $this->ejecutarCuerpo($trg, $trg['body'], $meta, $new, $old);
             } finally {
                 $this->anidamiento--;
             }
         }
+        return $new;
+    }
+
+    /** ¿Se cumple una condición de trigger (WHEN, o la de un IF) con estos NEW y OLD? */
+    private function cumpleCondicion(string $cond, ?array $new, ?array $old): bool
+    {
+        $ast = $this->sustituir($this->analizarExpr($cond), $new, $old);
+        $ctx = ['fila' => [], 'sub' => fn(array $s, int $sid): array => $this->seleccionar($s)];
+        return Valor::verdadero(Evaluator::evaluar(Evaluator::resolver($ast, []), $ctx)) === true;
+    }
+
+    /**
+     * Las sentencias de un trigger, en orden: texto de una sentencia, SET
+     * NEW.col = expr, o un bloque IF … ELSEIF … ELSE … END IF.
+     *
+     * @param list<string|array> $cuerpo
+     */
+    private function ejecutarCuerpo(array $trg, array $cuerpo, array $meta, ?array $new, ?array $old): ?array
+    {
+        foreach ($cuerpo as $paso) {
+            if (is_array($paso)) {
+                $hecho = false;
+                foreach ($paso['si'] as [$cond, $sentencias]) {
+                    if ($this->cumpleCondicion($cond, $new, $old)) {
+                        $new = $this->ejecutarCuerpo($trg, $sentencias, $meta, $new, $old);
+                        $hecho = true;
+                        break;
+                    }
+                }
+                if (!$hecho && $paso['sino'] !== null) {
+                    $new = $this->ejecutarCuerpo($trg, $paso['sino'], $meta, $new, $old);
+                }
+                continue;
+            }
+            if (strncasecmp(ltrim($paso), 'SET', 3) === 0) {
+                if ($trg['timing'] !== 'BEFORE' || $trg['event'] === 'DELETE' || $new === null) {
+                    throw JsonSqlDbError::syntax("SET NEW solo vale en un trigger BEFORE INSERT o BEFORE UPDATE ('{$trg['name']}')");
+                }
+                $set = $this->astCache[$paso] ??= Parser::analizarSetNew($paso);
+                // De izquierda a derecha, y cada una ve lo que dejaron las
+                // anteriores: como el SET de MySQL y las asignaciones de PostgreSQL
+                foreach ($set['asig'] as [$col, $expr]) {
+                    $def = null;
+                    foreach ($meta['columns'] as $c) {
+                        if (strcasecmp($c['name'], $col) === 0) { $def = $c; }
+                    }
+                    if ($def === null) {
+                        throw JsonSqlDbError::schema("NEW.$col no es una columna de la tabla");
+                    }
+                    $ctx = ['fila' => [], 'sub' => fn(array $s, int $sid): array => $this->seleccionar($s)];
+                    $valor = Evaluator::evaluar(Evaluator::resolver($this->sustituir($expr, $new, $old), []), $ctx);
+                    $new[$def['name']] = Types::cast($valor, $def);
+                }
+                continue;
+            }
+            $ast = $this->sustituir($this->analizar($paso), $new, $old);
+            if ($ast['k'] === 'select' || $ast['k'] === 'union') {
+                $this->seleccionar($ast);
+            } else {
+                $this->ejecutarSinVolcar($ast, $trg['name']);
+            }
+        }
+        return $new;
     }
 
     private function ejecutarSinVolcar(array $ast, string $trigger): void
@@ -1208,13 +1274,33 @@ final class Writer
             }
         }
 
-        // Comprobar que el cuerpo es analizable antes de guardarlo
-        foreach ($ast['trg']['body'] as $sql) {
-            Parser::analizar($sql);
-        }
+        // Comprobar que el cuerpo es analizable antes de guardarlo, y que un
+        // SET NEW está donde puede estar
+        $this->comprobarCuerpo($ast['trg'], $ast['trg']['body']);
         $this->cat->crearTrigger($ast['tabla'], $ast['trg']);
         unset($this->metas[$ast['tabla']]);
         return ['filas' => 0, 'mensaje' => "Trigger '$nombre' creado"];
+    }
+
+    /** @param list<string|array> $cuerpo */
+    private function comprobarCuerpo(array $trg, array $cuerpo): void
+    {
+        foreach ($cuerpo as $paso) {
+            if (is_array($paso)) {
+                foreach ($paso['si'] as [$cond, $sentencias]) {
+                    $this->analizarExpr($cond);
+                    $this->comprobarCuerpo($trg, $sentencias);
+                }
+                $this->comprobarCuerpo($trg, $paso['sino'] ?? []);
+            } elseif (strncasecmp(ltrim($paso), 'SET', 3) === 0) {
+                if ($trg['timing'] !== 'BEFORE' || $trg['event'] === 'DELETE') {
+                    throw JsonSqlDbError::syntax("SET NEW solo vale en un trigger BEFORE INSERT o BEFORE UPDATE ('{$trg['name']}')");
+                }
+                Parser::analizarSetNew($paso);
+            } else {
+                Parser::analizar($paso);
+            }
+        }
     }
 
     private function borrarTrigger(array $ast): array

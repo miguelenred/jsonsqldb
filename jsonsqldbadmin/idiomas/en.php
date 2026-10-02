@@ -631,8 +631,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'The folder of the database \'{base}\' is not in {ruta}. Set the path of the engine\'s data/ folder in ADMIN_RUTA_DATOS_MOTOR, or use the SQL dump, which goes through the API and needs no disk access.',
     'No se ha podido completar la operación'
         => 'The operation could not be completed',
-    'No se pudo apartar la base actual antes de restaurar. Comprueba los permisos de escritura en la carpeta de datos.'
-        => 'The current database could not be set aside before restoring. Check the write permissions on the data folder.',
     'No se pudo escribir {destino}'
         => '{destino} could not be written',
     'No se pudo escribir {ruta}. Comprueba los permisos de la carpeta.'
@@ -927,8 +925,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'An unclosed string in the file.',
     'Una casilla vacía significa «sin valor»: en las columnas automáticas, numéricas y de fecha la columna no se manda, y toma su valor por defecto. Marca NULL para guardar un nulo, y deja el texto vacío para guardar una cadena vacía. Las columnas marcadas como «obligatorio» no admiten nulos, así que no ofrecen la casilla.'
         => 'An empty box means «no value»: in automatic, numeric and date columns the column is not sent, and it takes its default value. Tick NULL to store a null, and leave the text empty to store an empty string. Columns marked as «required» do not accept nulls, so they do not offer the box.',
-    'Una o varias sentencias separadas por <code>;</code>. Dentro puedes usar <code>NEW.columna</code> (el valor que entra, en INSERT y UPDATE), <code>OLD.columna</code> (el que había, en UPDATE y DELETE) y <code>RAISE(ABORT, \'mensaje\')</code> para cancelar la operación con un error.'
-        => 'One or more statements separated by <code>;</code>. Inside you can use <code>NEW.columna</code> (the incoming value, in INSERT and UPDATE), <code>OLD.columna</code> (the previous one, in UPDATE and DELETE) and <code>RAISE(ABORT, \'mensaje\')</code> to cancel the operation with an error.',
+    'Una o varias sentencias separadas por <code>;</code>. Dentro puedes usar <code>NEW.columna</code> (el valor que entra, en INSERT y UPDATE), <code>OLD.columna</code> (el que había, en UPDATE y DELETE), <code>RAISE(ABORT, \'mensaje\')</code> para cancelar la operación con un error, <code>IF … THEN … ELSE … END IF</code>, y en un BEFORE INSERT o BEFORE UPDATE <code>SET NEW.columna = …</code> para cambiar la fila antes de guardarla.'
+        => 'One or more statements separated by <code>;</code>. Inside you can use <code>NEW.columna</code> (the incoming value, in INSERT and UPDATE), <code>OLD.columna</code> (the previous one, in UPDATE and DELETE), <code>RAISE(ABORT, \'mensaje\')</code> to cancel the operation with an error, <code>IF … THEN … ELSE … END IF</code>, and in a BEFORE INSERT or BEFORE UPDATE <code>SET NEW.columna = …</code> to change the row before it is saved.',
     'Una por línea; también rangos como 192.168.1.0/24. Tu IP ahora: <code>{1}</code>. Una lista sin ella no se acepta.'
         => 'One per line; ranges like 192.168.1.0/24 too. Your IP now: <code>{1}</code>. A list without it is not accepted.',
     'Una sentencia por ejecución. Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>.'
@@ -969,8 +967,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'View \'{nombre}\' created.',
     'Vistas'
         => 'Views',
-    'Vistas, triggers, funciones y procedimientos saltados: su SQL es de otro dialecto'
-        => 'Views, triggers, functions and procedures skipped: their SQL is another dialect',
     'Volcado SQL para otro motor'
         => 'SQL dump for another engine',
     'Volver a comprobar'
@@ -1007,10 +1003,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'created by hand',
     'el final (claves foráneas)'
         => 'the end (foreign keys)',
-    'escritas en el SQL de jsonSQLDB; revísalas antes de crearlas'
-        => 'written in jsonSQLDB\'s SQL; review them before creating them',
-    'escritos en el SQL de jsonSQLDB; hay que reescribirlos para este motor'
-        => 'written in jsonSQLDB\'s SQL; they have to be rewritten for this engine',
     'exigido'
         => 'required',
     'fija'
@@ -1157,4 +1149,202 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Tables',
     'Inicio'
         => 'Home',
+    'Cómo hacer el volcado de cada motor: <a href="{1}" target="_blank" rel="noopener">guía</a>.'
+        => 'How to make the dump of each engine: <a href="{1}" target="_blank" rel="noopener">guide</a>.',
+    'Sin traducir: {motivo}'
+        => 'Not translated: {motivo}',
+    'Sin traducir (van comentados al final): {lista}'
+        => 'Not translated (commented out at the end): {lista}',
+    'No se encuentra el analizador del motor en {ruta}'
+        => 'The engine\'s SQL parser is not at {ruta}',
+    'Access no tiene triggers: ni su SQL ni OLEDB pueden crearlos. Las macros de datos de un .accdb se hacen a mano en Access.'
+        => 'Access has no triggers: neither its SQL nor OLEDB can create them. The data macros of an .accdb are made by hand in Access.',
+    'SQL Server: sin clave primaria en \'{tabla}\' no se puede saber qué fila de deleted corresponde a cada una de inserted'
+        => 'SQL Server: without a primary key in \'{tabla}\' there is no way to tell which row of deleted belongs to each row of inserted',
+    'Un trigger solo puede hacer INSERT, UPDATE, DELETE o SELECT'
+        => 'A trigger can only do INSERT, UPDATE, DELETE or SELECT',
+    'Access no tiene {op}'
+        => 'Access has no {op}',
+    'Access no tiene OFFSET'
+        => 'Access has no OFFSET',
+    '{motor} no tiene FULL JOIN'
+        => '{motor} has no FULL JOIN',
+    'Access no tiene DEFAULT en un UPDATE'
+        => 'Access has no DEFAULT in an UPDATE',
+    'RAISE solo se puede traducir como sentencia de un trigger'
+        => 'RAISE can only be translated as a statement of a trigger',
+    'Expresión sin traducción: \'{k}\''
+        => 'Expression with no translation: \'{k}\'',
+    '{cual}.{col} no es una columna de la tabla'
+        => '{cual}.{col} is not a column of the table',
+    'Access no tiene LIKE … ESCAPE'
+        => 'Access has no LIKE … ESCAPE',
+    '{motor} no tiene expresiones regulares (REGEXP)'
+        => '{motor} has no regular expressions (REGEXP)',
+    'CAST a \'{tipo}\' sin equivalente en Access'
+        => 'CAST to \'{tipo}\' with no equivalent in Access',
+    'CAST a \'{tipo}\' sin equivalente'
+        => 'CAST to \'{tipo}\' with no equivalent',
+    'SQL Server no tiene STRING_AGG(DISTINCT …)'
+        => 'SQL Server has no STRING_AGG(DISTINCT …)',
+    'Access no tiene una función para unir los textos de un grupo (GROUP_CONCAT)'
+        => 'Access has no function to join the texts of a group (GROUP_CONCAT)',
+    'Función sin traducción: {f}()'
+        => 'Function with no translation: {f}()',
+    'Access no tiene {f} con caracteres propios'
+        => 'Access has no {f} with your own characters',
+    'Solo se traducen modificadores de fecha escritos tal cual'
+        => 'Only date modifiers written as literals are translated',
+    'Modificador de fecha sin traducción: \'{m}\''
+        => 'Date modifier with no translation: \'{m}\'',
+    'STRFTIME solo se traduce con el formato escrito tal cual'
+        => 'STRFTIME is only translated with its format written as a literal',
+    'Código de STRFTIME sin traducción: {c}'
+        => 'STRFTIME code with no translation: {c}',
+    '{que} \'{n}\' sin importar: {motivo}'
+        => '{que} \'{n}\' not imported: {motivo}',
+    'el final (triggers)'
+        => 'the end (triggers)',
+    'Funciones y procedimientos almacenados saltados: aquí no existen'
+        => 'Stored functions and procedures skipped: they do not exist here',
+    'una vista con la lista de columnas delante del AS'
+        => 'a view with the list of columns before the AS',
+    'no se encuentra el AS de la vista'
+        => 'the AS of the view is not there',
+    'trigger {m} {e}: aquí solo hay BEFORE y AFTER de INSERT, UPDATE o DELETE'
+        => 'trigger {m} {e}: here there are only BEFORE and AFTER of INSERT, UPDATE or DELETE',
+    'no se encuentra el ON del trigger'
+        => 'the ON of the trigger is not there',
+    'el trigger no hace nada que se pueda hacer aquí'
+        => 'the trigger does nothing that can be done here',
+    'falta el END del cuerpo'
+        => 'the END of the body is missing',
+    'falta {p}'
+        => '{p} is missing',
+    'SELECT … INTO variable: aquí no hay variables'
+        => 'SELECT … INTO variable: there are no variables here',
+    'variables locales (DECLARE): aquí no hay variables'
+        => 'local variables (DECLARE): there are no variables here',
+    'sentencia \'{s}\' sin equivalente en un trigger de aquí'
+        => 'statement \'{s}\' with no equivalent in a trigger here',
+    'SET a una variable: aquí solo se puede cambiar NEW.columna'
+        => 'SET of a variable: here only NEW.column can be changed',
+    'asignación sin ='
+        => 'assignment with no =',
+    'SET NEW en un trigger AFTER'
+        => 'SET NEW in an AFTER trigger',
+    'Mensajes de error compuestos en triggers: se importa solo su texto fijo'
+        => 'Error messages built from parts in triggers: only their fixed text is imported',
+    'REPLACE INTO: aquí no hay sustitución de filas por clave'
+        => 'REPLACE INTO: there is no replacement of rows by key here',
+    'INSERT … ON DUPLICATE KEY UPDATE'
+        => 'INSERT … ON DUPLICATE KEY UPDATE',
+    'el operador XOR'
+        => 'the XOR operator',
+    'LOCATE con posición de inicio'
+        => 'LOCATE with a start position',
+    'TRUNCATE con decimales calculados'
+        => 'TRUNCATE with computed decimals',
+    'INTERVAL en \'{u}\''
+        => 'INTERVAL in \'{u}\'',
+    'DATE_FORMAT con un formato calculado'
+        => 'DATE_FORMAT with a computed format',
+    'Código de DATE_FORMAT sin traducción: {c}'
+        => 'DATE_FORMAT code with no translation: {c}',
+    'paréntesis sin cerrar'
+        => 'unclosed parenthesis',
+    '{f}() con {n} argumentos'
+        => '{f}() with {n} arguments',
+    'UPDATE OF columnas en triggers: aquí se dispara con cualquier UPDATE'
+        => 'UPDATE OF columns in triggers: here it fires with any UPDATE',
+    'trigger de TRUNCATE'
+        => 'TRUNCATE trigger',
+    'trigger FOR EACH STATEMENT: aquí los triggers son por fila'
+        => 'FOR EACH STATEMENT trigger: here triggers run per row',
+    'trigger con REFERENCING'
+        => 'trigger with REFERENCING',
+    'no se encuentra la función {f}() en el volcado'
+        => 'the function {f}() is not in the dump',
+    'INSTEAD OF: aquí un trigger no puede sustituir la escritura que lo dispara'
+        => 'INSTEAD OF: here a trigger cannot replace the write that fires it',
+    'UPDATE o DELETE con varias tablas en su FROM'
+        => 'UPDATE or DELETE with several tables in its FROM',
+    'RETURN NULL en un trigger BEFORE: aquí no se puede cancelar una escritura en silencio'
+        => 'RETURN NULL in a BEFORE trigger: here a write cannot be cancelled silently',
+    'un intervalo calculado'
+        => 'a computed interval',
+    '{op} {c} (…)'
+        => '{op} {c} (…)',
+    'LIKE con un patrón calculado: aquí no distingue mayúsculas'
+        => 'LIKE with a computed pattern: here it does not tell capitals apart',
+    'intervalo \'{i}\''
+        => 'interval \'{i}\'',
+    'date_trunc(\'{u}\')'
+        => 'date_trunc(\'{u}\')',
+    'to_char con un formato calculado'
+        => 'to_char with a computed format',
+    'Código de to_char sin traducción: {c}'
+        => 'to_char code with no translation: {c}',
+    'EXTRACT de \'{u}\''
+        => 'EXTRACT of \'{u}\'',
+    'Para Microsoft Access (Jet / ACE, en modo ANSI-92). Access no ejecuta un fichero de sentencias: hay que lanzarlas una a una, por ejemplo con OLEDB desde PowerShell o con CurrentProject.Connection.Execute desde VBA, saltando las líneas que empiezan por --.'
+        => 'For Microsoft Access (Jet / ACE, in ANSI-92 mode). Access does not run a file of statements: they have to be run one by one, for example with OLEDB from PowerShell or with CurrentProject.Connection.Execute from VBA, skipping the lines that start with --.',
+    'Texto de hasta 255 caracteres como TEXT(n) y más largo como MEMO, enteros como LONG, autonumérico como COUNTER, fechas como DATETIME. Las vistas van como consultas guardadas (CREATE VIEW). Access no tiene triggers: van comentados al final.'
+        => 'Text of up to 255 characters as TEXT(n) and longer as MEMO, integers as LONG, autonumber as COUNTER, dates as DATETIME. Views go as saved queries (CREATE VIEW). Access has no triggers: they are commented out at the end.',
+    'Autonuméricos que no son la clave primaria: importados como enteros'
+        => 'Autonumbers that are not the primary key: imported as integers',
+    'el operador ^ con valores calculados'
+        => 'the ^ operator with computed values',
+    'SQL: Microsoft Access'
+        => 'SQL: Microsoft Access',
+    '<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> que vuelca un .mdb o .accdb a un fichero que se importa aquí, con sus tablas, claves, índices, relaciones, datos y consultas. Necesita <strong>Windows</strong>. Lo más fácil para ejecutarlo: <strong>botón derecho sobre el fichero descargado → «Ejecutar con PowerShell»</strong>; pregunta qué base volcar y en qué carpeta guardar el volcado. Si falta el controlador de Access, lo dice y da el enlace para descargarlo.'
+        => '<strong>Microsoft Access</strong>: <a href="{1}">download the PowerShell script</a> that dumps an .mdb or .accdb to a file you import here, with its tables, keys, indexes, relationships, data and queries. It needs <strong>Windows</strong>. The easiest way to run it: <strong>right-click the downloaded file → «Run with PowerShell»</strong>; it asks which database to dump and which folder to save the dump in. If the Access engine is missing, it says so and gives the link to download it.',
+    'Microsoft Access (script de PowerShell)'
+        => 'Microsoft Access (PowerShell script)',
+    'Ahora se deduce en cada petición de la cabecera Host, que manda el navegador: guarda la configuración para dejarla escrita.'
+        => 'Right now it is worked out on every request from the Host header, which the browser sends: save the configuration to have it written down.',
+    'Sentencias que no estaban en UTF-8, leídas como Latin-1 / Windows-1252 ({n}): si eran datos binarios, vuelca con --hex-blob'
+        => 'Statements that were not in UTF-8, read as Latin-1 / Windows-1252 ({n}): if they were binary data, dump with --hex-blob',
+    'Campos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252: {n}.'
+        => 'Fields that were not in UTF-8, read as Latin-1 / Windows-1252: {n}.',
+    'Paró cerca de la línea {linea}: {error}. No se ha cambiado nada: la base ha vuelto a como estaba antes de importar.'
+        => 'It stopped near line {linea}: {error}. Nothing has changed: the database is back as it was before the import.',
+    'El problema está en la línea {linea} o en las {lote} anteriores: {error}. No se ha cargado nada: la tabla ha vuelto a como estaba.'
+        => 'The problem is in line {linea} or in the {lote} before it: {error}. Nothing has been loaded: the table is back as it was.',
+    '{f} fichero(s) restaurados, {t} tabla(s).'
+        => '{f} file(s) restored, {t} table(s).',
+    'Nombre \'{n}\' cambiado a \'{otro}\': \'{ya}\' ya se llamaba \'{destino}\' aquí'
+        => 'Name \'{n}\' changed to \'{otro}\': \'{ya}\' was already called \'{destino}\' here',
+    'Fechas «0000-00-00» de MySQL importadas como NULL: aquí no existen'
+        => 'MySQL «0000-00-00» dates imported as NULL: they do not exist here',
+    'DECIMAL de más de 15 cifras: aquí se guarda como número de coma flotante, con unas 15 cifras exactas'
+        => 'DECIMAL of more than 15 digits: here it is stored as a floating-point number, with about 15 exact digits',
+    'ERROR: el volcado está incompleto: {error}'
+        => 'ERROR: the dump is incomplete: {error}',
+    'No se pudo devolver la base a como estaba: la copia de antes está en {copia}.'
+        => 'The database could not be put back as it was: the copy from before is in {copia}.',
+    'Lo que paró la importación: {error}'
+        => 'What stopped the import: {error}',
+    'El usuario \'{usuario}\' ya existe'
+        => 'The user \'{usuario}\' already exists',
+    'La extensión zip de PHP no está activada, así que no se puede generar el ZIP. Actívala en php.ini (extension=zip) o usa el volcado en SQL.'
+        => 'PHP\'s zip extension is not enabled, so the ZIP cannot be made. Enable it in php.ini (extension=zip) or use the SQL dump.',
+    'No se pudo crear el fichero temporal del ZIP.'
+        => 'The ZIP\'s temporary file could not be created.',
+    'No se pudo abrir el ZIP temporal para escribir.'
+        => 'The temporary ZIP could not be opened for writing.',
+    'No se pudo cerrar el ZIP temporal.'
+        => 'The temporary ZIP could not be closed.',
+    'No se pudo hacer la copia de la base antes de cambiarla. Comprueba el espacio libre y los permisos de la carpeta de datos.'
+        => 'The copy of the database could not be made before changing it. Check the free space and the permissions of the data folder.',
+    'El código de instalación no es correcto. Está en el fichero {fichero} del servidor.'
+        => 'The installation code is not correct. It is in the file {fichero} on the server.',
+    'No se puede bloquear la base para copiarla o restaurarla: comprueba los permisos de su carpeta.'
+        => 'The database cannot be locked to copy or restore it: check the permissions of its folder.',
+    'Código de instalación'
+        => 'Installation code',
+    'Para que solo quien tiene acceso al servidor pueda terminar la instalación: está en el fichero <code>{fichero}</code> de la carpeta de datos del panel (<code>jsonsqldbadmin/datos/</code>, salvo que <code>ADMIN_DATA_PATH</code> diga otra), y también lo muestra <code>php configurar.php</code>. Se borra al terminar.'
+        => 'So that only someone with access to the server can finish the installation: it is in the file <code>{fichero}</code> in the panel\'s data folder (<code>jsonsqldbadmin/datos/</code>, unless <code>ADMIN_DATA_PATH</code> says otherwise), and <code>php configurar.php</code> shows it too. It is deleted when the installation is done.',
+    '<strong>PHP {v}: las escrituras no son duraderas ante un corte de luz.</strong> El motor necesita fsync(), que llega con PHP 8.1, para que una escritura confirmada sobreviva a un apagón o a un fallo del sistema. Usa PHP 8.1 o posterior en producción.'
+        => '<strong>PHP {v}: writes are not durable across a power cut.</strong> The engine needs fsync(), which arrives with PHP 8.1, for a confirmed write to survive a power failure or a system crash. Use PHP 8.1 or later in production.',
 ];

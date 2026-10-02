@@ -29,6 +29,7 @@
         <?php endif; ?>
 
         <form method="post" autocomplete="off">
+            <?= csrf() ?>
             <div class="mb-3">
                 <label class="form-label" for="usuario"><?= h(t('Usuario')) ?></label>
                 <input class="form-control" id="usuario" name="usuario" required autofocus

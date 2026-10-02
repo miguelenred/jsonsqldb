@@ -34,13 +34,14 @@
 # ----------------------------------------------------------------------
 
 $Global:JsonSqlDb = @{
-    Url         = 'https://example.com/jsonsqldb/api/jsonsqldb_api.php'
     # Clave de los ejemplos: permiso de escritura sobre la base 'pruebas'.
-    # Es la misma que usa cliente_ejemplo.php. Para tu aplicación, crea una
-    # clave propia en api/jsonsqldb_api_config.php.
-    ApiKey      = 'CHANGE_ME_EXAMPLE_API_KEY'
+    # Llega por variables de entorno: escrita aquí, este fichero lo serviría
+    # la web. php configurar.php dice cuál es. Para tu aplicación, crea una
+    # clave propia en api/jsonsqldb_api_config.php y guárdala fuera de la web.
+    Url         = $(if ($env:JSONSQLDB_URL) { $env:JSONSQLDB_URL } else { 'https://example.com/jsonsqldb/api/jsonsqldb_api.php' })
+    ApiKey      = $(if ($env:JSONSQLDB_API_KEY) { $env:JSONSQLDB_API_KEY } else { 'CHANGE_ME_EXAMPLE_API_KEY' })
     # El 'hmac_secret' de la API key de arriba
-    HmacSecret  = 'CHANGE_ME_EXAMPLE_SECRET'
+    HmacSecret  = $(if ($env:JSONSQLDB_HMAC_SECRET) { $env:JSONSQLDB_HMAC_SECRET } else { 'CHANGE_ME_EXAMPLE_SECRET' })
     Base        = 'pruebas'
     TimeoutSec  = 30
     # Certificado propio o autofirmado. Ruta al .crt/.pem para verificarlo,

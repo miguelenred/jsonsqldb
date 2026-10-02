@@ -4,8 +4,8 @@ Author, design and technical direction
   Miguel Sanchez <miguel@miguelenred.es>
 
 Implementation
-  Assisted by artificial intelligence (Anthropic's Claude among other models),
-  under the direction and review of the author.
+  Assisted by several artificial intelligence models, under the direction and
+  review of the author.
 
 Third-party components bundled in jsonsqldbadmin/assets/
   Bootstrap 5.3.3        - MIT License - https://getbootstrap.com

@@ -136,8 +136,8 @@ final class Catalog
             }
             // Y donde escriban sus triggers
             foreach ($meta['triggers'] as $trg) {
-                foreach ((array)($trg['body'] ?? []) as $sql) {
-                    $destino = self::tablaDeLaSentencia((string)$sql);
+                foreach (self::sentenciasDe((array)($trg['body'] ?? [])) as $sql) {
+                    $destino = self::tablaDeLaSentencia($sql);
                     if ($destino === null) {
                         return null;               // no se sabe a dónde escribe
                     }
@@ -161,8 +161,36 @@ final class Catalog
      * de mirar el texto: una SQL con un nombre de tabla dentro de una cadena
      * engañaría a cualquier expresión regular.
      */
+    /**
+     * Los textos de las sentencias de un cuerpo de trigger, entrando en los
+     * bloques IF, y sus condiciones (que pueden leer de otras tablas).
+     *
+     * @param list<string|array> $cuerpo
+     * @return list<string>
+     */
+    public static function sentenciasDe(array $cuerpo): array
+    {
+        $todas = [];
+        foreach ($cuerpo as $paso) {
+            if (!is_array($paso)) {
+                $todas[] = (string)$paso;
+                continue;
+            }
+            foreach ($paso['si'] as [$cond, $sentencias]) {
+                $todas[] = 'SELECT ' . $cond;
+                array_push($todas, ...self::sentenciasDe($sentencias));
+            }
+            array_push($todas, ...self::sentenciasDe($paso['sino'] ?? []));
+        }
+        return $todas;
+    }
+
     private static function tablaDeLaSentencia(string $sql): ?string
     {
+        // SET NEW.col = … solo cambia la fila que se está escribiendo
+        if (preg_match('/^\s*SET\s+NEW\s*\./i', $sql)) {
+            return '';
+        }
         try {
             $ast = Parser::analizar($sql);
         } catch (\Throwable $e) {
@@ -1175,7 +1203,12 @@ final class Catalog
         if (!in_array($evento, self::EVENTOS, true)) {
             throw JsonSqlDbError::schema("Evento de trigger no soportado: '$evento'");
         }
-        $cuerpo = array_values(array_filter(array_map('trim', (array)($trg['body'] ?? []))));
+        // Cada paso es el texto de una sentencia o un bloque IF (un array, ver
+        // Parser::cuerpoTrigger()); los textos vacíos sobran
+        $cuerpo = array_values(array_filter(
+            array_map(static fn($p) => is_string($p) ? trim($p) : $p, (array)($trg['body'] ?? [])),
+            static fn($p): bool => $p !== ''
+        ));
         if ($cuerpo === []) {
             throw JsonSqlDbError::schema("El trigger '$nombre' no tiene cuerpo");
         }

@@ -38,8 +38,10 @@ header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: same-origin');
 // Todo lo que carga el panel es local: nada de CDNs ni de recursos externos
+// Los scripts, solo los del panel y los de la propia página con su nonce: un
+// script inyectado no se ejecutaría. Los estilos siguen admitiendo style="…"
 header("Content-Security-Policy: default-src 'self'; img-src 'self' data:; "
-     . "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+     . "style-src 'self' 'unsafe-inline'; script-src 'self' 'nonce-" . nonce() . "'; "
      . "form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
 
 // --- Quién y por dónde ---
@@ -88,18 +90,28 @@ if ($asistente || !Auth::hayUsuarios()) {
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         try {
             Auth::comprobarCsrf();
+            Instalador::comprobarCodigo(post('codigo'));
             if ($asistente) {
                 $datos['resumen'] = Instalador::instalar($_POST);
+                Instalador::borrarCodigo();
                 Audit::registrar('instalar', post('usuario'));
             } else {
                 $nombre = Instalador::crearAdmin(post('usuario'), (string)($_POST['clave'] ?? ''),
                                                  (string)($_POST['clave2'] ?? ''));
+                Instalador::borrarCodigo();
                 Audit::registrar('instalar', $nombre);
                 flash('success', t('Administrador \'{nombre}\' creado. Ya puedes entrar.', ['nombre' => $nombre]));
                 redirigir();
             }
         } catch (Throwable $e) {
             $datos['error'] = $e->getMessage();
+        }
+    }
+    if (!isset($datos['resumen'])) {
+        try {
+            Instalador::codigo();                   // que el fichero exista para poder leerlo
+        } catch (Throwable $e) {
+            $datos['error'] ??= $e->getMessage();
         }
     }
     vista('instalar', $datos);
@@ -109,16 +121,26 @@ if ($asistente || !Auth::hayUsuarios()) {
 // ----------------------------------------------------------------------
 // Acceso
 // ----------------------------------------------------------------------
-if ($pagina === 'salir') {
+// Cerrar sesión, solo por POST y con su token: un enlace o una imagen en otra
+// página no pueden cerrar la sesión de nadie
+if ($pagina === 'salir' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    Auth::comprobarCsrf();
     Audit::registrar('salir');
     Auth::cerrar();
     redirigir();
+}
+// Un enlace viejo a ?p=salir (GET): a la portada, sin cerrar nada
+if ($pagina === 'salir') {
+    redirigir(['p' => 'bases']);
 }
 
 if (!Auth::identificado()) {
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $usuario = post('usuario');
         try {
+            // También el acceso lleva su token: sin él, otra página podría hacer
+            // entrar al navegador de alguien con una cuenta elegida por ella
+            Auth::comprobarCsrf();
             Auth::entrar($usuario, (string)($_POST['clave'] ?? ''), util_ip());
             Audit::registrar('entrar');
             redirigir(['p' => 'bases']);
@@ -128,6 +150,15 @@ if (!Auth::identificado()) {
         }
     }
     vista('login', ['error' => $error ?? null]);
+    exit;
+}
+
+// El script de PowerShell que vuelca una base de Access para importarla aquí
+if ($pagina === 'script_access') {
+    header('Content-Type: text/plain; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="access-to-jsonsqldb.ps1"');
+    header('X-Content-Type-Options: nosniff');
+    readfile(__DIR__ . '/herramientas/access-to-jsonsqldb.ps1');
     exit;
 }
 

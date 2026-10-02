@@ -78,6 +78,9 @@ final class Evaluator
                 foreach ($n['args'] as $i => $a) {
                     $n['args'][$i] = self::resolver($a, $mapa, $alias, $externo);
                 }
+                foreach ($n['orden'] ?? [] as $i => $o) {
+                    $n['orden'][$i]['expr'] = self::resolver($o['expr'], $mapa, $alias, $externo);
+                }
                 return $n;
 
             case 'case':
@@ -193,6 +196,7 @@ final class Evaluator
                 'arg'      => $n['star'] ? null : $n['args'][0],
                 'distinct' => $n['distinct'],
                 'sep'      => $n['args'][1] ?? null,
+                'orden'    => $n['orden'] ?? null,
             ];
             $n['agid'] = $firma;
             return $n;
@@ -256,7 +260,7 @@ final class Evaluator
             case 'bin':     return [$n['i'], $n['d']];
             case 'un':
             case 'null':    return [$n['e']];
-            case 'fn':      return $n['args'];
+            case 'fn':      return array_merge($n['args'], array_column($n['orden'] ?? [], 'expr'));
             case 'between': return [$n['e'], $n['min'], $n['max']];
             case 'like':    return $n['escape'] === null ? [$n['e'], $n['patron']] : [$n['e'], $n['patron'], $n['escape']];
             case 'regexp':  return [$n['e'], $n['patron']];

@@ -3,7 +3,21 @@
 A web panel to administer jsonSQLDB from the browser. Pure PHP, no Composer and
 nothing from outside: Bootstrap, the stylesheet and the icons (inline SVG, no
 icon font) are in `jsonsqldbadmin/`. Light and dark theme, remembered in each
-browser.
+browser; in Spanish and English (section 6).
+
+What is new in 2.7.1 and 2.7.2, and where it is described:
+
+| Since | What | Section |
+|---|---|---|
+| 2.7.1 | The configuration can be changed from the Configuration page | 7 |
+| 2.7.1 | Sessions end when a user is deleted or their password changes | below |
+| 2.7.2 | Spanish and English, following the browser, saved per user | 6 |
+| 2.7.2 | SQL dumps for SQLite, MySQL / MariaDB, PostgreSQL and SQL Server | 3 |
+| 2.7.2 | Import of dumps from those four engines | 3 |
+| 2.7.2 | Warning when the data folder can be downloaded from outside | 7 |
+| 2.7.3 | Guide to making the dump of each engine; UTF-16 SQL Server scripts | 3 |
+| 2.7.3 | CSV cells that a spreadsheet would run as formulas are neutralised | 3 |
+| 2.7.3 | Signing out is a POST with its token; failed sign-ins counted under a lock; `Secure` cookie behind a trusted proxy | 5 |
 
 The panel talks to the engine in one of two ways, chosen when it is installed:
 
@@ -74,10 +88,15 @@ users and audit trail are kept. If you lose access, delete
 `jsonsqldbadmin/datos/usuarios.json` and the panel asks for a new
 administrator.
 
-The wizard is reachable by anyone who reaches an unconfigured panel — as with
-any web application installed from the browser. Do not leave a copy
-unconfigured on a public server, or restrict it by IP first
-(`ADMIN_IPS_PERMITIDAS`).
+**The wizard asks for an installation code** (2.7.3). It is in the file
+`codigo-instalacion.txt` of the panel's data folder (`jsonsqldbadmin/datos/`
+unless `ADMIN_DATA_PATH` says otherwise), which the web server does not serve;
+`php configurar.php` prints it too. Only someone with access to the server can
+read it, so a panel published before it is set up can no longer be taken over
+by the first visitor who creates the administrator. The code is deleted when
+the installation finishes; if the users file is deleted later to recover
+access, a new one is made. `configurar.php` only runs from the command line, and
+Apache, IIS, nginx and LiteSpeed refuse it over HTTP.
 
 ## 2. Panel users
 
@@ -156,7 +175,8 @@ for more, plus an X to remove the spare ones; blank ones are ignored.
 - Triggers, with an assistant: name, `BEFORE`/`AFTER` dropdown,
   `INSERT`/`UPDATE`/`DELETE` dropdown, optional condition (the `WHEN`) and the
   body. Below it the statement about to be created is shown live. In the body
-  `NEW.column`, `OLD.column` and `RAISE(ABORT, 'message')` are valid.
+  `NEW.column`, `OLD.column`, `RAISE(ABORT, 'message')`, `IF … END IF` and, in
+  a `BEFORE INSERT`/`BEFORE UPDATE`, `SET NEW.column = …` are valid.
 - Indexes: create one on one or more columns — the form warns that order
   matters — and drop it. The automatic ones of the primary key and the
   `UNIQUE`s are shown as such and cannot be dropped on their own: they go with
@@ -267,17 +287,185 @@ the autoincrement continuing.
   in batches of 200, with bound parameters.
 
 A file that creates or drops databases is refused: the import is into one
-database. **There are no transactions**: if a statement or a batch fails, what
-came before is already written. The import stops there and says how many
-statements or rows went in and where it stopped. `tests/f5_admin.php` imports
+database.
+
+**All or nothing, when the panel reaches the database's folder** (2.7.3): with
+the panel on the same machine as the engine (direct connection, or the API on
+the same server with `ADMIN_RUTA_DATOS_MOTOR` pointing at its `data/`), the
+import first copies the database next to it (`name.antes-de-importar`) and, if a
+statement or a batch fails, puts it back as it was and says so; the copy is
+removed when the import finishes. The engine has no multi-statement
+transactions, so with the panel on another machine the import stops at the
+failure and what came before is already written, as before: it says how many
+statements or rows went in and where it stopped. Import into a new database when
+in doubt.
+
+**What the importer copes with** (2.7.3):
+
+- **Files that are not in UTF-8**: an old MySQL dump, or one made with
+  `--default-character-set=latin1`, or a CSV saved by Excel. Each statement or
+  field that is not valid UTF-8 is read as Latin-1 / Windows-1252 and the
+  summary says how many. Before, one such byte stopped the import with
+  «Sentencia no soportada: 'I'».
+- **Two names that become the same one** when made valid here (`ventas-2024`
+  and `ventas_2024`, `Order Details` and `Order_Details`): the second table or
+  view gets a suffix (`ventas_2024_2`) and the summary says so. Before, the
+  second one's `DROP TABLE IF EXISTS` wiped out the first.
+- **`BIT` columns of mysqldump**, which arrive as raw bytes, become the number
+  they form; MySQL's **zero date `0000-00-00`** becomes `NULL`, with a warning;
+  **`ALTER VIEW/FUNCTION/TYPE … OWNER TO`** of a `pg_dump` without `--no-owner`
+  is skipped.
+- A **`DECIMAL` of more than 15 digits** is warned about: here it is a
+  floating-point number with about 15 exact digits. An integer beyond 64 bits
+  (`BIGINT UNSIGNED` above 9223372036854775807) is an error, not a silently
+  changed number. `tests/f5_admin.php` imports
 the panel's own dump of a database with foreign keys and triggers and checks
 the copy, loads a 450-row CSV with quoted separators and empty fields, and
 checks the report of a CSV with a bad value in row 250.
+
+### How to make an SQL dump of each database
+
+The import reads the dumps these tools write, as plain SQL text. Make the dump,
+upload the file on the page of the database you want it in, and leave the format
+on *Detect*. When it finishes, the summary lists anything that did not translate.
+
+**SQLite** — with the `sqlite3` command-line tool:
+
+```sh
+sqlite3 shop.db .dump > shop.sql
+sqlite3 shop.db ".dump customers orders" > two_tables.sql   # only some tables
+```
+
+On Windows it is `sqlite3.exe`, from sqlite.org. *DB Browser for SQLite* also
+works: *File → Export → Database to SQL file*.
+
+**MySQL / MariaDB** — with `mysqldump` (`mariadb-dump` on recent MariaDB):
+
+```sh
+mysqldump --default-character-set=utf8mb4 -u user -p shop > shop.sql
+```
+
+`--default-character-set=utf8mb4` keeps accents and emoji. Do not use `--xml`,
+`--tab` or `--compatible`: they do not write SQL the importer reads. From
+phpMyAdmin: *Export → Custom → Format: SQL*. **Views and triggers come along**
+(2.7.3), translated to the SQL used here: `IF()`, `CONCAT_WS`, `DATE_ADD … INTERVAL`
+(which MySQL stores as `x + interval 1 day`), `DATEDIFF`, `DATE_FORMAT`, `YEAR()`,
+`LOCATE`, `LEFT`/`RIGHT`, `GREATEST`/`LEAST`, `FLOOR`/`CEIL`, `TRUNCATE`, `MOD`,
+`GROUP_CONCAT … ORDER BY … SEPARATOR`, `LIMIT a, b`; in triggers `IF/ELSEIF/ELSE`,
+`SET NEW.col = …`, `SIGNAL … MESSAGE_TEXT` and `INSERT … SET`. Triggers are
+created at the end, after the data, so they do not fire while it loads. A view or
+trigger that uses something with no equivalent here (local variables, loops,
+stored procedures) is skipped and named in the summary with the reason; the
+rest of the dump goes on.
+
+**PostgreSQL** — with `pg_dump`, in its default **plain** format:
+
+```sh
+pg_dump --no-owner -h host -U user shop > shop.sql
+```
+
+Do not use `-Fc`, `-Fd` or `-Ft`: those are binary archives for `pg_restore`.
+`--inserts` also works, but is not needed: the importer reads the `COPY` data
+of the default format. From pgAdmin: *Backup… → Format: Plain*. **Views and
+triggers come along** (2.7.3): the `::type` casts, `x + '1 day'::interval`,
+`IS DISTINCT FROM`, `= ANY (ARRAY[…])`, the `~~` with which pg_dump writes
+`LIKE` (case-sensitive there, so a literal pattern becomes the equivalent
+`REGEXP`), `to_char`, `date_trunc`, `EXTRACT`, `string_agg … ORDER BY`, and
+PostgreSQL's `CONCAT`/`GREATEST` that skip `NULL`. A trigger's plpgsql function
+is translated with it — `IF/ELSIF`, `NEW.x := …`, `RAISE EXCEPTION`,
+`RETURN` — and a trigger for several events (`INSERT OR UPDATE`) becomes one
+per event, named `name_insert`, `name_update`…, with `TG_OP` set to its event.
+Other functions and procedures are skipped.
+
+**SQL Server** — with Management Studio:
+
+1. Right-click the database → *Tasks* → *Generate Scripts…*
+2. Choose the tables (or the whole database).
+3. In *Set Scripting Options*, open *Advanced* and set *Types of data to
+   script* to **Schema and data**.
+4. Save to a single file. Either *Unicode text* (UTF-16, the default) or *UTF-8*
+   works: the importer converts UTF-16 on its own.
+
+The script it writes — with `GO`, `[dbo].[…]`, `N'…'` and `IDENTITY` — is what
+the importer was built for. **Views and triggers come along** (2.7.3). Views:
+`TOP`, `OFFSET … FETCH`, `ISNULL`, `LEN`, `CHARINDEX`, `IIF`, `DATEADD`,
+`DATEDIFF`, `DATEPART`, `FORMAT`, `CONVERT(type, x, 120)`, `ROUND(x, n, 1)`,
+`STRING_AGG … WITHIN GROUP`, `WITH (NOLOCK)`, and `+` as concatenation when one
+side is text. Triggers are the bigger change: SQL Server runs a trigger once per
+statement, with the rows in the `inserted` and `deleted` tables; here a trigger
+runs once per row. With one row, `inserted` is `NEW` and `deleted` is `OLD`, so
+the importer rewrites the usual patterns — `UPDATE … FROM t JOIN inserted i ON …`
+(the `ON` goes to the `WHERE`), `INSERT … SELECT … FROM inserted`,
+`IF [NOT] EXISTS (SELECT … FROM inserted …)`, `IF UPDATE(col)`, variables loaded
+with `SELECT @v = col FROM inserted`, `RAISERROR`/`THROW` and `ROLLBACK` — one
+trigger per event. A trigger that updates its own row (`UPDATE t … JOIN
+inserted i ON t.id = i.id`) becomes a `BEFORE` trigger with `SET NEW`, named
+`name_antes`: SQL Server does not fire a trigger again from its own update, and
+here it would. `INSTEAD OF` triggers, cursors and loops have no equivalent and
+are skipped with the reason. Stored procedures are skipped.
+
+**Microsoft Access** — with the PowerShell script the panel offers in its import
+box (*download the PowerShell script*), `access-to-jsonsqldb.ps1`. It needs
+**Windows**. The easiest way to run it: **right-click the downloaded file →
+«Run with PowerShell»**. It asks for the `.mdb` or `.accdb` file and for the
+folder where the dump is saved, and writes `name.access.sql` there with the
+tables (autonumber, keys, indexes, `NOT NULL`), the data, the relationships (with
+their `CASCADE`/`SET NULL`) and the saved select queries as views. The database
+is opened read-only. Import the file here with the format on *Detect* (or
+*Microsoft Access*).
+
+It reads the database through OLEDB, so it needs the **Microsoft Access
+Database Engine**. If it is missing, the script says so and offers the download
+page (Microsoft Access Database Engine 2016 Redistributable). The engine must have
+the same bitness as the PowerShell running the script: with 32-bit Office the
+64-bit engine will not install, so use the 32-bit PowerShell
+(`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`) with the 32-bit
+engine. An `.mdb` can also be read with the old Jet engine, 32-bit only.
+
+The queries are translated as Access stores them: text in double quotes,
+`#dates#`, `&`, `IIf`, `Nz`, `Mid`, `Len`, `InStr` (without case, as in Access),
+`Format`, `DateAdd`, `DateDiff`, `Year`…, `CCur`/`CLng`/`CDate`…, the `*`, `?` and
+`#` wildcards of `Like`, `Table!Field`, joins in parentheses and `TOP`. What does
+not come along: attachments and OLE objects (binary data); action, crosstab and
+parameter queries; and the hidden queries of forms and reports. The script lists
+them when it finishes. Note that Access compares text without case in `=` too,
+and here `=` tells capitals apart.
+
+The panel also exports **for Access** (*SQL: Microsoft Access* in the dump
+dropdown): `TEXT(n)`/`MEMO`, `LONG`, `COUNTER`, `DATETIME` with `#…#` values,
+relationships with `CASCADE`/`SET NULL`, and the views as saved queries
+(`CREATE VIEW`), translated to Access SQL. Access has no triggers, so they go
+commented with that reason. Access does not run a file of statements: run them
+one by one (OLEDB from PowerShell, `CurrentProject.Connection.Execute` from VBA),
+skipping the `--` lines.
+
+What does not arrive the same in any of them: `CHECK` constraints, computed
+default values (`CURRENT_TIMESTAMP`, `NOW()`, `getdate()`), `ENUM` value lists,
+time zones of dates, and binary data that is not text (kept as its hexadecimal,
+`\x…`). Names that are not valid here become valid: `Order Details` →
+`Order_Details`. And if the dump contains `DROP TABLE`, a table with the same name
+here is replaced: import into a new, empty database if in doubt.
+
+**The SQL dump of a whole database is written table by table** (2.7.3): the
+rows of each table are read when that table is written, and the dump goes to the
+browser as it is made, so only one table is in memory at a time (before, the
+whole database was). `ADMIN_EXPORT_MAX` still caps the total number of rows. If
+something fails halfway, the download has already started: the file ends with an
+`-- ERROR: the dump is incomplete` line. The dump for SQLite writes
+`AUTOINCREMENT` only on an `INTEGER PRIMARY KEY`, the only place SQLite accepts
+it. In views exported to other engines, `CAST(x AS INTEGER)` truncates as it
+does here (MySQL and PostgreSQL would round), and `GROUP_CONCAT` without
+`ORDER BY` has no defined order in any engine: write the `ORDER BY` when the
+order matters.
 
 **Export** — **CSV** and **INSERT** buttons on the data screen (exports the
 whole table, with the ordering you have set, not just the visible page) and on
 the SQL editor's result (exports what the query returned).
 
+- A text cell that starts with `=`, `+`, `-` or `@` gets an apostrophe in front
+  (2.7.3): a spreadsheet would otherwise take it for a formula and run it when
+  the file is opened. Excel does not show the apostrophe; numbers, including
+  negative ones, are not touched.
 - The CSV carries a UTF-8 BOM so Excel does not break accents, and uses `;` as
   separator (`ADMIN_CSV_SEPARADOR`, change it to `,` for other tools). Nulls
   come out as an empty cell.
@@ -351,6 +539,15 @@ $cli->aceptarAutofirmado();
 ```
 
 ## 5. Security
+
+- **Signing out is a form (POST) with its CSRF token** (2.7.3): a link or an
+  image on another page cannot sign anyone out.
+- **Failed sign-in attempts are counted under an exclusive lock** (2.7.3), so
+  attempts arriving at the same time are all counted.
+- **The session cookie carries `Secure`** whenever the request came over HTTPS,
+  including behind a trusted proxy (`ADMIN_CONFIAR_EN_PROXY`) that sends
+  `X-Forwarded-Proto: https` (2.7.3); before, it only looked at the direct
+  connection.
 
 - `config.php`, `lib/`, `vistas/` and `datos/` are blocked by `.htaccess` and
   `web.config`. Only `index.php` and `assets/` are served. **On nginx and
@@ -450,22 +647,26 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/config.dist.php` | template; the wizard writes `config.php` from it |
 | `jsonsqldbadmin/config.php` | configuration (not in the repository) |
 | `jsonsqldbadmin/lib/Api.php` | calls to the engine, through the API or by direct connection |
-| `jsonsqldbadmin/lib/Instalador.php` | the setup wizard: checks, connection test, writing the configuration |
+| `jsonsqldbadmin/lib/Instalador.php` | the setup wizard and the Configuration page: checks, connection test, writing `config.php`, the data-folder check |
 | `jsonsqldbadmin/lib/Auth.php` | users, session, IP lockout and CSRF |
 | `jsonsqldbadmin/lib/Audit.php` | audit trail |
-| `jsonsqldbadmin/lib/Exportar.php` | export to CSV, INSERT statements and ZIP |
-| `jsonsqldbadmin/lib/Importar.php` | restore of a ZIP backup |
+| `jsonsqldbadmin/lib/Exportar.php` | export to CSV, `INSERT` statements, ZIP and SQL dumps for SQLite, MySQL / MariaDB, PostgreSQL and SQL Server |
+| `jsonsqldbadmin/lib/Importar.php` | import of SQL dumps and CSV, and restore of a ZIP backup |
+| `jsonsqldbadmin/lib/Traductor.php` | translation of SQLite, MySQL, PostgreSQL and SQL Server dumps into jsonSQLDB's SQL |
+| `jsonsqldbadmin/lib/Idioma.php` | the panel's language: browser, user choice, `t()` |
+| `jsonsqldbadmin/idiomas/en.php` | the English texts, keyed by the Spanish ones |
 | `jsonsqldbadmin/lib/Store.php` | reading and writing of the panel's JSON files |
 | `jsonsqldbadmin/lib/iconos.php` | the icons, inline SVG |
 | `jsonsqldbadmin/lib/util.php` | escaping, URLs, messages and validation |
 | `jsonsqldbadmin/lib/acciones.php` | every action that changes something |
 | `jsonsqldbadmin/vistas/` | pages |
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 (CSS and JS), local |
+| `jsonsqldbadmin/herramientas/access-to-jsonsqldb.ps1` | the PowerShell script that dumps a Microsoft Access database (Windows), downloaded from the import box |
 | `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
-| `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields |
-| `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json` |
-| `tests/f5_admin.php` | 129 checks driving the real panel through the API |
-| `tests/f11_asistente.php` | 34 checks of the setup wizard, the configuration page, sessions and the direct connection |
+| `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields, selects that submit their form |
+| `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json`, and `codigo-instalacion.txt` until the installation finishes |
+| `tests/f5_admin.php` | 137 checks driving the real panel through the API |
+| `tests/f11_asistente.php` | 35 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
 ## 9. Tests
 
@@ -476,9 +677,19 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php     → OK: 129
-php tests/f11_asistente.php → OK: 31
+php tests/f5_admin.php      → OK: 137   the panel, page by page
+php tests/f11_asistente.php → OK: 35    setup wizard, direct connection, configuration, sessions, languages
+php tests/f14_volcados.php  → OK: 18    dumps, difficult dumps, ZIP paths, all-or-nothing (30 with servers)
+php tests/f15_idiomas.php   → OK: 6     every text translated, none left over, browser language
+php tests/f16_vistas_triggers.php → OK: 11   views and triggers exported, run in MySQL and PostgreSQL
+php tests/f17_rutinas_importadas.php → OK: 11views and triggers imported from MySQL, PostgreSQL, SQL Server
+php tests/f18_access.php    → OK: 11    the Access script, importing and exporting Access
 ```
+
+`tests/f14_volcados.php` loads the dumps into real servers when it is told where
+they are (`JSONSQLDB_TEST_MYSQL`, `JSONSQLDB_TEST_POSTGRESQL`, as
+`host:user:password`) and imports Microsoft's Northwind script with
+`JSONSQLDB_TEST_NORTHWIND=1`; CI does all three.
 
 The tests need the cURL extension (the panel itself does not). On Windows with
 XAMPP, enable it in `php.ini` (`extension=curl`).

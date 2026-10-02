@@ -103,7 +103,8 @@ defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     true);  // local
 defined('RATE_LIMIT_MAX') || define('RATE_LIMIT_MAX',        150);    // máximo de peticiones por IP en la ventana
 defined('RATE_LIMIT_SECONDS') || define('RATE_LIMIT_SECONDS',    86400);  // ventana de tiempo (24 horas)
 defined('RATE_TIMESTAMP_DIFF') || define('RATE_TIMESTAMP_DIFF',   300);    // desfase máximo del timestamp (5 min)
-defined('RATE_LIMIT_GLOBAL_MAX') || define('RATE_LIMIT_GLOBAL_MAX', 30);     // fallos de autenticación admitidos en la ventana
+defined('RATE_LIMIT_FALLOS_IP') || define('RATE_LIMIT_FALLOS_IP', 10);      // fallos de autenticación de una IP antes de bloquearla (solo a ella)
+defined('RATE_LIMIT_POR_CLAVE') || define('RATE_LIMIT_POR_CLAVE', 0);       // peticiones de cada API key en la ventana, de cualquier IP (0 = sin cupo)
 
 // Tamaño máximo del cuerpo de la petición (bytes)
 defined('MAX_POST_SIZE') || define('MAX_POST_SIZE', 200000);

@@ -642,6 +642,71 @@ chk('SHOW TRIGGERS de una tabla y de toda la base', function () use ($bd) {
         && count($bd->consultar('SHOW TRIGGERS')) === 1;
 });
 
+chk('un trigger puede tener IF … ELSEIF … ELSE … END IF, también anidados', function () use ($bd) {
+    $bd->consultar("CREATE TABLE prod (id INTEGER PRIMARY KEY AUTOINCREMENT, precio DECIMAL(10,2), tramo TEXT)");
+    $bd->consultar("CREATE TABLE avisos (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT)");
+    $bd->consultar("CREATE TRIGGER prod_ai AFTER INSERT ON prod BEGIN
+        IF NEW.precio < 10 THEN INSERT INTO avisos (msg) VALUES ('barato ' || NEW.id);
+        ELSEIF NEW.precio < 100 THEN
+            IF NEW.precio = 50 THEN INSERT INTO avisos (msg) VALUES ('justo ' || NEW.id); END IF;
+        ELSE INSERT INTO avisos (msg) VALUES ('caro ' || NEW.id); UPDATE prod SET tramo = 'alto' WHERE id = NEW.id;
+        END IF;
+    END");
+    $bd->consultar("INSERT INTO prod (precio) VALUES (5), (50), (70), (500)");
+    $m = array_column($bd->consultar('SELECT msg FROM avisos ORDER BY id'), 'msg');
+    $t = array_column($bd->consultar('SELECT tramo FROM prod ORDER BY id'), 'tramo');
+    $bd->consultar('DROP TRIGGER prod_ai');
+    return $m === ['barato 1', 'justo 2', 'caro 4'] && $t === [null, null, null, 'alto'] ?: json_encode([$m, $t]);
+});
+chk('un trigger BEFORE cambia la fila que se escribe con SET NEW.col = …', function () use ($bd) {
+    // Como en MySQL (SET NEW.x = …) y en PostgreSQL (NEW.x := …): de izquierda
+    // a derecha, cada asignación ve las anteriores, y el valor se convierte al
+    // tipo de la columna
+    $bd->consultar("CREATE TRIGGER prod_bi BEFORE INSERT ON prod BEGIN
+        IF NEW.precio < 0 THEN SELECT RAISE(ABORT, 'precio negativo'); END IF;
+        SET NEW.precio = NEW.precio * 2, NEW.tramo = CASE WHEN NEW.precio >= 100 THEN 'alto' ELSE 'bajo' END;
+    END");
+    $bd->consultar("CREATE TRIGGER prod_bu BEFORE UPDATE ON prod BEGIN SET NEW.tramo = 'cambiado ' || OLD.tramo; END");
+    $bd->consultar("INSERT INTO prod (precio) VALUES (60)");
+    $a = $bd->consultar('SELECT precio, tramo FROM prod ORDER BY id DESC LIMIT 1')[0];
+    $bd->consultar('UPDATE prod SET precio = 1 WHERE id = 5');
+    $b = $bd->consultar('SELECT precio, tramo FROM prod WHERE id = 5')[0];
+    try { $bd->consultar("INSERT INTO prod (precio) VALUES (-1)"); $c = 'sin error'; }
+    catch (JsonSQLDB\JsonSqlDbError $e) { $c = $e->getMessage(); }
+    $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM prod')[0]['n'];
+    $bd->consultar('DROP TRIGGER prod_bi');
+    $bd->consultar('DROP TRIGGER prod_bu');
+    return (float)$a['precio'] === 120.0 && $a['tramo'] === 'alto' && $b['tramo'] === 'cambiado alto'
+        && $c === 'precio negativo' && $n === 5 ?: json_encode([$a, $b, $c, $n]);
+});
+chk('lo que pone SET NEW pasa las mismas comprobaciones: NOT NULL, únicos y claves', function () use ($bd) {
+    $bd->consultar('CREATE TABLE snn (id INTEGER PRIMARY KEY, nombre TEXT NOT NULL, cod TEXT UNIQUE)');
+    $bd->consultar("INSERT INTO snn VALUES (1, 'a', 'X')");
+    $bd->consultar("CREATE TRIGGER snn_bi BEFORE INSERT ON snn BEGIN
+        IF NEW.id = 2 THEN SET NEW.nombre = NULL; END IF;
+        IF NEW.id = 3 THEN SET NEW.cod = 'X'; END IF;
+    END");
+    $mal = [];
+    foreach ([2 => 'NULL', 3 => 'UNIQUE'] as $id => $que) {
+        try { $bd->consultar("INSERT INTO snn VALUES ($id, 'b', 'Y$id')"); $mal[] = "$que aceptado"; } catch (JsonSQLDB\JsonSqlDbError $e) { }
+    }
+    $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM snn')[0]['n'];
+    $bd->consultar('DROP TABLE snn');
+    return $mal === [] && $n === 1 ?: implode(', ', $mal) . " · $n filas";
+});
+chk('SET NEW solo se admite en BEFORE INSERT y BEFORE UPDATE, y solo sobre NEW', function () use ($bd) {
+    $mal = [];
+    foreach (["CREATE TRIGGER x1 AFTER INSERT ON prod BEGIN SET NEW.tramo = 'x'; END",
+              "CREATE TRIGGER x2 BEFORE DELETE ON prod BEGIN SET NEW.tramo = 'x'; END",
+              "CREATE TRIGGER x3 BEFORE INSERT ON prod BEGIN SET OLD.tramo = 'x'; END",
+              "CREATE TRIGGER x4 BEFORE INSERT ON prod BEGIN IF NEW.id > 0 THEN SET NEW.tramo = 'x'; END"] as $sql) {
+        try { $bd->consultar($sql); $mal[] = $sql; } catch (JsonSQLDB\JsonSqlDbError $e) { }
+    }
+    $bd->consultar('DROP TABLE prod');
+    $bd->consultar('DROP TABLE avisos');
+    return $mal === [] ?: 'aceptado: ' . implode(' | ', $mal);
+});
+
 echo "\n== Caché de resultados ==\n";
 
 chk('una consulta repetida se sirve de la caché y una escritura la invalida', function () use ($raiz) {

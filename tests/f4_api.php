@@ -479,20 +479,49 @@ chk('IP suelta, rango CIDR, IPv6 y lista vacía', function () {
     return $salida === '1,0,1,0,1,1,0,1,0' ?: $salida;
 });
 
-echo "\n== Clave de los clientes de ejemplo ==\n";
-chk('está registrada con escritura sobre pruebas', function () {
+echo "\n== Clientes de ejemplo ==\n";
+chk('su cuenta existe, con escritura sobre pruebas y nada más', function () {
+    $c = $GLOBALS['API_KEYS']['Clientes de ejemplo'] ?? null;
+    return is_array($c) && $c['permiso'] === 'escritura' && $c['bases'] === ['pruebas'] ?: json_encode($c);
+});
+chk('ningún cliente lleva una clave escrita: están en api/ y la web podría servirlos', function () {
+    // configurar.php ya ha pasado por aquí (el CI lo ejecuta antes): hasta
+    // 2.7.2 escribía la clave dentro, y dos de los tres se podían descargar
+    foreach (['php', 'py', 'ps1'] as $ext) {
+        $texto = (string)file_get_contents(__DIR__ . "/../api/cliente_ejemplo.$ext");
+        if (!str_contains($texto, 'CHANGE_ME_EXAMPLE_API_KEY') || !str_contains($texto, 'CHANGE_ME_EXAMPLE_SECRET')) {
+            return "cliente_ejemplo.$ext no tiene sus marcadores";
+        }
+        foreach ($GLOBALS['API_KEYS'] as $cuenta) {
+            if (is_array($cuenta) && strlen((string)($cuenta['key'] ?? '')) > 20 && str_contains($texto, (string)$cuenta['key'])) {
+                return "cliente_ejemplo.$ext lleva una clave de verdad";
+            }
+        }
+    }
+    return true;
+});
+chk('los tres toman la clave y el secreto de las mismas variables de entorno', function () {
+    foreach (['php', 'py', 'ps1'] as $ext) {
+        $texto = (string)file_get_contents(__DIR__ . "/../api/cliente_ejemplo.$ext");
+        foreach (['JSONSQLDB_API_KEY', 'JSONSQLDB_HMAC_SECRET', 'JSONSQLDB_URL'] as $var) {
+            if (!str_contains($texto, $var)) { return "cliente_ejemplo.$ext no lee $var"; }
+        }
+    }
     require_once __DIR__ . '/../api/cliente_ejemplo.php';
-    $c = cuentaDe(JsonSqlDbCliente::EJEMPLO_API_KEY);
-    return is_array($c) && $c['permiso'] === 'escritura' && $c['bases'] === ['pruebas'];
+    putenv('JSONSQLDB_API_KEY=clave-del-entorno');
+    putenv('JSONSQLDB_HMAC_SECRET=secreto-del-entorno');
+    $cli = JsonSqlDbCliente::pruebas();
+    putenv('JSONSQLDB_API_KEY');
+    putenv('JSONSQLDB_HMAC_SECRET');
+    $leer = static fn(string $p) => (new ReflectionProperty(JsonSqlDbCliente::class, $p))->getValue($cli);
+    return $leer('apiKey') === 'clave-del-entorno' && $leer('secreto') === 'secreto-del-entorno' ?: 'el cliente PHP no las usa';
 });
-chk('el .ps1 usa exactamente la misma clave', function () {
-    $ps1 = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
-    return str_contains($ps1, "ApiKey      = '" . JsonSqlDbCliente::EJEMPLO_API_KEY . "'");
-});
-chk('el cliente Python usa la misma clave y secreto', function () {
-    $py = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.py');
-    return str_contains($py, '"' . JsonSqlDbCliente::EJEMPLO_API_KEY . '"')
-        && str_contains($py, '"' . JsonSqlDbCliente::EJEMPLO_SECRETO . '"');
+chk('la web no sirve los clientes de ejemplo (Apache, IIS, nginx)', function () {
+    $raiz = dirname(__DIR__);
+    return str_contains((string)file_get_contents("$raiz/api/.htaccess"), 'cliente_ejemplo\\.')
+        && str_contains((string)file_get_contents("$raiz/api/web.config"), 'cliente_ejemplo.')
+        && str_contains((string)file_get_contents("$raiz/nginx/jsonsqldb.conf"), 'api/cliente_ejemplo')
+        ?: 'falta la regla en alguno';
 });
 chk('el cliente Python firma igual que el de PHP', function () {
     global $base;
@@ -530,11 +559,66 @@ PY;
 
     return $tokenPy === $tokenPhp ?: "python: $tokenPy / php: $tokenPhp";
 });
-chk('los dos clientes usan el secreto de su clave', function () {
-    $ps1  = (string)file_get_contents(__DIR__ . '/../api/cliente_ejemplo.ps1');
-    $suyo = secretoDe(JsonSqlDbCliente::EJEMPLO_API_KEY);
-    return str_contains($ps1, "HmacSecret  = '" . JsonSqlDbCliente::EJEMPLO_SECRETO . "'")
-        && JsonSqlDbCliente::EJEMPLO_SECRETO === $suyo;
+echo "\n== Límites de la API ==\n";
+/** Ejecuta código contra un ApiStore en otro proceso, con los límites activos, y devuelve lo que imprime. */
+function conLimites(string $codigo, string $constantes = ''): string
+{
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_limites_' . getmypid();
+    @mkdir($dir, 0775, true);
+    array_map('unlink', (array)glob("$dir/*"));
+    $prog = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("RATE_LIMIT_ACTIVO", true); define("RATE_LIMIT_MAX", 1000);'
+          . 'define("RATE_LIMIT_SECONDS", 3600); define("ANTI_REPLAY_ACTIVO", true); define("RATE_TIMESTAMP_DIFF", 300);'
+          . $constantes . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+          . '$s = new JsonSQLDB\\ApiStore(' . var_export($dir, true) . ');' . $codigo;
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($prog) . ' 2>&1');
+    array_map('unlink', (array)glob("$dir/*"));
+    @rmdir($dir);
+    return trim($salida);
+}
+chk('los fallos de autenticación bloquean solo a la IP que falla, no a todos', function () {
+    // Hasta 2.7.2, 30 fallos de cualquiera cerraban la API a todo el mundo un día
+    $r = conLimites('for ($i = 0; $i < 40; $i++) { $s->fallo("6.6.6.6"); }'
+        . 'echo json_encode([$s->ipBloqueada("6.6.6.6"), $s->ipBloqueada("7.7.7.7")]);', 'define("RATE_LIMIT_FALLOS_IP", 5);');
+    return $r === '[true,false]' ?: $r;
+});
+chk('con una configuración de antes de 2.7.3, sin las constantes nuevas, se bloquea a los 10 fallos', function () {
+    $r = conLimites('for ($i = 0; $i < 9; $i++) { $s->fallo("6.6.6.6"); } $a = $s->ipBloqueada("6.6.6.6");'
+        . '$s->fallo("6.6.6.6"); echo json_encode([$a, $s->ipBloqueada("6.6.6.6")]);');
+    return $r === '[false,true]' ?: $r;
+});
+chk('el cupo por API key cuenta las peticiones de esa clave desde cualquier IP', function () {
+    $r = conLimites('echo json_encode([$s->nonceYContar("n1", "1.1.1.1", "A"), $s->nonceYContar("n2", "2.2.2.2", "A"),'
+        . '$s->nonceYContar("n3", "3.3.3.3", "A"), $s->nonceYContar("n4", "3.3.3.3", "B")]);', 'define("RATE_LIMIT_POR_CLAVE", 2);');
+    return $r === '[true,true,"limite",true]' ?: $r;
+});
+chk('lo que se anota de una petición rechazada va recortado', function () use ($raizDatos) {
+    peticion(['api_key' => 'x', 'db' => str_repeat('a', 5000), 'sql' => 'SELECT 1', 'timestamp' => (string)time(), 'token' => str_repeat('0', 64)]);
+    $ficheros = (array)glob($raizDatos . '/api/peticiones-*.json');
+    $lineas = array_filter(explode("\n", (string)file_get_contents((string)end($ficheros))));
+    $ultima = json_decode((string)end($lineas), true);
+    return strlen((string)($ultima['db'] ?? 'x')) <= 64 ?: 'db de ' . strlen((string)$ultima['db']) . ' caracteres';
+});
+chk('con 20 ficheros llenos en el día, las peticiones sin clave válida ya no se anotan', function () {
+    // Ficheros de 50 bytes: cada anotación llena uno. Las de alguien con clave
+    // siguen anotándose; las anónimas, que cualquiera puede mandar, no
+    $patron = var_export(sys_get_temp_dir() . '/jsonsqldb_test_limites_' . getmypid() . '/peticiones-*.json', true);
+    $r = conLimites('for ($i = 0; $i < 25; $i++) { $s->registrar(["origen" => "", "error" => str_repeat("x", 60)]); }'
+        . '$antes = count(glob(' . $patron . ') ?: []);'
+        . '$s->registrar(["origen" => "cuenta", "error" => str_repeat("y", 60)]);'
+        . 'echo $antes, ",", count(glob(' . $patron . ') ?: []);',
+        'define("JSONSQLDB_LOG_MAX_SIZE", 50);');
+    return $r === '20,21' ?: $r;
+});
+
+echo "\n== Reglas del servidor web ==\n";
+chk('la regla de nginx de ficheros ocultos cubre también los de la raíz', function () {
+    // nginx usa expresiones PCRE, las mismas de PHP: se prueban con las URL
+    $conf = (string)file_get_contents(dirname(__DIR__) . '/nginx/jsonsqldb.conf');
+    if (!preg_match('/^# --- Ficheros ocultos.*\nlocation ~ (\S+) \{/m', $conf, $m)) { return 'no se encuentra la regla'; }
+    foreach (['/jsonsqldb/.env', '/jsonsqldb/.git/config', '/jsonsqldb/.htaccess', '/jsonsqldb/data/x/.rev'] as $uri) {
+        if (!preg_match('#' . $m[1] . '#', $uri)) { return "no cubre $uri"; }
+    }
+    return !preg_match('#' . $m[1] . '#', '/jsonsqldb/api/jsonsqldb_api.php') ?: 'cubre también lo que no debe';
 });
 
 echo "\n== Limpieza ==\n";

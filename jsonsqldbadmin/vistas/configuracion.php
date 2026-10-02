@@ -100,6 +100,9 @@ $numero   = static function (string $campo, string $texto, string $ayuda = '') u
           <input class="form-control" id="api_url" name="api_url" value="<?= h((string)ADMIN_API_URL) ?>"
                  placeholder="<?= h(Api::urlDeducida()) ?>">
           <div class="form-text"><?= h(t('Vacía = la de esta instalación.')) ?></div>
+          <?php if ((string)ADMIN_API_URL === '' && !Api::directa()): ?>
+            <div class="form-text text-warning"><?= h(t('Ahora se deduce en cada petición de la cabecera Host, que manda el navegador: guarda la configuración para dejarla escrita.')) ?></div>
+          <?php endif; ?>
         </div>
         <div class="col-lg-6">
           <label class="form-label" for="api_key"><?= h(t('API key de administración')) ?></label>

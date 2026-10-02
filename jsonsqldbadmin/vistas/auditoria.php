@@ -21,7 +21,7 @@ if ($busca !== '') {
   <input type="hidden" name="p" value="auditoria">
   <div class="col-auto">
     <label class="form-label" for="dia"><?= h(t('Día')) ?></label>
-    <select class="form-select form-select-sm" id="dia" name="dia" onchange="this.form.submit()">
+    <select class="form-select form-select-sm" id="dia" name="dia" data-enviar-al-cambiar>
       <?php if ($dias === []): ?><option><?= h($dia) ?></option><?php endif; ?>
       <?php foreach ($dias as $d): ?>
         <option<?= $d === $dia ? ' selected' : '' ?>><?= h($d) ?></option>

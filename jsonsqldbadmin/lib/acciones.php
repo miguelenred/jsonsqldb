@@ -229,11 +229,13 @@ function ejecutarAccion(string $accion): void
                 || !is_uploaded_file((string)$subido['tmp_name'])) {
                 throw new RuntimeException(t('No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP (upload_max_filesize y post_max_size).'));
             }
+            // Con la carpeta de la base a mano (misma máquina), todo o nada
+            $ruta = rutaDeLaBaseSiSeAlcanza($nombre);
             if ($accion === 'importar_sql') {
-                $resumen = Importar::sql((string)$subido['tmp_name'], $nombre, (string)post('formato', 'auto'));
+                $resumen = Importar::sql((string)$subido['tmp_name'], $nombre, (string)post('formato', 'auto'), $ruta);
             } else {
                 $tabla   = identificador(post('tabla'), 'tabla');
-                $resumen = Importar::csv((string)$subido['tmp_name'], $nombre, $tabla);
+                $resumen = Importar::csv((string)$subido['tmp_name'], $nombre, $tabla, $ruta);
             }
             Audit::registrar($accion, $resumen . ' (' . basename((string)$subido['name']) . ')', $nombre);
             flash('success', $resumen);
@@ -411,7 +413,7 @@ function ejecutarAccion(string $accion): void
 
         case 'exportar_base':
             $nombre  = nombreBase(post('nombre'));
-            $formato = in_array(post('formato'), ['zip', 'mysql', 'postgresql', 'sqlserver'], true) ? post('formato') : 'sql';
+            $formato = in_array(post('formato'), ['zip', 'mysql', 'postgresql', 'sqlserver', 'access'], true) ? post('formato') : 'sql';
 
             if ($formato === 'zip') {
                 // El ZIP lee los ficheros directamente, sin pasar por la API: antes
@@ -424,12 +426,14 @@ function ejecutarAccion(string $accion): void
                 Exportar::zip($nombre, $ruta);       // termina la petición
             }
 
+            // Primero se cuentan las filas (para el tope); las de cada tabla se
+            // piden al escribir esa tabla, y en memoria solo hay una a la vez
             $tablas = [];
             $filas  = 0;
             foreach (Api::sql($nombre, 'SHOW TABLES') as $t) {
                 $tabla = (string)$t['tabla'];
-                $datos = Api::sql($nombre, 'SELECT * FROM ' . cita($tabla));
-                $filas += count($datos);
+                $n = (int)(Api::sql($nombre, 'SELECT COUNT(*) AS n FROM ' . cita($tabla))[0]['n'] ?? 0);
+                $filas += $n;
                 if ($filas > ADMIN_EXPORT_MAX) {
                     throw new RuntimeException(t('El volcado supera el tope de {n} filas (ADMIN_EXPORT_MAX). Exporta las tablas por separado o usa el ZIP.',
                         ['n' => Idioma::numero((int)ADMIN_EXPORT_MAX)]));
@@ -438,12 +442,13 @@ function ejecutarAccion(string $accion): void
                     'tabla'    => $tabla,
                     'columnas' => Api::sql($nombre, 'SHOW SCHEMA ' . cita($tabla)),
                     'claves'   => Api::sql($nombre, 'SHOW KEYS FROM ' . cita($tabla)),
-                    'filas'    => $datos,
+                    'n'        => $n,
                 ];
             }
             Audit::registrar('exportar_base', $nombre . ' · ' . $filas . ' fila(s)', $nombre);
             Exportar::base($nombre, $tablas, Api::sql($nombre, 'SHOW TRIGGERS'), Api::sql($nombre, 'SHOW VIEWS'),
-                           Api::sql($nombre, 'SHOW INDEXES'), $formato === 'sql' ? 'sqlite' : $formato);
+                           Api::sql($nombre, 'SHOW INDEXES'), $formato === 'sql' ? 'sqlite' : $formato,
+                           static fn(string $tabla): array => Api::sql($nombre, 'SELECT * FROM ' . cita($tabla)));
             // Exportar termina la petición
 
         // ---------------- Usuarios ----------------

@@ -48,6 +48,7 @@ $zipDisponible = mismoHostQueLaApi() !== false;
                         <option value="mysql"><?= h(t('SQL: MySQL / MariaDB')) ?></option>
                         <option value="postgresql"><?= h(t('SQL: PostgreSQL')) ?></option>
                         <option value="sqlserver"><?= h(t('SQL: SQL Server')) ?></option>
+                        <option value="access"><?= h(t('SQL: Microsoft Access')) ?></option>
                       </select>
                       <button class="btn btn-sm btn-outline-secondary" title="<?= h(t('Descargar el volcado')) ?>"><?= icono('download') ?></button>
                     </form>

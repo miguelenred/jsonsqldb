@@ -20,7 +20,7 @@ DirectoryIndex index.php
 # --- Las carpetas internas también, aunque falten sus .htaccess ---
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteRule ^(lib|vistas|datos)(/|$) - [F,L]
+    RewriteRule ^(lib|vistas|datos|idiomas|herramientas)(/|$) - [F,L]
 </IfModule>
 
 ServerSignature Off

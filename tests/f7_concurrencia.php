@@ -741,6 +741,62 @@ chk('borrar la base de pruebas', function () use ($raiz) {
     return !is_dir($raiz);
 });
 
+echo "\n== Copias del panel mientras se escribe ==\n";
+
+chk('el panel copia la base (ZIP, todo o nada) con el bloqueo del motor: cada copia es de un solo momento', function () use ($raiz) {
+    // Una auditoría externa señaló que el ZIP del panel leía la carpeta sin
+    // ningún bloqueo. Aquí cuatro procesos insertan sin parar en «pares», y un
+    // trigger copia cada fila a «espejo» en la misma sentencia: en cualquier
+    // momento confirmado las dos tablas tienen las mismas filas. Mientras
+    // tanto se copia la carpeta como lo hace el panel (conBaseBloqueada), y
+    // cada copia, abierta como base, tiene que tener las dos iguales.
+    require_once dirname(__DIR__) . '/jsonsqldbadmin/lib/Idioma.php';
+    require_once dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php';
+    Database::crear('copias', $raiz);
+    $bd = new Database('copias', $raiz);
+    $bd->consultar('CREATE TABLE pares (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)');
+    $bd->consultar('CREATE TABLE espejo (id INTEGER PRIMARY KEY, v TEXT)');
+    $bd->consultar('CREATE TRIGGER copia AFTER INSERT ON pares BEGIN INSERT INTO espejo (id, v) VALUES (NEW.id, NEW.v); END');
+    $fin = microtime(true) + 3;
+    $procs = [];
+    for ($i = 0; $i < 4; $i++) {
+        $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+                . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+                . '$bd = new JsonSQLDB\\Database("copias", ' . var_export($raiz, true) . ');'
+                . 'while (microtime(true) < ' . $fin . ') { $bd->consultar("INSERT INTO pares (v) VALUES (?)", [str_repeat("x", 300)]); }';
+        $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+        if (is_resource($p)) { $procs[] = [$p, $tub]; }
+    }
+    $copias = 0;
+    $mal = [];
+    $copiar = static function (string $de, string $a) use (&$copiar): void {
+        @mkdir($a, 0775, true);
+        foreach ((array)scandir($de) as $f) {
+            if ($f === '.' || $f === '..' || esFicheroDeBloqueo((string)$f)) { continue; }
+            is_dir("$de/$f") ? $copiar("$de/$f", "$a/$f") : copy("$de/$f", "$a/$f");
+        }
+    };
+    while (microtime(true) < $fin) {
+        $nombre = 'copia' . $copias;
+        conBaseBloqueada("$raiz/copias", static fn() => $copiar("$raiz/copias", "$raiz/$nombre"));
+        $c = new Database($nombre, $raiz);
+        $a = (int)$c->consultar('SELECT COUNT(*) AS n FROM pares')[0]['n'];
+        $b = (int)$c->consultar('SELECT COUNT(*) AS n FROM espejo')[0]['n'];
+        if ($a !== $b) { $mal[] = "copia $copias: pares $a, espejo $b"; }
+        $copias++;
+        usleep(50000);
+    }
+    $errores = [];
+    foreach ($procs as [$p, $tub]) {
+        $salida = '';
+        foreach ($tub as $t) { $salida .= stream_get_contents($t); fclose($t); }
+        if (proc_close($p) !== 0 || trim($salida) !== '') { $errores[] = trim(substr($salida, 0, 200)); }
+    }
+    $total = (int)$bd->consultar('SELECT COUNT(*) AS n FROM pares')[0]['n'];
+    return $mal === [] && $errores === [] && $copias >= 5 && $total > 0
+        ?: implode(' | ', array_merge($mal, $errores)) . " · $copias copias, $total filas";
+});
+
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";
 exit($ko === 0 ? 0 : 1);

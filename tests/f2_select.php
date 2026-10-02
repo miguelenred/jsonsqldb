@@ -230,6 +230,10 @@ chk('agregado sobre tabla vacía', function () use ($bd) {
 error('agregado en WHERE', 'SYNTAX', 'SELECT nombre FROM usuarios WHERE COUNT(*) > 1');
 
 echo "\n== Funciones de texto ==\n";
+chk('TRANSLATE cambia cada carácter por el de su posición y quita los que sobran (2.7.3)', function () use ($bd) {
+    $r = $bd->consultar("SELECT TRANSLATE('Ñandú áb', 'áúb', 'au') AS a, TRANSLATE(NULL, 'a', 'b') AS b, TRANSLATE('abc', '', 'x') AS c")[0];
+    return $r === ['a' => 'Ñandu a', 'b' => null, 'c' => 'abc'] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
 chk('UPPER / LOWER con acentos', fn() => igual(
     $bd->consultar("SELECT UPPER(nombre), LOWER(nombre) FROM usuarios WHERE id = 3"),
     [['MARÍA','maría']]
@@ -685,6 +689,18 @@ chk('GROUP_CONCAT ignora los NULL', function () use ($bd) {
     $r = $bd->consultar('SELECT GROUP_CONCAT(a) AS s FROM gc');
     $bd->consultar('DROP TABLE gc');
     return $r[0]['s'] === 'x,y' ?: $r[0]['s'];
+});
+chk('GROUP_CONCAT … ORDER BY ordena dentro de cada grupo, también con DISTINCT y separador', function () use ($bd) {
+    // Como MySQL y SQLite 3.44: lo que da es lo mismo que da SQLite
+    $bd->consultar('CREATE TABLE gco (g INTEGER, v VARCHAR(5), n INTEGER)');
+    $bd->consultar("INSERT INTO gco VALUES (1,'b',2),(1,'a',3),(1,'c',1),(2,'z',1),(2,'y',2),(1,'a',9)");
+    $r = [
+        array_column($bd->consultar("SELECT g, GROUP_CONCAT(v, '|' ORDER BY v) AS x FROM gco GROUP BY g ORDER BY g"), 'x'),
+        array_column($bd->consultar('SELECT g, GROUP_CONCAT(v ORDER BY n DESC) AS x FROM gco GROUP BY g ORDER BY g'), 'x'),
+        array_column($bd->consultar('SELECT GROUP_CONCAT(DISTINCT v ORDER BY v DESC) AS x FROM gco'), 'x'),
+    ];
+    $bd->consultar('DROP TABLE gco');
+    return $r === [['a|a|b|c', 'y|z'], ['a,a,b,c', 'y,z'], ['z,y,c,b,a']] ?: json_encode($r);
 });
 
 echo "\n== EXISTS ==\n";

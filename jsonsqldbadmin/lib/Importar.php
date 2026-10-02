@@ -41,13 +41,94 @@ final class Importar
      * No hay transacciones: si una sentencia falla, las anteriores ya están
      * hechas. Se para ahí y se dice cuál era y cuántas se ejecutaron.
      */
-    public static function sql(string $fichero, string $base, string $dialecto = 'auto'): string
+    /**
+     * Importa un volcado SQL. Con $rutaBase (la carpeta de la base, cuando el
+     * panel la alcanza: misma máquina que el motor) es todo o nada: antes se
+     * hace una copia de la base y, si algo falla, se deja como estaba. Sin
+     * ella, lo que se haya ejecutado antes del fallo queda hecho.
+     */
+    public static function sql(string $fichero, string $base, string $dialecto = 'auto', ?string $rutaBase = null): string
     {
-        $fh = @fopen($fichero, 'rb');
-        if ($fh === false) {
-            throw new RuntimeException(t('No se puede leer el fichero subido.'));
+        return self::deshacible($rutaBase, fn(bool $d) => self::importarSql($fichero, $base, $dialecto, $d));
+    }
+
+    /** Importa un CSV en una tabla; con $rutaBase, todo o nada (como sql()). */
+    public static function csv(string $fichero, string $base, string $tabla, ?string $rutaBase = null): string
+    {
+        return self::deshacible($rutaBase, fn(bool $d) => self::importarCsv($fichero, $base, $tabla, $d));
+    }
+
+    /**
+     * Ejecuta una importación con una copia de la base de antes, si se puede, y
+     * la devuelve a como estaba si algo falla.
+     *
+     * @param callable(bool): string $importar recibe si se puede deshacer
+     */
+    private static function deshacible(?string $rutaBase, callable $importar): string
+    {
+        // Hace falta poder escribir en la carpeta de la base y en la de al lado
+        // (la copia): si no, devolverla a como estaba podría quedarse a medias
+        if ($rutaBase === null || !is_dir($rutaBase) || !is_writable($rutaBase) || !is_writable(dirname($rutaBase))) {
+            return $importar(false);
         }
-        if (!in_array($dialecto, ['jsonsqldb', 'sqlite', 'mysql', 'postgresql', 'sqlserver'], true)) {
+        // La copia, con la base bloqueada: entera de un mismo momento
+        try {
+            $copia = conBaseBloqueada($rutaBase, static fn(): string => self::copiaDeAntes($rutaBase, '.antes-de-importar'));
+        } catch (RuntimeException $e) {
+            return $importar(false);                // sin sitio para la copia: como siempre
+        }
+        try {
+            $r = $importar(true);
+        } catch (Throwable $e) {
+            try {
+                conBaseBloqueada($rutaBase, static fn() => self::devolver($copia, $rutaBase));
+            } catch (RuntimeException $r) {
+                // El mensaje de la importación decía que todo había vuelto atrás: aquí no es así
+                throw new RuntimeException($r->getMessage() . ' ' . t('Lo que paró la importación: {error}',
+                    ['error' => ($e->getPrevious() ?? $e)->getMessage()]), 0, $e);
+            } finally {
+                self::olvidarCache();
+            }
+            throw $e;
+        }
+        self::borrarArbol($copia);
+        return $r;
+    }
+
+    private static function copiarArbol(string $origen, string $destino): bool
+    {
+        if (!@mkdir($destino, 0775, true) && !is_dir($destino)) {
+            return false;
+        }
+        foreach ((array)scandir($origen) as $f) {
+            if ($f === '.' || $f === '..' || esFicheroDeBloqueo((string)$f)) {
+                continue;
+            }
+            $de = "$origen/$f";
+            $a = "$destino/$f";
+            if (is_dir($de) ? !self::copiarArbol($de, $a) : !@copy($de, $a)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Después de devolver una base a como estaba, la caché de APCu del motor
+     * podría tener resultados de lo que se deshizo con los mismos números de
+     * revisión: se vacía (la de disco está dentro de la carpeta de la base).
+     */
+    private static function olvidarCache(): void
+    {
+        if (function_exists('apcu_enabled') && apcu_enabled() && class_exists('APCUIterator')) {
+            apcu_delete(new APCUIterator('/^jsq:/'));
+        }
+    }
+
+    private static function importarSql(string $fichero, string $base, string $dialecto, bool $deshacible): string
+    {
+        $fh = self::abrirUtf8($fichero);
+        if (!in_array($dialecto, ['jsonsqldb', 'sqlite', 'mysql', 'postgresql', 'sqlserver', 'access'], true)) {
             $dialecto = Traductor::detectar((string)fread($fh, 8192));
             rewind($fh);
         }
@@ -86,17 +167,31 @@ final class Importar
         // PostgreSQL y SQL Server declaran la clave primaria, el autoincremento
         // o los valores por defecto después de crear la tabla, a veces después
         // de sus datos: una primera pasada los recoge para el CREATE TABLE
-        if ($traductor !== null && in_array($dialecto, ['postgresql', 'sqlserver'], true)) {
+        if ($traductor !== null && in_array($dialecto, ['postgresql', 'sqlserver', 'access'], true)) {
             foreach (self::sentencias($fh, $dialecto) as [$sql]) {
                 $traductor->observar($sql);
             }
             rewind($fh);
         }
         try {
+            self::$noUtf8 = 0;
             foreach (self::sentencias($fh, $dialecto) as [$sql, $en]) {
                 $linea = $en;
                 if ($traductor !== null) {
+                    $traductor->venidaDeLatin1(self::$latin1);
                     foreach ($traductor->traducir($sql) as $traducida) {
+                        // Una vista traducida que el motor no acepta se salta y
+                        // se dice; el resto del volcado sigue
+                        if (preg_match('/^CREATE VIEW\s+("(?:[^"]|"")+")/', $traducida, $v)) {
+                            $vaciar();
+                            try {
+                                Api::sql($base, $traducida);
+                                $hechas++;
+                            } catch (RuntimeException $e) {
+                                $traductor->avisar(t("{que} '{n}' sin importar: {motivo}", ['que' => t('Vista'), 'n' => trim($v[1], '"'), 'motivo' => $e->getMessage()]));
+                            }
+                            continue;
+                        }
                         $ejecutar($traducida);
                     }
                     continue;
@@ -117,19 +212,110 @@ final class Importar
                     Api::sql($base, $alter);
                     $hechas++;
                 }
+                // Y los triggers, los últimos: con los datos ya cargados
+                $linea = t('el final (triggers)');
+                foreach ($traductor->triggers() as [$nombreTrg, $trg]) {
+                    try {
+                        Api::sql($base, $trg);
+                        $hechas++;
+                    } catch (RuntimeException $e) {
+                        $traductor->avisar(t("{que} '{n}' sin importar: {motivo}", ['que' => 'Trigger', 'n' => $nombreTrg, 'motivo' => $e->getMessage()]));
+                    }
+                }
             }
         } catch (Throwable $e) {
-            throw new RuntimeException(t('Se ejecutaron {n} sentencia(s) y paró cerca de la línea {linea}: {error}. Lo anterior ya está hecho: no hay transacciones.',
-                ['n' => $hechas, 'linea' => $linea, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
+            throw new RuntimeException($deshacible
+                ? t('Paró cerca de la línea {linea}: {error}. No se ha cambiado nada: la base ha vuelto a como estaba antes de importar.',
+                    ['linea' => $linea, 'error' => rtrim($e->getMessage(), '. ')])
+                : t('Se ejecutaron {n} sentencia(s) y paró cerca de la línea {linea}: {error}. Lo anterior ya está hecho: no hay transacciones.',
+                    ['n' => $hechas, 'linea' => $linea, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
         } finally {
             fclose($fh);
         }
         $nombres = ['jsonsqldb' => 'jsonSQLDB', 'sqlite' => 'SQLite', 'mysql' => 'MySQL / MariaDB',
-                    'postgresql' => 'PostgreSQL', 'sqlserver' => 'SQL Server'];
+                    'postgresql' => 'PostgreSQL', 'sqlserver' => 'SQL Server', 'access' => 'Microsoft Access'];
         $avisos = $traductor === null ? [] : $traductor->avisos();
+        if (self::$noUtf8 > 0) {
+            $avisos[] = t('Sentencias que no estaban en UTF-8, leídas como Latin-1 / Windows-1252 ({n}): si eran datos binarios, vuelca con --hex-blob', ['n' => self::$noUtf8]);
+        }
         return t('{n} sentencia(s) ejecutadas (volcado de {motor}).', ['n' => $hechas, 'motor' => $nombres[$dialecto]])
             . ($avisos === [] ? '' : ' ' . t('Lo que no ha llegado igual: {avisos}.', ['avisos' => implode('; ', $avisos)]));
     }
+
+    /**
+     * Abre un volcado para leerlo en UTF-8. Management Studio guarda los
+     * scripts en UTF-16 («Unicode») si no se le dice otra cosa, y algunos
+     * programas de Windows ponen la marca de UTF-8 al principio: lo primero se
+     * convierte a un temporal en UTF-8, por trozos; lo segundo se salta.
+     *
+     * @return resource
+     */
+    private static function abrirUtf8(string $fichero)
+    {
+        $fh = @fopen($fichero, 'rb');
+        if ($fh === false) {
+            throw new RuntimeException(t('No se puede leer el fichero subido.'));
+        }
+        $marca = (string)fread($fh, 3);
+        if (strncmp($marca, "\xEF\xBB\xBF", 3) === 0) {
+            $limpio = fopen('php://temp', 'w+b');
+            stream_copy_to_stream($fh, $limpio);
+            fclose($fh);
+            rewind($limpio);
+            return $limpio;
+        }
+        $origen = strncmp($marca, "\xFF\xFE", 2) === 0 ? 'UTF-16LE' : (strncmp($marca, "\xFE\xFF", 2) === 0 ? 'UTF-16BE' : null);
+        if ($origen === null) {
+            rewind($fh);
+            return $fh;
+        }
+        // A un temporal en memoria (o en disco si pasa de 2 MB), de 1 MB en 1 MB
+        // y sin partir un carácter: en UTF-16 cada unidad son 2 bytes, y un par
+        // sustituto va entero si el trozo acaba en su primera mitad
+        fseek($fh, 2);
+        $limpio = fopen('php://temp', 'w+b');
+        $resto = '';
+        while (!feof($fh)) {
+            $trozo = $resto . (string)fread($fh, 1048576);
+            $corte = strlen($trozo) - strlen($trozo) % 2;
+            $alto = $origen === 'UTF-16LE' ? ord($trozo[$corte - 1] ?? "\0") : ord($trozo[$corte - 2] ?? "\0");
+            if ($corte >= 2 && $alto >= 0xD8 && $alto <= 0xDB) {
+                $corte -= 2;                        // primera mitad de un par sustituto
+            }
+            $resto = (string)substr($trozo, $corte);
+            fwrite($limpio, (string)mb_convert_encoding(substr($trozo, 0, $corte), 'UTF-8', $origen));
+        }
+        fclose($fh);
+        rewind($limpio);
+        return $limpio;
+    }
+
+    /** Sentencias que no venían en UTF-8 en la última importación (leídas como Windows-1252). */
+    private static int $noUtf8 = 0;
+
+    /**
+     * Las sentencias del fichero, en UTF-8. Un volcado viejo de MySQL o uno
+     * hecho con --default-character-set=latin1 trae los textos en Latin-1 /
+     * Windows-1252: sin convertirlos, un solo byte suelto rompía el análisis
+     * de toda la sentencia («Sentencia no soportada: 'I'»).
+     *
+     * @param resource $fh
+     * @return \Generator<array{0: string, 1: int}>
+     */
+    private static function sentencias($fh, string $dialecto): \Generator
+    {
+        foreach (self::sentenciasCrudas($fh, $dialecto) as [$sql, $n]) {
+            self::$latin1 = !mb_check_encoding($sql, 'UTF-8');
+            if (self::$latin1) {
+                $sql = (string)mb_convert_encoding($sql, 'UTF-8', 'Windows-1252');
+                self::$noUtf8++;
+            }
+            yield [$sql, $n];
+        }
+    }
+
+    /** ¿La última sentencia entregada venía en Latin-1? */
+    private static bool $latin1 = false;
 
     /**
      * Las sentencias de un fichero SQL, una a una, con la línea en que acaba
@@ -149,7 +335,7 @@ final class Importar
      * @param resource $fh
      * @return \Generator<int, array{0: string, 1: int}>
      */
-    private static function sentencias($fh, string $dialecto = 'jsonsqldb'): \Generator
+    private static function sentenciasCrudas($fh, string $dialecto = 'jsonsqldb'): \Generator
     {
         $mysql = $dialecto === 'mysql';
         $pg    = $dialecto === 'postgresql';
@@ -160,10 +346,16 @@ final class Importar
         $dolar = '';            // dentro de $etiqueta$ … $etiqueta$ (PostgreSQL)
         $bloque = false;        // dentro de un /* comentario */
         $nivel = 0;             // BEGIN y CASE abiertos
+        $delim = ';';           // DELIMITER de mysqldump (;; alrededor de los triggers)
+        $condicional = 0;       // dentro de /*!50003 … */ de mysqldump: es SQL
         $n = 0;
         while (($l = fgets($fh)) !== false) {
             $n++;
             $vacia = trim($actual) === '' && $comilla === '' && $dolar === '' && !$bloque;
+            if ($vacia && $mysql && preg_match('/^\s*DELIMITER\s+(\S+)\s*$/i', $l, $dm)) {
+                $delim = $dm[1];
+                continue;
+            }
             if ($vacia && $pg && preg_match('/^\s*\\\\/', $l)) {
                 continue;                               // \restrict y otras órdenes de psql
             }
@@ -211,7 +403,30 @@ final class Importar
                     $actual .= "\n";
                     break;
                 }
+                // /*!50003 … */ de mysqldump: lo de dentro es SQL (vistas, triggers…)
+                if ($mysql && $c === '/' && ($l[$i + 1] ?? '') === '*' && ($l[$i + 2] ?? '') === '!') {
+                    $i += 2;
+                    while (ctype_digit($l[$i + 1] ?? '')) { $i++; }
+                    $condicional++;
+                    $actual .= ' ';
+                    continue;
+                }
+                if ($condicional > 0 && $c === '*' && ($l[$i + 1] ?? '') === '/') {
+                    $condicional--;
+                    $i++;
+                    $actual .= ' ';
+                    continue;
+                }
                 if ($c === '/' && ($l[$i + 1] ?? '') === '*') { $bloque = true; $i++; continue; }
+                // Con otro DELIMITER, el ; es un carácter más (el de dentro de un trigger)
+                if ($delim !== ';' && substr($l, $i, strlen($delim)) === $delim) {
+                    $i += strlen($delim) - 1;
+                    if (trim($actual) !== '') {
+                        yield [trim($actual) . ';', $n];
+                    }
+                    $actual = '';
+                    continue;
+                }
                 if ($pg && $c === '$' && preg_match('/\G\$[A-Za-z_]*\$/', $l, $m, 0, $i)) {
                     $dolar = $m[0];
                     $actual .= $dolar;
@@ -225,7 +440,7 @@ final class Importar
                     $actual .= $c;
                     continue;
                 }
-                if ($c === ';' && $nivel <= 0) {
+                if ($c === ';' && $nivel <= 0 && $delim === ';') {
                     $sentencia = trim($actual);
                     $actual = '';
                     $nivel = 0;
@@ -276,7 +491,7 @@ final class Importar
      * Sin transacciones: si un lote falla (un tipo que no encaja, una clave
      * repetida), lo anterior ya está dentro y se dice hasta qué línea.
      */
-    public static function csv(string $fichero, string $base, string $tabla): string
+    private static function importarCsv(string $fichero, string $base, string $tabla, bool $deshacible): string
     {
         $fh = @fopen($fichero, 'rb');
         if ($fh === false) {
@@ -298,6 +513,7 @@ final class Importar
             $lote = [];
             $filas = 0;
             $linea = 1;
+            $noUtf8 = 0;
             $insertar = static function () use (&$lote, &$filas, $base, $cab, $marcas): void {
                 if ($lote === []) { return; }
                 Api::sql($base, $cab . implode(', ', array_fill(0, count($lote), $marcas)), array_merge(...$lote));
@@ -311,20 +527,33 @@ final class Importar
                     if (count($r) !== count($cols)) {
                         throw new RuntimeException('tiene ' . count($r) . ' campo(s) y la cabecera ' . count($cols) . '.');
                     }
-                    $lote[] = array_map(static fn($v) => $v === '' ? null : $v, $r);
+                    $lote[] = array_map(static function ($v) use (&$noUtf8) {
+                        if ($v === '' || $v === null) {
+                            return null;
+                        }
+                        if (!mb_check_encoding($v, 'UTF-8')) {
+                            $noUtf8++;
+                            return (string)mb_convert_encoding($v, 'UTF-8', 'Windows-1252');
+                        }
+                        return $v;
+                    }, $r);
                     if (count($lote) >= self::LOTE) {
                         $insertar();
                     }
                 }
                 $insertar();
             } catch (Throwable $e) {
-                throw new RuntimeException(t('Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: no hay transacciones.',
-                    ['n' => $filas, 'linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
+                throw new RuntimeException($deshacible
+                    ? t('El problema está en la línea {linea} o en las {lote} anteriores: {error}. No se ha cargado nada: la tabla ha vuelto a como estaba.',
+                        ['linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')])
+                    : t('Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: no hay transacciones.',
+                        ['n' => $filas, 'linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
             }
         } finally {
             fclose($fh);
         }
-        return t("{n} fila(s) cargadas en '{tabla}'.", ['n' => $filas, 'tabla' => $tabla]);
+        return t("{n} fila(s) cargadas en '{tabla}'.", ['n' => $filas, 'tabla' => $tabla])
+            . ($noUtf8 > 0 ? ' ' . t('Campos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252: {n}.', ['n' => $noUtf8]) : '');
     }
 
     /** Ficheros sueltos que sí se aceptan además de los .json */
@@ -361,31 +590,37 @@ final class Importar
                 );
             }
 
-            // Copia de seguridad de lo que hay ahora, por si algo falla a medias
-            $respaldo = self::respaldar($rutaBase);
-
-            try {
-                foreach ($entradas as $interna => $destino) {
-                    $contenido = $arch->getFromName($interna);
-                    if ($contenido === false) {
-                        throw new RuntimeException(t('No se pudo leer \'{interna}\' del ZIP.', ['interna' => $interna]));
+            // Con el bloqueo exclusivo de la base (el del motor): mientras se
+            // restaura no hay consultas ni escrituras en ella, y las que llegan
+            // esperan. Se restaura en su misma carpeta, sin cambiarle el nombre,
+            // para que quien espera el bloqueo siga esperando el mismo fichero
+            conBaseBloqueada($rutaBase, static function () use ($arch, $entradas, $rutaBase): void {
+                $copia = self::copiaDeAntes($rutaBase, '.antes-de-restaurar');
+                try {
+                    self::vaciar($rutaBase);
+                    foreach ($entradas as $interna => $destino) {
+                        $contenido = $arch->getFromName($interna);
+                        if ($contenido === false) {
+                            throw new RuntimeException(t('No se pudo leer \'{interna}\' del ZIP.', ['interna' => $interna]));
+                        }
+                        $dir = dirname($destino);
+                        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+                            throw new RuntimeException(t('No se puede crear la carpeta \'{dir}\'.', ['dir' => $dir]));
+                        }
+                        if (@file_put_contents($destino, $contenido) === false) {
+                            throw new RuntimeException(t('No se puede escribir {fichero}.', ['fichero' => basename($destino)]));
+                        }
                     }
-                    $dir = dirname($destino);
-                    if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
-                        throw new RuntimeException(t('No se puede crear la carpeta \'{dir}\'.', ['dir' => $dir]));
-                    }
-                    if (@file_put_contents($destino, $contenido) === false) {
-                        throw new RuntimeException(t('No se puede escribir {fichero}.', ['fichero' => basename($destino)]));
-                    }
+                } catch (Throwable $e) {
+                    self::devolver($copia, $rutaBase);
+                    throw new RuntimeException(
+                        t('La restauración falló y se ha dejado la base como estaba. {error}', ['error' => $e->getMessage()])
+                    );
+                } finally {
+                    self::olvidarCache();           // la base es otra: sus revisiones vuelven a empezar
                 }
-            } catch (Throwable $e) {
-                self::restaurar($respaldo, $rutaBase);
-                throw new RuntimeException(
-                    t('La restauración falló y se ha dejado la base como estaba. {error}', ['error' => $e->getMessage()])
-                );
-            }
-
-            self::borrarArbol($respaldo);
+                self::borrarArbol($copia);
+            });
 
             $tablas = 0;
             foreach (array_keys($entradas) as $interna) {
@@ -393,7 +628,7 @@ final class Importar
                     $tablas++;
                 }
             }
-            return count($entradas) . ' fichero(s) restaurados, ' . $tablas . ' tabla(s).';
+            return t('{f} fichero(s) restaurados, {t} tabla(s).', ['f' => count($entradas), 't' => $tablas]);
         } finally {
             $arch->close();
         }
@@ -435,6 +670,16 @@ final class Importar
             if ($partes === []) {
                 continue;
             }
+            // Ningún trozo de la ruta puede ser «.» o «..», ni estar vacío (a//b),
+            // ni llevar un byte nulo: ni siquiera al final, donde la lista de
+            // nombres permitidos ya lo dejaba fuera
+            foreach ($partes as $p) {
+                if ($p === '' || $p === '.' || $p === '..' || strpos($p, "\0") !== false) {
+                    throw new RuntimeException(
+                        t("El ZIP contiene una ruta que sale de la carpeta de destino: '{ruta}'. No se ha tocado nada.", ['ruta' => $interna])
+                    );
+                }
+            }
             $relativa = implode('/', $partes);
             $fichero  = basename($relativa);
 
@@ -449,6 +694,15 @@ final class Importar
             self::validarContenido($arch, $i, $fichero);
 
             $out[$interna] = $rutaBase . '/' . $relativa;
+        }
+        // Y, por si acaso, cada destino queda dentro de la carpeta de la base
+        $raiz = rtrim(str_replace('\\', '/', $rutaBase), '/') . '/';
+        foreach ($out as $interna => $destino) {
+            if (strpos(str_replace('\\', '/', $destino), $raiz) !== 0) {
+                throw new RuntimeException(
+                    t("El ZIP contiene una ruta que sale de la carpeta de destino: '{ruta}'. No se ha tocado nada.", ['ruta' => $interna])
+                );
+            }
         }
         return $out;
     }
@@ -512,30 +766,46 @@ final class Importar
         }
     }
 
-    /** Aparta lo que hay ahora y devuelve dónde ha quedado. */
-    private static function respaldar(string $rutaBase): string
+    /**
+     * Copia la base a su lado (sin los ficheros de bloqueo) y devuelve dónde.
+     * Se llama con la base bloqueada.
+     */
+    private static function copiaDeAntes(string $rutaBase, string $sufijo): string
     {
-        $respaldo = $rutaBase . '.antes-de-restaurar';
-        self::borrarArbol($respaldo);
-
-        if (!is_dir($rutaBase)) {
-            return $respaldo;                               // base nueva: nada que guardar
-        }
-        if (!@rename($rutaBase, $respaldo)) {
+        $copia = $rutaBase . $sufijo;
+        self::borrarArbol($copia);
+        if (!self::copiarArbol($rutaBase, $copia)) {
+            self::borrarArbol($copia);
             throw new RuntimeException(
-                t('No se pudo apartar la base actual antes de restaurar. Comprueba los permisos de escritura en la carpeta de datos.')
+                t('No se pudo hacer la copia de la base antes de cambiarla. Comprueba el espacio libre y los permisos de la carpeta de datos.')
             );
         }
-        return $respaldo;
+        return $copia;
     }
 
-    private static function restaurar(string $respaldo, string $rutaBase): void
+    /** Vacía la carpeta de una base, salvo sus ficheros de bloqueo (los tiene cogidos quien la cambia). */
+    private static function vaciar(string $rutaBase): void
     {
-        if (!is_dir($respaldo)) {
-            return;
+        foreach ((array)scandir($rutaBase) as $f) {
+            if ($f === '.' || $f === '..' || esFicheroDeBloqueo((string)$f)) {
+                continue;
+            }
+            is_dir("$rutaBase/$f") ? self::borrarArbol("$rutaBase/$f") : @unlink("$rutaBase/$f");
         }
-        self::borrarArbol($rutaBase);
-        @rename($respaldo, $rutaBase);
+    }
+
+    /**
+     * Deja la base como en la copia, en su misma carpeta, y borra la copia. Se
+     * llama con la base bloqueada. Si la copia no se puede volver a poner, se
+     * conserva y se dice dónde está.
+     */
+    private static function devolver(string $copia, string $rutaBase): void
+    {
+        self::vaciar($rutaBase);
+        if (!self::copiarArbol($copia, $rutaBase)) {
+            throw new RuntimeException(t('No se pudo devolver la base a como estaba: la copia de antes está en {copia}.', ['copia' => $copia]));
+        }
+        self::borrarArbol($copia);
     }
 
     private static function borrarArbol(string $dir): void

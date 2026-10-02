@@ -4,6 +4,16 @@
 </IfModule>
 Options -Indexes
 
+# Los clientes de ejemplo son para copiarlos, no para servirlos
+<FilesMatch "^cliente_ejemplo\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
 <FilesMatch "_config\.php$">
     <IfModule mod_authz_core.c>
         Require all denied

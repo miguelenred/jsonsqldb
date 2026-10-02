@@ -60,7 +60,9 @@ final class ApiStore
             }
             $texto  = stream_get_contents($fh);
             $estado = $texto === '' ? [] : (json_decode($texto, true) ?: []);
-            $estado += ['ips' => [], 'fallos' => [], 'nonces' => []];
+            // 'fallos' (la lista global de antes de 2.7.3) ya no se usa: se quita
+            unset($estado['fallos']);
+            $estado += ['ips' => [], 'fallosIp' => [], 'claves' => [], 'nonces' => []];
 
             [$estado, $resultado] = $fn($estado);
             if ($soloLectura) {
@@ -88,15 +90,16 @@ final class ApiStore
         $ahora  = time();
         $limite = $ahora - RATE_LIMIT_SECONDS;
 
-        foreach ($estado['ips'] as $ip => $marcas) {
-            $vivas = array_values(array_filter($marcas, static fn(int $t): bool => $t >= $limite));
-            if ($vivas === []) {
-                unset($estado['ips'][$ip]);
-            } else {
-                $estado['ips'][$ip] = $vivas;
+        foreach (['ips', 'fallosIp', 'claves'] as $grupo) {
+            foreach ($estado[$grupo] as $quien => $marcas) {
+                $vivas = array_values(array_filter($marcas, static fn(int $t): bool => $t >= $limite));
+                if ($vivas === []) {
+                    unset($estado[$grupo][$quien]);
+                } else {
+                    $estado[$grupo][$quien] = $vivas;
+                }
             }
         }
-        $estado['fallos'] = array_values(array_filter($estado['fallos'], static fn(int $t): bool => $t >= $limite));
 
         $limiteNonce = $ahora - (RATE_TIMESTAMP_DIFF + 60);
         foreach ($estado['nonces'] as $nonce => $t) {
@@ -107,41 +110,49 @@ final class ApiStore
         return $estado;
     }
 
-    /** ¿Se ha superado el número global de fallos de autenticación? */
-    public function bloqueoGlobal(): bool
+    /**
+     * ¿Ha fallado ya demasiadas veces la autenticación desde esta IP? Se mira
+     * antes de comprobar nada más, y solo cierra el paso a esa IP.
+     *
+     * Hasta 2.7.2 había además un bloqueo global: 30 fallos de cualquiera, sin
+     * ni siquiera una clave válida, cerraban la API a todo el mundo durante un
+     * día. Era una forma de tirarla desde fuera, y se ha quitado.
+     */
+    public function ipBloqueada(string $ip): bool
     {
         if (!RATE_LIMIT_ACTIVO) {
             return false;
         }
-        return (bool)$this->transaccion(static function (array $e): array {
+        return (bool)$this->transaccion(static function (array $e) use ($ip): array {
             $limite = time() - RATE_LIMIT_SECONDS;
-            $n = 0;
-            foreach ($e['fallos'] as $t) {
-                if ($t >= $limite) { $n++; }
-            }
-            return [$e, $n >= RATE_LIMIT_GLOBAL_MAX];
+            $n = count(array_filter($e['fallosIp'][$ip] ?? [], static fn(int $t): bool => $t >= $limite));
+            return [$e, $n >= self::fallosPorIp()];
         }, true);                              // solo mira: no reescribe nada
     }
 
+    /** Fallos de una IP antes de bloquearla; 10 si la configuración es de antes de 2.7.3. */
+    private static function fallosPorIp(): int
+    {
+        return max(1, defined('RATE_LIMIT_FALLOS_IP') ? (int)RATE_LIMIT_FALLOS_IP : 10);
+    }
+
     /**
-     * Anota un fallo de autenticación y, de paso, cuenta la petición.
+     * Anota un fallo de autenticación de una IP, y cuenta la petición.
      *
-     * Las dos cosas iban en transacciones separadas, o sea dos reescrituras del
-     * fichero por cada petición rechazada. Van juntas porque siempre se hacían
-     * juntas.
+     * Las dos cosas van en la misma transacción: una reescritura del fichero
+     * por petición rechazada, no dos. Con tope en las dos listas: pasado el
+     * límite nada cambia la decisión, y solo engordaría el fichero.
      */
-    public function fallo(?string $ip = null): void
+    public function fallo(string $ip): void
     {
         if (!RATE_LIMIT_ACTIVO) {
             return;
         }
         $this->transaccion(static function (array $e) use ($ip): array {
-            // Con tope, por lo mismo que en nonceYContar(): lo que pase de ahí no
-            // cambia ninguna decisión y solo engordaría el fichero
-            if (count($e['fallos']) < 10 * RATE_LIMIT_MAX) {
-                $e['fallos'][] = time();
+            if (count($e['fallosIp'][$ip] ?? []) < self::fallosPorIp()) {
+                $e['fallosIp'][$ip][] = time();
             }
-            if ($ip !== null && count($e['ips'][$ip] ?? []) < RATE_LIMIT_MAX) {
+            if (count($e['ips'][$ip] ?? []) < RATE_LIMIT_MAX) {
                 $e['ips'][$ip][] = time();
             }
             return [$e, null];
@@ -162,14 +173,16 @@ final class ApiStore
      *
      * @return true|string|false
      */
-    public function nonceYContar(string $nonce, string $ip)
+    public function nonceYContar(string $nonce, string $ip, string $clave = '')
     {
         $antiReplay = ANTI_REPLAY_ACTIVO;
         $rate       = RATE_LIMIT_ACTIVO;
         if (!$antiReplay && !$rate) {
             return true;
         }
-        $r = $this->transaccion(static function (array $e) use ($nonce, $ip, $antiReplay, $rate): array {
+        // Una configuración de antes de 2.7.3 no tiene esta constante: sin cupo
+        $porClave = defined('RATE_LIMIT_POR_CLAVE') ? (int)RATE_LIMIT_POR_CLAVE : 0;
+        $r = $this->transaccion(static function (array $e) use ($nonce, $ip, $clave, $antiReplay, $rate, $porClave): array {
             if ($antiReplay && isset($e['nonces'][$nonce])) {
                 return [$e, 'nonce'];
             }
@@ -189,10 +202,27 @@ final class ApiStore
                 $marcas[] = time();
             }
             $e['ips'][$ip] = $marcas;
-            return [$e, $dentro ? true : 'limite'];
+            if (!$dentro) {
+                return [$e, 'limite'];
+            }
+            // Cupo de cada API key, sea cual sea la IP (0 = sin cupo): para que
+            // una clave filtrada, o una aplicación desbocada, no lo agote todo
+            if ($porClave > 0 && $clave !== '') {
+                $deClave = array_values(array_filter($e['claves'][$clave] ?? [], static fn(int $t): bool => $t >= $limite));
+                if (count($deClave) >= $porClave) {
+                    $e['claves'][$clave] = $deClave;
+                    return [$e, 'limite'];
+                }
+                $deClave[] = time();
+                $e['claves'][$clave] = $deClave;
+            }
+            return [$e, true];
         });
         return $r === null ? false : $r;
     }
+
+    /** Ficheros llenos por día a partir de los cuales no se anotan las peticiones sin clave válida. */
+    private const MAX_FICHEROS_DIA = 20;
 
     /**
      * Histórico de peticiones: un fichero por día, un objeto JSON por línea.
@@ -207,24 +237,34 @@ final class ApiStore
         if ($linea === false) {
             return;
         }
-        @file_put_contents($this->ficheroDelDia(), $linea . "\n", FILE_APPEND | LOCK_EX);
+        [$fichero, $vuelta] = $this->ficheroDelDia();
+        // Un día con más de MAX_FICHEROS_DIA ficheros llenos ya no admite las
+        // peticiones rechazadas antes de saber de quién son: sin tope, cualquiera
+        // podía llenar el disco a base de peticiones sin clave
+        if ($vuelta >= self::MAX_FICHEROS_DIA && ($entrada['origen'] ?? '') === '') {
+            return;
+        }
+        @file_put_contents($fichero, $linea . "\n", FILE_APPEND | LOCK_EX);
 
         if (mt_rand(1, 200) === 1) {
             $this->purgarHistorico();
         }
     }
 
-    private function ficheroDelDia(): string
+    /** @return array{0: string, 1: int} el fichero de hoy en el que escribir y cuántos van llenos */
+    private function ficheroDelDia(): array
     {
         $base = $this->dir . '/peticiones-' . date('Y-m-d');
         $max  = Config::logMaxSize();
         $f    = $base . '.json';
+        $i    = 0;
         if ($max > 0) {
             for ($i = 1; is_file($f) && filesize($f) >= $max; $i++) {
                 $f = $base . '.' . $i . '.json';
             }
+            $i--;
         }
-        return $f;
+        return [$f, $i];
     }
 
     private function purgarHistorico(): void

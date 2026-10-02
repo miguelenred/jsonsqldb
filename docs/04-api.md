@@ -80,10 +80,21 @@ exist.
 
 ### The example clients' key
 
-`cliente_ejemplo.php`, `cliente_ejemplo.ps1` and `cliente_ejemplo.py` come with an
-API key of their own, **the same in all three**, with `escritura` permission on
-the `pruebas` database and no other. It is registered in
+`cliente_ejemplo.php`, `cliente_ejemplo.ps1` and `cliente_ejemplo.py` use an API
+key of their own, **the same in all three**, with `escritura` permission on the
+`pruebas` database and no other. It is registered in
 `api/jsonsqldb_api_config.php` as «Clientes de ejemplo».
+
+**The key is not written into the clients** (2.7.3): they live in `api/`, and a
+file there can be requested over the web. They read it from environment
+variables — `JSONSQLDB_API_KEY`, `JSONSQLDB_HMAC_SECRET` and `JSONSQLDB_URL` —
+and `php configurar.php` prints the values when it creates the configuration.
+The web server refuses to hand out `cliente_ejemplo.*` (rules in `api/.htaccess`,
+`api/web.config` and `nginx/jsonsqldb.conf`). For your own application, copy the
+client next to your code, outside the public folder, and give it a key of its
+own. Up to 2.7.2 `configurar.php` wrote the key into the three files and two of
+them could be downloaded: if you ran it with an earlier version, change that
+account's key and secret (see SECURITY.md).
 
 `escritura` allows `SELECT`, `INSERT`, `UPDATE` and `DELETE`, plus the `SHOW`
 statements. It does not allow `CREATE`, `ALTER`, `DROP` or triggers: those need
@@ -215,6 +226,24 @@ Types come already normalised by the engine: numbers as numbers, dates as
 `yyyy-MM-dd[ HH:mm[:ss[.fff]]]` and nulls as `null`. Nothing needs converting in
 the client.
 
+**How to tell an error: by the `error` key, not by the HTTP status.** Almost
+every error — a bad key or signature, an expired or repeated token, the request
+limit, a database the key may not use, a wrong method, a request too large, an
+SQL error — comes with **HTTP 200** and the JSON above. Only four cases use
+another status, because they happen before the API can answer normally:
+
+| Status | When |
+|---|---|
+| 403 | The IP is not in `IPS_PERMITIDAS`, or the request came over HTTP with `EXIGIR_HTTPS` on |
+| 500 | The configuration is unfinished (`CHANGE_ME_` values), or a query ran out of memory |
+
+This is deliberate and stays so (an external audit of 2.7.2 suggested 401, 403,
+429… for each case): changing it would change what existing clients receive —
+PowerShell's `Invoke-RestMethod`, for one, throws an exception on a 4xx instead
+of returning the JSON with the reason. A client checks `error` in the body, as
+the example clients in `api/` do. A monitoring system or a proxy that needs to
+tell failures apart can read the same key, or the API's log.
+
 > **Leave it at `false` in production.** With `DEVOLVER_ERRORES = true` the
 > response includes the internal message, which may name tables and columns:
 > convenient while developing and free information for whoever probes your API.
@@ -288,7 +317,8 @@ The admin key and its `hmac_secret` must match `ADMIN_API_KEY` and
 | Maximum clock skew | `RATE_TIMESTAMP_DIFF` | 300 s |
 | Anti-replay (single-use token) | `ANTI_REPLAY_ACTIVO` | enabled |
 | Per-IP request limit | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **enabled**, 150 / 24 h |
-| Cut-off on authentication failures | `RATE_LIMIT_GLOBAL_MAX` | 30 |
+| Per-IP block after authentication failures | `RATE_LIMIT_FALLOS_IP` | 10 in the window, only that IP |
+| Per-key request limit, from any IP | `RATE_LIMIT_POR_CLAVE` | 0 (no limit) |
 | IP allow-list (single IP or CIDR) | `IPS_PERMITIDAS` | empty (no filter) |
 | Require HTTPS | `EXIGIR_HTTPS` | **`true`** |
 | HSTS header | `HSTS_ACTIVO` | `false` |
@@ -297,6 +327,20 @@ The admin key and its `hmac_secret` must match `ADMIN_API_KEY` and
 All state (per-IP counters, failures and used tokens) is kept in **JSON**, in
 `logs/api/estado.json`, under an exclusive lock and pruning only expired
 entries. There is no external database underneath.
+
+Up to 2.7.2 there was also a **global** cut-off: 30 authentication failures
+from anyone closed the API to every client for up to a day, which made it
+possible to take it down without any key. It was removed in 2.7.3:
+authentication failures now block only the IP they come from
+(`RATE_LIMIT_FALLOS_IP`), checked before anything else, and
+`RATE_LIMIT_GLOBAL_MAX` is no longer read. A configuration file from an earlier
+version keeps working: the new constants take their defaults when they are
+missing.
+
+What a rejected request leaves in the request log is cut down (the database
+name to 64 characters, the error to 1,000), and once a day has 20 full log files
+the requests rejected before their key is known are no longer logged, so they
+cannot fill the disk.
 
 Token comparison uses `hash_equals`, so the secret cannot be guessed by timing
 responses.
@@ -437,7 +481,7 @@ php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
 php tests/f2_select.php       → OK: 147
 php tests/f3_escrituras.php   → OK: 63
-php tests/f4_api.php          → OK: 54
+php tests/f4_api.php          → OK: 60
 php tests/f5_esquema.php      → OK: 91
 php tests/f5_admin.php        → OK: 128
 ```

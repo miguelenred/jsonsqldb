@@ -161,9 +161,10 @@ final class Instalador
             }
             $valores['ADMIN_API_KEY'] = $claveApi;
             $valores['ADMIN_HMAC_SECRET'] = $secretoApi;
-            if ($url !== '') {
-                $valores['ADMIN_API_URL'] = $url;
-            }
+            // Siempre escrita: deducida en cada petición de la cabecera Host, que
+            // manda el navegador, un Host manipulado podía llevarse la petición
+            // firmada (con la API key). La de ahora la ha comprobado el instalador
+            $valores['ADMIN_API_URL'] = $url !== '' ? $url : Api::url();
             $resumen = [t('Conexión') => 'API', 'URL' => $url !== '' ? $url : Api::url()] + $resumen;
             if ($generar) {
                 $resumen[t('Configuración de la API')] = t('creada con claves nuevas');
@@ -186,6 +187,51 @@ final class Instalador
     }
 
     /** Solo crea el administrador: la configuración ya está hecha. */
+    /** Fichero con el código de instalación: en datos/, que el servidor no sirve. */
+    public const FICHERO_CODIGO = 'codigo-instalacion.txt';
+
+    /**
+     * El código de instalación. Mientras no hay administrador, el asistente lo
+     * pide: está en un fichero del servidor, así que solo puede terminar la
+     * instalación quien tiene acceso al servidor. Antes, el primero que llegaba
+     * al panel recién publicado podía crear el administrador. Se crea la
+     * primera vez que se pide (o con php configurar.php, que lo muestra).
+     */
+    public static function codigo(): string
+    {
+        $ruta = self::rutaCodigo();
+        $codigo = is_file($ruta) ? trim((string)file_get_contents($ruta)) : '';
+        if (!preg_match('/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/', $codigo)) {
+            $codigo = implode('-', str_split(bin2hex(random_bytes(8)), 4));
+            if (@file_put_contents($ruta, $codigo . "\n", LOCK_EX) === false) {
+                throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => $ruta]));
+            }
+            @chmod($ruta, 0600);
+        }
+        return $codigo;
+    }
+
+    /** Comprueba el código que se ha escrito en el asistente. */
+    public static function comprobarCodigo(string $dado): void
+    {
+        $dado = strtolower(str_replace([' ', '-'], '', trim($dado)));
+        if ($dado === '' || !hash_equals(str_replace('-', '', self::codigo()), $dado)) {
+            throw new RuntimeException(t('El código de instalación no es correcto. Está en el fichero {fichero} del servidor.',
+                ['fichero' => self::FICHERO_CODIGO]));
+        }
+    }
+
+    /** Terminada la instalación, el código ya no sirve. */
+    public static function borrarCodigo(): void
+    {
+        @unlink(self::rutaCodigo());
+    }
+
+    private static function rutaCodigo(): string
+    {
+        return Store::ruta(self::FICHERO_CODIGO);  // la carpeta de datos del panel (ADMIN_DATA_PATH)
+    }
+
     public static function crearAdmin(string $usuario, string $clave, string $repetida): string
     {
         self::comprobarClaves($clave, $repetida);
@@ -266,7 +312,9 @@ final class Instalador
         if ($url !== '' && !preg_match('#^https?://[^\s]+$#i', $url)) {
             throw new RuntimeException(t('La URL de la API tiene que empezar por http:// o https://.'));
         }
-        $v['ADMIN_API_URL'] = $url;
+        // Vacía, la de esta instalación tal como la ve quien guarda ahora: escrita,
+        // no deducida en cada petición de la cabecera Host (ver arriba)
+        $v['ADMIN_API_URL'] = $url !== '' || $modo !== 'api' ? $url : Api::urlDeducida();
         foreach ([['api_key', 'ADMIN_API_KEY'], ['api_secret', 'ADMIN_HMAC_SECRET'],
                   ['lectura_key', 'ADMIN_API_KEY_LECTURA'], ['lectura_secret', 'ADMIN_HMAC_SECRET_LECTURA']] as [$campo, $c]) {
             $nuevo = trim((string)($d[$campo] ?? ''));

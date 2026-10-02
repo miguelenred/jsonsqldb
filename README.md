@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, with
 the data stored as JSON files you can read. No database server, no Composer, no
 extensions beyond the standard ones. You copy a folder and it works.
 
-**Version 2.7.2** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
+**Version 2.7.3** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
 8.1 or later recommended, [see why](#php-80-works-but-81-or-later-is-recommended))
 
 ---
@@ -346,7 +346,10 @@ Two more things that catch people out on a first install:
 
 Then open `jsonsqldbadmin/` in a browser. **The first time the panel is opened —
 and only the first time — it asks you to create the administrator account**: you
-choose the username and password right there. There is no default password and
+choose the username and password right there, after typing the **installation
+code** that `php configurar.php` prints (it is also in
+`jsonsqldbadmin/datos/codigo-instalacion.txt`): only someone with access to the
+server can finish the installation. There is no default password and
 no factory user, so there is nothing to change afterwards and no chance of
 leaving an `admin/admin` behind. The password is stored with bcrypt and must be
 at least 10 characters.
@@ -561,10 +564,17 @@ the role of each panel user. Apart from the ZIP backup and restore, the panel
 never reads or writes the data files.
 
 It manages databases, tables, columns, keys, views, triggers and rows; checks
-and repairs referential integrity; exports to CSV, `INSERT` statements, SQL
-dump or ZIP (and restores the ZIP); and has its own users with `admin` /
-read-only roles, bcrypt passwords, per-IP lockout, CSRF tokens and a daily
-audit trail. The full tour is in [`docs/05-admin.md`](docs/05-admin.md).
+and repairs referential integrity; exports to CSV, `INSERT` statements, ZIP or
+an SQL dump for SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft
+Access — views and triggers translated to each one's SQL — and imports the dumps
+those engines make, with their views and triggers, CSV files and its own ZIP (for
+Access, with a PowerShell script it offers); and has its own users
+with `admin` / read-only roles, bcrypt passwords, per-IP lockout, CSRF tokens
+and a daily audit trail. Its configuration can be changed from its own page,
+which also warns if the data folder can be downloaded from outside. It is in
+**Spanish and English**: it follows the browser's language, and a language
+chosen with its selector is saved with the user. The full tour is in
+[`docs/05-admin.md`](docs/05-admin.md).
 
 Bootstrap 5.3.3 is bundled locally and the icons are inline SVG; light and dark
 theme. The panel makes **zero** external requests.
@@ -981,21 +991,24 @@ touch your data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 147   SELECT execution and collation
+php tests/f2_select.php       → OK: 149   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 54    real requests against the API
-php tests/f5_esquema.php      → OK: 91    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 129   the panel, driven like a user
+php tests/f4_api.php          → OK: 60    real requests against the API
+php tests/f5_esquema.php      → OK: 95    SHOW, ALTER, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 137   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 28    real simultaneous processes and locking
+php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 34    panel setup wizard and direct connection
-php tests/f12_contra_sqlite.php → OK: 4    139 queries and 16 writes, same results as SQLite
+php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
+php tests/f12_contra_sqlite.php → OK: 4    143 queries and 16 writes, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 9 (21 with every server)  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
+php tests/f14_volcados.php     → OK: 18 (30 with every server)  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
+php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQL and PostgreSQL do the same there
+php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
+php tests/f18_access.php       → OK: 11    Microsoft Access: the PowerShell script, import and export
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that
@@ -1053,9 +1066,9 @@ This project is **directed by Miguel Sanchez** and **assisted by artificial
 intelligence**. The concept, architecture, functional and technical
 specification, design decisions, priorities, acceptance criteria and review
 are the author's. The implementation — the PHP source code, the test suites,
-the benchmarks and the documentation — is produced with the help of AI models
-(Anthropic's Claude among others), working from that specification and under
-the author's direction, and reviewed by him before being kept.
+the benchmarks and the documentation — is produced with the help of several
+AI models, working from that specification and under the author's direction,
+and reviewed by him before being kept.
 
 Every design decision and every trade-off was made by a human. No line ships
 without his review.

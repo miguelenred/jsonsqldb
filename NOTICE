@@ -8,8 +8,8 @@ Concept, architecture, functional and technical specification, design
 decisions and review by Miguel Sanchez.
 
 Implementation (source code, test suites and documentation) produced with the
-assistance of artificial intelligence (Anthropic's Claude among other models),
-working from that specification and under the author's direction and review.
+assistance of several artificial intelligence models, working from that
+specification and under the author's direction and review.
 
 This product bundles the following third-party components, each under its
 own licence:

@@ -154,7 +154,7 @@ function ipPermitida(string $ip, array $lista): bool
 }
 
 /** Devuelve un error y termina. */
-function salirConError(string $publico, string $interno = ''): never
+function salirConError(string $publico, string $interno = ''): void
 {
     global $store, $ip, $inicio;
 
@@ -162,12 +162,13 @@ function salirConError(string $publico, string $interno = ''): never
         'ts'     => date('Y-m-d H:i:s'),
         'ip'     => $ip,
         'ua'     => substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
-        'db'     => (string)($_POST['db'] ?? ''),
+        // Recortado: llega de quien sea, antes de comprobar nada
+        'db'     => substr((string)($_POST['db'] ?? ''), 0, 64),
         'origen' => '',
         'op'     => '',
         'filas'  => null,
         'ms'     => round((microtime(true) - $inicio) * 1000, 2),
-        'error'  => $publico . ($interno !== '' ? ': ' . $interno : ''),
+        'error'  => substr($publico . ($interno !== '' ? ': ' . $interno : ''), 0, 1000),
     ]);
 
     $mensaje = DEVOLVER_ERRORES && $interno !== '' ? $publico . ': ' . $interno : $publico;
@@ -261,9 +262,10 @@ if ($paramsRaw !== '') {
 }
 if (!ctype_digit($timestamp) || strlen($timestamp) !== 10) { salirConError('Timestamp inválido'); }
 
-// --- Bloqueo global por exceso de fallos ---
-if ($store->bloqueoGlobal()) {
-    salirConError('Servicio temporalmente no disponible');
+// --- Bloqueo por fallos de autenticación desde esta IP ---
+// Solo a esa IP: hasta 2.7.2 los fallos de cualquiera bloqueaban a todos
+if ($store->ipBloqueada($ip)) {
+    salirConError('Demasiados intentos fallidos desde esta IP');
 }
 
 // --- API key ---
@@ -340,9 +342,14 @@ if (!hash_equals($tokenEsperado, $token)) {
 // dos tokens distintos coincidieran en 64 bits dentro de la misma ventana de
 // minutos y se rechazara uno legítimo, que es despreciable. A cambio, el
 // fichero de estado se queda en una cuarta parte por esta vía.
-$acceso = $store->nonceYContar(substr(hash('sha256', $token), 0, 16), $ip);
+$acceso = $store->nonceYContar(substr(hash('sha256', $token), 0, 16), $ip, $origen);
 if ($acceso !== true) {
-    $store->fallo($ip);
+    // Un token repetido sí cuenta como intento fallido de esa IP; pasarse del
+    // límite de peticiones, no: la petición estaba bien firmada, y contarlo
+    // bloquearía la IP entera un día por un cupo que se renueva solo
+    if ($acceso === 'nonce') {
+        $store->fallo($ip);
+    }
     // false es un fallo de entrada/salida del fichero de estado, no un límite
     // superado. Se sigue cerrando el paso, pero decir «límite» sería mentir y
     // mandaría a quien lo lea a mirar donde no es.

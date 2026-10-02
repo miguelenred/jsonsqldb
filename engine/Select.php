@@ -1989,6 +1989,10 @@ final class Select
                 }
                 if ($d['distinct'] || $d['nombre'] === 'GROUP_CONCAT') {
                     $grupos[$clave]['lista'][$id][] = $v;
+                    // GROUP_CONCAT … ORDER BY: con cada valor, sus claves de orden
+                    foreach ($d['orden'] ?? [] as $i => $o) {
+                        $grupos[$clave]['claves'][$id][$i][] = Evaluator::evaluar($o['expr'], $ctx);
+                    }
                 } elseif ($d['nombre'] === 'MIN' || $d['nombre'] === 'MAX') {
                     if (!array_key_exists($id, $grupos[$clave]['mejor'])) {
                         $grupos[$clave]['mejor'][$id] = $v;
@@ -2022,7 +2026,16 @@ final class Select
                         $s   = Evaluator::evaluar($d['sep'], ['fila' => $g['fila'], 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa]);
                         $sep = $s === null ? '' : Valor::aTexto($s);
                     }
-                    $valores[$id] = Functions::agregado($d['nombre'], $g['lista'][$id] ?? [], $g['n'], $d['distinct'], $sep);
+                    $lista = $g['lista'][$id] ?? [];
+                    if (($d['orden'] ?? null) !== null && count($lista) > 1) {
+                        // El mismo orden que el ORDER BY de una consulta
+                        $claves = $g['claves'][$id];
+                        $indices = array_keys($lista);
+                        $orden = self::ordenNativo($d['orden'], $claves, $indices)
+                            ?? self::todasOrdenadas($indices, self::comparadorDe($d['orden'], $g['claves'][$id]));
+                        $lista = array_map(static fn(int $i) => $lista[$i], $orden);
+                    }
+                    $valores[$id] = Functions::agregado($d['nombre'], $lista, $g['n'], $d['distinct'], $sep);
                 } elseif ($d['nombre'] === 'COUNT') {
                     $valores[$id] = $cuenta;
                 } elseif ($d['nombre'] === 'SUM') {

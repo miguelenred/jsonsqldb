@@ -23,6 +23,13 @@ declare(strict_types=1);
  * https://miguelenred.es/jsonsqldb
  */
 
+// Solo desde la línea de órdenes: por el navegador escribiría las claves de
+// todo y diría cuáles son a quien lo abriera
+if (PHP_SAPI !== 'cli') {
+    http_response_code(403);
+    exit;
+}
+
 $raiz  = __DIR__;
 $local = in_array('--local', $argv, true);
 
@@ -31,14 +38,6 @@ $ficheros = [
     'jsonsqldbadmin/config.php'     => 'jsonsqldbadmin/config.dist.php',
 ];
 
-// Los tres clientes de ejemplo llevan la clave de su cuenta escrita dentro, y
-// tiene que ser la misma que la de la configuración o no podrían conectarse.
-// Se sustituyen en su sitio, sin copia previa: vienen en el repositorio.
-$clientes = [
-    'api/cliente_ejemplo.php',
-    'api/cliente_ejemplo.py',
-    'api/cliente_ejemplo.ps1',
-];
 
 foreach ($ficheros as $destino => $plantilla) {
     if (is_file("$raiz/$destino")) {
@@ -101,20 +100,14 @@ foreach ($ficheros as $destino => $plantilla) {
     echo "Creado $destino\n";
 }
 
-foreach ($clientes as $cliente) {
-    if (!is_file("$raiz/$cliente")) {
-        continue;                          // no es obligatorio tenerlos
-    }
-    $texto  = (string)file_get_contents("$raiz/$cliente");
-    $antes  = $texto;
-    foreach ($orden as $marcador) {
-        $texto = str_replace($marcador, $valores[$marcador], $texto);
-    }
-    if ($texto !== $antes) {
-        file_put_contents("$raiz/$cliente", $texto);
-        echo "Actualizado $cliente\n";
-    }
-}
+// La clave de los clientes de ejemplo no se escribe en ellos: están en api/ y
+// la web los serviría a quien los pidiera, con una clave que puede escribir en
+// la base 'pruebas'. Se dice aquí, para pasarla por variables de entorno.
+echo "\nClientes de ejemplo (api/cliente_ejemplo.*): cuenta 'Clientes de ejemplo', escritura sobre 'pruebas'.\n"
+   . "Pásales la clave por variables de entorno, nunca escrita en un fichero que sirva la web:\n"
+   . "  JSONSQLDB_API_KEY=" . $valores['CHANGE_ME_EXAMPLE_API_KEY'] . "\n"
+   . "  JSONSQLDB_HMAC_SECRET=" . $valores['CHANGE_ME_EXAMPLE_SECRET'] . "\n"
+   . "  JSONSQLDB_URL=https://tu-servidor/jsonsqldb/api/jsonsqldb_api.php\n";
 
 // Comprobar que no ha quedado ningún marcador SIN SUSTITUIR. Se miran solo los
 // que están entre comillas, que son valores; los .dist mencionan CHANGE_ME_ en
@@ -136,5 +129,17 @@ if ($local) {
     echo "\nHTTPS desactivado en los dos, para poder probar por HTTP en tu máquina.\n";
     echo "VUELVE A PONERLO a true en los dos ficheros antes de publicar esto.\n";
 }
+// El código que pide el panel para crear el administrador (el mismo fichero
+// que crea el panel si no existe; ver jsonsqldbadmin/lib/Instalador.php)
+$ficheroCodigo = "$raiz/jsonsqldbadmin/datos/codigo-instalacion.txt";
+$codigo = is_file($ficheroCodigo) ? trim((string)file_get_contents($ficheroCodigo)) : '';
+if (!preg_match('/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/', $codigo)) {
+    $codigo = implode('-', str_split(bin2hex(random_bytes(8)), 4));
+    file_put_contents($ficheroCodigo, $codigo . "\n");
+    @chmod($ficheroCodigo, 0600);
+}
+
 echo "\nAhora abre jsonsqldbadmin/ en el navegador: te pedirá crear el usuario\n";
 echo "administrador. No hay usuario por defecto ni contraseña que cambiar.\n";
+echo "Te pedirá también este código de instalación: $codigo\n";
+echo "(está en jsonsqldbadmin/datos/codigo-instalacion.txt y se borra al terminar)\n";

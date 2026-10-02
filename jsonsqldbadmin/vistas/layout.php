@@ -49,7 +49,7 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex,nofollow">
 <title><?= h($titulo !== '' ? $titulo . ' · ' : '') ?>jsonSQLDBadmin</title>
-<script>try{var t=localStorage.getItem('jsa-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.setAttribute('data-bs-theme',t);}catch(e){}</script>
+<script nonce="<?= h(nonce()) ?>">try{var t=localStorage.getItem('jsa-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.setAttribute('data-bs-theme',t);}catch(e){}</script>
 <link rel="stylesheet" href="assets/bootstrap.min.css">
 <link rel="stylesheet" href="assets/panel.css">
 </head>
@@ -154,7 +154,8 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
                     <li><span class="dropdown-item-text small text-body-secondary"><?= t('Rol: {1}', [1 => h($usuario['rol'] ?? '')]) ?></span></li>
                     <li><a class="dropdown-item" href="<?= h(url(['p' => 'usuarios'])) ?>"><?= icono('key') ?> <?= h(t('Cambiar mi contraseña')) ?></a></li>
                     <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item" href="<?= h(url(['p' => 'salir'])) ?>"><?= icono('logout') ?> <?= h(t('Cerrar sesión')) ?></a></li>
+                    <li><form method="post" action="<?= h(url(['p' => 'salir'])) ?>"><?= csrf() ?>
+                      <button class="dropdown-item"><?= icono('logout') ?> <?= h(t('Cerrar sesión')) ?></button></form></li>
                 </ul>
             </div>
         </div>
@@ -163,6 +164,9 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
     <main class="content">
         <?php if ($sinConexion !== ''): ?>
             <div class="alert alert-danger"><?= t('<strong>Sin conexión con el motor.</strong> {1}', [1 => h($sinConexion)]) ?></div>
+        <?php endif; ?>
+        <?php if (PHP_VERSION_ID < 80100): ?>
+            <div class="alert alert-warning"><?= t('<strong>PHP {v}: las escrituras no son duraderas ante un corte de luz.</strong> El motor necesita fsync(), que llega con PHP 8.1, para que una escritura confirmada sobreviva a un apagón o a un fallo del sistema. Usa PHP 8.1 o posterior en producción.', ['v' => h(PHP_VERSION)]) ?></div>
         <?php endif; ?>
         <?php foreach ($mensajes as $m): ?>
             <div class="alert alert-<?= h($m['tipo']) ?> alert-dismissible fade show" role="alert">

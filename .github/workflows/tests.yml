@@ -57,6 +57,11 @@ jobs:
       - name: Admin panel setup wizard and direct connection
         run: php tests/f11_asistente.php
 
+      - name: No runtime data in the repository
+        run: |
+          sobra=$(git ls-files data logs jsonsqldbadmin/datos | grep -vE '(\.htaccess|web\.config|\.gitkeep)$' || true)
+          if [ -n "$sobra" ]; then echo "Runtime files tracked: $sobra"; exit 1; fi
+
       - name: Same results as SQLite
         run: php tests/f12_contra_sqlite.php
 
@@ -69,6 +74,9 @@ jobs:
           sudo systemctl start postgresql.service
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
           php tests/f14_volcados.php
+          php tests/f16_vistas_triggers.php
+          php tests/f17_rutinas_importadas.php
+          JSONSQLDB_TEST_PWSH_EXIGIR=1 php tests/f18_access.php
         env:
           JSONSQLDB_TEST_MYSQL: 127.0.0.1:root:root
           JSONSQLDB_TEST_MYSQL_EXIGIR: 1

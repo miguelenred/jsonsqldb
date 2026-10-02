@@ -85,6 +85,14 @@ $pasos    = $completo ? ($conUsuario ? ['1 ' . t('Conexión'), '2 ' . t('Segurid
           <div class="setup-section pb-0"><div class="alert alert-danger mb-0"><?= h($error) ?></div></div>
         <?php endif; ?>
 
+        <div class="setup-section">
+          <label class="form-label" for="codigo"><strong><?= h(t('Código de instalación')) ?></strong></label>
+          <input class="form-control font-monospace" id="codigo" name="codigo" required autocomplete="off"
+                 placeholder="xxxx-xxxx-xxxx-xxxx" value="<?= h(post('codigo')) ?>">
+          <div class="form-text"><?= t('Para que solo quien tiene acceso al servidor pueda terminar la instalación: está en el fichero <code>{fichero}</code> de la carpeta de datos del panel (<code>jsonsqldbadmin/datos/</code>, salvo que <code>ADMIN_DATA_PATH</code> diga otra), y también lo muestra <code>php configurar.php</code>. Se borra al terminar.',
+              ['fichero' => Instalador::FICHERO_CODIGO]) ?></div>
+        </div>
+
         <?php if ($completo): ?>
         <div class="setup-section">
           <h3><span class="num">1</span> <?= h(t('Conexión con el motor')) ?></h3>

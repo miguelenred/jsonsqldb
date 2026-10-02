@@ -107,6 +107,24 @@ DROP TRIGGER IF EXISTS trg_sum;
 - `NEW.column` is available in INSERT and UPDATE; `OLD.column` in UPDATE and
   DELETE. They are replaced by their value before the statement runs.
 - `RAISE(ABORT, 'message')` cancels the whole operation: nothing is written.
+- **`IF … THEN … ELSEIF … ELSE … END IF`** inside the body, nested if needed
+  (2.7.3), as in MySQL and PostgreSQL.
+- **`SET NEW.column = expression`** in a `BEFORE INSERT` or `BEFORE UPDATE`
+  trigger changes the row before it is written (2.7.3). Several assignments go
+  left to right, each one seeing the previous ones, and the value is converted
+  to the column's type; the row then goes through the same checks as any other
+  (`NOT NULL`, unique keys, foreign keys). Anywhere else it is rejected when the
+  trigger is created.
+
+  ```sql
+  CREATE TRIGGER trg_products BEFORE INSERT ON products BEGIN
+      IF NEW.price < 0 THEN SELECT RAISE(ABORT, 'Negative price');
+      ELSEIF NEW.price >= 100 THEN SET NEW.band = 'high';
+      ELSE SET NEW.band = 'low';
+      END IF;
+      SET NEW.name = UPPER(NEW.name);
+  END;
+  ```
 - A trigger sees the changes made by its own statement, even though they are
   not on disk yet.
 - Maximum nesting of 8 levels: an infinite recursion is cut with an error and

@@ -1,0 +1,57 @@
+{
+    "clientes": [
+        "{\"id\":1,\"nombre\":\"Ana\",\"email\":\"ana@e.es\",\"saldo\":210,\"alta\":\"2026-01-05 10:00:00\",\"nivel\":\"normal\"}",
+        "{\"id\":2,\"nombre\":\"alberto\",\"email\":null,\"saldo\":600,\"alta\":\"2026-02-10 08:30:00\",\"nivel\":\"oro\"}",
+        "{\"id\":3,\"nombre\":\"Bea\",\"email\":\"bea@e.es\",\"saldo\":1,\"alta\":\"2026-03-01 00:00:00\",\"nivel\":\"normal\"}",
+        "{\"id\":4,\"nombre\":\"Zoe\",\"email\":\"zoe@mail.com\",\"saldo\":2930,\"alta\":\"2026-04-01 12:00:00\",\"nivel\":\"oro\"}"
+    ],
+    "pedidos": [
+        "{\"id\":1,\"cliente_id\":1,\"total\":90,\"estado\":\"nuevo\",\"creado\":\"2026-03-01 09:00:00\"}",
+        "{\"id\":2,\"cliente_id\":1,\"total\":120,\"estado\":\"cerrado\",\"creado\":\"2026-03-15 18:45:00\"}",
+        "{\"id\":4,\"cliente_id\":4,\"total\":30,\"estado\":\"nuevo\",\"creado\":\"2026-04-02 10:00:00\"}",
+        "{\"id\":5,\"cliente_id\":4,\"total\":2000,\"estado\":\"revisar\",\"creado\":\"2026-01-01 00:00:00\"}"
+    ],
+    "registro": [
+        "{\"id\":1,\"msg\":\"alta 1 de 1\"}",
+        "{\"id\":2,\"msg\":\"alta 2 de 1\"}",
+        "{\"id\":3,\"msg\":\"alta 3 de 2\"}",
+        "{\"id\":4,\"msg\":\"alta 4 de 4\"}",
+        "{\"id\":5,\"msg\":\"alta 5 de 4\"}"
+    ],
+    "v_resumen": [
+        "{\"nombre\":\"Ana\",\"n\":2,\"total\":210,\"media\":105}",
+        "{\"nombre\":\"Bea\",\"n\":0,\"total\":0,\"media\":null}",
+        "{\"nombre\":\"Zoe\",\"n\":2,\"total\":2030,\"media\":1015}",
+        "{\"nombre\":\"alberto\",\"n\":0,\"total\":0,\"media\":null}"
+    ],
+    "v_textos": [
+        "{\"id\":1,\"may\":\"ANA\",\"largo\":3,\"ini\":\"An\",\"fin\":\"na\",\"ficha\":\"Ana - ana@e.es\",\"correo\":\"ana@e.es\",\"pos\":3,\"trozo\":\"na\",\"clave\":\"Ana#1\"}",
+        "{\"id\":2,\"may\":\"ALBERTO\",\"largo\":7,\"ini\":\"al\",\"fin\":\"to\",\"ficha\":\"alberto\",\"correo\":\"sin email\",\"pos\":1,\"trozo\":\"lbe\",\"clave\":\"alberto#2\"}",
+        "{\"id\":3,\"may\":\"BEA\",\"largo\":3,\"ini\":\"Be\",\"fin\":\"ea\",\"ficha\":\"Bea - bea@e.es\",\"correo\":\"bea@e.es\",\"pos\":3,\"trozo\":\"ea\",\"clave\":\"Bea#3\"}",
+        "{\"id\":4,\"may\":\"ZOE\",\"largo\":3,\"ini\":\"Zo\",\"fin\":\"oe\",\"ficha\":\"Zoe - zoe@mail.com\",\"correo\":\"zoe@mail.com\",\"pos\":0,\"trozo\":\"oe\",\"clave\":\"Zoe#4\"}"
+    ],
+    "v_fechas": [
+        "{\"id\":1,\"mes\":\"2026-03\",\"manana\":\"2026-03-02 09:00:00\",\"antes\":\"2026-03-01 07:00:00\",\"anio\":2026,\"m\":3,\"dias\":59}",
+        "{\"id\":2,\"mes\":\"2026-03\",\"manana\":\"2026-03-16 18:45:00\",\"antes\":\"2026-03-15 16:45:00\",\"anio\":2026,\"m\":3,\"dias\":73}",
+        "{\"id\":4,\"mes\":\"2026-04\",\"manana\":\"2026-04-03 10:00:00\",\"antes\":\"2026-04-02 08:00:00\",\"anio\":2026,\"m\":4,\"dias\":91}",
+        "{\"id\":5,\"mes\":\"2026-01\",\"manana\":\"2026-01-02 00:00:00\",\"antes\":\"2025-12-31 22:00:00\",\"anio\":2026,\"m\":1,\"dias\":0}"
+    ],
+    "v_calc": [
+        "{\"id\":1,\"tope\":100,\"suelo\":90,\"f\":12,\"c\":13,\"resto\":1,\"tercio\":30,\"tramo\":\"bajo\"}",
+        "{\"id\":2,\"tope\":120,\"suelo\":100,\"f\":17,\"c\":18,\"resto\":2,\"tercio\":40,\"tramo\":\"alto\"}",
+        "{\"id\":4,\"tope\":100,\"suelo\":30,\"f\":4,\"c\":5,\"resto\":1,\"tercio\":10,\"tramo\":\"bajo\"}",
+        "{\"id\":5,\"tope\":2000,\"suelo\":100,\"f\":285,\"c\":286,\"resto\":2,\"tercio\":666.66,\"tramo\":\"alto\"}"
+    ],
+    "v_top": [
+        "{\"nombre\":\"Zoe\",\"saldo\":2930}",
+        "{\"nombre\":\"alberto\",\"saldo\":600}"
+    ],
+    "v_grupos": [
+        "{\"cliente_id\":1,\"estados\":\"cerrado|nuevo\"}",
+        "{\"cliente_id\":4,\"estados\":\"nuevo|revisar\"}"
+    ],
+    "v_de_vista": [
+        "{\"nombre\":\"Ana\",\"total\":210}",
+        "{\"nombre\":\"Zoe\",\"total\":2030}"
+    ]
+}

@@ -39,15 +39,20 @@ final class JsonSqlDbCliente
     // Datos de la clave de los ejemplos: permiso de escritura sobre 'pruebas'.
     // La misma que usa cliente_ejemplo.ps1. Para tu aplicación, crea una clave
     // propia en api/jsonsqldb_api_config.php.
+    // La clave y el secreto de los ejemplos llegan por variables de entorno:
+    // escritos aquí, este fichero los serviría la web a quien lo pidiera.
+    // php configurar.php dice cuáles son; para tu aplicación, crea una clave
+    // propia en api/jsonsqldb_api_config.php y guárdala fuera de la web.
     public const EJEMPLO_URL     = 'https://example.com/jsonsqldb/api/jsonsqldb_api.php';
-    public const EJEMPLO_API_KEY = 'CHANGE_ME_EXAMPLE_API_KEY';
-    public const EJEMPLO_SECRETO = 'CHANGE_ME_EXAMPLE_SECRET';
     public const EJEMPLO_BASE    = 'pruebas';
 
     /** Cliente ya configurado contra la base 'pruebas'. */
     public static function pruebas(): self
     {
-        $cli = new self(self::EJEMPLO_URL, self::EJEMPLO_API_KEY, self::EJEMPLO_SECRETO, self::EJEMPLO_BASE);
+        $cli = new self((string)(getenv('JSONSQLDB_URL') ?: self::EJEMPLO_URL),
+                        (string)(getenv('JSONSQLDB_API_KEY') ?: 'CHANGE_ME_EXAMPLE_API_KEY'),
+                        (string)(getenv('JSONSQLDB_HMAC_SECRET') ?: 'CHANGE_ME_EXAMPLE_SECRET'),
+                        self::EJEMPLO_BASE);
         $cli->aceptarAutofirmado();
         return $cli;
     }

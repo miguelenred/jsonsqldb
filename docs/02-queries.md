@@ -66,7 +66,7 @@ expect to find:
 |---|---|---|
 | `\|\|` to concatenate | SQLite, standard | The native form here |
 | `CONCAT(...)` | MySQL, SQL Server | Not in SQLite. If any argument is `NULL`, the result is `NULL` |
-| `GROUP_CONCAT(col, sep)` | SQLite and MySQL | MySQL writes `SEPARATOR sep`; here it is the second argument, as in SQLite |
+| `GROUP_CONCAT(col, sep)` | SQLite and MySQL | MySQL writes `SEPARATOR sep`; here it is the second argument, as in SQLite. `GROUP_CONCAT(col, sep ORDER BY x DESC)` orders inside each group (2.7.3), as MySQL and SQLite 3.44 |
 | `REGEXP` / `RLIKE` | MySQL | In SQLite `REGEXP` exists but must be provided separately. Here it just works |
 | `LIMIT n, m` | MySQL | `LIMIT n OFFSET m`, from SQLite, works too |
 | `IFNULL` | SQLite and MySQL | `COALESCE` is the standard and is there as well |
@@ -164,6 +164,11 @@ And these behavioural differences are worth keeping in mind:
   exactly in floating point and each engine breaks the tie its own way. If the
   cent has to add up, store cents in an `INTEGER`.
 - `AVG` always returns a decimal, as SQLite and MySQL do (2.7.2).
+- An integer literal that does not fit in 64 bits is read as a decimal, as in
+  SQLite (`SELECT 18446744073709551615` gives `1.8446744073709552E+19`), and
+  `-9223372036854775808` is the smallest integer, exactly (2.7.3). Before, it
+  was silently clipped to 9223372036854775807. Stored in an `INTEGER` column it
+  is an «out of range» error, as it already was through a parameter.
 - `/` always divides exactly, as in MySQL: `7 / 2` is `3.5`. SQLite divides
   two integers as integers and gives 3. For the integer part, use
   `CAST(7 / 2 AS INTEGER)`.
@@ -198,7 +203,7 @@ Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``.
 | Group | Functions |
 |---|---|
 | Aggregates | `COUNT(*)`, `COUNT(x)`, `COUNT(DISTINCT x)`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT` |
-| Text | `UPPER`, `LOWER`, `LENGTH`, `SUBSTR`/`SUBSTRING`, `TRIM`, `LTRIM`, `RTRIM`, `REPLACE`, `INSTR`, `CONCAT` |
+| Text | `UPPER`, `LOWER`, `LENGTH`, `SUBSTR`/`SUBSTRING`, `TRIM`, `LTRIM`, `RTRIM`, `REPLACE`, `TRANSLATE`, `INSTR`, `CONCAT` |
 | Numbers | `ABS`, `ROUND`, `RANDOM` |
 | Dates | `DATE`, `TIME`, `DATETIME`, `STRFTIME` |
 | Nulls | `COALESCE`, `IFNULL`, `NULLIF` |
@@ -210,7 +215,32 @@ Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``.
   included.
 - `DATE`/`TIME`/`DATETIME` with no argument, or with `'now'`, return the current
   date: `SELECT DATE('now')`.
-- `STRFTIME` accepts `%Y %m %d %H %M %S %f %j %w %W %s %%`.
+- **Adding and subtracting time** works as in SQLite, with *modifiers* after the
+  date, applied left to right (2.7.3; before, they were silently ignored):
+
+  ```sql
+  SELECT DATE('2026-03-01', '+1 day');                 -- 2026-03-02
+  SELECT DATETIME(creado, '+2 hours', '-30 minutes') FROM pedidos;
+  SELECT DATE('now', '-7 days');                       -- a week ago
+  SELECT DATE(x, 'start of month', '+1 month', '-1 day');  -- last day of x's month
+  SELECT * FROM pedidos WHERE creado >= DATETIME('now', '-24 hours');
+  ```
+
+  The units are `seconds`, `minutes`, `hours`, `days`, `months` and `years`,
+  singular or plural, with or without a sign (`'+1 day'`, `'3 days'`,
+  `'-1.5 hours'`). Seconds, minutes, hours and days admit decimals; months and
+  years must be whole. `'start of day'`, `'start of month'` and
+  `'start of year'` take the date back to that point; `'weekday N'` moves it to
+  the next day of the week N (0 = Sunday), or leaves it if it is already one;
+  `'unixepoch'`, first, reads the value as seconds since 1970 (UTC), as in
+  `DATETIME(1700000000, 'unixepoch')`. Dates here carry no time zone, so
+  `'localtime'` and `'utc'` are accepted and change nothing. As in SQLite, adding
+  months does not clip to the end of the month: 31 January plus one month is
+  3 March (MySQL and PostgreSQL would give 28 February). A modifier the engine
+  does not know is an error, never a silently wrong date. There is no
+  MySQL-style `DATE_ADD(x, INTERVAL 1 DAY)`.
+- `STRFTIME(format, date, modifiers…)` accepts `%Y %m %d %H %M %S %f %j %w %W %s %%`,
+  and the same modifiers after the date.
 - Aggregates ignore `NULL`; `SUM` and `AVG` over an empty set return `NULL` and
   `COUNT` returns 0.
 

@@ -20,7 +20,7 @@ DirectoryIndex index.php
 </FilesMatch>
 
 # --- Bloquear la configuración y cualquier fichero oculto ---
-<FilesMatch "^(config\.php|.*_config\.php|\.).*">
+<FilesMatch "^(config\.php|configurar\.php|.*_config\.php|\.).*">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>

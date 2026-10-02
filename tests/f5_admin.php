@@ -235,21 +235,32 @@ chk('sin usuarios pide crear el administrador', fn() =>
 chk('crear el administrador sin token CSRF se rechaza', fn() =>
     str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'clave-muy-larga-1', 'clave2' => 'clave-muy-larga-1']),
                  'Formulario caducado'));
+/** El código de instalación que ha dejado el panel en su carpeta de datos. */
+function codigo(): string {
+    global $raizDatos;
+    return trim((string)@file_get_contents($raizDatos . '/admin/codigo-instalacion.txt'));
+}
+chk('sin el código de instalación (que está en el servidor) no se crea el administrador', fn() =>
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'codigo' => '0000-0000-0000-0000', 'usuario' => 'jefe',
+                               'clave' => 'clave-muy-larga-1', 'clave2' => 'clave-muy-larga-1']), 'código de instalación no es correcto')
+    && codigo() !== '');
 chk('la contraseña corta se rechaza', fn() =>
-    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'corta', 'clave2' => 'corta']),
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'codigo' => codigo(), 'usuario' => 'jefe', 'clave' => 'corta', 'clave2' => 'corta']),
                  'al menos 10 caracteres'));
 chk('las dos contraseñas tienen que coincidir', fn() =>
-    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1',
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'codigo' => codigo(), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1',
                                'clave2' => 'clave-muy-larga-2']), 'no coinciden'));
 chk('se crea el administrador', fn() =>
-    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1',
-                               'clave2' => 'clave-muy-larga-1']), 'Ya puedes entrar'));
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'codigo' => codigo(), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1',
+                               'clave2' => 'clave-muy-larga-1']), 'Ya puedes entrar') && codigo() === '');
 chk('ahora pide usuario y contraseña', fn() =>
     str_contains(pedir(), 'name="clave"') && !str_contains(pedir(), 'Crea el administrador'));
+chk('entrar sin token CSRF se rechaza', fn() =>
+    str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'clave-muy-larga-1']), 'Formulario caducado'));
 chk('contraseña incorrecta', fn() =>
-    str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'no-es-esta-clave']), 'incorrectos'));
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'no-es-esta-clave']), 'incorrectos'));
 chk('acceso correcto', fn() =>
-    str_contains(peticion('', ['usuario' => 'jefe', 'clave' => 'clave-muy-larga-1']), 'Bases de datos'));
+    str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1']), 'Bases de datos'));
 chk('sin token CSRF la acción se rechaza', fn() =>
     str_contains(enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'sinCsrf'], false), 'Formulario caducado'));
 
@@ -743,6 +754,34 @@ chk('la exportación respeta el filtro', function () {
     return count(explode("\n", trim($csv))) === 2 && str_contains($csv, 'Sin saldo');
 });
 
+chk('ningún script en línea sin su nonce, ni código en atributos (la CSP ya no admite unsafe-inline)', function () {
+    $mal = [];
+    foreach (['p=bases', 'p=tablas&db=tienda', 'p=estructura&db=tienda&tabla=clientes', 'p=crear_tabla&db=tienda', 'p=auditoria'] as $q) {
+        $html = pedir($q);
+        if (preg_match('/<script(?![^>]*\b(src|nonce)=)[^>]*>/', $html) || preg_match('/\son(change|click|submit|load|input)=/i', $html)) {
+            $mal[] = $q;
+        }
+    }
+    return $mal === [] ?: implode(', ', $mal);
+});
+chk('la página de importar ofrece el script de Access y explica cómo ejecutarlo; el panel lo descarga', function () {
+    $html = pedir('p=tablas&db=tienda');
+    $script = pedir('p=script_access');
+    return str_contains($html, 'p=script_access') && str_contains($html, 'Ejecutar con PowerShell') && str_contains($html, 'Windows')
+        && str_contains($html, 'value="access"') && str_starts_with(ltrim($script), '<#') && str_contains($script, 'function Export-AccessDatabase')
+        ?: 'falta el enlace, la explicación o el script';
+});
+chk('el CSV neutraliza los textos que Excel tomaría por fórmulas', function () {
+    // =HYPERLINK(…), +, -, @: con un apóstrofo delante son texto. Un número
+    // negativo no se toca: no es un texto
+    enviar('p=sql&db=tienda', ['sql' => "CREATE TABLE formulas (id INTEGER PRIMARY KEY, t VARCHAR(60), n INTEGER)"]);
+    enviar('p=sql&db=tienda', ['sql' => "INSERT INTO formulas VALUES (1, '=HYPERLINK(\"http://x\")', -5), (2, '+34 600', 1), (3, '@SUM(A1)', 2), (4, 'normal', 3)"]);
+    $csv = descargar('p=datos&db=tienda&tabla=formulas', ['accion' => 'exportar', 'formato' => 'csv', 'db' => 'tienda', 'tabla' => 'formulas']);
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE formulas']);
+    return str_contains($csv, "'=HYPERLINK") && str_contains($csv, "'+34 600") && str_contains($csv, "'@SUM")
+        && str_contains($csv, ';-5') && !str_contains($csv, "'normal") ?: $csv;
+});
+
 echo "\n== Exportación ==\n";
 chk('la pantalla de datos ofrece CSV e INSERT', function () {
     $html = pedir('p=datos&db=tienda&tabla=clientes');
@@ -952,15 +991,20 @@ chk('importar un fichero que crea o borra bases se rechaza', function () use ($r
     @unlink($fichero);
     return str_contains($html, 'crear o borrar una base') && str_contains(pedir('p=bases'), 'tienda') ?: 'no lo rechazó';
 });
-chk('un CSV con un dato que no encaja dice cuánto cargó y dónde paró', function () use ($raizDatos) {
+chk('un CSV con un dato que no encaja dice dónde paró y no deja nada a medias (el panel alcanza la carpeta)', function () use ($raizDatos) {
+    // Con la carpeta de la base en la misma máquina, la importación es todo o
+    // nada: antes quedaban cargadas las 200 filas anteriores al fallo
+    $contar = static fn(): ?int => preg_match('/<td>(\d+)<\/td>/', enviar('p=sql&db=importada', ['sql' => 'SELECT COUNT(*) AS n FROM gente']), $m) ? (int)$m[1] : null;
+    $antes = $contar();
     $csv = "nombre,edad\n";
     for ($i = 1; $i <= 300; $i++) { $csv .= "otra $i," . ($i === 250 ? 'abc' : '30') . "\n"; }
     $fichero = $raizDatos . '/malo.csv';
     file_put_contents($fichero, $csv);
     $html = subir('p=tablas&db=importada', ['accion' => 'importar_csv', 'db' => 'importada', 'tabla' => 'gente'], 'fichero', $fichero);
     @unlink($fichero);
-    return (str_contains($html, 'Se cargaron 200 fila(s)') && str_contains($html, 'no hay transacciones'))
-        ?: 'no explicó el fallo: ' . (preg_match('/alert-danger[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
+    $despues = $contar();
+    return str_contains($html, 'línea 301') && str_contains($html, 'No se ha cargado nada') && $antes !== null && $antes === $despues
+        ?: 'no explicó el fallo o dejó filas: ' . json_encode([$antes, $despues]) . ' ' . (preg_match('/alert-danger[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
 });
 chk('con la API en otra máquina, el ZIP se desactiva y se explica', function () use ($raizDatos, $puertoApi) {
     // Se pide el listado de bases haciendo creer al panel que la API está fuera
@@ -1129,9 +1173,60 @@ chk('crear un usuario de solo lectura', fn() =>
         'accion' => 'crear_usuario', 'usuario' => 'consulta',
         'clave' => 'otra-clave-larga-2', 'rol' => 'lectura',
     ]), 'consulta&#039; creado'));
-chk('el de lectura entra', function () {
+chk('cerrar sesión con un enlace (GET) ya no la cierra: hace falta POST y su token', function () {
     pedir('p=salir');
-    return str_contains(peticion('', ['usuario' => 'consulta', 'clave' => 'otra-clave-larga-2']),
+    $sigue = str_contains(pedir('p=bases'), 'Bases de datos');
+    peticion('p=salir', []);                        // POST sin token
+    $sigue2 = str_contains(pedir('p=bases'), 'Bases de datos');
+    return $sigue && $sigue2 ?: 'se cerró sin POST con token';
+});
+/** Ejecuta código con las clases del panel en otro proceso, con sus datos en $dir. */
+function conPanel(string $codigo, string $dir, string $antes = ''): string
+{
+    $lib = dirname(__DIR__) . '/jsonsqldbadmin';
+    $prog = 'define("ADMIN_DATA_PATH", ' . var_export($dir, true) . ');' . $antes
+          . 'require ' . var_export("$lib/config.dist.php", true) . ';'
+          . 'foreach (["util", "Idioma", "Store", "Auth"] as $c) { require ' . var_export("$lib/lib/", true) . ' . $c . ".php"; }'
+          . $codigo;
+    return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($prog) . ' 2>&1'));
+}
+chk('detrás de un proxy de confianza con HTTPS, la cookie de sesión lleva Secure', function () {
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_proxy_' . getmypid();
+    @mkdir($dir, 0775, true);
+    $con = conPanel('$_SERVER["HTTP_X_FORWARDED_PROTO"] = "https"; Auth::iniciarSesion(); echo json_encode(session_get_cookie_params()["secure"]);',
+                    $dir, 'define("ADMIN_CONFIAR_EN_PROXY", true);');
+    $sin = conPanel('$_SERVER["HTTP_X_FORWARDED_PROTO"] = "https"; Auth::iniciarSesion(); echo json_encode(session_get_cookie_params()["secure"]);',
+                    $dir, 'define("ADMIN_CONFIAR_EN_PROXY", false);');
+    array_map('unlink', (array)glob("$dir/*"));
+    @rmdir($dir);
+    // Sin confiar en el proxy, su cabecera no cuenta: cualquiera podría mandarla
+    return $con === 'true' && $sin === 'false' ?: "con proxy: $con, sin confiar en él: $sin";
+});
+chk('los intentos fallidos de entrar no se pierden aunque lleguen a la vez', function () {
+    // Ocho procesos apuntando 25 fallos cada uno a la vez: sin bloqueo, dos que
+    // leen el mismo número guardan el mismo número y se pierde uno
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_intentos_' . getmypid();
+    @mkdir($dir, 0775, true);
+    $inicio = microtime(true) + 0.5;
+    $procs = [];
+    for ($p = 0; $p < 8; $p++) {
+        $lib = dirname(__DIR__) . '/jsonsqldbadmin';
+        $prog = 'define("ADMIN_DATA_PATH", ' . var_export($dir, true) . '); require ' . var_export("$lib/config.dist.php", true) . ';'
+              . 'foreach (["util", "Idioma", "Store", "Auth"] as $c) { require ' . var_export("$lib/lib/", true) . ' . $c . ".php"; }'
+              . 'time_sleep_until(' . $inicio . '); $m = new ReflectionMethod("Auth", "apuntarFallo"); $m->setAccessible(true);'
+              . 'for ($i = 0; $i < 25; $i++) { $m->invoke(null, "9.9.9.9"); }';
+        $procs[] = proc_open([PHP_BINARY, '-r', $prog], [], $tub);
+    }
+    foreach ($procs as $pr) { proc_close($pr); }
+    $intentos = json_decode((string)@file_get_contents("$dir/intentos.json"), true);
+    array_map('unlink', (array)glob("$dir/*"));
+    @rmdir($dir);
+    $n = (int)($intentos['9.9.9.9']['fallos'] ?? -1);
+    return $n === 200 ?: "se contaron $n de 200";
+});
+chk('el de lectura entra', function () {
+    enviar('p=salir', [], true, 'p=bases');
+    return str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'consulta', 'clave' => 'otra-clave-larga-2']),
                         'Bases de datos');
 });
 chk('el de lectura no ve los botones de administración', fn() =>
@@ -1152,8 +1247,8 @@ chk('el de lectura sí puede lanzar un SELECT', fn() =>
 
 echo "\n== Auditoría ==\n";
 chk('la auditoría recoge quién hizo qué', function () {
-    pedir('p=salir');
-    peticion('', ['usuario' => 'jefe', 'clave' => 'clave-muy-larga-1']);
+    enviar('p=salir', [], true, 'p=bases');
+    peticion('', ['csrf' => csrfActual(''), 'usuario' => 'jefe', 'clave' => 'clave-muy-larga-1']);
     $html = pedir('p=auditoria');
     return str_contains($html, 'crear_tabla') && str_contains($html, 'jefe')
         && str_contains($html, 'anadir_fk');

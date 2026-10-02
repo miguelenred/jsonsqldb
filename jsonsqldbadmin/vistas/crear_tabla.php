@@ -95,7 +95,7 @@ $filaColumna = static function (string $i) use ($tipos): string {
 </form>
 
 <template id="plantillaColumna"><?= $filaColumna('__I__') ?></template>
-<script>
+<script nonce="<?= h(nonce()) ?>">
 (function () {
     const cuerpo    = document.getElementById('filasColumnas');
     const plantilla = document.getElementById('plantillaColumna');

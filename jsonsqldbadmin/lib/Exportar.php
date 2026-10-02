@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/GeneradorSql.php';   // vistas y triggers en el SQL de cada motor
+
 /**
  * Exportación de resultados a CSV o a sentencias INSERT.
  *
@@ -26,7 +28,14 @@ final class Exportar
             foreach ($filas as $f) {
                 $linea = [];
                 foreach ($f as $v) {
-                    $linea[] = $v === null ? '' : (is_bool($v) ? ($v ? '1' : '0') : (is_float($v) ? var_export($v, true) : (string)$v));
+                    $texto = $v === null ? '' : (is_bool($v) ? ($v ? '1' : '0') : (is_float($v) ? var_export($v, true) : (string)$v));
+                    // Un texto que empieza por = + - @ lo toma Excel por una fórmula
+                    // y la ejecuta al abrir el fichero: con un apóstrofo delante, es
+                    // texto (Excel no lo muestra). Los números no se tocan
+                    if (is_string($v) && preg_match('/^[\s]*[=+\-@]|^[\t\r]/', $v)) {
+                        $texto = "'" . $texto;
+                    }
+                    $linea[] = $texto;
                 }
                 fputcsv($salida, $linea, $sep, '"', '\\');
             }
@@ -46,14 +55,13 @@ final class Exportar
     {
         if (!class_exists('ZipArchive')) {
             throw new RuntimeException(
-                'La extensión zip de PHP no está activada, así que no se puede generar el ZIP. '
-                . 'Actívala en php.ini (extension=zip) o usa el volcado en SQL.'
+                t('La extensión zip de PHP no está activada, así que no se puede generar el ZIP. Actívala en php.ini (extension=zip) o usa el volcado en SQL.')
             );
         }
 
         $tmp = tempnam(sys_get_temp_dir(), 'jsonsqldb_');
         if ($tmp === false) {
-            throw new RuntimeException('No se pudo crear el fichero temporal del ZIP.');
+            throw new RuntimeException(t('No se pudo crear el fichero temporal del ZIP.'));
         }
         // Se borra pase lo que pase, también si la petición muere por el camino
         register_shutdown_function(static function () use ($tmp): void {
@@ -61,32 +69,35 @@ final class Exportar
         });
 
         try {
-            $zip = new ZipArchive();
-            if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) {
-                throw new RuntimeException('No se pudo abrir el ZIP temporal para escribir.');
-            }
-
-            $ruta  = rtrim(str_replace('\\', '/', $ruta), '/');
-            $corte = strlen(dirname($ruta)) + 1;          // deja fuera todo lo anterior a la base
-            $items = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($ruta, FilesystemIterator::SKIP_DOTS),
-                RecursiveIteratorIterator::SELF_FIRST
-            );
-
-            $zip->addEmptyDir($base);
-            foreach ($items as $item) {
-                /** @var SplFileInfo $item */
-                $real    = str_replace('\\', '/', $item->getPathname());
-                $interna = substr($real, $corte);
-                if ($item->isDir()) {
-                    $zip->addEmptyDir($interna);
-                } elseif ($item->isFile()) {
-                    $zip->addFile($real, $interna);
+            $ruta = rtrim(str_replace('\\', '/', $ruta), '/');
+            // Con el bloqueo exclusivo de la base (el del motor) hasta cerrar el
+            // ZIP, que es cuando se leen los ficheros: sin él, una escritura a
+            // mitad de la copia dejaba partes, índices y revisiones de dos momentos
+            conBaseBloqueada($ruta, static function () use ($tmp, $ruta, $base): void {
+                $zip = new ZipArchive();
+                if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) {
+                    throw new RuntimeException(t('No se pudo abrir el ZIP temporal para escribir.'));
                 }
-            }
-            if ($zip->close() !== true) {
-                throw new RuntimeException('No se pudo cerrar el ZIP temporal.');
-            }
+                $corte = strlen(dirname($ruta)) + 1;      // deja fuera todo lo anterior a la base
+                $items = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($ruta, FilesystemIterator::SKIP_DOTS),
+                    RecursiveIteratorIterator::SELF_FIRST
+                );
+                $zip->addEmptyDir($base);
+                foreach ($items as $item) {
+                    /** @var SplFileInfo $item */
+                    $real    = str_replace('\\', '/', $item->getPathname());
+                    $interna = substr($real, $corte);
+                    if ($item->isDir()) {
+                        $zip->addEmptyDir($interna);
+                    } elseif ($item->isFile() && !esFicheroDeBloqueo($item->getFilename())) {
+                        $zip->addFile($real, $interna);
+                    }
+                }
+                if ($zip->close() !== true) {
+                    throw new RuntimeException(t('No se pudo cerrar el ZIP temporal.'));
+                }
+            });
 
             self::cabeceras($base . '.zip', 'application/zip');
             header('Content-Length: ' . (string)filesize($tmp));
@@ -107,16 +118,26 @@ final class Exportar
      * @param array<int,array<string,mixed>> $triggers
      */
     public static function base(string $base, array $tablas, array $triggers, array $vistas = [],
-                                array $indices = [], string $dialecto = 'sqlite'): void
+                                array $indices = [], string $dialecto = 'sqlite', ?callable $cargar = null): void
     {
-        $ext = ['mysql' => '.mysql.sql', 'postgresql' => '.pg.sql', 'sqlserver' => '.sqlserver.sql'][$dialecto] ?? '.sql';
+        $ext = ['mysql' => '.mysql.sql', 'postgresql' => '.pg.sql', 'sqlserver' => '.sqlserver.sql', 'access' => '.access.sql'][$dialecto] ?? '.sql';
         self::cabeceras($base . $ext, 'text/plain; charset=UTF-8');
-        echo self::volcado($base, $tablas, $triggers, $vistas, $indices, $dialecto);
+        // Tabla a tabla hacia el navegador, sin juntar antes el volcado entero.
+        // Si algo falla a medias, la descarga ya ha empezado: el error va al
+        // final del fichero, para que nadie lo tome por un volcado completo
+        try {
+            self::volcado($base, $tablas, $triggers, $vistas, $indices, $dialecto, $cargar, static function (string $trozo): void {
+                echo $trozo;
+                flush();
+            });
+        } catch (Throwable $e) {
+            echo "\n-- " . t('ERROR: el volcado está incompleto: {error}', ['error' => $e->getMessage()]) . "\n";
+        }
         exit;
     }
 
-    /** Dialectos de volcado: 'sqlite' (que también es el de jsonSQLDB), 'mysql', 'postgresql', 'sqlserver'. */
-    public const DIALECTOS = ['sqlite', 'mysql', 'postgresql', 'sqlserver'];
+    /** Dialectos de volcado: 'sqlite' (que también es el de jsonSQLDB), 'mysql', 'postgresql', 'sqlserver', 'access'. */
+    public const DIALECTOS = ['sqlite', 'mysql', 'postgresql', 'sqlserver', 'access'];
 
     /** El dialecto del volcado en curso. Solo cambia durante volcado(). */
     private static string $d = 'sqlite';
@@ -128,7 +149,8 @@ final class Exportar
     {
         switch (self::$d) {
             case 'mysql':     return '`' . str_replace('`', '``', $nombre) . '`';
-            case 'sqlserver': return '[' . str_replace(']', ']]', $nombre) . ']';
+            case 'sqlserver':
+            case 'access':    return '[' . str_replace(']', ']]', $nombre) . ']';
             default:          return cita($nombre);
         }
     }
@@ -156,12 +178,20 @@ final class Exportar
      *
      * @param array<int,array{tabla:string,columnas:array,claves:array,filas:array}> $tablas
      */
+    /**
+     * El volcado de una base. Las filas pueden venir ya en cada tabla
+     * ('filas') o pedirse tabla a tabla con $cargar(nombre); y el texto puede
+     * devolverse entero o entregarse por trozos a $salida (uno por tabla). Con
+     * los dos, en memoria solo hay una tabla a la vez: antes estaba la base
+     * entera, y una base mediana agotaba la memoria de PHP.
+     */
     public static function volcado(string $base, array $tablas, array $triggers, array $vistas = [],
-                                   array $indices = [], string $dialecto = 'sqlite'): string
+                                   array $indices = [], string $dialecto = 'sqlite',
+                                   ?callable $cargar = null, ?callable $salida = null): string
     {
         self::$d = in_array($dialecto, self::DIALECTOS, true) ? $dialecto : 'sqlite';
         try {
-            return self::componer($base, $tablas, $triggers, $vistas, $indices);
+            return self::componer($base, $tablas, $triggers, $vistas, $indices, $cargar, $salida);
         } finally {
             self::$d = 'sqlite';
             self::$repetidos = [];
@@ -172,12 +202,13 @@ final class Exportar
      * @param array<int,array{tabla:string,columnas:array,claves:array,filas:array}> $tablas
      * @param array<int,array{indice:string,tabla:string,columnas:string,automatico:int}> $indices
      */
-    private static function componer(string $base, array $tablas, array $triggers, array $vistas, array $indices): string
+    private static function componer(string $base, array $tablas, array $triggers, array $vistas, array $indices,
+                                     ?callable $cargar = null, ?callable $salida = null): string
     {
         $filas = 0;
         $porNombre = [];
         foreach ($tablas as $t) {
-            $filas += count($t['filas']);
+            $filas += isset($t['filas']) ? count($t['filas']) : (int)($t['n'] ?? 0);
             $porNombre[$t['tabla']] = $t;
         }
         [$orden, $diferidas] = self::ordenar($porNombre);
@@ -201,6 +232,9 @@ final class Exportar
         $out .= self::cabeceraDialecto($base);
         foreach ($orden as $nombre) {
             $t = $porNombre[$nombre];
+            if (!isset($t['filas'])) {
+                $t['filas'] = $cargar !== null ? $cargar($nombre) : [];
+            }
             $out .= "\n-- ------------------------------------------------------------\n";
             $out .= '-- ' . t('Tabla: {tabla}', ['tabla' => $nombre]) . "\n";
             $out .= "-- ------------------------------------------------------------\n";
@@ -222,7 +256,8 @@ final class Exportar
                 // SQL Server no deja escribir en una columna IDENTITY sin pedirlo
                 $identidad = self::$d === 'sqlserver' && $auto !== null;
                 $out .= "\n" . ($identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " ON;\n" : '')
-                      . self::lineasInsert($filasT, $nombre)
+                      . self::lineasInsert($filasT, $nombre, array_column(array_filter($t['columnas'],
+                            static fn(array $c): bool => strtoupper((string)$c['tipo']) === 'DATETIME'), 'columna'))
                       . ($identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " OFF;\n" : '');
             }
             // En PostgreSQL la secuencia de una columna IDENTITY no se entera de
@@ -239,6 +274,12 @@ final class Exportar
                 $out .= 'CREATE INDEX ' . self::q(self::nombreObjeto($nombre, (string)$i['indice'])) . ' ON ' . self::q($nombre)
                       . ' (' . implode(', ', array_map(static fn($c) => self::q((string)$c), explode(',', (string)$i['columnas']))) . ");\n";
             }
+            // Por trozos: esta tabla sale ya, y sus filas dejan sitio a la siguiente
+            if ($salida !== null) {
+                $salida($out);
+                $out = '';
+            }
+            unset($t, $filasT);
         }
         if ($diferidas !== []) {
             $out .= "\n-- ------------------------------------------------------------\n";
@@ -253,25 +294,82 @@ final class Exportar
         // demás, comentados, porque su SQL podría crearse sin error y hacer otra
         // cosa (|| es un O lógico en MySQL; un trigger de PostgreSQL es una
         // función; uno de SQL Server no tiene NEW ni OLD)
-        $comentar = self::$d !== 'sqlite';
-        if ($vistas !== []) {
-            $out .= "\n-- ------------------------------------------------------------\n-- " . t('Vistas') . ($comentar ? ': ' . t('escritas en el SQL de jsonSQLDB; revísalas antes de crearlas') : '') . "\n";
-            $out .= "-- ------------------------------------------------------------\n";
-            foreach ($vistas as $v) {
-                $sql = 'CREATE VIEW ' . self::q((string)$v['vista']) . ' AS ' . rtrim(trim((string)$v['sql']), ';') . ';';
-                $out .= ($comentar ? '-- ' . str_replace("\n", "\n-- ", $sql) : $sql) . "\n";
+        // Vistas y triggers: tal cual para SQLite y jsonSQLDB; para los demás,
+        // traducidos a su SQL. Lo que no tiene ninguna forma de escribirse allí
+        // va comentado con el motivo, y se cuenta en la cabecera
+        // Lo que no se pueda escribir en el destino (o un aviso de PHP por algo
+        // inesperado) deja esa vista o ese trigger comentado, no el volcado a medias
+        set_error_handler(static function (int $n, string $msg): bool {
+            throw new NoTraducible($msg);
+        }, E_WARNING | E_NOTICE);                  // no los avisos de obsoleto de versiones nuevas de PHP
+        try {
+            $gen = self::$d === 'sqlite' ? null
+                : (new GeneradorSql(self::$d))->conTipos(array_map(static fn(array $t): array => $t['columnas'], $porNombre));
+            $sinTraducir = [];
+            if ($vistas !== []) {
+                $out .= "\n-- ------------------------------------------------------------\n-- " . t('Vistas') . "\n";
+                $out .= "-- ------------------------------------------------------------\n";
+                foreach ($gen === null ? $vistas : GeneradorSql::ordenarVistas($vistas) as $v) {
+                    $sql = 'CREATE VIEW ' . self::q((string)$v['vista']) . ' AS ' . rtrim(trim((string)$v['sql']), ';') . ';';
+                    if ($gen === null) {
+                        $out .= $sql . "\n";
+                        continue;
+                    }
+                    try {
+                        $out .= $gen->vista((string)$v['vista'], (string)$v['sql']) . "\n";
+                    } catch (Throwable $e) {
+                        $sinTraducir[] = (string)$v['vista'];
+                        $out .= '-- ' . t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()]) . "\n-- " . str_replace("\n", "\n-- ", $sql) . "\n";
+                    }
+                }
             }
+            if ($triggers !== []) {
+                $out .= "\n-- ------------------------------------------------------------\n-- " . t('Triggers') . "\n";
+                $out .= "-- ------------------------------------------------------------\n";
+                if ($gen === null) {
+                    foreach ($triggers as $trg) {
+                        $out .= rtrim(trim((string)$trg['sql']), ';') . ";\n";
+                    }
+                } else {
+                    $porTabla = [];
+                    foreach ($triggers as $trg) {
+                        $porTabla[(string)$trg['tabla']][] = $trg;
+                    }
+                    foreach ($porTabla as $tabla => $lista) {
+                        $t = $porNombre[$tabla] ?? null;
+                        $pk = [];
+                        foreach ($t['claves'] ?? [] as $k) {
+                            if ($k['tipo'] === 'PRIMARY') {
+                                $pk = array_map('trim', explode(',', (string)$k['columnas']));
+                            }
+                        }
+                        try {
+                            $out .= $gen->triggers($tabla, $lista, $t['columnas'] ?? [], $pk);
+                        } catch (Throwable $e) {
+                            foreach ($lista as $trg) {
+                                $sinTraducir[] = (string)$trg['nombre'];
+                                $out .= '-- ' . t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()]) . "\n-- "
+                                      . str_replace("\n", "\n-- ", rtrim(trim((string)$trg['sql']), ';') . ';') . "\n";
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            restore_error_handler();
         }
-        if ($triggers !== []) {
-            $out .= "\n-- ------------------------------------------------------------\n-- " . t('Triggers') . ($comentar ? ': ' . t('escritos en el SQL de jsonSQLDB; hay que reescribirlos para este motor') : '') . "\n";
-            $out .= "-- ------------------------------------------------------------\n";
-            foreach ($triggers as $trg) {
-                $sql = rtrim(trim((string)$trg['sql']), ';') . ';';
-                $out .= ($comentar ? '-- ' . str_replace("\n", "\n-- ", $sql) : $sql) . "\n";
-            }
+        if ($sinTraducir !== []) {
+            $aviso = '-- ' . t('Sin traducir (van comentados al final): {lista}', ['lista' => implode(', ', $sinTraducir)]) . "\n";
+            // Por trozos, la cabecera ya ha salido: el aviso va aquí
+            $out = $salida !== null ? "\n" . $aviso . $out
+                : str_replace('-- jsonsqldb-dialecto: ' . self::$d . "\n", '-- jsonsqldb-dialecto: ' . self::$d . "\n" . $aviso, $out);
         }
         $out .= ['mysql' => "\nSET FOREIGN_KEY_CHECKS = 1;\n", 'postgresql' => "\nCOMMIT;\n",
                  'sqlserver' => "\nCOMMIT TRANSACTION;\n"][self::$d] ?? '';
+        if ($salida !== null) {
+            $salida($out);
+            return '';
+        }
         return $out;
     }
 
@@ -300,6 +398,9 @@ final class Exportar
                 return $out . $c(t('Para SQL Server 2016 o posterior: {orden}, o ábrelo en SQL Server Management Studio. Todo va en una transacción.', ['orden' => "sqlcmd -d nombre_base -i $base.sqlserver.sql"]))
                      . $c(t('Texto como NVARCHAR con cotejamiento binario (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos), enteros como BIGINT, fechas como DATETIME2(3), autoincremento como IDENTITY. Una clave foránea de una tabla hacia sí misma va sin ON DELETE/ON UPDATE: SQL Server no admite acciones en cadena que puedan formar un ciclo. Las vistas y los triggers van comentados.'))
                      . "SET NOCOUNT ON;\nSET XACT_ABORT ON;\nSET ANSI_NULLS ON;\nSET QUOTED_IDENTIFIER ON;\nBEGIN TRANSACTION;\n";
+            case 'access':
+                return $out . $c(t('Para Microsoft Access (Jet / ACE, en modo ANSI-92). Access no ejecuta un fichero de sentencias: hay que lanzarlas una a una, por ejemplo con OLEDB desde PowerShell o con CurrentProject.Connection.Execute desde VBA, saltando las líneas que empiezan por --.'))
+                     . $c(t('Texto de hasta 255 caracteres como TEXT(n) y más largo como MEMO, enteros como LONG, autonumérico como COUNTER, fechas como DATETIME. Las vistas van como consultas guardadas (CREATE VIEW). Access no tiene triggers: van comentados al final.'));
             default:
                 return $out . $c(t('Se carga en jsonSQLDB (Importar un volcado SQL, en la página de la base) y en SQLite: {orden}', ['orden' => "sqlite3 $base.db < $base.sql"]));
         }
@@ -419,6 +520,15 @@ final class Exportar
             $acciones = (string)$k['tabla_destino'] === $tabla ? ''
                 : str_replace('RESTRICT', 'NO ACTION', $acciones);
         }
+        if (self::$d === 'access') {
+            // Access solo escribe CASCADE y SET NULL; lo demás es no hacer nada
+            $acciones = '';
+            foreach (['DELETE' => $k['on_delete'], 'UPDATE' => $k['on_update']] as $cuando => $accion) {
+                if (in_array($accion, ['CASCADE', 'SET NULL'], true)) {
+                    $acciones .= " ON $cuando $accion";
+                }
+            }
+        }
         return 'CONSTRAINT ' . self::q(self::nombreObjeto($tabla, (string)$k['nombre']))
              . ' FOREIGN KEY (' . implode(', ', array_map($q, array_filter(explode(',', (string)$k['columnas'])))) . ')'
              . ' REFERENCES ' . self::q((string)$k['tabla_destino'])
@@ -454,7 +564,9 @@ final class Exportar
             $d = self::q($nombre) . ' ' . $tipo;
             switch (self::$d) {
                 case 'sqlite':
-                    $d .= ($esPk ? ' PRIMARY KEY' : '') . ($auto ? ' AUTOINCREMENT' : '')
+                    // SQLite solo admite AUTOINCREMENT en INTEGER PRIMARY KEY; en otra
+                    // columna el volcado no se cargaba allí (aquí sí se admite)
+                    $d .= ($esPk ? ' PRIMARY KEY' : '') . ($auto && $esPk ? ' AUTOINCREMENT' : '')
                         . ((int)$c['notnull'] === 1 && (int)$c['pk'] !== 1 ? ' NOT NULL' : '');
                     break;
                 case 'mysql':
@@ -468,6 +580,11 @@ final class Exportar
                 case 'sqlserver':
                     $d .= ($auto ? ' IDENTITY(1,1)' : '')
                         . ((int)$c['pk'] === 1 || (int)$c['notnull'] === 1 ? ' NOT NULL' : '') . ($esPk ? ' PRIMARY KEY' : '');
+                    break;
+                case 'access':
+                    // El autonumérico de Access es su propio tipo: COUNTER
+                    $d = self::q($nombre) . ' ' . ($auto ? 'COUNTER' : $tipo)
+                        . (!$auto && ((int)$c['pk'] === 1 || (int)$c['notnull'] === 1) ? ' NOT NULL' : '') . ($esPk ? ' PRIMARY KEY' : '');
                     break;
             }
             if ((int)$c['unico'] === 1) {
@@ -522,6 +639,9 @@ final class Exportar
      */
     private static function tipoDestino(array $c, bool $enClave, array $filas): string
     {
+        if (self::$d === 'access') {
+            return self::tipoAccess($c, $enClave, $filas);
+        }
         $tipo = strtoupper((string)$c['tipo']);
         $ss   = self::$d === 'sqlserver';
         $cot  = $ss ? ' COLLATE Latin1_General_100_BIN2' : '';
@@ -563,6 +683,48 @@ final class Exportar
         return $ss ? ($max <= 450 ? "NVARCHAR($max)" : 'NVARCHAR(MAX)') . $cot : 'VARCHAR(' . $max . ')';
     }
 
+    /**
+     * El tipo de una columna en Access (Jet/ACE, DDL en modo ANSI-92). Texto de
+     * hasta 255 caracteres, TEXT(n); más largo, MEMO, que no se puede indexar.
+     * Enteros, LONG, que es de 32 bits: si los datos no caben, DECIMAL(19,0).
+     * DECIMAL, con 28 cifras como mucho, las de Access.
+     */
+    private static function tipoAccess(array $c, bool $enClave, array $filas): string
+    {
+        $tipo = strtoupper((string)$c['tipo']);
+        $col = (string)$c['columna'];
+        if ($c['longitud'] !== null) {
+            return (int)$c['longitud'] <= 255 ? 'TEXT(' . (int)$c['longitud'] . ')' : 'MEMO';
+        }
+        if ($c['escala'] !== null || $tipo === 'DECIMAL') {
+            $escala = $c['escala'] !== null ? (int)$c['escala'] : 6;
+            return 'DECIMAL(' . min(28, max(18, $escala + 12)) . ',' . $escala . ')';
+        }
+        switch ($tipo) {
+            case 'INTEGER':
+                foreach ($filas as $f) {
+                    $v = $f[$col] ?? null;
+                    if (is_int($v) && ($v > 2147483647 || $v < -2147483648)) {
+                        return 'DECIMAL(19,0)';
+                    }
+                }
+                return 'LONG';
+            case 'DOUBLE':   return 'DOUBLE';
+            case 'DATETIME': return 'DATETIME';
+            case 'BOOLEAN':  return 'BIT';
+        }
+        if (!$enClave) {
+            return 'MEMO';
+        }
+        // Un texto en una clave o un índice: TEXT(255) si los datos caben
+        foreach ($filas as $f) {
+            if (is_string($f[$col] ?? null) && mb_strlen($f[$col], 'UTF-8') > 255) {
+                return 'MEMO';
+            }
+        }
+        return 'TEXT(255)';
+    }
+
     /** Declaración del tipo, con longitud o decimales si los tiene. */
     private static function tipo(array $c): string
     {
@@ -592,8 +754,10 @@ final class Exportar
     }
 
     /** @param array<int,array<string,mixed>> $filas */
-    private static function lineasInsert(array $filas, string $tabla): string
+    /** @param list<string> $fechas columnas DATETIME: en Access, sus valores van como #fecha# */
+    private static function lineasInsert(array $filas, string $tabla, array $fechas = []): string
     {
+        $fechas = array_flip($fechas);
         if ($filas === []) {
             return '';
         }
@@ -605,7 +769,9 @@ final class Exportar
         foreach ($filas as $f) {
             $vals = [];
             foreach ($cols as $c) {
-                $vals[] = self::literal($f[$c] ?? null);
+                $v = $f[$c] ?? null;
+                $vals[] = self::$d === 'access' && isset($fechas[$c]) && is_string($v)
+                    ? '#' . substr(str_replace('T', ' ', $v), 0, 19) . '#' : self::literal($v);
             }
             $out .= $cab . implode(', ', $vals) . ");\n";
         }

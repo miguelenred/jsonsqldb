@@ -195,10 +195,13 @@ class JsonSqlDbCliente:
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # La clave y el secreto llegan por variables de entorno: escritos aquí,
+    # este fichero los serviría la web. php configurar.php dice cuáles son.
+    import os
     cli = JsonSqlDbCliente(
-        "https://example.com/jsonsqldb/api/jsonsqldb_api.php",
-        "CHANGE_ME_EXAMPLE_API_KEY",
-        "CHANGE_ME_EXAMPLE_SECRET",
+        os.environ.get("JSONSQLDB_URL", "https://example.com/jsonsqldb/api/jsonsqldb_api.php"),
+        os.environ.get("JSONSQLDB_API_KEY", "CHANGE_ME_EXAMPLE_API_KEY"),
+        os.environ.get("JSONSQLDB_HMAC_SECRET", "CHANGE_ME_EXAMPLE_SECRET"),
         "pruebas",
     )
 

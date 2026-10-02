@@ -32,6 +32,13 @@ function h($valor): string
 }
 
 /** Campo oculto con el token CSRF. */
+/** El nonce de esta respuesta para los <script> de la página (ver la CSP en index.php). */
+function nonce(): string
+{
+    static $nonce = null;
+    return $nonce ??= base64_encode(random_bytes(16));
+}
+
 function csrf(): string
 {
     return '<input type="hidden" name="csrf" value="' . h(Auth::csrf()) . '">';
@@ -182,7 +189,8 @@ function get(string $nombre, string $defecto = ''): string
 /** Comprueba un identificador de tabla, columna o restricción. */
 function identificador(string $valor, string $que): string
 {
-    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $valor)) {
+    // Lo mismo que admite el motor (engine/Storage.php): hasta 64 caracteres
+    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $valor)) {
         throw new RuntimeException(t('Nombre de {que} no válido: \'{valor}\'', ['que' => t($que), 'valor' => $valor]));
     }
     return $valor;
@@ -261,6 +269,57 @@ function condicionFiltro(array $columnas, string $filtro): array
  * Carpeta en disco de una base de datos, comprobada.
  * Solo la usa la copia en ZIP.
  */
+/**
+ * Ejecuta $fn con el bloqueo exclusivo de una base: el mismo que coge el motor
+ * (engine/Storage.php, los ficheros .turno y .lock de su carpeta), así que
+ * mientras dura no hay ninguna consulta ni escritura en ella, y las que llegan
+ * esperan. Para copiar la base al ZIP o restaurarla sin mezclar ficheros de
+ * dos momentos. $fn no puede usar el motor: esperaría a este mismo bloqueo.
+ *
+ * @template T
+ * @param callable(): T $fn
+ * @return T
+ */
+function conBaseBloqueada(string $ruta, callable $fn)
+{
+    if (!is_dir($ruta) && !@mkdir($ruta, 0775, true) && !is_dir($ruta)) {
+        throw new RuntimeException(t('No se puede crear la carpeta \'{dir}\'.', ['dir' => $ruta]));
+    }
+    $torno = @fopen("$ruta/.turno", 'c');
+    $lock  = @fopen("$ruta/.lock", 'c');
+    if ($torno === false || $lock === false) {
+        throw new RuntimeException(t('No se puede bloquear la base para copiarla o restaurarla: comprueba los permisos de su carpeta.'));
+    }
+    // Como el motor: por el torno, para no quedarse esperando detrás de un
+    // goteo de lecturas
+    flock($torno, LOCK_EX);
+    flock($lock, LOCK_EX);
+    flock($torno, LOCK_UN);
+    try {
+        return $fn();
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        fclose($torno);
+    }
+}
+
+/** ¿Es un fichero de bloqueo del motor (.lock, .turno, .tabla.lock)? No se copian ni se borran. */
+function esFicheroDeBloqueo(string $nombre): bool
+{
+    return $nombre === '.turno' || (str_starts_with($nombre, '.') && str_ends_with($nombre, '.lock'));
+}
+
+/** La carpeta de una base si el panel la alcanza (misma máquina que el motor), o null. */
+function rutaDeLaBaseSiSeAlcanza(string $base): ?string
+{
+    try {
+        return rutaDeLaBase($base);
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
 function rutaDeLaBase(string $base): string
 {
     // Antes de mirar el disco: si la API está en otra máquina, los ficheros del

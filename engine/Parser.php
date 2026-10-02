@@ -234,13 +234,7 @@ final class Parser
         }
         if ($this->comer('id', 'ORDER')) {
             $this->exigir('id', 'BY');
-            do {
-                $e   = $this->expr();
-                $dir = 'ASC';
-                if ($this->comer('id', 'DESC'))      { $dir = 'DESC'; }
-                elseif ($this->comer('id', 'ASC'))   { $dir = 'ASC'; }
-                $sel['order'][] = ['expr' => $e, 'dir' => $dir];
-            } while ($this->comer('punc', ','));
+            $sel['order'] = $this->listaOrden();
         }
         if ($this->comer('id', 'LIMIT')) {
             $primero = $this->enteroPositivo('LIMIT');
@@ -541,6 +535,12 @@ final class Parser
         $tk = $this->actual();
         if ($tk['t'] === 'op' && ($tk['v'] === '-' || $tk['v'] === '+')) {
             $this->avanzar();
+            // -9223372036854775808 es el entero más pequeño: el número solo no cabe
+            $sig = $this->actual();
+            if ($tk['v'] === '-' && $sig['t'] === 'num' && ltrim((string)($sig['texto'] ?? ''), '0') === '9223372036854775808') {
+                $this->avanzar();
+                return ['k' => 'lit', 'v' => PHP_INT_MIN];
+            }
             $e = $this->exprUnaria();
             return $tk['v'] === '-' ? ['k' => 'un', 'op' => '-', 'e' => $e] : $e;
         }
@@ -652,6 +652,12 @@ final class Parser
                     do {
                         $fn['args'][] = $this->expr();
                     } while ($this->comer('punc', ','));
+                    // GROUP_CONCAT(x [, sep] ORDER BY …): el orden dentro del grupo,
+                    // como en MySQL y en SQLite 3.44
+                    if ($nombre === 'GROUP_CONCAT' && $this->comer('id', 'ORDER')) {
+                        $this->exigir('id', 'BY');
+                        $fn['orden'] = $this->listaOrden();
+                    }
                 }
                 $this->exigir('punc', ')');
                 return $fn;
@@ -672,6 +678,20 @@ final class Parser
         }
 
         throw JsonSqlDbError::syntax("Expresión no válida cerca de '" . ($tk['v'] === '' ? 'fin de consulta' : $tk['v']) . "' (línea {$tk['l']})");
+    }
+
+    /** @return list<array{expr: array, dir: string}> los elementos de un ORDER BY */
+    private function listaOrden(): array
+    {
+        $orden = [];
+        do {
+            $e   = $this->expr();
+            $dir = 'ASC';
+            if ($this->comer('id', 'DESC'))      { $dir = 'DESC'; }
+            elseif ($this->comer('id', 'ASC'))   { $dir = 'ASC'; }
+            $orden[] = ['expr' => $e, 'dir' => $dir];
+        } while ($this->comer('punc', ','));
+        return $orden;
     }
 
     private function exprCase(): array
@@ -1173,18 +1193,7 @@ final class Parser
         }
 
         $this->exigir('id', 'BEGIN');
-        $cuerpo = [];
-        while (!$this->es('id', 'END')) {
-            if ($this->es('eof')) {
-                throw JsonSqlDbError::syntax('Falta el END del trigger');
-            }
-            $ini = $this->actual()['p'];
-            $this->sentencia();
-            $cuerpo[] = $this->textoEntre($ini, $this->actual()['p']);
-            if (!$this->comer('punc', ';') && !$this->es('id', 'END')) {
-                throw JsonSqlDbError::syntax('Falta el ; entre las sentencias del trigger');
-            }
-        }
+        $cuerpo = $this->cuerpoTrigger(['END']);
         $this->exigir('id', 'END');
 
         if ($cuerpo === []) {
@@ -1194,6 +1203,102 @@ final class Parser
         return ['k' => 'create_trigger', 'tabla' => $tabla, 'si_no_existe' => $siNoExiste,
                 'trg' => ['name' => $nombre, 'timing' => $timing, 'event' => $evento,
                           'when' => $cuando, 'body' => $cuerpo, 'sql' => trim($this->sql)]];
+    }
+
+    /**
+     * Las sentencias del cuerpo de un trigger, hasta una de las palabras de
+     * $hasta. Cada una se guarda como su texto, salvo:
+     *  - IF cond THEN … [ELSEIF cond THEN …] [ELSE …] END IF, que se guarda como
+     *    ['si' => [[cond, [sentencias]], …], 'sino' => ?[sentencias]];
+     *  - SET NEW.col = expr [, NEW.col = expr], que solo vale en un trigger
+     *    BEFORE INSERT o BEFORE UPDATE y cambia la fila que se va a escribir.
+     * Con esto un trigger de MySQL o de PostgreSQL se puede importar tal como
+     * funciona allí, sin reescribirlo en otra forma.
+     *
+     * @param list<string> $hasta
+     * @return list<string|array>
+     */
+    private function cuerpoTrigger(array $hasta): array
+    {
+        $cuerpo = [];
+        while (true) {
+            foreach ($hasta as $palabra) {
+                if ($this->es('id', $palabra)) {
+                    return $cuerpo;
+                }
+            }
+            if ($this->es('eof')) {
+                throw JsonSqlDbError::syntax('Falta el END del trigger');
+            }
+            if ($this->comer('id', 'IF')) {
+                $si = [];
+                do {
+                    $ini = $this->actual()['p'];
+                    $this->expr();
+                    $cond = $this->textoEntre($ini, $this->actual()['p']);
+                    $this->exigir('id', 'THEN');
+                    $si[] = [$cond, $this->cuerpoTrigger(['ELSEIF', 'ELSE', 'END'])];
+                } while ($this->comer('id', 'ELSEIF'));
+                $sino = null;
+                if ($this->comer('id', 'ELSE')) {
+                    $sino = $this->cuerpoTrigger(['END']);
+                }
+                $this->exigir('id', 'END');
+                $this->exigir('id', 'IF');
+                $cuerpo[] = ['si' => $si, 'sino' => $sino];
+            } elseif ($this->es('id', 'SET')) {
+                $ini = $this->actual()['p'];
+                $this->setNew();
+                $cuerpo[] = $this->textoEntre($ini, $this->actual()['p']);
+            } else {
+                $ini = $this->actual()['p'];
+                $this->sentencia();
+                $cuerpo[] = $this->textoEntre($ini, $this->actual()['p']);
+            }
+            $hayFin = false;
+            foreach ($hasta as $palabra) {
+                $hayFin = $hayFin || $this->es('id', $palabra);
+            }
+            if (!$this->comer('punc', ';') && !$hayFin) {
+                throw JsonSqlDbError::syntax('Falta el ; entre las sentencias del trigger');
+            }
+        }
+    }
+
+    /**
+     * SET NEW.col = expr [, NEW.col = expr], dentro de un trigger.
+     *
+     * @return array{k: string, asig: list<array{0: string, 1: array}>}
+     */
+    private function setNew(): array
+    {
+        $this->exigir('id', 'SET');
+        $asig = [];
+        do {
+            $quien = $this->nombreSimple('NEW');
+            if (strtoupper($quien) !== 'NEW') {
+                throw JsonSqlDbError::syntax('En un trigger, SET solo puede cambiar NEW.columna');
+            }
+            $this->exigir('punc', '.');
+            $col = $this->nombreSimple('columna');
+            if (!$this->comer('op', '=') && !$this->comer('op', ':=')) {
+                throw JsonSqlDbError::syntax("Se esperaba '=' después de NEW.$col");
+            }
+            $asig[] = [$col, $this->expr()];
+        } while ($this->comer('punc', ','));
+        return ['k' => 'set_new', 'asig' => $asig];
+    }
+
+    /** SET NEW.col = expr suelto, como lo analiza un trigger al ejecutarse. */
+    public static function analizarSetNew(string $sql): array
+    {
+        $p = new self(Lexer::tokens($sql), $sql, []);
+        $r = $p->setNew();
+        $p->comer('punc', ';');
+        if (!$p->es('eof')) {
+            throw JsonSqlDbError::syntax('Sobra texto después de SET NEW');
+        }
+        return $r;
     }
 
     private function drop(): array

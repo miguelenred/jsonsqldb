@@ -337,6 +337,22 @@ chk('un script de «Generar scripts» de SQL Server llega con los mismos datos y
     foreach (Api::sql('imp_ss', 'SHOW SCHEMA Clientes') as $c) { $def[$c['columna']] = [$c['defecto'], (int)$c['auto']]; }
     return $def['Saldo'][0] == 0 && $def['Activo'][0] == 1 && $def['Id'][1] === 1 ?: 'faltan los valores por defecto o el IDENTITY: ' . json_encode($def);
 });
+chk('el script de SQL Server guardado en UTF-16 («Unicode», lo que propone Management Studio) o con marca de UTF-8 llega igual', function () use ($importar, $volcados) {
+    $esperado = json_decode((string)file_get_contents("$volcados/sqlserver.esperado.json"), true);
+    $texto = (string)file_get_contents("$volcados/sqlserver.sql");
+    // Con trozos de 1 MB por en medio: se repite para que la conversión cruce bordes
+    $relleno = str_repeat("-- " . str_repeat('relleno ñ 😀 ', 40) . "\n", 2500);
+    foreach (['utf16le' => "\xFF\xFE" . mb_convert_encoding($texto . $relleno, 'UTF-16LE', 'UTF-8'),
+              'utf16be' => "\xFE\xFF" . mb_convert_encoding($texto, 'UTF-16BE', 'UTF-8'),
+              'bom8'    => "\xEF\xBB\xBF" . $texto] as $nombre => $bytes) {
+        $f = JSONSQLDB_DATA_PATH . "/ss_$nombre.sql";
+        file_put_contents($f, $bytes);
+        $r = $importar($f, "imp_ss_$nombre", $esperado, 'SQL Server', 'Pedidos');
+        @unlink($f);
+        if ($r !== true) { return "$nombre: $r"; }
+    }
+    return true;
+});
 chk('lo que se exporta para PostgreSQL y para SQL Server se vuelve a importar igual', function () use ($tablas, $triggers, $vistas, $indices, $original) {
     foreach (['postgresql' => 'PostgreSQL', 'sqlserver' => 'SQL Server'] as $d => $nombre) {
         $f = JSONSQLDB_DATA_PATH . "/vuelta.$d.sql";
@@ -423,6 +439,142 @@ chk('una base creada en MySQL, volcada con su mysqldump, llega igual', function 
     $m->query("DROP DATABASE `$bd`");
     if ($estado !== 0) { return "mysqldump terminó con $estado"; }
     return $importar($fichero, 'imp_vivo', $esperado, 'MySQL / MariaDB', 'a_pedidos');
+});
+
+echo "\n== Volcados difíciles (de las auditorías externas de la 2.7.3) ==\n";
+chk('el volcado por trozos (una tabla en memoria a la vez) es el mismo que el entero, en los cinco dialectos', function () {
+    // Antes se juntaban las filas de todas las tablas antes de escribir nada
+    Database::crear('trozos');
+    $bd = new Database('trozos');
+    $bd->consultar('CREATE TABLE padre (id INTEGER PRIMARY KEY, nombre VARCHAR(20))');
+    $bd->consultar('CREATE TABLE hijo (id INTEGER PRIMARY KEY, padre_id INTEGER, FOREIGN KEY (padre_id) REFERENCES padre (id))');
+    $bd->consultar("INSERT INTO padre VALUES (1, 'a'), (2, 'b')");
+    $bd->consultar('INSERT INTO hijo VALUES (1, 1), (2, 2), (3, 1)');
+    $bd->consultar('CREATE VIEW v AS SELECT p.nombre, COUNT(*) AS n FROM padre p JOIN hijo h ON h.padre_id = p.id GROUP BY p.nombre');
+    $meta = [];
+    foreach (['hijo', 'padre'] as $t) {
+        $meta[] = ['tabla' => $t, 'columnas' => $bd->consultar("SHOW SCHEMA $t"), 'claves' => $bd->consultar("SHOW KEYS FROM $t"), 'n' => 0];
+    }
+    $cargar = static fn(string $t) => $bd->consultar("SELECT * FROM $t");
+    $completas = array_map(static fn($m) => $m + ['filas' => $cargar($m['tabla'])], $meta);
+    $sinFecha = static fn(string $s) => (string)preg_replace('/^-- jsonSQLDB · .*\n/', '', $s);
+    foreach (['sqlite', 'mysql', 'postgresql', 'sqlserver', 'access'] as $d) {
+        $trozos = [];
+        Exportar::volcado('trozos', $meta, [], $bd->consultar('SHOW VIEWS'), [], $d, $cargar, static function ($x) use (&$trozos) { $trozos[] = $x; });
+        $entero = Exportar::volcado('trozos', $completas, [], $bd->consultar('SHOW VIEWS'), [], $d);
+        // n solo es el recuento de la cabecera: con las filas, cuenta las filas
+        $entero = str_replace('5 fila(s)', '0 fila(s)', $entero);
+        if ($sinFecha(implode('', $trozos)) !== $sinFecha($entero) || count($trozos) < 3) {
+            return "$d: distinto o de un solo trozo";
+        }
+    }
+    return true;
+});
+chk('el volcado para SQLite se carga en SQLite aunque haya un autonumérico que no es la clave primaria', function () {
+    // SQLite solo admite AUTOINCREMENT en INTEGER PRIMARY KEY
+    if (!class_exists('SQLite3')) { return null; }
+    Database::crear('autos');
+    $bd = new Database('autos');
+    $bd->consultar('CREATE TABLE t (id INTEGER AUTOINCREMENT, x TEXT)');
+    $bd->consultar("INSERT INTO t (x) VALUES ('a'), ('b')");
+    $tablas = [['tabla' => 't', 'columnas' => $bd->consultar('SHOW SCHEMA t'), 'claves' => $bd->consultar('SHOW KEYS FROM t'),
+                'filas' => $bd->consultar('SELECT * FROM t')]];
+    $sql = Exportar::volcado('autos', $tablas, [], [], [], 'sqlite');
+    $lite = new SQLite3(':memory:');
+    $ok = @$lite->exec($sql);
+    $n = $ok ? $lite->querySingle('SELECT COUNT(*) FROM t') : null;
+    return $ok && $n === 2 ?: 'SQLite: ' . $lite->lastErrorMsg();
+});
+chk('un volcado de MySQL en Latin-1 se importa: textos con acentos, BIT en crudo y fecha cero', function () {
+    // Antes, un solo byte Latin-1 rompía el análisis («Sentencia no soportada: 'I'»)
+    Database::crear('lat1');
+    $r = Importar::sql(__DIR__ . '/volcados/mysql_latin1.sql', 'lat1');
+    $filas = (new Database('lat1'))->consultar('SELECT * FROM personas ORDER BY id');
+    return $filas === [['id' => 1, 'nombre' => 'José', 'b' => 170, 'f' => null], ['id' => 2, 'nombre' => 'Ana', 'b' => 1, 'f' => null]]
+        && str_contains($r, 'Latin-1') && str_contains($r, '0000-00-00') ?: json_encode([$filas, $r], JSON_UNESCAPED_UNICODE);
+});
+chk('dos tablas que acaban en el mismo nombre no se pisan: la segunda recibe un sufijo y se avisa', function () {
+    // Antes, `ventas_2024` borraba con su DROP TABLE IF EXISTS la tabla que
+    // salía de `ventas-2024`, y se perdían sus filas
+    Database::crear('choque');
+    $r = Importar::sql(__DIR__ . '/volcados/mysql_nombres_que_chocan.sql', 'choque');
+    $bd = new Database('choque');
+    $a = $bd->consultar('SELECT * FROM ventas_2024 ORDER BY id');
+    $b = $bd->consultar('SELECT * FROM ventas_2024_2');
+    return $a === [['id' => 1, 'x' => 'a'], ['id' => 2, 'x' => 'b']] && $b === [['id' => 9, 'y' => 'z']]
+        && str_contains($r, "'ventas_2024' cambiado a 'ventas_2024_2'") ?: json_encode([$a, $b, $r]);
+});
+chk('ALTER … OWNER TO de pg_dump (sin --no-owner) y demás ALTER que no son de tabla se saltan', function () {
+    $f = JSONSQLDB_DATA_PATH . '/owner.sql';
+    file_put_contents($f, "-- PostgreSQL database dump\nSET standard_conforming_strings = on;\nCREATE TABLE public.t (id integer NOT NULL);\n"
+        . "ALTER TABLE public.t OWNER TO postgres;\nCREATE VIEW public.v AS\n SELECT t.id\n   FROM public.t;\nALTER VIEW public.v OWNER TO postgres;\n"
+        . "ALTER FUNCTION public.f() OWNER TO postgres;\nALTER TYPE public.estado OWNER TO postgres;\nCOPY public.t (id) FROM stdin;\n1\n2\n\\.\n");
+    Database::crear('owner');
+    Importar::sql($f, 'owner');
+    $bd = new Database('owner');
+    return count($bd->consultar('SELECT * FROM v')) === 2 ?: 'no';
+});
+chk('con la carpeta de la base a mano, una importación que falla deja la base como estaba (todo o nada)', function () {
+    Database::crear('todo');
+    $bd = new Database('todo');
+    $bd->consultar('CREATE TABLE previa (id INTEGER PRIMARY KEY, x TEXT)');
+    $bd->consultar("INSERT INTO previa VALUES (1, 'antes')");
+    $f = JSONSQLDB_DATA_PATH . '/falla.sql';
+    file_put_contents($f, "CREATE TABLE nueva (id INTEGER PRIMARY KEY);\nINSERT INTO nueva VALUES (1);\nUPDATE previa SET x = 'después';\n"
+        . "INSERT INTO nueva VALUES (1);\n");                // clave repetida: falla aquí
+    try {
+        Importar::sql($f, 'todo', 'jsonsqldb', JSONSQLDB_DATA_PATH . '/todo');
+        return 'no falló';
+    } catch (RuntimeException $e) {
+        $msg = $e->getMessage();
+    }
+    $bd = new Database('todo');
+    $tablas = array_column($bd->consultar('SHOW TABLES'), 'tabla');
+    $x = $bd->consultar('SELECT x FROM previa')[0]['x'];
+    // Sin la carpeta (panel en otra máquina), lo de antes del fallo queda hecho, como siempre
+    try { Importar::sql($f, 'todo', 'jsonsqldb'); } catch (RuntimeException $e) { $msg2 = $e->getMessage(); }
+    $quedo = array_column($bd->consultar('SHOW TABLES'), 'tabla');
+    sort($quedo);
+    return $tablas === ['previa'] && $x === 'antes' && str_contains($msg, 'ha vuelto a como estaba')
+        && !is_dir(JSONSQLDB_DATA_PATH . '/todo.antes-de-importar') && $quedo === ['nueva', 'previa'] && str_contains($msg2 ?? '', 'no hay transacciones')
+        ?: json_encode([$tablas, $x, $msg, $quedo]);
+});
+chk('un CSV en Latin-1 se carga con sus acentos', function () {
+    Database::crear('csvlat');
+    $bd = new Database('csvlat');
+    $bd->consultar('CREATE TABLE p (id INTEGER, nombre TEXT)');
+    $f = JSONSQLDB_DATA_PATH . '/p.csv';
+    file_put_contents($f, "id;nombre\n1;Jos\xE9\n2;Mu\xF1oz\n");
+    $r = Importar::csv($f, 'csvlat', 'p');
+    return array_column($bd->consultar('SELECT nombre FROM p ORDER BY id'), 'nombre') === ['José', 'Muñoz'] && str_contains($r, 'Latin-1') ?: $r;
+});
+
+echo "\n== Restaurar desde ZIP: rutas que salen de la carpeta ==\n";
+chk('un ZIP con «..», «.» o «//» en una ruta se rechaza entero, y nada se escribe fuera de la base', function () {
+    // Dos auditorías externas señalaron las rutas que acaban en «..». La lista
+    // de nombres permitidos ya las dejaba sin escribir; ahora, además, el ZIP
+    // se rechaza entero y cada destino se comprueba dentro de la base
+    if (!class_exists('ZipArchive')) { return null; }
+    $dir = JSONSQLDB_DATA_PATH . '/zipslip';
+    @mkdir("$dir/db", 0775, true);
+    $mal = [];
+    foreach (['db/..', 'db/foo/..', 'db/./t.json', 'db//t.json', 'db/sub/../../fuera.json', 'db/..\\fuera.json', '../fuera.json'] as $nombre) {
+        $f = "$dir/p.zip";
+        @unlink($f);
+        $z = new ZipArchive();
+        $z->open($f, ZipArchive::CREATE);
+        $z->addFromString('db/t.meta.json', '{"columns":[],"pk":[]}');
+        $z->addFromString($nombre, '{"columns":[],"pk":[]}');
+        $z->close();
+        try {
+            Importar::zip($f, 'db', "$dir/db");
+            $mal[] = "$nombre aceptado";
+        } catch (RuntimeException $e) {
+            if (!str_contains($e->getMessage(), 'sale de la carpeta')) { $mal[] = "$nombre: " . $e->getMessage(); }
+        }
+    }
+    $fuera = array_diff((array)scandir($dir), ['.', '..', 'db', 'p.zip']);
+    return $mal === [] && $fuera === [] ?: implode(' | ', $mal) . ' · fuera: ' . implode(',', $fuera);
 });
 
 unset($bd);

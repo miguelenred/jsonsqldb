@@ -35,6 +35,30 @@ final class Store
         return is_array($datos) ? $datos : $defecto;
     }
 
+    /**
+     * Lee, cambia y guarda un fichero de una vez, con un bloqueo exclusivo
+     * sobre un fichero .lock al lado: dos peticiones a la vez no se pisan el
+     * cambio. guardar() solo, con su temporal y su rename, deja el fichero
+     * siempre entero, pero no impide que dos procesos lean lo mismo, sumen
+     * uno cada uno y guarden los dos el mismo número.
+     *
+     * @param callable(array): array $cambio
+     */
+    public static function actualizar(string $fichero, callable $cambio): void
+    {
+        $lock = @fopen(self::ruta($fichero) . '.lock', 'c');
+        if ($lock === false) {
+            throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => self::ruta($fichero) . '.lock']));
+        }
+        try {
+            flock($lock, LOCK_EX);
+            self::guardar($fichero, $cambio(self::leer($fichero)));
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
     public static function guardar(string $fichero, array $datos): void
     {
         $destino = self::ruta($fichero);

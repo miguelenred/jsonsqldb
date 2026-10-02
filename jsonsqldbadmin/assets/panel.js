@@ -126,3 +126,9 @@
     });
     marcar();
 })();
+
+// Un desplegable que envía su formulario al cambiar (sin onchange en el HTML:
+// la CSP no admite código en atributos)
+document.querySelectorAll('[data-enviar-al-cambiar]').forEach(function (el) {
+    el.addEventListener('change', function () { el.form.submit(); });
+});

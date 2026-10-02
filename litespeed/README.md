@@ -65,7 +65,7 @@ RewriteRule ^/jsonsqldb/(data|logs|engine|docs|tests|nginx|litespeed)(/|$) - [F,
 RewriteRule ^/jsonsqldb/jsonsqldbadmin/(lib|vistas|datos)(/|$) - [F,L]
 
 # Configuration files, at any level
-RewriteRule ^/jsonsqldb/.*(^|/)(config\.php|[^/]*_config\.php|[^/]*\.dist\.php)$ - [F,L]
+RewriteRule ^/jsonsqldb/.*(^|/)(config\.php|configurar\.php|[^/]*_config\.php|[^/]*\.dist\.php)$ - [F,L]
 
 # Extensions that must never be served. .json is the data: this is the one
 # rule that matters most. The panel's assets are .css, .js and .woff2.

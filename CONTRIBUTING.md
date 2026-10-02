@@ -4,8 +4,8 @@ Thanks for taking a look. A few things worth knowing before you start.
 
 ## About this project
 
-The implementation was written by an AI model (Claude Opus 5) from a
-specification and under review by the author — see [AUTHORS](AUTHORS). That does
+The implementation was written with several AI models from a specification and
+under review by the author — see [AUTHORS](AUTHORS). That does
 not change how contributions work, but it does explain why the code style and the
 comments are as consistent as they are, and why the comments are in Spanish.
 

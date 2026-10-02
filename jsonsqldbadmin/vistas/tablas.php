@@ -58,6 +58,10 @@ usort($tablas, static fn($a, $b) => strcasecmp((string)$a['tabla'], (string)$b['
       <div class="card-header"><?= icono('upload') ?> <?= h(t('Importar un volcado SQL')) ?></div>
       <div class="card-body">
         <p class="small text-body-secondary"><?= t('El volcado del panel, o uno de SQLite (<code>sqlite3 base.db .dump</code>), MySQL / MariaDB (<code>mysqldump</code>), PostgreSQL (<code>pg_dump</code>, en texto) o SQL Server (el script de «Generar scripts» de Management Studio, con esquema y datos). Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual (un <code>CHECK</code>, un <code>ENUM</code>…). Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen. <strong>No hay transacciones</strong>: si una sentencia falla, las anteriores ya están hechas y se dice cuál era.') ?></p>
+        <p class="small"><?= t('Cómo hacer el volcado de cada motor: <a href="{1}" target="_blank" rel="noopener">guía</a>.',
+            [1 => 'https://github.com/miguelenred/jsonsqldb/blob/main/docs/05-admin.md#how-to-make-an-sql-dump-of-each-database']) ?></p>
+        <p class="small"><?= t('<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> que vuelca un .mdb o .accdb a un fichero que se importa aquí, con sus tablas, claves, índices, relaciones, datos y consultas. Necesita <strong>Windows</strong>. Lo más fácil para ejecutarlo: <strong>botón derecho sobre el fichero descargado → «Ejecutar con PowerShell»</strong>; pregunta qué base volcar y en qué carpeta guardar el volcado. Si falta el controlador de Access, lo dice y da el enlace para descargarlo.',
+            [1 => h(url(['p' => 'script_access']))]) ?></p>
         <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap">
           <?= csrf() ?>
           <input type="hidden" name="accion" value="importar_sql">
@@ -69,6 +73,7 @@ usort($tablas, static fn($a, $b) => strcasecmp((string)$a['tabla'], (string)$b['
             <option value="mysql"><?= h(t('MySQL / MariaDB (mysqldump)')) ?></option>
             <option value="postgresql"><?= h(t('PostgreSQL (pg_dump)')) ?></option>
             <option value="sqlserver"><?= h(t('SQL Server (Generar scripts)')) ?></option>
+            <option value="access"><?= h(t('Microsoft Access (script de PowerShell)')) ?></option>
           </select>
           <input class="form-control" type="file" name="fichero" accept=".sql,text/plain" required style="max-width:22rem">
           <button class="btn btn-primary"><?= icono('upload') ?> <?= h(t('Importar')) ?></button>

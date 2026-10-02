@@ -28,7 +28,9 @@ final class Auth
         session_set_cookie_params([
             'httponly' => true,
             'samesite' => 'Strict',
-            'secure'   => ($_SERVER['HTTPS'] ?? 'off') !== 'off',
+            // La misma comprobación que la de exigir HTTPS: detrás de un proxy
+            // de confianza, su cabecera cuenta; si no, la cookie salía sin Secure
+            'secure'   => util_https(),
         ]);
         session_start();
 
@@ -158,16 +160,20 @@ final class Auth
             throw new RuntimeException(t('Rol no válido'));
         }
         self::validarNuevo($usuario, $clave);
+        $hash = password_hash($clave, PASSWORD_BCRYPT, ['cost' => ADMIN_BCRYPT_COSTE]);
 
-        $usuarios = self::usuarios();
-        $usuarios[] = [
-            'usuario' => $usuario,
-            'hash'    => password_hash($clave, PASSWORD_BCRYPT, ['cost' => ADMIN_BCRYPT_COSTE]),
-            'rol'     => $rol,
-            'creado'  => date('Y-m-d H:i:s'),
-            'acceso'  => null,
-        ];
-        Store::guardar(self::USUARIOS, $usuarios);
+        // Leer, cambiar y guardar bajo un mismo bloqueo (Store::actualizar): dos
+        // cambios a la vez ya no se pisan. Y dentro se vuelve a mirar que no
+        // exista, por si otro lo ha creado mientras tanto
+        Store::actualizar(self::USUARIOS, static function (array $usuarios) use ($usuario, $hash, $rol): array {
+            foreach ($usuarios as $u) {
+                if (strcasecmp((string)$u['usuario'], $usuario) === 0) {
+                    throw new RuntimeException(t("El usuario '{usuario}' ya existe", ['usuario' => $usuario]));
+                }
+            }
+            $usuarios[] = ['usuario' => $usuario, 'hash' => $hash, 'rol' => $rol, 'creado' => date('Y-m-d H:i:s'), 'acceso' => null];
+            return $usuarios;
+        });
         return $usuario;
     }
 
@@ -181,33 +187,39 @@ final class Auth
     /** Guarda el idioma de un usuario: le sigue en cualquier navegador. */
     public static function guardarIdioma(string $usuario, string $idioma): void
     {
-        $usuarios = self::usuarios();
-        foreach ($usuarios as $i => $u) {
-            if (strcasecmp((string)$u['usuario'], $usuario) === 0) {
-                $usuarios[$i]['idioma'] = $idioma;
-                Store::guardar(self::USUARIOS, $usuarios);
-                return;
+        Store::actualizar(self::USUARIOS, static function (array $usuarios) use ($usuario, $idioma): array {
+            foreach ($usuarios as $i => $u) {
+                if (strcasecmp((string)$u['usuario'], $usuario) === 0) {
+                    $usuarios[$i]['idioma'] = $idioma;
+                }
             }
-        }
+            return $usuarios;
+        });
     }
 
     public static function cambiarClave(string $usuario, string $clave): void
     {
         self::validarClave($clave);
-        $usuarios = self::usuarios();
-        foreach ($usuarios as $i => $u) {
-            if (strcasecmp((string)$u['usuario'], $usuario) === 0) {
-                $usuarios[$i]['hash'] = password_hash($clave, PASSWORD_BCRYPT, ['cost' => ADMIN_BCRYPT_COSTE]);
-                Store::guardar(self::USUARIOS, $usuarios);
-                return;
+        $hash = password_hash($clave, PASSWORD_BCRYPT, ['cost' => ADMIN_BCRYPT_COSTE]);
+        Store::actualizar(self::USUARIOS, static function (array $usuarios) use ($usuario, $hash): array {
+            foreach ($usuarios as $i => $u) {
+                if (strcasecmp((string)$u['usuario'], $usuario) === 0) {
+                    $usuarios[$i]['hash'] = $hash;
+                    return $usuarios;
+                }
             }
-        }
-        throw new RuntimeException(t('El usuario \'{usuario}\' no existe', ['usuario' => $usuario]));
+            throw new RuntimeException(t('El usuario \'{usuario}\' no existe', ['usuario' => $usuario]));
+        });
     }
 
     public static function borrar(string $usuario): void
     {
-        $usuarios = self::usuarios();
+        Store::actualizar(self::USUARIOS, static fn(array $usuarios): array => self::sinUsuario($usuarios, $usuario));
+    }
+
+    /** La lista sin ese usuario; siempre tiene que quedar un administrador. */
+    private static function sinUsuario(array $usuarios, string $usuario): array
+    {
         $quedan   = [];
         $admins   = 0;
         foreach ($usuarios as $u) {
@@ -223,7 +235,7 @@ final class Auth
         if ($admins === 0) {
             throw new RuntimeException(t('Tiene que quedar al menos un administrador'));
         }
-        Store::guardar(self::USUARIOS, $quedan);
+        return $quedan;
     }
 
     private static function validarClave(string $clave): void
@@ -263,13 +275,15 @@ final class Auth
         $_SESSION['visto']   = time();
         $_SESSION['csrf']    = bin2hex(random_bytes(32));
 
-        $usuarios = self::usuarios();
-        foreach ($usuarios as $i => $x) {
-            if (strcasecmp((string)$x['usuario'], (string)$u['usuario']) === 0) {
-                $usuarios[$i]['acceso'] = date('Y-m-d H:i:s');
+        $nombre = (string)$u['usuario'];
+        Store::actualizar(self::USUARIOS, static function (array $usuarios) use ($nombre): array {
+            foreach ($usuarios as $i => $x) {
+                if (strcasecmp((string)$x['usuario'], $nombre) === 0) {
+                    $usuarios[$i]['acceso'] = date('Y-m-d H:i:s');
+                }
             }
-        }
-        Store::guardar(self::USUARIOS, $usuarios);
+            return $usuarios;
+        });
     }
 
     /** Minutos que faltan para poder reintentar, 0 si no hay bloqueo. */
@@ -286,7 +300,15 @@ final class Auth
 
     private static function apuntarFallo(string $ip): void
     {
-        $intentos = Store::leer(self::INTENTOS);
+        // Con el fichero bloqueado: dos intentos a la vez no pueden contar uno
+        Store::actualizar(self::INTENTOS, static function (array $intentos) use ($ip): array {
+            return self::sumarFallo($intentos, $ip);
+        });
+    }
+
+    /** @param array<string,array{fallos:int,ultimo:int}> $intentos */
+    private static function sumarFallo(array $intentos, string $ip): array
+    {
         $e = $intentos[$ip] ?? ['fallos' => 0, 'ultimo' => 0];
 
         // Si el bloqueo anterior ya expiró, se empieza a contar de nuevo
@@ -301,15 +323,16 @@ final class Auth
         foreach ($intentos as $k => $v) {
             if ((int)($v['ultimo'] ?? 0) < $corte) { unset($intentos[$k]); }
         }
-        Store::guardar(self::INTENTOS, $intentos);
+        return $intentos;
     }
 
     private static function limpiarFallos(string $ip): void
     {
-        $intentos = Store::leer(self::INTENTOS);
-        if (isset($intentos[$ip])) {
-            unset($intentos[$ip]);
-            Store::guardar(self::INTENTOS, $intentos);
+        if (isset(Store::leer(self::INTENTOS)[$ip])) {
+            Store::actualizar(self::INTENTOS, static function (array $intentos) use ($ip): array {
+                unset($intentos[$ip]);
+                return $intentos;
+            });
         }
     }
 

@@ -112,21 +112,32 @@ chk('sin token CSRF no instala nada', function () use ($admin, $config) {
     $html = peticion('', ['conexion' => 'directa'] + $admin);
     return str_contains($html, 'Formulario caducado') && !is_file($config);
 });
+/** El código de instalación que ha dejado el panel en su carpeta de datos. */
+function codigo(): string {
+    global $tmp;
+    return trim((string)@file_get_contents("$tmp/admin/codigo-instalacion.txt"));
+}
+chk('sin el código de instalación, que está en el servidor, no instala nada', function () use ($admin, $config) {
+    // Antes, el primero que llegaba al panel recién publicado lo instalaba
+    $html = peticion('', ['csrf' => csrf(), 'codigo' => 'abcd-abcd-abcd-abcd', 'conexion' => 'directa', 'motor' => '', 'http' => '1'] + $admin);
+    return str_contains($html, 'código de instalación no es correcto') && !is_file($config) && codigo() !== '' ?: 'instaló o no avisó';
+});
 chk('una carpeta que no es jsonSQLDB se rechaza sin escribir nada', function () use ($admin, $config) {
-    $html = peticion('', ['csrf' => csrf(), 'conexion' => 'directa', 'motor' => '/no/existe'] + $admin);
+    $html = peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'directa', 'motor' => '/no/existe'] + $admin);
     return str_contains($html, 'no está jsonSQLDB') && !is_file($config) ?: 'o escribió, o no avisó';
 });
 chk('una API que no responde se rechaza sin escribir nada', function () use ($admin, $config) {
-    $html = peticion('', ['csrf' => csrf(), 'conexion' => 'api', 'api_url' => 'http://127.0.0.1:1/api.php',
+    $html = peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'api', 'api_url' => 'http://127.0.0.1:1/api.php',
                           'api_key' => 'x', 'api_secret' => 'y'] + $admin);
     return str_contains($html, 'alert-danger') && !is_file($config) ?: 'o escribió, o no avisó';
 });
 chk('las dos contraseñas tienen que coincidir', fn() =>
-    str_contains(peticion('', ['csrf' => csrf(), 'conexion' => 'directa', 'clave2' => 'otra-distinta-1'] + $admin),
+    str_contains(peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'directa', 'clave2' => 'otra-distinta-1'] + $admin),
                  'no coinciden'));
 chk('con conexión directa, prueba el motor y lo instala', function () use ($admin, $config) {
-    $html = peticion('', ['csrf' => csrf(), 'conexion' => 'directa', 'motor' => '', 'http' => '1'] + $admin);
+    $html = peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'directa', 'motor' => '', 'http' => '1'] + $admin);
     if (!str_contains($html, 'jsonSQLDBadmin está instalado')) { return 'no terminó'; }
+    if (codigo() !== '') { return 'el código de instalación sigue ahí'; }
     $texto = (string)@file_get_contents($config);
     if (!str_contains($texto, "define('ADMIN_CONEXION', 'directa')")) { return 'config.php sin la conexión directa'; }
     if (str_contains($texto, "'CHANGE_ME")) { return 'quedan valores CHANGE_ME en config.php'; }
@@ -140,7 +151,7 @@ chk('instalado, el asistente ya no aparece: pide entrar', function () {
 
 echo "\n== Panel por conexión directa ==\n";
 chk('entra y dice que va por conexión directa', function () use ($admin) {
-    $html = peticion('', ['usuario' => $admin['usuario'], 'clave' => $admin['clave']]);
+    $html = peticion('', ['csrf' => csrf(), 'usuario' => $admin['usuario'], 'clave' => $admin['clave']]);
     return str_contains($html, 'Bases de datos') && str_contains($html, '>Directa<');
 });
 chk('crea una base, y está en la carpeta de datos del motor', function () use ($tmp) {
@@ -263,8 +274,8 @@ chk('crear un usuario de solo lectura', function () {
     return str_contains($html, 'mirona');
 });
 chk('con él, un SELECT funciona y un DELETE lo rechaza el motor', function () {
-    peticion('p=salir');
-    peticion('', ['usuario' => 'mirona', 'clave' => 'clave-lectura-1']);
+    peticion('p=salir', ['csrf' => csrf('p=bases')]);
+    peticion('', ['csrf' => csrf(), 'usuario' => 'mirona', 'clave' => 'clave-lectura-1']);
     $lee = peticion('p=sql&db=tienda', ['csrf' => csrf('p=sql&db=tienda'), 'sql' => 'SELECT COUNT(*) AS n FROM t']);
     $borra = peticion('p=sql&db=tienda', ['csrf' => csrf('p=sql&db=tienda'), 'sql' => 'DELETE FROM t']);
     if (!str_contains($lee, '<td>2</td>')) { return 'el SELECT no devolvió 2'; }
@@ -297,7 +308,7 @@ chk('cambiarle la contraseña a un usuario cierra sus sesiones abiertas', functi
     global $cookies;
     $suya = $cookies;                                   // mirona tiene aquí su sesión abierta
     $cookies = $suya . '.admin';
-    peticion('', ['usuario' => $admin['usuario'], 'clave' => $admin['clave']]);
+    peticion('', ['csrf' => csrf(), 'usuario' => $admin['usuario'], 'clave' => $admin['clave']]);
     peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'cambiar_clave',
                             'usuario' => 'mirona', 'clave' => 'otra-clave-lectura-2']);
     $cookies = $suya;
@@ -307,7 +318,7 @@ chk('cambiarle la contraseña a un usuario cierra sus sesiones abiertas', functi
 chk('borrar un usuario cierra sus sesiones abiertas', function () use ($admin) {
     global $cookies;
     $suya = $cookies;
-    peticion('', ['usuario' => 'mirona', 'clave' => 'otra-clave-lectura-2']);
+    peticion('', ['csrf' => csrf(), 'usuario' => 'mirona', 'clave' => 'otra-clave-lectura-2']);
     if (!str_contains(peticion('p=bases'), 'Bases de datos')) { return 'mirona no pudo entrar'; }
     $cookies = $suya . '.admin';
     peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'borrar_usuario', 'usuario' => 'mirona']);
@@ -346,7 +357,7 @@ chk('el selector guarda el idioma en el usuario y le sigue en otra sesión y otr
     $suya = $cookies;
     $cookies = $suya . '.otra';                         // otro navegador, que pide español
     @unlink($cookies);
-    peticion('', ['usuario' => $admin['usuario'], 'clave' => 'clave-muy-larga-2']);
+    peticion('', ['csrf' => csrf(), 'usuario' => $admin['usuario'], 'clave' => 'clave-muy-larga-2']);
     $html = peticion('p=bases');
     @unlink($cookies);
     $cookies = $suya;
