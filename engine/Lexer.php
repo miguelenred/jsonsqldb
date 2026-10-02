@@ -138,7 +138,7 @@ final class Lexer
                 // SQLite: (int) lo dejaba en PHP_INT_MAX sin avisar, y un
                 // 18446744073709551615 (BIGINT UNSIGNED) se guardaba cambiado.
                 // 9223372036854775808 con un - delante es PHP_INT_MIN: lo ve el analizador
-                $entero = !$flotante && ($i - $ini < 19 || (string)(int)$texto === (ltrim($texto, '0') ?: '0'));
+                $entero = !$flotante && Valor::cifrasCaben($texto);
                 $tokens[] = ['t' => 'num', 'v' => $entero ? (int)$texto : (float)$texto, 'l' => $linea, 'p' => $ini, 'texto' => $texto];
                 continue;
             }

@@ -116,7 +116,7 @@ php tests/f8_indices.php      → OK: 60    indexes, against a full scan every t
 php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
 php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
-php tests/f12_contra_sqlite.php → OK: 4    143 queries and 16 writes, same results as SQLite
+php tests/f12_contra_sqlite.php → OK: 4    145 queries and 16 writes, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
 php tests/f14_volcados.php     → OK: 18 (30 with every server)  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language

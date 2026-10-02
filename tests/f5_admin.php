@@ -1213,8 +1213,8 @@ chk('los intentos fallidos de entrar no se pierden aunque lleguen a la vez', fun
         $lib = dirname(__DIR__) . '/jsonsqldbadmin';
         $prog = 'define("ADMIN_DATA_PATH", ' . var_export($dir, true) . '); require ' . var_export("$lib/config.dist.php", true) . ';'
               . 'foreach (["util", "Idioma", "Store", "Auth"] as $c) { require ' . var_export("$lib/lib/", true) . ' . $c . ".php"; }'
-              . 'time_sleep_until(' . $inicio . '); $m = new ReflectionMethod("Auth", "apuntarFallo"); $m->setAccessible(true);'
-              . 'for ($i = 0; $i < 25; $i++) { $m->invoke(null, "9.9.9.9"); }';
+              . 'time_sleep_until(' . $inicio . '); $f = Closure::bind(static fn(string $ip) => Auth::apuntarFallo($ip), null, Auth::class);'
+              . 'for ($i = 0; $i < 25; $i++) { $f("9.9.9.9"); }';
         $procs[] = proc_open([PHP_BINARY, '-r', $prog], [], $tub);
     }
     foreach ($procs as $pr) { proc_close($pr); }

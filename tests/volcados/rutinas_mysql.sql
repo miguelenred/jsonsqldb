@@ -57,6 +57,19 @@ CREATE VIEW v_grupos AS
 
 CREATE VIEW v_de_vista AS SELECT nombre, total FROM v_resumen WHERE n > 0;
 
+-- Lo que MySQL 8 reescribe a su manera al guardar la vista: NOT EXISTS y
+-- NOT (x IN (…)) como «… is false», REGEXP como regexp_like(), y además
+-- IS TRUE / IS NOT FALSE / IS UNKNOWN, <=> y CAST AS SIGNED (que redondea)
+CREATE VIEW v_bool AS
+  SELECT id, saldo IS TRUE AS t1, saldo IS NOT FALSE AS t2, (saldo > 100) IS UNKNOWN AS t3,
+         email <=> NULL AS t4, nivel <=> 'oro' AS t5, CAST(saldo / 3 AS SIGNED) AS t6
+  FROM clientes;
+
+CREATE VIEW v_sin AS
+  SELECT id, nombre FROM clientes
+  WHERE NOT EXISTS (SELECT 1 FROM pedidos p WHERE p.cliente_id = clientes.id AND p.estado = 'cerrado')
+    AND (NOT (id IN (SELECT cliente_id FROM pedidos WHERE total > 1000)) OR nombre REGEXP '^[A-Z]');
+
 DELIMITER ;;
 CREATE TRIGGER pedidos_bi BEFORE INSERT ON pedidos FOR EACH ROW
 BEGIN

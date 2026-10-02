@@ -725,6 +725,12 @@ final class Traductor
                 $i += strlen($palabra);
                 continue;
             }
+            // <=> de MySQL (igualdad que admite NULL), antes que <=
+            if ($this->mysql && substr($sql, $i, 3) === '<=>') {
+                $out[] = ['k' => 'op', 'v' => '<=>'];
+                $i += 3;
+                continue;
+            }
             foreach (['<=', '>=', '<>', '!=', '||', '==', '::'] as $doble) {
                 if (substr($sql, $i, 2) === $doble) { $out[] = ['k' => 'op', 'v' => $doble]; $i += 2; continue 2; }
             }

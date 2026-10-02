@@ -116,6 +116,38 @@ first; this is what was real and what was done.
   (a cross join), PostgreSQL's `OFFSET … LIMIT` order, `~~ like_escape(…)`,
   `::time(0) without time zone` and `x + interval -2 hour`, SQL Server's
   `DATALENGTH` and `DATEFROMPARTS`, and Access's `InStr` with binary compare.
+- **Access `a & b & c` grew twice as long with every `&`** on import: each
+  pair was translated on its own and repeated the previous ones. The whole
+  chain is now translated at once (NULL only if every part is). Found running
+  the suite on PHP 8.0, where a build with a recursion limit stopped on it.
+- **MySQL 8 views** (the tests had run against MariaDB, which writes them
+  differently). MySQL 8 stores `NOT EXISTS (…)` and `NOT (x IN (…))` as
+  `exists(…) is false` / `x in (…) is false`, and `REGEXP` as `regexp_like()`;
+  they are translated now, with `IS [NOT] TRUE / FALSE / UNKNOWN` in general.
+  Also fixed on the way: `a <=> b` gave `NULL` instead of 0 when only one side
+  was `NULL`, and MySQL's `CAST(x AS SIGNED)` rounds (1.5 gives 2) where the
+  engine's `CAST` truncates, so it is imported as `CAST(ROUND(x) AS INTEGER)`.
+  `tests/volcados/rutinas_mysql.sql` has two views with all of it, and the test
+  dumps were mixed with mysqldump's warning about the password on the command
+  line (MySQL 8 prints it, MariaDB does not): its messages now go apart. The
+  dump tests pass with MySQL 8.0.46 and with MariaDB 10.11.
+- **Every PHP version, 8.0 to 8.5, ran the whole suite** before release. What
+  it found:
+  - **Converting a number that does not fit in 64 bits to an integer** gave a
+    value that depended on the platform, and PHP 8.5 also prints a warning for
+    it (in an API response, a warning before the JSON breaks it). It now stays
+    at the largest or smallest integer, as `CAST` does in SQLite
+    (`CAST(1e20 AS INTEGER)` = 9223372036854775807), in `CAST`, `%`, `ROUND`,
+    `SUBSTR` and the date modifiers; a number written in the SQL or stored in an
+    `INTEGER` column is checked by its digits before converting. Compared with
+    SQLite in `tests/f12_contra_sqlite.php`.
+  - The API and collation tests passed accented text to a child process
+    through `escapeshellarg()`, which drops non-ASCII characters under the C
+    locale; they now start it without a shell.
+  - Two tests reached private members with Reflection, which needs
+    `setAccessible()` on PHP 8.0 and warns as deprecated on 8.5; they now use a
+    closure bound to the class, the same on every version. A test function
+    with an implicitly nullable parameter (deprecated in 8.4) is now explicit.
 - **`TRANSLATE(text, from, to)`** is a new text function (as in PostgreSQL,
   Oracle and SQL Server): views exported to PostgreSQL and SQL Server sort with
   it, so they come back with it.

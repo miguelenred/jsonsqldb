@@ -416,6 +416,19 @@ chk('los números siguen ordenándose como números', function () use ($bd) {
     $r = array_column($bd->consultar('SELECT id FROM usuarios ORDER BY id DESC LIMIT 3'), 'id');
     return $r === [6, 5, 4] ?: $r;
 });
+/**
+ * Ejecuta código PHP en otro proceso y devuelve lo que escribe (salida y
+ * errores). Sin shell: con el locale C (el de PHP 8.0 en algunas
+ * instalaciones), escapeshellarg() se come los caracteres que no son ASCII.
+ */
+function conPhp(string $codigo): string {
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+    $salida = stream_get_contents($tub[1]) . stream_get_contents($tub[2]);
+    fclose($tub[1]);
+    fclose($tub[2]);
+    proc_close($p);
+    return $salida;
+}
 chk('el mapa del idioma manda sobre el base', function () {
     // Sueco: å, ä y ö son letras propias y van después de la z.
     // Las constantes se leen al arrancar, así que se comprueba en otro proceso.
@@ -425,7 +438,7 @@ chk('el mapa del idioma manda sobre el base', function () {
             . "\$n = ['Östen','Åke','Ärla','Zorn','Anna','Bo'];"
             . "usort(\$n, fn(\$a, \$b) => JsonSQLDB\\Valor::compararOrden(\$a, \$b));"
             . "echo implode(',', \$n);";
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(conPhp($codigo));
     return $salida === 'Anna,Bo,Zorn,Åke,Ärla,Östen' ?: $salida;
 });
 chk('la colación binaria recupera el orden de SQLite', function () {
@@ -434,7 +447,7 @@ chk('la colación binaria recupera el orden de SQLite', function () {
             . "\$n = ['Óscar','oscar','Olga','Ana'];"
             . "usort(\$n, fn(\$a, \$b) => JsonSQLDB\\Valor::compararOrden(\$a, \$b));"
             . "echo implode(',', \$n);";
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(conPhp($codigo));
     return $salida === 'Ana,Olga,oscar,Óscar' ?: $salida;
 });
 chk('borrar la tabla de orden', function () use ($bd) {

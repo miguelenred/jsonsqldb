@@ -135,9 +135,12 @@ chk('se crea la base de origen y se vuelca con mysqldump', function () use ($m, 
     if ($error !== null) { return $error; }
     [$host, $usuario, $clave] = array_pad(explode(':', $conexion, 3), 3, '');
     $orden = 'mysqldump --skip-comments --default-character-set=utf8mb4 -h ' . escapeshellarg($host) . ' -u ' . escapeshellarg($usuario)
-           . ' ' . escapeshellarg('-p' . $clave) . ' ' . escapeshellarg($bdMysql) . ' > ' . escapeshellarg($volcado) . ' 2>&1';
+           . ' ' . escapeshellarg('-p' . $clave) . ' ' . escapeshellarg($bdMysql) . ' > ' . escapeshellarg($volcado)
+           . ' 2> ' . escapeshellarg("$volcado.err");
+    // Los avisos, aparte: el mysqldump de MySQL 8 avisa de la contraseña en la
+    // línea de órdenes, y mezclado con el volcado lo estropeaba
     exec($orden, $nada, $rc);
-    return $rc === 0 && filesize($volcado) > 1000 ?: 'mysqldump: ' . (string)@file_get_contents($volcado);
+    return $rc === 0 && filesize($volcado) > 1000 ?: 'mysqldump: ' . (string)@file_get_contents("$volcado.err");
 });
 $resumen = '';
 chk('el volcado se importa con todas sus vistas y sus triggers, sin saltarse ninguno', function () use ($m, $volcado, &$resumen) {
@@ -149,7 +152,7 @@ chk('el volcado se importa con todas sus vistas y sus triggers, sin saltarse nin
     $triggers = array_column($bd->consultar('SHOW TRIGGERS'), 'nombre');
     sort($vistas);
     sort($triggers);
-    return $vistas === ['v_calc', 'v_de_vista', 'v_fechas', 'v_grupos', 'v_resumen', 'v_textos', 'v_top']
+    return $vistas === ['v_bool', 'v_calc', 'v_de_vista', 'v_fechas', 'v_grupos', 'v_resumen', 'v_sin', 'v_textos', 'v_top']
         && $triggers === ['clientes_bi', 'clientes_bu', 'pedidos_ad', 'pedidos_ai', 'pedidos_au', 'pedidos_bd', 'pedidos_bi']
         && !str_contains($resumen, 'sin importar') ?: "vistas: " . implode(',', $vistas) . " · triggers: " . implode(',', $triggers) . " · $resumen";
 });
@@ -183,7 +186,7 @@ chk('las mismas escrituras dejan las mismas tablas y vistas allí y aquí, y fal
     if (getenv('JSONSQLDB_F17_GUARDAR')) {
         file_put_contents($GLOBALS['esperado'], json_encode(estado($bd, $nombres, ['v_top']), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n");
     }
-    $mal = array_merge($mal, diferencias($nombres, ['v_top'],
+    $mal = array_merge($mal, diferencias(array_merge($nombres, ['v_bool', 'v_sin']), ['v_top'],
         static function (string $n) use ($m) {
             $r = $m->query("SELECT * FROM `$n`");
             return $r ? $r->fetch_all(MYSQLI_ASSOC) : [['error' => $m->error]];
@@ -216,8 +219,8 @@ chk('se crea la base de origen y se vuelca con pg_dump', function () use ($pg, $
     }
     [$host, $usuario, $clave] = array_pad(explode(':', $pgConexion, 3), 3, '');
     exec('PGPASSWORD=' . escapeshellarg($clave) . ' pg_dump --no-owner -h ' . escapeshellarg($host) . ' -U ' . escapeshellarg($usuario)
-        . ' ' . escapeshellarg($bdPg) . ' > ' . escapeshellarg($volcadoPg) . ' 2>&1', $nada, $rc);
-    return $rc === 0 && filesize($volcadoPg) > 1000 ?: 'pg_dump: ' . (string)@file_get_contents($volcadoPg);
+        . ' ' . escapeshellarg($bdPg) . ' > ' . escapeshellarg($volcadoPg) . ' 2> ' . escapeshellarg("$volcadoPg.err"), $nada, $rc);
+    return $rc === 0 && filesize($volcadoPg) > 1000 ?: 'pg_dump: ' . (string)@file_get_contents("$volcadoPg.err");
 });
 chk('el volcado se importa con todas sus vistas y sus triggers (uno por evento), sin saltarse ninguno', function () use ($pg, $volcadoPg) {
     if ($pg === null) { return null; }

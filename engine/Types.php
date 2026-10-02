@@ -108,8 +108,8 @@ final class Types
                     throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
                 }
                 if (is_string($valor) && preg_match('/^([+-]?)0*(\d+)$/', trim($valor), $m)) {
-                    $i = (int)trim($valor);
-                    if ((string)abs($i) === $m[2] || ($i === PHP_INT_MIN && $m[2] === '9223372036854775808')) return $i;
+                    // Se mira antes de convertir: PHP 8.5 avisa al convertir lo que no cabe
+                    if (Valor::cifrasCaben($m[2], $m[1] === '-')) return (int)trim($valor);
                     throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
                 }
                 throw JsonSqlDbError::type("Valor no entero para '{$col['name']}': " . self::texto($valor));
@@ -192,8 +192,9 @@ final class Types
 
         switch ($base) {
             case 'INTEGER':
-                // Se trunca hacia cero, no se redondea: CAST(1.9 AS INTEGER) = 1
-                return (int)Valor::aNumero($v);
+                // Se trunca hacia cero, no se redondea: CAST(1.9 AS INTEGER) = 1;
+                // y lo que no cabe se queda en el máximo o el mínimo, como en SQLite
+                return Valor::entero(Valor::aNumero($v));
 
             case 'DOUBLE':
                 return (float)Valor::aNumero($v);

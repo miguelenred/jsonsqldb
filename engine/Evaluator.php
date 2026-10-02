@@ -533,8 +533,8 @@ final class Evaluator
                         case '*': return $x * $y;
                         case '/': return $y == 0 ? null : $x / $y;
                     }
-                    $di = (int)$y;
-                    return $di === 0 ? null : (int)$x % $di;
+                    $di = Valor::entero($y);
+                    return $di === 0 ? null : Valor::entero($x) % $di;
                 };
         }
         return null;
@@ -592,8 +592,8 @@ final class Evaluator
                 // El módulo trabaja con enteros, como en SQLite. Comprobar el
                 // cero ANTES de convertir dejaba pasar 0.4, que al convertirse
                 // se vuelve 0 y provocaba un DivisionByZeroError de PHP.
-                $di = (int)$y;
-                return $di === 0 ? null : (int)$x % $di;
+                $di = Valor::entero($y);
+                return $di === 0 ? null : Valor::entero($x) % $di;
         }
 
         throw JsonSqlDbError::syntax("Operador no soportado: $op");

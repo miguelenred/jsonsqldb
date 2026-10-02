@@ -50,10 +50,15 @@ function chk(string $titulo, callable $fn): void {
 function peticion(array $post): array
 {
     global $raizProyecto, $raizDatos;
-    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/_peticion.php')
-         . ' ' . escapeshellarg(json_encode($post, JSON_UNESCAPED_UNICODE))
-         . ' ' . escapeshellarg($raizDatos);
-    $salida = shell_exec($cmd);
+    // Sin shell: con el locale C (el de PHP 8.0 en algunas instalaciones),
+    // escapeshellarg() se come los caracteres que no son ASCII y la petición
+    // llegaba con «Logroo» en vez de «Logroño»
+    $p = proc_open([PHP_BINARY, __DIR__ . '/_peticion.php', (string)json_encode($post, JSON_UNESCAPED_UNICODE), $raizDatos],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+    $salida = stream_get_contents($tub[1]);
+    fclose($tub[1]);
+    fclose($tub[2]);
+    proc_close($p);
     $datos  = json_decode((string)$salida, true);
     return is_array($datos) ? $datos : ['error' => 'respuesta no válida: ' . substr((string)$salida, 0, 300)];
 }
@@ -76,7 +81,7 @@ function secretoDe(string $clave): string
 }
 
 /** Petición firmada correctamente. */
-function firmada(string $sql, string $clave, string $bd = null, ?string $ts = null, array $params = []): array
+function firmada(string $sql, string $clave, ?string $bd = null, ?string $ts = null, array $params = []): array
 {
     global $base;
     $bd ??= $base;
@@ -513,7 +518,10 @@ chk('los tres toman la clave y el secreto de las mismas variables de entorno', f
     $cli = JsonSqlDbCliente::pruebas();
     putenv('JSONSQLDB_API_KEY');
     putenv('JSONSQLDB_HMAC_SECRET');
-    $leer = static fn(string $p) => (new ReflectionProperty(JsonSqlDbCliente::class, $p))->getValue($cli);
+    // Las propiedades son privadas: se leen desde dentro de la clase con un
+    // cierre ligado a ella. Con Reflection, PHP 8.0 exigía setAccessible(), que
+    // en 8.5 avisa de obsoleta; así vale igual en todas las versiones
+    $leer = static fn(string $p) => Closure::bind(static fn(JsonSqlDbCliente $c) => $c->$p, null, JsonSqlDbCliente::class)($cli);
     return $leer('apiKey') === 'clave-del-entorno' && $leer('secreto') === 'secreto-del-entorno' ?: 'el cliente PHP no las usa';
 });
 chk('la web no sirve los clientes de ejemplo (Apache, IIS, nginx)', function () {

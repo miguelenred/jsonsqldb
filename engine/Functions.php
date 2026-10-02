@@ -95,7 +95,7 @@ final class Functions
             case 'ROUND':
                 self::exige($nombre, $args, 1, 2);
                 if ($args[0] === null) { return null; }
-                $dec = isset($args[1]) ? (int)Valor::aNumero($args[1]) : 0;
+                $dec = isset($args[1]) ? Valor::entero(Valor::aNumero($args[1])) : 0;
                 return round((float)Valor::aNumero($args[0]), $dec);
             case 'RANDOM':
                 self::exige($nombre, $args, 0);
@@ -228,7 +228,7 @@ final class Functions
         }
         $s     = Valor::aTexto($args[0]);
         $largo = Types::longitud($s);
-        $ini   = (int)Valor::aNumero($args[1]);
+        $ini   = Valor::entero(Valor::aNumero($args[1]));
 
         // Índice base 0 interno. En SQL la primera posición es la 1, y la 0 se
         // refiere al hueco anterior al primer carácter: SUBSTR('abcdef',0,3)
@@ -239,7 +239,7 @@ final class Functions
         if (!isset($args[2])) {
             return self::corte($s, max(0, $ini), null);
         }
-        $len = (int)Valor::aNumero($args[2]);
+        $len = Valor::entero(Valor::aNumero($args[2]));
 
         // La ventana pedida es [ini, ini+len) con longitud positiva, y
         // [ini+len, ini) con longitud negativa: en ese caso son los caracteres
@@ -323,7 +323,7 @@ final class Functions
             if ($v === null || !is_numeric($v)) {
                 return null;
             }
-            $d = (new \DateTimeImmutable('@' . (int)floor((float)$v)))->modify(sprintf('+%d microseconds', (int)round(fmod((float)$v, 1) * 1e6)));
+            $d = (new \DateTimeImmutable('@' . Valor::entero(floor((float)$v))))->modify(sprintf('+%d microseconds', (int)round(fmod((float)$v, 1) * 1e6)));
             return self::modificar($d, array_slice($mods, 1));
         }
         return self::modificar(self::aFecha($v), $mods);
@@ -351,13 +351,13 @@ final class Functions
             if (preg_match('/^([+-]?)(\d+(?:\.\d+)?)\s*(second|minute|hour|day|month|year)s?$/', $texto, $p)) {
                 $n = (float)$p[2] * ($p[1] === '-' ? -1 : 1);
                 if ($p[3] === 'month' || $p[3] === 'year') {
-                    if ($n != (int)$n) {
+                    if ($n != Valor::entero($n)) {
                         throw JsonSqlDbError::syntax("Modificador de fecha no soportado: '$texto' (los meses y los años, enteros)");
                     }
-                    $d = $d->modify(sprintf('%+d %s', (int)$n, $p[3]));
+                    $d = $d->modify(sprintf('%+d %s', Valor::entero($n), $p[3]));
                 } else {
                     // En segundos, para admitir '+1.5 days' como SQLite
-                    $seg = (int)round($n * ['second' => 1, 'minute' => 60, 'hour' => 3600, 'day' => 86400][$p[3]]);
+                    $seg = Valor::entero(round($n * ['second' => 1, 'minute' => 60, 'hour' => 3600, 'day' => 86400][$p[3]]));
                     $d = $d->modify(sprintf('%+d seconds', $seg));
                 }
                 continue;

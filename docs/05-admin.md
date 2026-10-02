@@ -351,7 +351,10 @@ phpMyAdmin: *Export → Custom → Format: SQL*. **Views and triggers come along
 (2.7.3), translated to the SQL used here: `IF()`, `CONCAT_WS`, `DATE_ADD … INTERVAL`
 (which MySQL stores as `x + interval 1 day`), `DATEDIFF`, `DATE_FORMAT`, `YEAR()`,
 `LOCATE`, `LEFT`/`RIGHT`, `GREATEST`/`LEAST`, `FLOOR`/`CEIL`, `TRUNCATE`, `MOD`,
-`GROUP_CONCAT … ORDER BY … SEPARATOR`, `LIMIT a, b`; in triggers `IF/ELSEIF/ELSE`,
+`GROUP_CONCAT … ORDER BY … SEPARATOR`, `LIMIT a, b`, and what MySQL 8 writes
+its own way: `exists(…) is false` (a `NOT EXISTS`), `regexp_like()`,
+`IS [NOT] TRUE/FALSE`, `<=>`, and `CAST(… AS SIGNED)`, which rounds there; in
+triggers `IF/ELSEIF/ELSE`,
 `SET NEW.col = …`, `SIGNAL … MESSAGE_TEXT` and `INSERT … SET`. Triggers are
 created at the end, after the data, so they do not fire while it loads. A view or
 trigger that uses something with no equivalent here (local variables, loops,

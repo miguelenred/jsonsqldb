@@ -45,6 +45,39 @@ final class Valor
         return 0;
     }
 
+    /**
+     * Un número como entero, truncando hacia cero. Lo que no cabe en 64 bits
+     * se queda en el máximo o el mínimo (como CAST en SQLite) y NaN es 0. Sin
+     * comprobarlo, (int) daba un valor que dependía de la plataforma, y PHP 8.5
+     * además avisa de que no se puede representar.
+     *
+     * @param int|float $n
+     */
+    public static function entero($n): int
+    {
+        if (is_int($n)) {
+            return $n;
+        }
+        if (is_nan($n)) {
+            return 0;
+        }
+        if ($n >= 9.2233720368547758E18) {
+            return PHP_INT_MAX;
+        }
+        if ($n <= -9.2233720368547758E18) {
+            return PHP_INT_MIN;
+        }
+        return (int)$n;
+    }
+
+    /** ¿Cabe en un entero de 64 bits este número escrito solo con cifras (y un signo)? */
+    public static function cifrasCaben(string $cifras, bool $negativo = false): bool
+    {
+        $cifras = ltrim($cifras, '0') ?: '0';
+        $limite = $negativo ? '9223372036854775808' : '9223372036854775807';
+        return strlen($cifras) < 19 || (strlen($cifras) === 19 && strcmp($cifras, $limite) <= 0);
+    }
+
     public static function aTexto($v): string
     {
         if ($v === null)    { return ''; }

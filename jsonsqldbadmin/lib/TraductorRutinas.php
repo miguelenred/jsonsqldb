@@ -1269,6 +1269,7 @@ final class TraductorRutinas
      */
     private function operadores(array $t): array
     {
+        $t = $this->esVerdadero($t);
         if ($this->d === 'postgresql') {
             $t = $this->operadoresPg($t);
         }
@@ -1301,7 +1302,8 @@ final class TraductorRutinas
                 $fin = $this->finOperando($t, $k + 1);
                 $der = $this->expr(array_slice($t, $k + 1, $fin - $k));
                 $texto = ['MOD' => "($izq % $der)", 'DIV' => "CAST($izq / $der AS INTEGER)"][$u]
-                    ?? "(($izq = $der) OR ($izq IS NULL AND $der IS NULL))";
+                    // <=> da 1 o 0, nunca NULL: 2 <=> NULL es 0
+                    ?? "(CASE WHEN ($izq) IS NULL AND ($der) IS NULL THEN 1 WHEN ($izq) IS NULL OR ($der) IS NULL THEN 0 WHEN ($izq) = ($der) THEN 1 ELSE 0 END)";
             }
             array_splice($t, $ini, $fin - $ini + 1, [['k' => 'raw', 'v' => $texto]]);
             $k = $ini;
@@ -1390,8 +1392,17 @@ final class TraductorRutinas
                 $a = $this->expr(array_slice($t, $ini, $k - $ini));
                 $der = array_slice($t, $k + 1, $fin - $k);
                 if ($x['v'] === '&') {
-                    $b = $this->expr($der);
-                    $texto = "(CASE WHEN ($a) IS NULL AND ($b) IS NULL THEN NULL ELSE COALESCE($a, '') || COALESCE($b, '') END)";
+                    // La cadena entera (a & b & c) de una vez: de dos en dos, cada
+                    // paso repetía los anteriores y la expresión crecía al doble
+                    // con cada &
+                    $partes = [$a, $this->expr($der)];
+                    while (($t[$fin + 1]['k'] ?? '') === 'op' && ($t[$fin + 1]['v'] ?? '') === '&') {
+                        $desde = $fin + 2;
+                        $fin = $this->finOperando($t, $desde);
+                        $partes[] = $this->expr(array_slice($t, $desde, $fin - $desde + 1));
+                    }
+                    $texto = '(CASE WHEN COALESCE(' . implode(', ', $partes) . ') IS NULL THEN NULL ELSE '
+                        . implode(' || ', array_map(static fn($p) => "COALESCE($p, '')", $partes)) . ' END)';
                 } elseif ($x['v'] === '\\') {
                     $texto = "CAST(($a) / (" . $this->expr($der) . ') AS INTEGER)';
                 } else {
@@ -1437,6 +1448,51 @@ final class TraductorRutinas
             }
         }
         return "$a REGEXP " . $this->tr->texto([['k' => 'str', 'v' => '(?is)^' . $re . '$']]);
+    }
+
+    /**
+     * X IS [NOT] TRUE / FALSE / UNKNOWN. MySQL 8 guarda así un NOT EXISTS
+     * («exists(…) is false») y un NOT IN con subconsulta («x in (…) is false»).
+     * Aquí: CASE, que da 1 o 0 y nunca NULL, como esos operadores. X llega hasta
+     * el AND, OR, NOT, WHERE… anterior: IS va detrás de las comparaciones.
+     * TRUE y FALSE ya vienen como 1 y 0.
+     */
+    private function esVerdadero(array $t): array
+    {
+        for ($k = 1; $k < count($t); $k++) {
+            if ($this->palabra($t[$k]) !== 'IS') {
+                continue;
+            }
+            $no = $this->palabra($t[$k + 1] ?? []) === 'NOT';
+            $v = $t[$k + ($no ? 2 : 1)] ?? null;
+            if ($v === null) {
+                continue;
+            }
+            $cual = $v['k'] === 'num' && in_array($v['v'], ['1', '0'], true) ? ($v['v'] === '1' ? 'TRUE' : 'FALSE') : $this->palabra($v);
+            if (!in_array($cual, ['TRUE', 'FALSE', 'UNKNOWN'], true)) {
+                continue;                           // IS NULL y los demás, como estaban
+            }
+            // Hacia atrás, hasta el conector anterior del mismo nivel
+            $ini = $k - 1;
+            $nivel = 0;
+            for (; $ini >= 0; $ini--) {
+                $x = $t[$ini];
+                if ($x['v'] === ')') { $nivel++; continue; }
+                if ($x['v'] === '(') { if ($nivel === 0) { break; } $nivel--; continue; }
+                if ($nivel === 0 && ($x['v'] === ',' || in_array($this->palabra($x),
+                        ['AND', 'OR', 'NOT', 'WHERE', 'ON', 'HAVING', 'WHEN', 'THEN', 'ELSE', 'SELECT', 'DISTINCT'], true))) {
+                    break;
+                }
+            }
+            $ini++;
+            $x = $this->expr(array_slice($t, $ini, $k - $ini));
+            $fin = $k + ($no ? 2 : 1);
+            $texto = $cual === 'UNKNOWN' ? "(($x) IS " . ($no ? 'NOT ' : '') . 'NULL)'
+                : '(CASE WHEN ' . ($cual === 'FALSE' ? "NOT ($x)" : "($x)") . ' THEN ' . ($no ? '0 ELSE 1' : '1 ELSE 0') . ' END)';
+            array_splice($t, $ini, $fin - $ini + 1, [['k' => 'raw', 'v' => $texto]]);
+            $k = $ini;
+        }
+        return $t;
     }
 
     /** Palabras que pueden ir delante de un paréntesis sin ser el nombre de una función. */
@@ -1701,6 +1757,10 @@ final class TraductorRutinas
             }
         }
         switch ($u) {
+            case 'REGEXP_LIKE':
+                // regexp_like(texto, patrón[, opciones]): así guarda MySQL 8 un REGEXP
+                $opciones = isset($a[2]) ? trim($a[2], "'") : '';
+                return '(' . $a[0] . ' REGEXP ' . (str_contains($opciones, 'i') ? "'(?i)' || " : '') . $a[1] . ')';
             case 'IF':
                 $this->exigirArgs($u, $a, 3);
                 return "(CASE WHEN {$a[0]} THEN {$a[1]} ELSE {$a[2]} END)";
@@ -2062,6 +2122,11 @@ final class TraductorRutinas
         }
         if ($destino === null) {
             throw new NoTraducible(t("CAST a '{tipo}' sin equivalente", ['tipo' => $base]));
+        }
+        // MySQL redondea al convertir a entero (CAST(1.5 AS SIGNED) = 2); aquí
+        // CAST trunca, como en SQLite y SQL Server
+        if ($destino === 'INTEGER' && $this->d === 'mysql') {
+            return "CAST(ROUND($x) AS INTEGER)";
         }
         return "CAST($x AS $destino)";
     }
