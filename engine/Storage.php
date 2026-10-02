@@ -44,7 +44,8 @@ final class Storage
      * decodificar la parte: una línea cuesta unas 30 µs y una parte de mil
      * filas unos 400.
      */
-    private const FILAS_POR_LINEA = 8;
+    /** Hasta cuántas filas de una parte se leen por líneas en vez de decodificarla entera (medido: 30 cuestan como decodificar una parte) */
+    private const FILAS_POR_LINEA = 30;
 
     private const RE_BASE  = '/^[A-Za-z0-9_-]{1,64}$/';
     private const RE_TABLA = '/^[A-Za-z_][A-Za-z0-9_]{0,63}$/';
@@ -65,6 +66,10 @@ final class Storage
     private array  $estados = [];
     /** @var array<string,array<string,array>> índices leídos dentro del bloqueo */
     private array  $indicesMemo = [];
+    /** @var array<string,array<string,array<int,int>>> trozos de índice ya vistos sanos, con su revisión (trozoSano()) */
+    private array  $trozosSanos = [];
+    /** @var array<string,array<string,string>> índices ya comprobados enteros, con las revisiones de sus trozos entonces (indiceValido()) */
+    private array  $indicesSanos = [];
     /** @var array<string,int> partes de cada tabla, dentro del bloqueo */
     private array  $partesMemo = [];
     /** @var array<string,array<string,int>> preguntas por claves de texto a cada índice, dentro del bloqueo */
@@ -1562,17 +1567,11 @@ final class Storage
             }
             // Pocas filas de una parte: se leen sus líneas, sin decodificarla
             if (count($enParte) <= self::FILAS_POR_LINEA) {
-                $sueltas = [];
-                foreach ($enParte as $pos) {
-                    $fila = $this->filaEnParte($tabla, $parte, $fichero, $pos - ($parte - 1) * $chunk);
-                    if ($fila === null) {
-                        $sueltas = null;
-                        break;
-                    }
-                    $sueltas[$pos] = $fila;
-                }
+                $sueltas = $this->filasEnParte($tabla, $parte, $fichero, array_map(static fn($p) => $p - ($parte - 1) * $chunk, $enParte));
                 if ($sueltas !== null) {
-                    $out += $sueltas;
+                    foreach ($sueltas as $d => $fila) {
+                        $out[$d + ($parte - 1) * $chunk] = $fila;
+                    }
                     continue;
                 }
             }
@@ -1946,7 +1945,7 @@ final class Storage
             };
             // Dónde empieza cada fila: con ello una lectura por clave lee
             // una línea del fichero en vez de decodificarlo entero (ver
-            // filaEnParte()). Van al final, con la posición del propio
+            // filasEnParte()). Van al final, con la posición del propio
             // listado en la última línea para encontrarlo sin leer nada más.
             $desfases = [];
             $sep      = "\n    ";
@@ -2105,28 +2104,44 @@ final class Storage
     }
 
     /**
-     * Una fila de una parte, leyendo solo su línea del fichero. Null si la
-     * parte no trae desfases o la línea no es lo que debería (editada a
-     * mano): entonces hay que decodificar la parte.
+     * Unas filas de una parte, leyendo solo sus líneas: un fopen para todas y
+     * un salto a cada una, en orden. Antes se abría el fichero una vez por
+     * fila, así que como mucho se leían 8 de una parte; con una sola apertura
+     * leer 30 sigue costando menos que decodificar las mil de la parte, y el
+     * disco ve menos aperturas y menos bytes. Null si la parte no trae
+     * desfases o algo no cuadra (entonces se decodifica entera).
+     *
+     * @param list<int> $desfases posiciones dentro de la parte
+     * @return array<int,array>|null desfase => fila
      */
-    private function filaEnParte(string $tabla, int $parte, string $fichero, int $desfase): ?array
+    private function filasEnParte(string $tabla, int $parte, string $fichero, array $desfases): ?array
     {
-        $desfases = $this->desfasesDeParte($tabla, $parte, $fichero);
-        if ($desfases === null || $desfase < 0 || strlen($desfases) < 4 * ($desfase + 1)) {
+        $saltos = $this->desfasesDeParte($tabla, $parte, $fichero);
+        if ($saltos === null) {
             return null;
         }
+        sort($desfases);
         $fh = @fopen($fichero, 'rb');
         if ($fh === false) {
             return null;
         }
-        fseek($fh, (int)unpack('N', $desfases, 4 * $desfase)[1]);
-        $linea = rtrim((string)fgets($fh), ",\r\n");
-        fclose($fh);
-        if ($linea === '' || $linea[0] !== '{') {
-            return null;
+        $out = [];
+        foreach ($desfases as $desfase) {
+            if ($desfase < 0 || strlen($saltos) < 4 * ($desfase + 1)) {
+                fclose($fh);
+                return null;
+            }
+            fseek($fh, (int)unpack('N', $saltos, 4 * $desfase)[1]);
+            $linea = rtrim((string)fgets($fh), ",\r\n");
+            $fila = $linea !== '' && $linea[0] === '{' ? json_decode($linea, true) : null;
+            if (!is_array($fila)) {
+                fclose($fh);
+                return null;
+            }
+            $out[$desfase] = $fila;
         }
-        $fila = json_decode($linea, true);
-        return is_array($fila) ? $fila : null;
+        fclose($fh);
+        return $out;
     }
 
     /** Escribe un fichero entero dentro de la escritura abierta. */
@@ -2314,8 +2329,12 @@ final class Storage
         // Los que se rehacen enteros desde la cola no necesitan el de antes.
         $tocar = [];
         if ($desde !== null && is_array($revs) && count($revs) >= (int)ceil($desde / $chunk)) {
-            foreach (array_keys($sueltas) as $pos) {
-                if ($pos < $desde) {
+            // Una fila cambiada solo toca su trozo si cambia su clave en este
+            // índice: un UPDATE de una columna sin índice no lee ni reescribe
+            // ningún trozo (antes los leía y decodificaba todos los de las
+            // filas cambiadas para acabar dejándolos igual)
+            foreach ($sueltas as $pos => $fila) {
+                if ($pos < $desde && (!isset($viejas[$pos]) || Indexes::cambiaClave($def['columns'], $viejas[$pos], $fila))) {
                     $tocar[intdiv((int)$pos, $chunk)] = true;
                 }
             }
@@ -2408,6 +2427,12 @@ final class Storage
      */
     private function trozoSano(string $tabla, array $def, int $parte, int $rev): bool
     {
+        // Un trozo ya visto sano en esta revisión lo sigue estando: se reescribe
+        // de una pieza (escribirAtomico) y con otra revisión. Cada escritura
+        // miraba todos los que no tocaba: 109 aperturas por INSERT a 60.000 filas
+        if (($this->trozosSanos[$tabla][$def['name']][$parte] ?? null) === $rev) {
+            return true;
+        }
         $fh = @fopen($this->ficheroIndice($tabla, $def['name'], $parte), 'rb');
         if ($fh === false) {
             return false;
@@ -2422,7 +2447,11 @@ final class Storage
             'index' => $def['name'], 'table' => $tabla, 'columns' => $def['columns'],
             'part' => $parte, 'rev' => $rev,
         ], self::JSON_FILA), 1, -1);
-        return strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0 && $cola === "}}\n";
+        $sano = strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0 && $cola === "}}\n";
+        if ($sano) {
+            $this->trozosSanos[$tabla][$def['name']][$parte] = $rev;
+        }
+        return $sano;
     }
 
     /**
@@ -2612,16 +2641,30 @@ final class Storage
             return null;
         }
         $this->bloquearLectura($tabla);
-        // Claves de texto exactas: se buscan en el texto de los trozos, sin
-        // decodificarlos, porque pueden estar en cualquiera (ver clavesEnTexto())
+        // Claves exactas: se buscan en el texto de los trozos, sin decodificarlos
+        // (ver clavesEnTexto()). Las de texto pueden estar en cualquiera; las
+        // numéricas, solo en los trozos cuyo rango las contiene. Antes las
+        // numéricas decodificaban cada trozo que tocaban y se quedaba en
+        // memoria: un IN de 100 claves repartidas, 8,7 MB y más que recorrer
         if (!$prefijo && $claves !== [] && !isset($this->indicesMemo[$tabla][$def['name']]['*'])) {
-            $texto = true;
-            foreach ($claves as $c) {
-                $texto = $texto && Indexes::valorNumerico($c) === null;
-            }
-            $plan = $texto ? $this->planIndice($tabla, $def) : null;
+            $plan = $this->planIndice($tabla, $def);
             if ($plan !== null && $plan['legado'] === null) {
-                $hallado = $this->clavesEnTexto($tabla, $def, $plan['partes'], $claves, false);
+                // Las numéricas, en cada trozo solo las que caben en su rango
+                $valores = array_map([Indexes::class, 'valorNumerico'], $claves);
+                $numericas = !in_array(null, $valores, true);
+                $trozos = [];
+                for ($p = 1; $p <= $plan['partes']; $p++) {
+                    if (!$numericas) {
+                        $trozos[$p] = $claves;
+                        continue;
+                    }
+                    foreach ($claves as $i => $c) {
+                        if (Indexes::cabeEnRango([$valores[$i]], $plan['rangos'][$p - 1])) {
+                            $trozos[$p][] = $c;
+                        }
+                    }
+                }
+                $hallado = $trozos === [] ? [] : $this->clavesEnTexto($tabla, $def, $trozos, $claves, false);
                 if ($hallado !== null) {
                     $posiciones = array_keys($hallado);
                     sort($posiciones);
@@ -2745,18 +2788,21 @@ final class Storage
      * @param list<string> $claves
      * @return array<int, true>|null
      */
-    private function clavesEnTexto(string $tabla, array $def, int $partes, array $claves, bool $parar): ?array
+    /**
+     * @param int|array<int,list<string>> $partes cuántos trozos (todos, con
+     *        las mismas $claves) o, por trozo, qué claves buscar en él
+     */
+    private function clavesEnTexto(string $tabla, array $def, $partes, array $claves, bool $parar): ?array
     {
         $revs    = $this->estado($tabla)['indexes'][$def['name']] ?? null;
         if (!is_array($revs)) {
             return null;
         }
-        $agujas = [];
-        foreach ($claves as $c) {
-            $agujas[] = json_encode($c, self::JSON_FILA) . ':';
-        }
+        $comoAguja = static fn($c) => json_encode($c, self::JSON_FILA) . ':';
+        $todas = array_map($comoAguja, $claves);
         $hallado = [];
-        for ($p = 1; $p <= $partes; $p++) {
+        foreach (is_array($partes) ? $partes : array_fill_keys(range(1, $partes), null) as $p => $deEste) {
+            $agujas = $deEste === null ? $todas : array_map($comoAguja, $deEste);
             $texto = @file_get_contents($this->ficheroIndice($tabla, $def['name'], $p));
             if ($texto === false || substr($texto, -3) !== "}}\n") {
                 return null;
@@ -2800,7 +2846,91 @@ final class Storage
     /** ¿Está el índice al día en todos sus trozos? */
     public function indiceValido(string $tabla, array $def): bool
     {
-        return $this->claveEnIndice($tabla, $def, "\0") !== null;
+        // Antes se buscaba una clave imposible en el texto de todos los trozos:
+        // cada escritura leía el índice entero (2-5 veces), y la mitad del
+        // INSERT de una fila se iba en eso. Basta con lo que mira trozoSano():
+        // la cabecera (nombre, parte y revisión que dice _rev.json) y el final
+        // del fichero, que además detecta un trozo cortado, cosa que la
+        // búsqueda no hacía. Y el veredicto se recuerda mientras las
+        // revisiones del índice en _rev.json sean las mismas
+        self::validarTabla($tabla);
+        if (!$this->indices) {
+            return false;
+        }
+        $this->bloquearLectura($tabla);
+        $plan = $this->planIndice($tabla, $def);
+        if ($plan === null) {
+            return false;
+        }
+        if ($plan['legado'] !== null) {
+            return true;
+        }
+        $revs = $this->estado($tabla)['indexes'][$def['name']] ?? null;
+        if (!is_array($revs)) {
+            return false;
+        }
+        $firma = $plan['partes'] . ':' . implode(',', array_slice($revs, 0, $plan['partes']));
+        if (($this->indicesSanos[$tabla][$def['name']] ?? null) === $firma) {
+            return true;
+        }
+        for ($p = 1; $p <= $plan['partes']; $p++) {
+            if (!$this->trozoSano($tabla, $def, $p, (int)($revs[$p - 1] ?? -1))) {
+                return false;
+            }
+        }
+        $this->indicesSanos[$tabla][$def['name']] = $firma;
+        return true;
+    }
+
+    /**
+     * ¿Leer estas claves numéricas por el índice saldría más caro que recorrer
+     * la tabla? Cada una cae en la parte cuyo trozo la contiene por rango; con
+     * el mismo cálculo que filasPorIndice() hace después con las posiciones.
+     */
+    private function noCompensa(string $tabla, array $def, array $claves): bool
+    {
+        if (count($claves) <= self::FILAS_POR_LINEA) {
+            return false;
+        }
+        $plan = $this->planIndice($tabla, $def);
+        if ($plan === null || $plan['legado'] !== null || $plan['partes'] === 0) {
+            return false;
+        }
+        $valores = [];
+        foreach ($claves as $c) {
+            $v = Indexes::valorNumerico($c);
+            if ($v === null) {
+                return false;                       // de texto: puede estar en cualquiera
+            }
+            $valores[] = $v;
+        }
+        sort($valores);
+        // Por trozo, cuántas caen en su rango: dos búsquedas binarias, no un
+        // recorrido de todas las claves por cada trozo
+        // Primera posición con un valor mayor ($incluido: o igual) que $x
+        $corte = static function (array $a, $x, bool $incluido): int {
+            $lo = 0;
+            $hi = count($a);
+            while ($lo < $hi) {
+                $m = ($lo + $hi) >> 1;
+                if ($incluido ? $a[$m] < $x : $a[$m] <= $x) { $lo = $m + 1; } else { $hi = $m; }
+            }
+            return $lo;
+        };
+        $coste = 0.0;
+        foreach ($plan['rangos'] as $r) {
+            if ($r === null) {
+                return false;                       // un trozo sin acotar: no se puede estimar
+            }
+            if ($r === []) {
+                continue;
+            }
+            $n = $corte($valores, $r[1], false) - $corte($valores, $r[0], true);
+            if ($n > 0) {
+                $coste += $n <= self::FILAS_POR_LINEA ? $n / self::FILAS_POR_LINEA : 1;
+            }
+        }
+        return $coste * 2 > max(1, $this->partes($tabla));
     }
 
     /**
@@ -2864,6 +2994,11 @@ final class Storage
      */
     public function filasPorIndice(string $tabla, array $def, array $claves, bool $prefijo): ?array
     {
+        // Con claves numéricas se sabe de antemano en qué parte cae cada una
+        // (el rango de su trozo): si no va a compensar, se renuncia sin buscar
+        if (!$prefijo && $this->noCompensa($tabla, $def, $claves)) {
+            return null;
+        }
         $posiciones = $this->posicionesPorIndice($tabla, $def, $claves, $prefijo);
         if ($posiciones === null) {
             return null;
@@ -2873,12 +3008,20 @@ final class Storage
 
         $necesarias = [];
         foreach ($posiciones as $p) {
-            $necesarias[intdiv($p, $chunk) + 1] = true;
+            $necesarias[intdiv($p, $chunk) + 1] = ($necesarias[intdiv($p, $chunk) + 1] ?? 0) + 1;
         }
-        // Leer más de la mitad de las partes no ahorra bastante respecto a
-        // recorrer la tabla. Sin ninguna, se sale con la lista vacía sin abrir
-        // un solo fichero.
-        if ($necesarias !== [] && count($necesarias) * 2 > $todas) {
+        // ¿Compensa frente a recorrer la tabla? Una parte con pocas filas
+        // pedidas se lee por líneas, sin decodificarla: cuesta lo que sus
+        // líneas, y FILAS_POR_LINEA líneas cuestan como decodificar una parte.
+        // Antes contaba como una parte entera, y 100 claves repartidas por la
+        // tabla renunciaban al índice y la recorrían entera. Si sale más de la
+        // mitad de las partes, se recorre. Sin ninguna, se sale con la lista
+        // vacía sin abrir un solo fichero.
+        $coste = 0.0;
+        foreach ($necesarias as $n) {
+            $coste += $n <= self::FILAS_POR_LINEA ? $n / self::FILAS_POR_LINEA : 1;
+        }
+        if ($necesarias !== [] && $coste * 2 > $todas) {
             return null;
         }
         $porParte = [];
@@ -2895,15 +3038,7 @@ final class Storage
             // Pocas filas de una parte: se leen sus líneas, sin decodificar las
             // mil. Muchas, o una parte que no trae desfases: se decodifica
             if (count($desfases) <= self::FILAS_POR_LINEA) {
-                $sueltas = [];
-                foreach ($desfases as $d) {
-                    $fila = $this->filaEnParte($tabla, $parte, $fichero, $d);
-                    if ($fila === null) {
-                        $sueltas = null;
-                        break;
-                    }
-                    $sueltas[] = $fila;
-                }
+                $sueltas = $this->filasEnParte($tabla, $parte, $fichero, $desfases);
                 if ($sueltas !== null) {
                     foreach ($sueltas as $fila) {
                         $filas[] = $fila;
@@ -3012,10 +3147,28 @@ final class Storage
     }
 
     /** @return list<array>|null */
-    public function resultadoCacheado(string $clave): ?array
+    /** @param list<string> $tablas las mismas con las que se calculó la clave */
+    public function resultadoCacheado(string $clave, array $tablas): ?array
     {
-        $v = $this->cacheLeer($clave);
+        $v = $this->cacheLeer($clave, $this->ficheroResultado($clave, $tablas));
         return is_array($v) ? $v : null;
+    }
+
+    /**
+     * El fichero de un resultado: su nombre dice de qué tablas depende, para
+     * que una escritura en cualquiera de ellas lo borre. Antes se buscaba con
+     * glob(), listando la carpeta de la caché en cada acierto: 0,1 ms con 40
+     * ficheros y 10 ms con 20.000. Ahora se construye el nombre exacto.
+     *
+     * @param list<string> $tablas
+     */
+    private function ficheroResultado(string $clave, array $tablas): string
+    {
+        $nombre = 'q';
+        foreach ($tablas as $t) {
+            $nombre .= '.' . md5($this->prefijo . $t);
+        }
+        return $this->dirCache . '/' . $nombre . '.' . substr($clave, -32) . '.cache';
     }
 
     /**
@@ -3038,11 +3191,7 @@ final class Storage
         if (!$this->cacheDisco || !is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {
             return;
         }
-        $nombre = 'q';
-        foreach ($tablas as $t) {
-            $nombre .= '.' . md5($this->prefijo . $t);
-        }
-        @file_put_contents($this->dirCache . '/' . $nombre . '.' . substr($clave, -32) . '.cache', serialize($filas));
+        @file_put_contents($this->ficheroResultado($clave, $tablas), serialize($filas));
     }
 
     /**
@@ -3076,7 +3225,8 @@ final class Storage
         return $this->prefijo . $this->etiqueta($tabla) . ':p' . $parte . ':' . $rev;
     }
 
-    private function cacheLeer(string $clave)
+    /** @param string|null $fichero el de la caché en disco, si quien llama ya lo sabe */
+    private function cacheLeer(string $clave, ?string $fichero = null)
     {
         if (!$this->cache) {
             return null;
@@ -3091,8 +3241,8 @@ final class Storage
                 return null;
             }
         } else {
-            $fichero = $this->ficheroCache($clave);
-            if ($fichero === null || !is_file($fichero)) {
+            $fichero ??= $this->ficheroCache($clave);
+            if (!is_file($fichero)) {
                 return null;
             }
             Memoria::comprobarFichero($fichero);
@@ -3114,7 +3264,7 @@ final class Storage
      * sola. Cabe poco a propósito, alrededor de un megabyte: trozos de
      * índice, listas de desfases y estructuras, que son pequeños. Las partes
      * no: son grandes y las búsquedas por clave ya no las necesitan (ver
-     * filaEnParte()).
+     * filasEnParte()).
      */
     private function recordar(string $clave, $valor): void
     {
@@ -3218,14 +3368,10 @@ final class Storage
     }
 
     /** Fichero de una entrada de caché; null si es un resultado que no está. */
-    private function ficheroCache(string $clave): ?string
+    private function ficheroCache(string $clave): string
     {
         // md5(prefijo+etiqueta) agrupa las entradas de una misma tabla para poder borrarlas juntas
         [, , $etiqueta, $tipo, $rev] = explode(':', $clave);
-        if ($etiqueta === '_q') {
-            $hay = glob($this->dirCache . '/q.*.' . $rev . '.cache');
-            return $hay === false || $hay === [] ? null : (string)$hay[0];
-        }
         return $this->dirCache . '/' . md5($this->prefijo . $etiqueta) . '.' . $tipo . $rev . '.cache';
     }
 }

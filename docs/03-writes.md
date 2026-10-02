@@ -258,10 +258,10 @@ the same as one `INSERT` with one row. Batch them.
 ```
 php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
-php tests/f2_select.php       → OK: 146
+php tests/f2_select.php       → OK: 151
 php tests/f3_escrituras.php   → OK: 63
-php tests/f8_indices.php      → OK: 60
-php tests/f10_indices_incrementales.php → OK: 16
+php tests/f8_indices.php      → OK: 62
+php tests/f10_indices_incrementales.php → OK: 18
 ```
 
 ---

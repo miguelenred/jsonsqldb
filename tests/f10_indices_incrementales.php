@@ -428,6 +428,57 @@ chk('NULL, cadenas vacías y números en columnas indexadas', function () use ($
     return true;
 });
 
+echo "\n== UPDATE que no cambia la clave de un índice (2.7.4) ==\n";
+chk('un UPDATE que no toca las columnas de un índice deja sus trozos como estaban, y el resto cuadra', function () use ($raiz) {
+    // Solo se tocan los trozos cuyas claves cambian: v está en ix_comp pero no
+    // en ix_ciudad ni en la clave única
+    $bd = preparar($raiz, 300);
+    $huella = static function () use ($raiz): string {
+        $h = '';
+        foreach (glob("$raiz/x/t.idx.ix_ciudad*") ?: [] as $f) { $h .= basename($f) . md5_file($f); }
+        return $h;
+    };
+    $antes = $huella();
+    $bd->consultar("UPDATE t SET v = 'cambiado' WHERE id % 3 = 0");
+    $despues = $huella();
+    unset($bd);
+    if ($antes === '' || $antes !== $despues) { return 'los trozos de ix_ciudad han cambiado'; }
+    return cuadraConRehacerlo($raiz);
+});
+
+echo "\n== Un trozo de índice cortado (2.7.4) ==\n";
+chk('un trozo con la cabecera bien y el final cortado no se da por bueno: la clave única sigue mandando', function () use ($raiz) {
+    // indiceValido() mira la cabecera y el final de cada trozo, y recuerda el
+    // veredicto mientras no cambien sus revisiones. Un trozo que un corte deja
+    // cortado (el final a medias) tiene que darse por malo, y la escritura
+    // comprobar la clave única sin él
+    $bd = preparar($raiz, 300);
+    unset($bd);
+    $trozos = glob("$raiz/x/t/*cod*") ?: glob("$raiz/x/t*/*cod*") ?: [];
+    if ($trozos === []) {
+        $todos = [];
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator("$raiz/x", FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $f) { if (str_contains($f->getFilename(), 'cod')) { $todos[] = $f->getPathname(); } }
+        $trozos = $todos;
+    }
+    if ($trozos === []) { return 'no encuentro los trozos del índice único'; }
+    sort($trozos);
+    $f = $trozos[0];
+    $texto = (string)file_get_contents($f);
+    file_put_contents($f, substr($texto, 0, (int)(strlen($texto) * 0.6)));   // el final, cortado
+    $bd = new Database('x', $raiz);
+    try {
+        $bd->consultar("INSERT INTO t VALUES (9999, 'c1', 'Madrid', 'v1')");   // c1 ya existe
+        $r = 'admitió un código repetido';
+    } catch (JsonSQLDB\JsonSqlDbError $e) {
+        $r = str_contains($e->getMessage(), 'c1') || stripos($e->getMessage(), 'únic') !== false || stripos($e->getMessage(), 'unique') !== false
+            ? true : 'otro error: ' . $e->getMessage();
+    }
+    $bien = $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE cod = 'c2'")[0]['n'] ?? null;
+    unset($bd);
+    return $r === true && (int)$bien === 1 ?: (is_string($r) ? $r : "c2 aparece $bien veces");
+});
+
 echo "\n== Limpieza ==\n";
 chk('sin restos', function () use ($raiz) {
     borrarArbol($raiz);

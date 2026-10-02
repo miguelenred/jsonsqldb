@@ -70,6 +70,9 @@ $bd->consultar('CREATE TABLE clientes (id INTEGER PRIMARY KEY, email VARCHAR(60)
                 nombre VARCHAR(60), ciudad VARCHAR(20), edad INTEGER, saldo DECIMAL(10,2))');
 $bd->consultar('CREATE TABLE pedidos (id INTEGER PRIMARY KEY, cid INTEGER,
                 total DECIMAL(10,2), fecha DATE)');
+// Para la cascada: hijos con ON DELETE CASCADE (2.7.4)
+$bd->consultar('CREATE TABLE notas (id INTEGER PRIMARY KEY, cid INTEGER, texto VARCHAR(20),
+                FOREIGN KEY (cid) REFERENCES clientes (id) ON DELETE CASCADE)');
 
 // Semilla fija: dos ejecuciones comparan los mismos datos
 mt_srand(20260831);
@@ -96,6 +99,16 @@ for ($i = 1; $i <= $pedidos; $i++) {
 foreach (array_chunk($lote, 2000) as $bloque) {
     $marcas = implode(',', array_fill(0, count($bloque), '(?,?,?,?)'));
     $bd->consultar("INSERT INTO pedidos VALUES $marcas", array_merge(...$bloque));
+}
+unset($lote);
+
+$lote = [];
+for ($i = 1; $i <= $filas; $i++) {
+    $lote[] = [$i, mt_rand(1, $filas), 'nota'];
+}
+foreach (array_chunk($lote, 2000) as $bloque) {
+    $marcas = implode(',', array_fill(0, count($bloque), '(?,?,?)'));
+    $bd->consultar("INSERT INTO notas VALUES $marcas", array_merge(...$bloque));
 }
 unset($lote);
 
@@ -133,6 +146,15 @@ $correr('IN de diez claves primarias',
     static fn() => $bd->consultar('SELECT id FROM clientes WHERE id IN (?,?,?,?,?,?,?,?,?,?)',
         [1, 7, 99, 500, 1000, $medio, $medio + 1, $ultimo - 2, $ultimo - 1, $ultimo]));
 
+// Clave primaria y una columna con un índice poco selectivo: tiene que ir por
+// la clave (2.7.4; antes leía todas las filas de esa ciudad)
+$correr('Clave primaria y columna con índice',
+    static fn() => $bd->consultar('SELECT * FROM clientes WHERE id = ? AND ciudad = ?', [$medio, 'Elche']));
+
+// Cien claves repartidas por toda la tabla (2.7.4)
+$correr('IN de cien claves repartidas',
+    static fn() => $bd->consultar('SELECT id FROM clientes WHERE id IN (' . implode(',', range(7, $filas, max(1, intdiv($filas, 100)))) . ')'));
+
 $correr('Igualdad sobre columna indexada',
     static fn() => $bd->consultar("SELECT COUNT(*) AS n FROM clientes WHERE ciudad = 'Elche'"));
 
@@ -148,6 +170,12 @@ $correr('LIKE por prefijo',
 $correr('LIMIT 50 sin filtro',
     static fn() => $bd->consultar('SELECT id, email FROM clientes LIMIT 50'));
 
+$correr('LIMIT 100 con un OFFSET grande',
+    static fn() => $bd->consultar('SELECT id FROM clientes LIMIT 100 OFFSET ' . intdiv($filas, 4)), 5);
+
+$correr('Una columna de la tabla entera',
+    static fn() => $bd->consultar('SELECT id FROM clientes'), 5);
+
 $correr('COUNT(*) de la tabla entera',
     static fn() => $bd->consultar('SELECT COUNT(*) AS n FROM pedidos'));
 
@@ -157,6 +185,9 @@ $correr('GROUP BY con SUM',
 
 $correr('ORDER BY con LIMIT 20',
     static fn() => $bd->consultar('SELECT id, saldo FROM clientes ORDER BY saldo DESC LIMIT 20'), 5);
+
+$correr('ORDER BY de dos columnas con LIMIT 1000',
+    static fn() => $bd->consultar('SELECT id, ciudad FROM clientes ORDER BY ciudad, id DESC LIMIT 1000'), 5);
 
 $correr('ORDER BY completo',
     static fn() => $bd->consultar('SELECT id FROM clientes ORDER BY saldo DESC'), 5);
@@ -192,6 +223,12 @@ $correr('DELETE de una fila', static function () use ($bd, &$nuevo) {
     $bd->consultar('INSERT INTO clientes VALUES (?,?,?,?,?,?)',
         [$nuevo, "z$nuevo@ejemplo.es", 'Nueva', 'Madrid', 30, 1.0]);
 }, 5);
+
+// Borrar 200 clientes con sus notas en cascada (2.7.4: antes recorría la
+// tabla de notas una vez por cliente). Se miden una vez: borran de verdad
+$correr('DELETE de 200 padres con cascada', static function () use ($bd, $medio) {
+    $bd->consultar('DELETE FROM clientes WHERE id BETWEEN ? AND ?', [$medio - 300, $medio - 101]);
+}, 1);
 
 // La caché de resultados, en un proceso aparte porque aquí está desactivada:
 // el JOIN de arriba, repetido sobre datos que no han cambiado

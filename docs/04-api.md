@@ -472,16 +472,16 @@ them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 | `api/cliente_ejemplo.ps1` | PowerShell client, with the same bound parameters |
 | `api/cliente_ejemplo.py` | Python client, standard library only |
 | `engine/ApiStore.php` | API state in JSON: rate limit, failures, nonces, history |
-| `tests/f4_api.php` | 52 checks sending real requests |
+| `tests/f4_api.php` | 61 checks sending real requests |
 
 ## 9. Tests
 
 ```
 php tests/f1_nucleo.php       → OK: 66
 php tests/f2_parser.php       → OK: 70
-php tests/f2_select.php       → OK: 147
+php tests/f2_select.php       → OK: 151
 php tests/f3_escrituras.php   → OK: 63
-php tests/f4_api.php          → OK: 60
-php tests/f5_esquema.php      → OK: 91
+php tests/f4_api.php          → OK: 61
+php tests/f5_esquema.php      → OK: 96
 php tests/f5_admin.php        → OK: 128
 ```

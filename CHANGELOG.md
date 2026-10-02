@@ -9,6 +9,95 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.7.4] - 2026-10-02
+
+Speed and memory, from an external review of 2.7.3 that measured where the
+engine chose the wrong path or held more than it needed. Every change was
+measured against 2.7.3 with the same data (60,000 rows, warm and cold
+processes) and kept only if it was better; two that were not are listed at the
+end. None of them adds disk work: most read or write less. Nothing changes in
+the on-disk format, the SQL dialect or the API's request and response (the
+responses are byte for byte the same). Figures below are 2.7.3 → 2.7.4.
+
+### Fixed
+
+- **`GROUP BY … ORDER BY` with no rows** (an empty table, or a `WHERE` that
+  leaves none) gave a PHP internal error instead of an empty result.
+
+### Faster
+
+- **Foreign key cascades.** Deleting or changing many parents read the whole
+  child table once per parent, and each child row was then looked up again by
+  scanning, because it was passed on with renumbered positions. The child side
+  is now a map built once per statement (from the second parent on) and kept up
+  to date as rows change. Deleting 1,000 customers with 5,000 orders in
+  cascade: 7.1 s → 0.13 s; changing the key of 200: 1.4 s → 0.13 s. A
+  cascading `UPDATE` also stops rewriting the whole child table on save: only
+  its changed rows.
+- **Writing a row.** Each write checked that the indexes were current by
+  reading every index chunk in full, 2-5 times per statement. It now checks the
+  header and the end of each chunk (which also catches a chunk cut short by a
+  crash, which the old check missed) and remembers the answer while the chunk's
+  revision stays the same. An `UPDATE` only touches the index chunks whose keys
+  change: changing a column without an index reads and writes no index at all.
+  11 single-row `INSERT`s: 110 → 68 ms; 11 `UPDATE`s: 105 → 58 ms; an `UPDATE`
+  of 5,000 rows: 468 → 375 ms and 57 → 50 MB.
+- **Choosing an index.** With two indexes covering one column each, the first
+  one defined won, and indexes created by hand come before the primary key:
+  `WHERE id = ? AND ciudad = ?` read every row of that city instead of one
+  (114 → 9 ms). A unique index fully covered now goes first, then the one
+  covering more columns; if one would not pay off, the next is tried.
+- **`IN` with many keys.** Numeric keys are looked for only in the index chunk
+  whose range holds them, in its text, without decoding it; the rows of a part
+  are read with one open of its file (before, one per row, up to 8); and when
+  using the index would not pay off it gives up before searching. Up to 4,096
+  numeric keys use the index (512 before). 100 keys spread over the table:
+  146 → 16 ms and 8.7 → 3.5 MB; 600 keys: 153 → 19 ms; 100 e-mails: 181 → 65 ms.
+- **`ORDER BY … LIMIT`.** Candidates are kept up to twice the limit, sorted with
+  PHP's native sort and cut, and the worst one kept becomes the bar a new row
+  has to beat. The old heap also made PHP copy the whole list of sort keys for
+  every row it dropped. `ORDER BY ciudad, id DESC LIMIT 1000`: 1,448 → 246 ms;
+  `ORDER BY saldo DESC LIMIT 20`: 326 → 164 ms.
+- **Result cache hits** find their file by its exact name instead of listing
+  the cache folder: 11.7 ms with 20,000 files there → 0.1 ms, and it no longer
+  grows with the folder.
+
+### Less memory
+
+- **The API writes a `SELECT` response row by row.** Rows of a `SELECT` without
+  `ORDER BY`, `DISTINCT` or aggregates go from the engine straight into the JSON
+  text, in memory, without the result ever being a PHP array (which takes
+  several times its JSON). The text is sent at the end, with no locks held, and
+  an error still comes as an error JSON. `SELECT *` of 60,000 rows: 43.9 →
+  14.0 MB. `Database::consultarPorFilas()` is the new engine call behind it.
+  A row with text that is not valid UTF-8 now gives an error instead of an
+  empty response.
+- **Projection while reading.** Without `ORDER BY` or `DISTINCT`, each row is
+  projected as it is read instead of after reading the whole table, the
+  `OFFSET` is skipped without building rows and the `LIMIT` stops the reading.
+  `SELECT id FROM a`: 44 → 26 MB; `LIMIT 100 OFFSET 15000`: 13.9 → 4.0 MB.
+
+### Measured and left out
+
+- **`COUNT(*)` from the row count in the revision file** (15.7 → 5.5 ms): after
+  recovering an interrupted write that number can differ from the data, and a
+  wrong count is worse than a slow one.
+- **Remembering text sort keys**, and streaming the rows of a full `ORDER BY`
+  to the API: neither was clearly faster, and the second used no less memory.
+
+### Tests
+
+- `tests/benchmark.php` gains the cases where the problems were: a primary key
+  plus a low-selectivity index, `IN` with 100 spread keys, a large `OFFSET`, one
+  column of the whole table, `ORDER BY` of two columns with `LIMIT 1000`, and a
+  cascade of 200 parents.
+- New checks: cascades with many parents in three levels against SQLite
+  (`f5_esquema`), a cut-short index chunk (`f10`), an `UPDATE` that leaves an
+  index untouched (`f10`), index candidates and `IN` with up to 3,000 keys
+  (`f8`), `LIMIT`/`OFFSET` applied while reading and `GROUP BY` with no rows
+  (`f2_select`), and a 3,000-row `SELECT` through the API by both paths
+  (`f4_api`).
+
 ## [2.7.3] - 2026-10-01
 
 Security fixes found by four external reviews of 2.7.2 (Arena, ChatGPT, Grok and

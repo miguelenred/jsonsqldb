@@ -21,6 +21,10 @@ final class Database
     private Storage $st;
     private Catalog $cat;
     private string  $base;
+    /** @var (callable(array):void)|null adónde van las filas de un SELECT en consultarPorFilas() */
+    private $porFila = null;
+    /** Filas de un SELECT que han salido por $porFila (null: no ha habido SELECT así) */
+    private ?int $enviadas = null;
 
     public function __construct(string $base, ?string $raiz = null)
     {
@@ -68,19 +72,72 @@ final class Database
     {
         $tope   = Config::cacheResultados();
         $tablas = $tope > 0 ? Select::tablasDe($ast, $this->cat) : null;
+        $porFila = $this->porFila;
         if ($tablas === null) {
-            return (new Select($this->cat))->ejecutar($ast);
+            return $porFila === null
+                ? (new Select($this->cat))->ejecutar($ast)
+                : (new Select($this->cat))->ejecutarHacia($ast, $porFila) ?? [];
         }
         $clave = $this->st->claveResultado($tablas, $sql, $params);
-        $filas = $this->st->resultadoCacheado($clave);
+        $filas = $this->st->resultadoCacheado($clave, $tablas);
         if ($filas !== null) {
-            return $filas;
+            return $filas;                           // ya está entero: se devuelve tal cual
         }
-        $filas = (new Select($this->cat))->ejecutar($ast);
+        if ($porFila === null) {
+            $filas = (new Select($this->cat))->ejecutar($ast);
+        } else {
+            // Las filas que salen una a una se guardan también para la caché
+            // mientras no pasen del tope; pasado, se dejan de guardar
+            $guardadas = [];
+            $filas = (new Select($this->cat))->ejecutarHacia($ast, static function (array $fila) use ($porFila, &$guardadas, $tope): void {
+                if ($guardadas !== null) {
+                    $guardadas[] = $fila;
+                    if (count($guardadas) > $tope) {
+                        $guardadas = null;
+                    }
+                }
+                $porFila($fila);
+            });
+            if ($filas === null) {
+                if ($guardadas !== null) {
+                    $this->st->guardarResultado($clave, $tablas, $guardadas);
+                }
+                return [];
+            }
+        }
         if (count($filas) <= $tope) {
             $this->st->guardarResultado($clave, $tablas, $filas);
         }
         return $filas;
+    }
+
+    /**
+     * Como consultar(), pero las filas de un SELECT que se pueda resolver
+     * leyendo y proyectando (sin ORDER BY, DISTINCT ni agregados) no se
+     * devuelven juntas: van a $porFila una a una según salen, y quien llama
+     * decide qué hacer con ellas (la API las va escribiendo como JSON). Así el
+     * resultado entero no está nunca en memoria como array, que ocupa varias
+     * veces su JSON. Devuelve cuántas filas han salido así, o, si no ha salido
+     * ninguna por ahí, lo mismo que consultar(): las filas de un SELECT que ya
+     * estaban enteras (ordenadas, agrupadas o de la caché) o el resultado de
+     * cualquier otra sentencia.
+     *
+     * @param callable(array):void $porFila
+     * @return int|array
+     */
+    public function consultarPorFilas(string $sql, array $params, ?callable $autorizar, callable $porFila)
+    {
+        $this->porFila = function (array $fila) use ($porFila): void {
+            $this->enviadas = ($this->enviadas ?? 0) + 1;
+            $porFila($fila);
+        };
+        $this->enviadas = null;
+        try {
+            $res = $this->consultar($sql, $params, $autorizar);
+        } finally {
+            $this->porFila = null;
+        }
+        return $this->enviadas ?? $res;
     }
 
     /**
@@ -173,7 +230,7 @@ final class Database
             }
 
             if (!$escritura) {
-                Logger::registrar($this->base, $op, $sql, count($filas), (microtime(true) - $t0) * 1000, null, $params);
+                Logger::registrar($this->base, $op, $sql, $this->enviadas ?? count($filas), (microtime(true) - $t0) * 1000, null, $params);
                 return $filas;
             }
 

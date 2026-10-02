@@ -173,6 +173,7 @@ final class Writer
                 $this->compactar($tabla);
             }
             unset($this->cambios[$tabla], $this->anexo[$tabla], $this->borradas[$tabla]);
+            $this->olvidarIndices($tabla);
         }
         return $this->datos[$tabla];
     }
@@ -188,6 +189,12 @@ final class Writer
      * @var array<string,array<int,true>> $sueltas
      * @var array<string,bool>           $sabe
      */
+    /** @var array<string,array{cols: list<string>, mapa: array<string,array<int,true>>}> lado hijo de las claves foráneas (hijasDe()) */
+    private array $idxHijo = [];
+    /** @var array<string,int> cuántas veces se han pedido las hijas de cada clave foránea en la sentencia */
+    private array $pedidasHijo = [];
+    /** @var array<string,true> tablas con huecos de un borrado en cascada, por compactar al terminar la sentencia */
+    private array $porCompactar = [];
     private array $desde   = [];
     private array $sueltas = [];
     private array $sabe    = [];
@@ -225,11 +232,7 @@ final class Writer
         } else {
             $this->marcarDesde($tabla, $desde);
         }
-        foreach (array_keys($this->idxPadre) as $clave) {
-            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
-                unset($this->idxPadre[$clave]);
-            }
-        }
+        $this->olvidarIndices($tabla);
     }
 
     /**
@@ -247,10 +250,9 @@ final class Writer
             $this->datos[$tabla][] = $fila;
         }
         $this->sucioDatos[$tabla] = true;
-        foreach (array_keys($this->idxPadre) as $clave) {
-            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
-                unset($this->idxPadre[$clave]);
-            }
+        $this->olvidarPadre($tabla);
+        if (isset($this->datos[$tabla])) {
+            $this->apuntarHija($tabla, (int)array_key_last($this->datos[$tabla]), $fila);
         }
     }
 
@@ -268,11 +270,8 @@ final class Writer
         $this->datos[$tabla][$pos] = $fila;
         $this->sucioDatos[$tabla]  = true;
         $this->marcarSuelta($tabla, $pos);        // no mueve a las demás
-        foreach (array_keys($this->idxPadre) as $clave) {
-            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
-                unset($this->idxPadre[$clave]);
-            }
-        }
+        $this->olvidarPadre($tabla);
+        $this->apuntarHija($tabla, $pos, $fila);  // su clave puede ser otra
     }
 
     /**
@@ -288,11 +287,7 @@ final class Writer
         unset($this->datos[$tabla][$pos]);
         $this->sucioDatos[$tabla] = true;
         $this->marcarDesde($tabla, $pos);         // al compactar se mueve lo de detrás
-        foreach (array_keys($this->idxPadre) as $clave) {
-            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
-                unset($this->idxPadre[$clave]);
-            }
-        }
+        $this->olvidarPadre($tabla);              // en el lado hijo, la posición vacía se salta al usarla
     }
 
     /** Cierra los huecos que hayan dejado los borrados. */
@@ -300,6 +295,86 @@ final class Writer
     {
         if (isset($this->datos[$tabla])) {
             $this->datos[$tabla] = array_values($this->datos[$tabla]);
+            $this->olvidarIndices($tabla);        // las posiciones han cambiado
+        }
+    }
+
+    /** Lo que se sabía de la tabla como padre y como hija: ya no vale. */
+    private function olvidarIndices(string $tabla): void
+    {
+        $this->olvidarPadre($tabla);
+        foreach (array_keys($this->idxHijo) as $id) {
+            if (strncmp($id, $tabla . '|', strlen($tabla) + 1) === 0) {
+                unset($this->idxHijo[$id]);
+            }
+        }
+    }
+
+    private function olvidarPadre(string $tabla): void
+    {
+        foreach (array_keys($this->idxPadre) as $clave) {
+            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
+                unset($this->idxPadre[$clave]);
+            }
+        }
+    }
+
+    /**
+     * Lado hijo de una clave foránea: las filas de $hija cuyas columnas $cols
+     * valen $clave. El mapa clave → posiciones se arma una vez y se va
+     * manteniendo al escribir, así que borrar o cambiar N padres ya no recorre
+     * la tabla hija N veces (era cuadrático: 1.000 padres con 25.000 hijos,
+     * 11 s). Una posición que se ha vaciado o cuya clave ha cambiado se salta.
+     *
+     * @return array<int,array> posición → fila, en orden de posición
+     */
+    private function hijasDe(string $hija, array $cols, string $clave): array
+    {
+        $this->filas($hija);                      // cargada: si se acaba de leer, sin mapas viejos
+        $id = $hija . '|' . implode(',', $cols);
+        // Con un solo padre (borrar o cambiar una fila), recorrer la tabla una
+        // vez cuesta lo mismo que armar el mapa y no ocupa memoria: el mapa se
+        // arma a partir del segundo padre de la sentencia
+        if (!isset($this->idxHijo[$id]) && ($this->pedidasHijo[$id] = ($this->pedidasHijo[$id] ?? 0) + 1) === 1) {
+            $out = [];
+            foreach ($this->datos[$hija] as $pos => $f) {
+                if (self::claveDe($f, $cols) === $clave) {
+                    $out[$pos] = $f;
+                }
+            }
+            return $out;
+        }
+        if (!isset($this->idxHijo[$id])) {
+            $mapa = [];
+            foreach ($this->filas($hija) as $pos => $f) {
+                $k = self::claveDe($f, $cols);
+                if ($k !== null) {
+                    $mapa[$k][$pos] = true;
+                }
+            }
+            $this->idxHijo[$id] = ['cols' => $cols, 'mapa' => $mapa];
+        }
+        $out = [];
+        foreach (array_keys($this->idxHijo[$id]['mapa'][$clave] ?? []) as $pos) {
+            $f = $this->datos[$hija][$pos] ?? null;
+            if ($f !== null && self::claveDe($f, $cols) === $clave) {
+                $out[$pos] = $f;
+            }
+        }
+        ksort($out);
+        return $out;
+    }
+
+    /** Una fila escrita en $pos: entra en los mapas de hijas de su tabla con su clave de ahora. */
+    private function apuntarHija(string $tabla, int $pos, array $fila): void
+    {
+        foreach ($this->idxHijo as $id => $i) {
+            if (strncmp($id, $tabla . '|', strlen($tabla) + 1) === 0) {
+                $k = self::claveDe($fila, $i['cols']);
+                if ($k !== null) {
+                    $this->idxHijo[$id]['mapa'][$k][$pos] = true;
+                }
+            }
         }
     }
 
@@ -620,6 +695,10 @@ final class Writer
         if (isset($this->datos[$tabla])) {
             $this->compactar($tabla);
         }
+        foreach (array_keys($this->porCompactar) as $t) {
+            $this->compactar((string)$t);         // las hijas borradas en cascada
+        }
+        $this->porCompactar = [];
 
         return $quitadas;
     }
@@ -739,17 +818,19 @@ final class Writer
         if ($where === null) {
             return null;
         }
-        $predicados = Indexes::predicados($where, strtolower($tabla));
-        $elegido    = Indexes::elegir($this->cat->indicesDe($tabla), $predicados[strtolower($tabla)] ?? []);
-        if ($elegido === null) {
-            return null;
-        }
         if (isset($this->sucioDatos[$tabla])) {
             return null;                             // el índice no conoce los cambios en memoria
         }
+        $predicados = Indexes::predicados($where, strtolower($tabla));
         $st         = $this->cat->storage();
-        $posiciones = $st->posicionesPorIndice($tabla, $elegido['def'], $elegido['claves'], $elegido['prefijo']);
-        return $posiciones === null ? null : $st->filasEnPosiciones($tabla, $posiciones);
+        // Del mejor al peor: si uno no compensa, el siguiente
+        foreach (Indexes::candidatos($this->cat->indicesDe($tabla), $predicados[strtolower($tabla)] ?? []) as $c) {
+            $posiciones = $st->posicionesPorIndice($tabla, $c['def'], $c['claves'], $c['prefijo']);
+            if ($posiciones !== null) {
+                return $st->filasEnPosiciones($tabla, $posiciones);
+            }
+        }
+        return null;
     }
 
     /**
@@ -946,12 +1027,7 @@ final class Writer
                 }
 
                 $accion = $nueva === null ? $fk['on_delete'] : $fk['on_update'];
-                $hijas  = [];
-                foreach ($this->filas($hija) as $pos => $f) {
-                    if (self::claveDe($f, $fk['columns']) === $claveVieja) {
-                        $hijas[$pos] = $f;
-                    }
-                }
+                $hijas  = $this->hijasDe($hija, $fk['columns'], $claveVieja);
                 if ($hijas === []) {
                     continue;
                 }
@@ -963,12 +1039,15 @@ final class Writer
                 }
 
                 if ($accion === 'CASCADE' && $nueva === null) {
-                    $this->borrarHijas($hija, array_values($hijas));
+                    // Con sus posiciones de verdad: renumeradas (array_values) no
+                    // coincidían, y cada hija se buscaba recorriendo la tabla
+                    $this->borrarHijas($hija, $hijas);
                     continue;
                 }
 
+                // Cada hija en su sitio: copiar la tabla, tocarla y volver a
+                // ponerla entera hacía que se reescribiera completa al guardar
                 $metaHijaActual = $this->meta($hija);
-                $filasHija      = $this->filas($hija);
                 foreach ($hijas as $pos => $f) {
                     foreach ($fk['columns'] as $i => $c) {
                         if ($accion === 'CASCADE') {
@@ -980,9 +1059,8 @@ final class Writer
                             $f[$c] = $col['default'];
                         }
                     }
-                    $filasHija[$pos] = $this->prepararFila($hija, $metaHijaActual, $f, false);
+                    $this->ponerFilaEn($hija, $pos, $this->prepararFila($hija, $metaHijaActual, $f, false));
                 }
-                $this->ponerFilas($hija, array_values($filasHija));
             }
         }
     }
@@ -1003,7 +1081,9 @@ final class Writer
 
             $this->lanzarTriggers($tabla, 'AFTER', 'DELETE', null, $fila);
         }
-        $this->compactar($tabla);
+        // Se compacta al terminar la sentencia: hacerlo aquí, tras cada padre,
+        // movía las posiciones y obligaba a rehacer el mapa de hijas
+        $this->porCompactar[$tabla] = true;
     }
 
     // ==================================================================

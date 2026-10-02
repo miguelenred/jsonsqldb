@@ -382,13 +382,13 @@ silently wrong result.
 | `engine/Config.php` | reads `config.php` with defaults |
 | `engine/Logger.php` | query log |
 | `tests/f2_parser.php` | 70 checks of the parser |
-| `tests/f2_select.php` | 147 checks of the executor, with real data |
+| `tests/f2_select.php` | 151 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
 php tests/f1_nucleo.php     → OK: 66
 php tests/f2_parser.php     → OK: 70
-php tests/f2_select.php     → OK: 147
-php tests/f8_indices.php    → OK: 60
+php tests/f2_select.php     → OK: 151
+php tests/f8_indices.php    → OK: 62
 ```

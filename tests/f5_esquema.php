@@ -694,6 +694,38 @@ chk('lo que pone SET NEW pasa las mismas comprobaciones: NOT NULL, únicos y cla
     $bd->consultar('DROP TABLE snn');
     return $mal === [] && $n === 1 ?: implode(', ', $mal) . " · $n filas";
 });
+chk('cascadas con muchos padres a la vez (borrar, cambiar la clave, SET NULL, tres niveles) dejan lo mismo que SQLite', function () use ($bd) {
+    // El lado hijo se resuelve con un mapa que se mantiene al escribir (2.7.4):
+    // tiene que dar exactamente lo mismo que recorrer la tabla por cada padre
+    if (!class_exists('SQLite3')) { return null; }
+    $lite = new SQLite3(':memory:');
+    $lite->exec('PRAGMA foreign_keys = ON');
+    $ddl = ['CREATE TABLE cp (id INTEGER PRIMARY KEY, n TEXT)',
+            'CREATE TABLE ch (id INTEGER PRIMARY KEY, pid INTEGER, k INTEGER, FOREIGN KEY (pid) REFERENCES cp (id) ON DELETE CASCADE ON UPDATE CASCADE)',
+            'CREATE TABLE cn (id INTEGER PRIMARY KEY, hid INTEGER, FOREIGN KEY (hid) REFERENCES ch (id) ON DELETE SET NULL ON UPDATE CASCADE)'];
+    $datos = [];
+    for ($i = 1; $i <= 60; $i++) { $datos[] = "INSERT INTO cp VALUES ($i, 'p$i')"; }
+    for ($i = 1; $i <= 300; $i++) { $datos[] = 'INSERT INTO ch VALUES (' . $i . ', ' . (($i * 7) % 60 + 1) . ', ' . ($i % 5) . ')'; }
+    for ($i = 1; $i <= 400; $i++) { $datos[] = 'INSERT INTO cn VALUES (' . $i . ', ' . (($i * 3) % 300 + 1) . ')'; }
+    $escrituras = ['UPDATE cp SET id = id + 1000 WHERE id BETWEEN 10 AND 30',      // la clave cambia en cascada
+                   'DELETE FROM cp WHERE id BETWEEN 1 AND 9',                     // y se borra en cascada
+                   'UPDATE ch SET id = id + 5000 WHERE k = 2',                    // dos niveles
+                   'DELETE FROM ch WHERE k IN (0, 3)',                            // SET NULL en los nietos
+                   'DELETE FROM cp WHERE id > 1015'];
+    foreach (array_merge($ddl, $datos, $escrituras) as $q) {
+        $lite->exec($q);
+        $bd->consultar($q);
+    }
+    $mal = [];
+    foreach (['cp', 'ch', 'cn'] as $t) {
+        $r = $lite->query("SELECT * FROM $t ORDER BY id");
+        $a = [];
+        while ($f = $r->fetchArray(SQLITE3_ASSOC)) { $a[] = $f; }
+        if ($a !== $bd->consultar("SELECT * FROM $t ORDER BY id")) { $mal[] = $t; }
+    }
+    foreach (['cn', 'ch', 'cp'] as $t) { $bd->consultar("DROP TABLE $t"); }
+    return $mal === [] ?: 'distinto en ' . implode(', ', $mal);
+});
 chk('SET NEW solo se admite en BEFORE INSERT y BEFORE UPDATE, y solo sobre NEW', function () use ($bd) {
     $mal = [];
     foreach (["CREATE TRIGGER x1 AFTER INSERT ON prod BEGIN SET NEW.tramo = 'x'; END",

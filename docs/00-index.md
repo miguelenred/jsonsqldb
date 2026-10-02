@@ -105,16 +105,16 @@ data.
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
 php tests/f2_parser.php       → OK: 70    parser and bound parameters
-php tests/f2_select.php       → OK: 149   SELECT execution and collation
+php tests/f2_select.php       → OK: 151   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 60    real requests against the API
-php tests/f5_esquema.php      → OK: 95    SHOW, ALTER, constraints, views, integrity, journal, result cache
+php tests/f4_api.php          → OK: 61    real requests against the API
+php tests/f5_esquema.php      → OK: 96    SHOW, ALTER, constraints, views, integrity, journal, result cache
 php tests/f5_admin.php        → OK: 139   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
+php tests/f8_indices.php      → OK: 62    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
-php tests/f10_indices_incrementales.php → OK: 16   indexes corrected instead of rebuilt
+php tests/f10_indices_incrementales.php → OK: 18   indexes corrected instead of rebuilt
 php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
 php tests/f12_contra_sqlite.php → OK: 4    145 queries and 16 writes, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)

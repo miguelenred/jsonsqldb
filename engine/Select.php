@@ -63,10 +63,38 @@ final class Select
         $this->lector    = $lector ?? static fn(string $t): iterable => $cat->storage()->filas($t);
     }
 
+    /** @var (callable(array):void)|null adónde van las filas de la consulta de fuera (ejecutarHacia()) */
+    private $sumidero = null;
+    /** Profundidad de correr(): 1 es la consulta de fuera; más, subconsultas, vistas y CTE */
+    private int $nivel = 0;
+    /** ¿Han salido filas por el sumidero? */
+    private bool $entregado = false;
+
     /** Ejecuta la consulta y devuelve las filas de salida. */
     public function ejecutar(array $ast): array
     {
         return $this->correr($ast)['filas'];
+    }
+
+    /**
+     * Como ejecutar(), pero en una consulta sin ORDER BY, DISTINCT ni
+     * agregados cada fila va a $porFila según se lee y se proyecta, sin
+     * juntarlas en un array; entonces devuelve null. Las que necesitan todo el
+     * resultado para ordenarlo o agruparlo lo devuelven como siempre: ya está
+     * entero en memoria, y entregarlo fila a fila solo costaría tiempo.
+     *
+     * @param callable(array):void $porFila
+     */
+    public function ejecutarHacia(array $ast, callable $porFila): ?array
+    {
+        $this->sumidero  = $porFila;
+        $this->entregado = false;
+        try {
+            $filas = $this->correr($ast)['filas'];
+        } finally {
+            $this->sumidero = null;
+        }
+        return $this->entregado ? null : $filas;
     }
 
     /**
@@ -165,11 +193,13 @@ final class Select
             $this->con = $ast['with'] + $this->con;
         }
 
+        $this->nivel++;
         try {
             return $ast['k'] === 'union'
                 ? $this->correrUnion($ast)
                 : $this->correrSimple($ast);
         } finally {
+            $this->nivel--;
             $this->con = $conAnterior;
         }
     }
@@ -381,6 +411,36 @@ final class Select
                 }
                 unset($filas);
                 $orden = [];                                 // ya está ordenado
+            } elseif ($orden === [] && !$ast['distinct']) {
+                // Sin ORDER BY ni DISTINCT, cada fila se proyecta según llega, sin
+                // juntar antes la tabla: SELECT id FROM t tenía en memoria la
+                // tabla entera y el resultado. Y el OFFSET se salta sin proyectar
+                // y el LIMIT para la lectura: LIMIT 100 OFFSET 15000 construía
+                // 15.100 filas para quedarse con 100
+                $saltar = (int)($ast['offset'] ?? 0);
+                $quedan = $ast['limit'] === null ? -1 : (int)$ast['limit'];
+                foreach ($quedan === 0 ? [] : $filas as $origen) {
+                    if ($saltar > 0) {
+                        $saltar--;
+                        continue;
+                    }
+                    Memoria::comprobar('la construcción del resultado');
+                    $fila = $proyectar($origen, ['fila' => $origen, 'sub' => $sub, 'conjunto' => $conjunto,
+                                                 'filaExterna' => $externa]);
+                    // La consulta de fuera, con sumidero: la fila sale ya, sin
+                    // quedarse en el resultado (las subconsultas van más abajo)
+                    if ($this->sumidero !== null && $this->nivel === 1) {
+                        ($this->sumidero)($fila);
+                        $this->entregado = true;
+                    } else {
+                        $resultado[] = $fila;
+                    }
+                    if (--$quedan === 0) {
+                        break;
+                    }
+                }
+                unset($filas, $origen);
+                $recortado = true;
             } else {
                 if (!is_array($filas)) {
                     $filas = iterator_to_array($filas, false);
@@ -436,8 +496,8 @@ final class Select
             $resultado = $ordenadas;
         }
 
-        // LIMIT / OFFSET
-        if ($ast['limit'] !== null || $ast['offset'] !== null) {
+        // LIMIT / OFFSET (si no se aplicaron ya al leer)
+        if (empty($recortado) && ($ast['limit'] !== null || $ast['offset'] !== null)) {
             $resultado = array_slice($resultado, $ast['offset'] ?? 0, $ast['limit']);
         }
 
@@ -517,6 +577,12 @@ final class Select
      */
     private static function ordenNativo(array $orden, array &$clavesOrden, array $indices): ?array
     {
+        // Nada que ordenar. Con GROUP BY y ORDER BY sobre una tabla vacía (o un
+        // WHERE que no deja ninguna fila) las claves ni siquiera existían, y
+        // asort() recibía null: error interno en vez de un resultado vacío
+        if ($indices === []) {
+            return [];
+        }
         // Qué hay en cada columna. Se decide antes de tocar nada: si alguna no
         // sirve, las claves tienen que seguir enteras para compararOrden()
         $tipos = [];
@@ -621,15 +687,17 @@ final class Select
     }
 
     /**
-     * Las $cuantas primeras filas según el ORDER BY, recorriendo el origen
-     * una vez y sin tenerlo entero: en memoria solo viven las filas que van
-     * ganando. Devuelve esas filas por su índice de llegada y los índices en
-     * el orden pedido. Mismo resultado que ordenar todo y cortar (ver
-     * primeras()).
+     * Las $cuantas primeras filas según el ORDER BY, sin ordenar el resto.
      *
-     * @param iterable<array> $filas
-     * @param list<string>    $claves  columna de cada expresión del ORDER BY
-     * @return array{0: array<int, array>, 1: list<int>}
+     * Se guardan las candidatas hasta tener el doble de las que hacen falta;
+     * entonces se ordenan (con la ordenación nativa si se puede) y se quedan
+     * las $cuantas mejores, y la peor de ellas pasa a ser el listón: una fila
+     * que no lo mejora se descarta con una sola comparación. Antes era un
+     * montón (SplHeap) que comparaba cada fila varias veces a través de dos
+     * funciones: un LIMIT 1000 con dos columnas tardaba seis veces más que
+     * ordenar la tabla entera. En memoria viven como mucho el doble de filas.
+     *
+     * @return array{0: array<int,array>, 1: list<int>} las filas vivas y sus índices, ya en orden
      */
     private static function primerasDe(iterable $filas, array $claves, array $orden, int $cuantas): array
     {
@@ -638,51 +706,55 @@ final class Select
         }
         $clavesOrden = array_fill(0, count($claves), []);
         $comparar    = self::comparadorDe($orden, $clavesOrden);
-        $monton      = new class ($comparar) extends \SplHeap {
-            /** @var callable */
-            private $comparar;
-
-            public function __construct(callable $comparar)
-            {
-                $this->comparar = $comparar;
+        $tope        = max(2 * $cuantas, $cuantas + 64);
+        $vivas       = [];
+        $liston      = null;                        // índice de la peor de las guardadas tras recortar
+        $k           = 0;
+        // Ordena las vivas y se queda con las $cuantas primeras
+        // Las claves se quitan recorriendo $claves y no $clavesOrden: un foreach
+        // sobre $clavesOrden lo comparte, y quitar algo dentro obligaba a PHP a
+        // copiar las listas de claves enteras en cada fila descartada
+        $recortar = static function () use (&$vivas, &$clavesOrden, &$liston, $orden, $comparar, $cuantas, $claves): array {
+            // ordenNativo() quiere las claves seguidas desde 0, como las de
+            // una tabla entera (y se las come): una copia renumerada, y después
+            // cada posición se traduce a su fila
+            $filasVivas = array_keys($vivas);
+            $copia = [];
+            foreach ($claves as $i => $_) {
+                $copia[$i] = array_values($clavesOrden[$i]);
             }
-
-            protected function compare($a, $b): int
-            {
-                return ($this->comparar)($a, $b);
+            $posiciones = self::ordenNativo($orden, $copia, array_keys($filasVivas));
+            $ordenados = $posiciones === null
+                ? self::todasOrdenadas($filasVivas, $comparar)
+                : array_map(static fn(int $p): int => $filasVivas[$p], $posiciones);
+            foreach (array_slice($ordenados, $cuantas) as $fuera) {
+                unset($vivas[$fuera]);
+                foreach ($claves as $i => $_) {
+                    unset($clavesOrden[$i][$fuera]);
+                }
             }
+            $ordenados = array_slice($ordenados, 0, $cuantas);
+            $liston    = count($ordenados) === $cuantas ? $ordenados[$cuantas - 1] : null;
+            return $ordenados;
         };
-        $vivas = [];
-        $k     = 0;
         foreach ($filas as $fila) {
             foreach ($claves as $i => $clave) {
                 $clavesOrden[$i][$k] = $fila[$clave] ?? null;
             }
-            if ($monton->count() < $cuantas) {
-                $vivas[$k] = $fila;
-                $monton->insert($k);
-            } elseif ($comparar($k, $monton->top()) < 0) {
-                $fuera = $monton->extract();
-                unset($vivas[$fuera]);
-                foreach ($clavesOrden as $i => $_) {
-                    unset($clavesOrden[$i][$fuera]);
+            if ($liston !== null && $comparar($k, $liston) > 0) {
+                foreach ($claves as $i => $_) {
+                    unset($clavesOrden[$i][$k]);    // no entra: va detrás de la peor guardada
                 }
-                $vivas[$k] = $fila;
-                $monton->insert($k);
             } else {
-                foreach ($clavesOrden as $i => $_) {
-                    unset($clavesOrden[$i][$k]);
+                $vivas[$k] = $fila;
+                if (count($vivas) >= $tope) {
+                    $recortar();
                 }
             }
             $k++;
             Memoria::comprobar('la ordenación');
         }
-        $elegidos = [];
-        foreach ($monton as $i) {
-            $elegidos[] = $i;
-        }
-        usort($elegidos, $comparar);              // son pocas: ordenarlas es barato
-        return [$vivas, $elegidos];
+        return [$vivas, $recortar()];
     }
 
     /**
@@ -991,11 +1063,14 @@ final class Select
         if (!$st->indicesActivos()) {
             return null;
         }
-        $elegido = Indexes::elegir($this->cat->indicesDe($tabla), $predicados);
-        if ($elegido === null) {
-            return null;
+        // Del mejor al peor: si uno no compensa (habría que leer media tabla), el siguiente
+        foreach (Indexes::candidatos($this->cat->indicesDe($tabla), $predicados) as $c) {
+            $filas = $st->filasPorIndice($tabla, $c['def'], $c['claves'], $c['prefijo']);
+            if ($filas !== null) {
+                return $filas;
+            }
         }
-        return $st->filasPorIndice($tabla, $elegido['def'], $elegido['claves'], $elegido['prefijo']);
+        return null;
     }
 
     /**

@@ -399,9 +399,18 @@ try {
         }
     };
 
+    // Las filas de un SELECT se escriben como JSON según salen del motor, en
+    // un texto en memoria: el resultado no llega a estar entero como array de
+    // PHP, que ocupa varias veces su JSON. El texto se envía al terminar, ya
+    // sin bloqueos, y un error a medio camino sigue saliendo como JSON de
+    // error porque todavía no se ha enviado nada. Sin tocar el disco
+    $json = '[';
     $res = $baseDatos === ''
         ? Database::consultarGlobal($sql, $params, $autorizar)
-        : (new Database($baseDatos))->consultar($sql, $params, $autorizar);
+        : (new Database($baseDatos))->consultarPorFilas($sql, $params, $autorizar,
+            static function (array $fila) use (&$json): void {
+                $json .= ($json === '[' ? '' : ',') . json_encode($fila, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+            });
 
     // SHOW DATABASES con una clave limitada: solo las suyas. Sin esto, los
     // nombres de las bases de los demás se verían aunque no se pudiera entrar
@@ -409,7 +418,7 @@ try {
         $res = array_values(array_filter($res, static fn($f): bool => in_array($f['base'] ?? null, $permitidas, true)));
     }
 
-    $filas = is_array($res) && isset($res['success']) ? (int)$res['filas'] : count($res);
+    $filas = is_int($res) ? $res : (is_array($res) && isset($res['success']) ? (int)$res['filas'] : count($res));
 
     $store->registrar([
         'ts'     => date('Y-m-d H:i:s'),
@@ -423,7 +432,9 @@ try {
         'error'  => null,
     ]);
 
-    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+    // Un texto que no es UTF-8 válido no se puede escribir en JSON: antes la
+    // respuesta salía vacía; ahora sale como error, igual por los dos caminos
+    echo is_int($res) ? $json . ']' : json_encode($res, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     exit;
 
 } catch (JsonSqlDbError $e) {

@@ -63,6 +63,12 @@ final class Indexes
      * más barato recorrer la tabla.
      */
     private const MAX_CLAVES = 512;
+    /**
+     * Con claves numéricas el tope es mayor: cada una se busca solo en el trozo
+     * cuyo rango la contiene, así que 4.000 claves cuestan unas 4.000 búsquedas
+     * pequeñas. Con texto cada clave se busca en todos los trozos
+     */
+    private const MAX_CLAVES_NUMERICAS = 4096;
 
     public static function validarNombre(string $nombre): void
     {
@@ -94,6 +100,12 @@ final class Indexes
     {
         $out    = [];
         $vistas = [];
+        // Los conjuntos únicos (clave primaria y UNIQUE): un índice sobre uno de
+        // ellos devuelve una fila o ninguna por clave
+        $unicos = [];
+        foreach (Catalog::conjuntosUnicos($meta) as $uq) {
+            $unicos[strtolower(implode(',', array_map('strval', $uq['columns'])))] = true;
+        }
 
         foreach ($meta['indexes'] ?? [] as $idx) {
             $cols = array_values(array_map('strval', (array)($idx['columns'] ?? [])));
@@ -105,7 +117,7 @@ final class Indexes
                 continue;
             }
             $vistas[$clave] = true;
-            $out[] = ['name' => (string)$idx['name'], 'columns' => $cols, 'auto' => false];
+            $out[] = ['name' => (string)$idx['name'], 'columns' => $cols, 'auto' => false, 'unico' => isset($unicos[$clave])];
         }
 
         foreach (Catalog::conjuntosUnicos($meta) as $uq) {
@@ -115,7 +127,7 @@ final class Indexes
                 continue;
             }
             $vistas[$clave] = true;
-            $out[] = ['name' => self::nombreAuto($cols), 'columns' => $cols, 'auto' => true];
+            $out[] = ['name' => self::nombreAuto($cols), 'columns' => $cols, 'auto' => true, 'unico' => true];
         }
 
         return $out;
@@ -418,6 +430,20 @@ final class Indexes
      * @param list<string>                 $columnas
      * @return array<string, int|list<int>>
      */
+    /**
+     * ¿Cambia la clave de índice de una fila? Si las columnas del índice
+     * valen lo mismo, no: ni siquiera hace falta calcularla.
+     */
+    public static function cambiaClave(array $columnas, array $vieja, array $nueva): bool
+    {
+        $vv = $nv = [];
+        foreach ($columnas as $c) {
+            $vv[] = $vieja[$c] ?? null;
+            $nv[] = $nueva[$c] ?? null;
+        }
+        return $vv !== $nv && self::clave($vv) !== self::clave($nv);
+    }
+
     public static function sustituir(array $keys, array $columnas, int $pos, array $vieja, array $nueva, bool &$cambio): array
     {
         $vv = $nv = [];
@@ -501,23 +527,31 @@ final class Indexes
     // ------------------------------------------------------------------
 
     /**
-     * Elige el índice más aprovechable para unos predicados de igualdad.
+     * El mejor índice para unos predicados de igualdad: el primero de candidatos().
      *
-     * $predicados es  columna en minúsculas => lista de valores  (un `=` da un
-     * valor, un `IN` da varios). Sirve el índice que cubra más columnas por la
-     * izquierda: uno sobre (a, b) vale para buscar por a, y mejor todavía por
-     * a y b. Se descarta el que no cubra ni la primera.
-     *
-     * @param list<array{name: string, columns: list<string>, auto: bool}> $defs
-     * @param array<string, list<mixed>> $predicados
      * @return array{def: array, claves: list<string>, prefijo: bool}|null
      */
     public static function elegir(array $defs, array $predicados): ?array
     {
-        $mejor = null;
-        $mejorN = 0;
+        return self::candidatos($defs, $predicados)[0] ?? null;
+    }
 
-        foreach ($defs as $def) {
+    /**
+     * Los índices que sirven para unos predicados de igualdad, del mejor al
+     * peor: primero uno único cubierto entero (una fila o ninguna por clave),
+     * después el que cubre más columnas por la izquierda, y a igualdad, el
+     * orden de definición. Antes, a igualdad de columnas ganaba el primero
+     * definido, y los creados a mano van antes que los de la clave primaria:
+     * con un índice sobre «ciudad», «WHERE id = ? AND ciudad = ?» leía todas
+     * las filas de esa ciudad en vez de una. Quien busca prueba el siguiente
+     * si uno no compensa.
+     *
+     * @return list<array{def: array, claves: list<string>, prefijo: bool}>
+     */
+    public static function candidatos(array $defs, array $predicados): array
+    {
+        $lista = [];
+        foreach (array_values($defs) as $orden => $def) {
             $n = 0;
             foreach ($def['columns'] as $col) {
                 if (!isset($predicados[strtolower($col)])) {
@@ -525,41 +559,47 @@ final class Indexes
                 }
                 $n++;
             }
-            if ($n > $mejorN) {
-                $mejor  = $def;
-                $mejorN = $n;
+            if ($n === 0) {
+                continue;
             }
-        }
-        if ($mejor === null) {
-            return null;
-        }
-
-        // Producto de los valores de cada columna cubierta: un IN aporta varios
-        $claves = [''];
-        for ($i = 0; $i < $mejorN; $i++) {
-            $valores = $predicados[strtolower($mejor['columns'][$i])];
-            if (count($claves) * count($valores) > self::MAX_CLAVES) {
-                return null;                    // demasiadas: sale más barato recorrer
-            }
-            $nuevas = [];
-            foreach ($claves as $base) {
-                foreach ($valores as $v) {
-                    if ($v === null) {
-                        continue;               // NULL nunca es igual a nada
-                    }
-                    $nuevas[] = $base . self::trozo($v);
+            // Producto de los valores de cada columna cubierta: un IN aporta varios
+            $claves = [''];
+            $tope = self::MAX_CLAVES;
+            if ($n === 1) {
+                $numericas = true;
+                foreach ($predicados[strtolower($def['columns'][0])] as $v) {
+                    $numericas = $numericas && (is_int($v) || is_float($v));
                 }
+                $tope = $numericas ? self::MAX_CLAVES_NUMERICAS : self::MAX_CLAVES;
             }
-            $claves = $nuevas;
+            for ($i = 0; $i < $n && $claves !== null; $i++) {
+                $valores = $predicados[strtolower($def['columns'][$i])];
+                if (count($claves) * count($valores) > $tope) {
+                    $claves = null;                 // demasiadas: con este índice sale más barato recorrer
+                    break;
+                }
+                $nuevas = [];
+                foreach ($claves as $base) {
+                    foreach ($valores as $v) {
+                        if ($v !== null) {          // NULL nunca es igual a nada
+                            $nuevas[] = $base . self::trozo($v);
+                        }
+                    }
+                }
+                $claves = $nuevas;
+            }
+            if ($claves === null) {
+                continue;
+            }
+            $claves = array_values(array_unique($claves));
+            if ($claves === []) {
+                return [];                          // ninguna fila puede cumplirlo
+            }
+            $lista[] = ['def' => $def, 'claves' => $claves, 'prefijo' => $n < count($def['columns']),
+                        'unico' => !empty($def['unico']) && $n === count($def['columns']), 'n' => $n, 'orden' => $orden];
         }
-
-        $claves = array_values(array_unique($claves));
-        if ($claves === []) {
-            return null;
-        }
-
-        return ['def' => $mejor, 'claves' => $claves,
-                'prefijo' => $mejorN < count($mejor['columns'])];
+        usort($lista, static fn($a, $b) => [$b['unico'], $b['n'], $a['orden']] <=> [$a['unico'], $a['n'], $b['orden']]);
+        return array_map(static fn($c) => ['def' => $c['def'], 'claves' => $c['claves'], 'prefijo' => $c['prefijo']], $lista);
     }
 
     // ------------------------------------------------------------------

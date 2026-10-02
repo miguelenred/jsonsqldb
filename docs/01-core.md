@@ -1051,6 +1051,25 @@ $rows = $db->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja'])
 It makes sense in a maintenance script, a migration or a cron job, where the
 HTTP hop only adds latency. For anything exposed to third parties, the API.
 
+For a large `SELECT` there is `consultarPorFilas()` (2.7.4): instead of
+returning the rows together, it hands them one at a time to a function as they
+come out of the engine, so the whole result is never a PHP array. It is what the
+API uses to write its JSON. It returns how many rows went out that way; a query
+that needs the whole result anyway (`ORDER BY`, `DISTINCT`, aggregates, one
+served from the result cache) and any other statement return what `consultar()`
+would. The function runs while the engine holds its read lock: keep it quick
+(write to a file or a buffer), not a slow network call.
+
+```php
+$n = $db->consultarPorFilas('SELECT * FROM customers', [], null,
+    static function (array $row) use ($fh): void {
+        fwrite($fh, json_encode($row) . "\n");
+    });
+if (is_array($n)) {                    // came whole: write it out here
+    foreach ($n as $row) { fwrite($fh, json_encode($row) . "\n"); }
+}
+```
+
 Using the storage layer directly, for maintenance:
 
 ```php

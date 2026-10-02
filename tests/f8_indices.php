@@ -91,6 +91,20 @@ chk('se crean solos, sin pedirlos', function () use ($bd) {
     $n = array_column($bd->consultar('SHOW INDEXES FROM gente'), 'columnas', 'indice');
     return isset($n['auto_id'], $n['auto_dni']) && $n['auto_id'] === 'id';
 });
+chk('IN con muchas claves repartidas da lo mismo por el índice que recorriendo (10, 100, 600 y 3.000 claves)', function () use ($bd) {
+    // Las numéricas se buscan solo en el trozo que las contiene y las filas se
+    // leen por líneas; con demasiadas, se renuncia antes de buscar
+    $total = (int)$bd->consultar('SELECT MAX(id) AS m FROM gente')[0]['m'];
+    foreach ([10, 100, 600, 3000] as $n) {
+        $ids = [];
+        for ($i = 0; $i < $n; $i++) { $ids[] = 1 + ($i * 7919) % ($total + 50); }   // algunas no existen
+        $lista = implode(',', $ids);
+        if (!igual($bd, "SELECT * FROM gente WHERE id IN ($lista) ORDER BY id", "SELECT * FROM gente WHERE id IN ($lista) OR 1 = 0 ORDER BY id")) {
+            return "distinto con $n claves";
+        }
+    }
+    return true;
+});
 chk('búsqueda por PK igual que el escaneo', fn() => igual($bd,
     'SELECT * FROM gente WHERE id = 431',
     'SELECT * FROM gente WHERE id + 0 = 431'));
@@ -632,6 +646,27 @@ echo "\n== Limpieza ==\n";
 chk('borrar la base de pruebas', function () use ($raiz) {
     borrarArbol($raiz);
     return !is_dir($raiz);
+});
+
+echo "\n== Elegir índice (2.7.4) ==\n";
+
+chk('con dos índices que cubren una columna cada uno, gana el único: «id = ? AND ciudad = ?» va por la clave primaria', function () {
+    // Antes ganaba el primero definido, y los creados a mano van delante de los
+    // automáticos: se leían todas las filas de esa ciudad en vez de una
+    $defs = [
+        ['name' => 'ix_ciudad', 'columns' => ['ciudad'], 'auto' => false, 'unico' => false],
+        ['name' => 'auto_id', 'columns' => ['id'], 'auto' => true, 'unico' => true],
+        ['name' => 'ix_ciudad_edad', 'columns' => ['ciudad', 'edad'], 'auto' => false, 'unico' => false],
+    ];
+    $a = Indexes::candidatos($defs, ['id' => [5], 'ciudad' => ['Oslo']]);
+    $b = Indexes::candidatos($defs, ['ciudad' => ['Oslo'], 'edad' => [30]]);
+    // 600 claves numéricas sí (cada una se busca en un solo trozo); 5.000, no
+    $c = Indexes::candidatos($defs, ['id' => range(1, 5000), 'ciudad' => ['Oslo']]);
+    $d = Indexes::candidatos($defs, ['id' => range(1, 600), 'ciudad' => ['Oslo']]);
+    $nombres = static fn($l) => implode(',', array_map(static fn($x) => $x['def']['name'], $l));
+    return $nombres($a) === 'auto_id,ix_ciudad,ix_ciudad_edad' && $nombres($b) === 'ix_ciudad_edad,ix_ciudad'
+        && $nombres($c) === 'ix_ciudad,ix_ciudad_edad' && $nombres($d) === 'auto_id,ix_ciudad,ix_ciudad_edad'
+        ?: $nombres($a) . ' | ' . $nombres($b) . ' | ' . $nombres($c) . ' | ' . $nombres($d);
 });
 
 echo "\n---------------------------------------\n";

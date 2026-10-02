@@ -567,6 +567,37 @@ PY;
 
     return $tokenPy === $tokenPhp ?: "python: $tokenPy / php: $tokenPhp";
 });
+echo "\n== Respuesta de un SELECT escrita fila a fila (2.7.4) ==\n";
+chk('un SELECT grande sale por la API igual por los dos caminos: tal cual, ordenado, agrupado, con LIMIT, vacío y de la caché', function () {
+    // Las filas de un SELECT sin ORDER BY se escriben como JSON según salen;
+    // las que llegan enteras (ordenadas, agrupadas, de la caché) se escriben
+    // de una vez. Lo que sale por un camino se comprueba con el otro
+    $admin = $GLOBALS['CLAVE_ADMIN'];
+    firmada('CREATE TABLE fila_a_fila (id INTEGER PRIMARY KEY, t TEXT, n DOUBLE, z INTEGER)', $admin);
+    $v = [];
+    for ($i = 1; $i <= 3000; $i++) {
+        $v[] = "($i, 'ñ \"$i\" 😀', " . ($i % 7 === 0 ? 'NULL' : $i / 4) . ', ' . ($i % 5) . ')';
+    }
+    foreach (array_chunk($v, 250) as $trozo) {                                       // la API limita el tamaño de la SQL
+        firmada('INSERT INTO fila_a_fila VALUES ' . implode(',', $trozo), $admin);
+    }
+    $ordenadas = firmada('SELECT * FROM fila_a_fila ORDER BY id', $admin);           // de una vez
+    $tal       = firmada('SELECT * FROM fila_a_fila', $admin);                       // fila a fila
+    $mal = [];
+    if (count($tal) !== 3000 || $tal !== $ordenadas) { $mal[] = 'tal cual'; }
+    if (($tal[2]['t'] ?? null) !== 'ñ "3" 😀' || !array_key_exists('n', $tal[6] ?? []) || $tal[6]['n'] !== null || ($tal[1]['n'] ?? null) !== 0.5) { $mal[] = 'valores'; }
+    $z2 = array_values(array_map(static fn($f) => ['id' => $f['id'], 't' => $f['t']],
+        array_filter($ordenadas, static fn($f) => $f['z'] === 2)));
+    if (firmada('SELECT id, t FROM fila_a_fila WHERE z = 2', $admin) !== $z2) { $mal[] = 'WHERE'; }
+    if (firmada('SELECT * FROM fila_a_fila LIMIT 10 OFFSET 2990', $admin) !== array_slice($ordenadas, 2990, 10)) { $mal[] = 'LIMIT'; }
+    if (firmada('SELECT * FROM fila_a_fila WHERE id < 0', $admin) !== []) { $mal[] = 'vacío'; }
+    $grupos = firmada('SELECT z, COUNT(*) AS c FROM fila_a_fila GROUP BY z ORDER BY z', $admin);
+    if (array_column($grupos, 'c') !== [600, 600, 600, 600, 600]) { $mal[] = 'GROUP BY'; }
+    if (firmada('SELECT * FROM fila_a_fila', $admin) !== $tal) { $mal[] = 'de la caché'; }
+    firmada('DROP TABLE fila_a_fila', $admin);
+    return $mal === [] ?: 'distinto: ' . implode(', ', $mal);
+});
+
 echo "\n== Límites de la API ==\n";
 /** Ejecuta código contra un ApiStore en otro proceso, con los límites activos, y devuelve lo que imprime. */
 function conLimites(string $codigo, string $constantes = ''): string

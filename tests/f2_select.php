@@ -230,6 +230,32 @@ chk('agregado sobre tabla vacía', function () use ($bd) {
 error('agregado en WHERE', 'SYNTAX', 'SELECT nombre FROM usuarios WHERE COUNT(*) > 1');
 
 echo "\n== Funciones de texto ==\n";
+chk('GROUP BY con ORDER BY sin ninguna fila da un resultado vacío, no un error interno (fallaba en 2.7.3)', function () use ($bd) {
+    $mal = [];
+    foreach (['SELECT nombre, COUNT(*) AS c FROM usuarios WHERE id < 0 GROUP BY nombre ORDER BY nombre',
+              'SELECT nombre, COUNT(*) AS c FROM usuarios WHERE id < 0 GROUP BY nombre ORDER BY c DESC, nombre',
+              'SELECT nombre, COUNT(*) AS c FROM usuarios WHERE id < 0 GROUP BY nombre ORDER BY 2'] as $q) {
+        try {
+            if ($bd->consultar($q) !== []) { $mal[] = $q; }
+        } catch (Throwable $e) {
+            $mal[] = get_class($e) . ': ' . $e->getMessage();
+        }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk('sin ORDER BY, LIMIT y OFFSET recortan lo mismo que el resultado entero (2.7.4: se aplican al leer)', function () use ($bd) {
+    // Se compara con el resultado entero recortado a mano, con WHERE, con
+    // columnas calculadas, en una subconsulta y en los bordes (0, más allá del final)
+    $todo = $bd->consultar('SELECT id, UPPER(nombre) AS n FROM usuarios WHERE id > 1');
+    $mal = [];
+    foreach ([[2, 1], [3, 0], [0, 2], [100, 0], [2, 100], [1, 4]] as [$lim, $off]) {
+        $r = $bd->consultar("SELECT id, UPPER(nombre) AS n FROM usuarios WHERE id > 1 LIMIT $lim OFFSET $off");
+        if ($r !== array_slice($todo, $off, $lim)) { $mal[] = "LIMIT $lim OFFSET $off"; }
+    }
+    $sub = $bd->consultar('SELECT id FROM usuarios WHERE id IN (SELECT id FROM usuarios WHERE id > 1 LIMIT 2 OFFSET 1)');
+    if (array_column($sub, 'id') !== array_slice(array_column($todo, 'id'), 1, 2)) { $mal[] = 'subconsulta'; }
+    return $mal === [] ?: implode(', ', $mal);
+});
 chk('TRANSLATE cambia cada carácter por el de su posición y quita los que sobran (2.7.3)', function () use ($bd) {
     $r = $bd->consultar("SELECT TRANSLATE('Ñandú áb', 'áúb', 'au') AS a, TRANSLATE(NULL, 'a', 'b') AS b, TRANSLATE('abc', '', 'x') AS c")[0];
     return $r === ['a' => 'Ñandu a', 'b' => null, 'c' => 'abc'] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
