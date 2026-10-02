@@ -50,14 +50,14 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 <meta name="robots" content="noindex,nofollow">
 <title><?= h($titulo !== '' ? $titulo . ' · ' : '') ?>jsonSQLDBadmin</title>
 <script nonce="<?= h(nonce()) ?>">try{var t=localStorage.getItem('jsa-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.setAttribute('data-bs-theme',t);}catch(e){}</script>
-<link rel="stylesheet" href="assets/bootstrap.min.css">
-<link rel="stylesheet" href="assets/panel.css">
+<link rel="stylesheet" href="<?= h(recurso('bootstrap.min.css')) ?>">
+<link rel="stylesheet" href="<?= h(recurso('panel.css')) ?>">
 </head>
 <?php if ($suelto): ?>
 <body class="<?= $vistaActual === 'instalar' ? 'setup-body' : 'login-body' ?>">
   <?php require __DIR__ . '/' . $vistaActual . '.php'; ?>
-<script src="assets/bootstrap.bundle.min.js"></script>
-<script src="assets/panel.js"></script>
+<script src="<?= h(recurso('bootstrap.bundle.min.js')) ?>"></script>
+<script src="<?= h(recurso('panel.js')) ?>"></script>
 </body>
 </html>
 <?php return; endif; ?>
@@ -181,7 +181,7 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
         <?= t('jsonSQLDBadmin{1} · {2} · PHP {3}', [1 => version() !== '' ? ' v' . h(version()) : '', 2 => Api::directa() ? t('conexión directa') : t('conexión por API'), 3 => h(PHP_VERSION)]) ?>
     </footer>
 </div>
-<script src="assets/bootstrap.bundle.min.js"></script>
-<script src="assets/panel.js"></script>
+<script src="<?= h(recurso('bootstrap.bundle.min.js')) ?>"></script>
+<script src="<?= h(recurso('panel.js')) ?>"></script>
 </body>
 </html>

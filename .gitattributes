@@ -37,6 +37,14 @@ VERSION     text eol=lf
 *.pdf       binary
 *.zip       binary
 
+# --- Volcados de prueba: byte a byte, sin tocar los finales de línea ---
+# Son copias exactas de lo que escriben mysqldump, pg_dump o el script de
+# Access. El de Access, hecho en Windows, lleva CRLF también dentro de un texto
+# de varias líneas (un campo Memo): si Git los cambiara a LF, cambiaría el dato
+# y la prueba que lo compara fallaría. Va después de *.php y *.json para mandar
+# sobre ellas.
+tests/volcados/** -text
+
 # --- Fuera de las estadísticas de lenguaje y de los diffs ---
 jsonsqldbadmin/assets/** linguist-vendored
 docs/**                  linguist-documentation

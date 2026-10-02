@@ -11,6 +11,16 @@ declare(strict_types=1);
  *
  * https://miguelenred.es/jsonsqldb
  */
+/**
+ * La dirección de un fichero de assets/ con la fecha del fichero detrás
+ * (?v=…): al actualizar el panel, el navegador pide el nuevo en vez de seguir
+ * con el que tenía guardado (un panel.js viejo dejaba botones sin hacer nada).
+ */
+function recurso(string $fichero): string
+{
+    return 'assets/' . $fichero . '?v=' . (string)@filemtime(dirname(__DIR__) . '/assets/' . $fichero);
+}
+
 function version(): string
 {
     static $v = null;

@@ -290,6 +290,9 @@ final class Importar
         return $limpio;
     }
 
+    /** Lo que pasa el separador por una nota «-- [t].[c] DEFAULT valor» o «-- [relación] ON DELETE CASCADE» de un volcado de Access. */
+    private const MARCA_NOTA = "\0nota:";
+
     /** Sentencias que no venían en UTF-8 en la última importación (leídas como Windows-1252). */
     private static int $noUtf8 = 0;
 
@@ -304,7 +307,16 @@ final class Importar
      */
     private static function sentencias($fh, string $dialecto): \Generator
     {
+        $notas = [];                                // lo que hay que añadir a la sentencia que viene
         foreach (self::sentenciasCrudas($fh, $dialecto) as [$sql, $n]) {
+            if (str_starts_with($sql, self::MARCA_NOTA)) {
+                $notas[] = substr($sql, strlen(self::MARCA_NOTA));
+                continue;
+            }
+            if ($notas !== []) {
+                $sql = self::aplicarNotas($sql, $notas);
+                $notas = [];
+            }
             self::$latin1 = !mb_check_encoding($sql, 'UTF-8');
             if (self::$latin1) {
                 $sql = (string)mb_convert_encoding($sql, 'UTF-8', 'Windows-1252');
@@ -312,6 +324,29 @@ final class Importar
             }
             yield [$sql, $n];
         }
+    }
+
+    /**
+     * Pone en la sentencia lo que su nota decía: el DEFAULT detrás del tipo de
+     * su columna y la acción detrás del REFERENCES de su relación. Lo que no
+     * encuentra lo deja como está.
+     *
+     * @param list<string> $notas
+     */
+    private static function aplicarNotas(string $sql, array $notas): string
+    {
+        foreach ($notas as $nota) {
+            if (preg_match('/^\[([^\]]+)\]\.\[([^\]]+)\]\s+DEFAULT\s+(.+)$/ui', $nota, $m)) {
+                $col = '\[' . preg_quote($m[2], '/') . '\]';
+                $sql = (string)preg_replace('/(' . $col . '\s+[A-Za-z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)/u',
+                    '$1 DEFAULT ' . str_replace(['\\', '$'], ['\\\\', '\\$'], trim($m[3])), $sql, 1);
+            } elseif (preg_match('/^\[([^\]]+)\]\s+(ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET NULL))$/ui', $nota, $m)) {
+                $fk = '\[' . preg_quote($m[1], '/') . '\]';
+                $sql = (string)preg_replace('/(CONSTRAINT\s+' . $fk . '\s+FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s*\[[^\]]+\]\s*\([^)]*\))/ui',
+                    '$1 ' . strtoupper($m[2]), $sql, 1);
+            }
+        }
+        return $sql;
     }
 
     /** ¿La última sentencia entregada venía en Latin-1? */
@@ -340,6 +375,7 @@ final class Importar
         $mysql = $dialecto === 'mysql';
         $pg    = $dialecto === 'postgresql';
         $ss    = $dialecto === 'sqlserver';
+        $access = $dialecto === 'access';
         $actual = '';
         $comilla = '';          // '' fuera; el carácter que cierra la cadena o el nombre
         $escapes = false;       // la cadena admite escapes de barra invertida
@@ -358,6 +394,12 @@ final class Importar
             }
             if ($vacia && $pg && preg_match('/^\s*\\\\/', $l)) {
                 continue;                               // \restrict y otras órdenes de psql
+            }
+            // «-- [tabla].[columna] DEFAULT valor» y «-- [relación] ON DELETE CASCADE»:
+            // lo que la sintaxis ANSI-89 de Access no deja escribir en la sentencia
+            if ($vacia && $access && preg_match('/^\s*--\s*(\[[^\]]+\]\.\[[^\]]+\]\s+DEFAULT\s+.+?|\[[^\]]+\]\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET NULL))\s*$/ui', $l, $mq)) {
+                yield [self::MARCA_NOTA . $mq[1], $n];
+                continue;
             }
             if ($ss && $comilla === '' && !$bloque && preg_match('/^\s*GO\s*(\d+)?\s*$/i', $l)) {
                 if (trim($actual) !== '') { yield [trim($actual), $n]; }

@@ -136,6 +136,9 @@ final class Exportar
         exit;
     }
 
+    /** @var list<string> lo que la sintaxis ANSI-89 de Access no deja escribir en la sentencia que viene */
+    private static array $notasAccess = [];
+
     /** Dialectos de volcado: 'sqlite' (que también es el de jsonSQLDB), 'mysql', 'postgresql', 'sqlserver', 'access'. */
     public const DIALECTOS = ['sqlite', 'mysql', 'postgresql', 'sqlserver', 'access'];
 
@@ -287,7 +290,12 @@ final class Exportar
                   . (self::$d === 'sqlite' ? ' ' . t('SQLite no acepta ALTER TABLE … ADD CONSTRAINT: ahí se cargarán los datos sin ellas.') : '') . "\n";
             $out .= "-- ------------------------------------------------------------\n";
             foreach ($diferidas as [$tabla, $k]) {
-                $out .= 'ALTER TABLE ' . self::q($tabla) . ' ADD ' . self::claveForanea($tabla, $k) . ";\n";
+                $sentencia = 'ALTER TABLE ' . self::q($tabla) . ' ADD ' . self::claveForanea($tabla, $k) . ";\n";
+                foreach (self::$notasAccess as $n) {
+                    $out .= '-- ' . $n . "\n";
+                }
+                self::$notasAccess = [];
+                $out .= $sentencia . (self::$d === 'access' ? "\n" : '');
             }
         }
         // Vistas y triggers: tal cual en el volcado de jsonSQLDB y SQLite; en los
@@ -399,8 +407,9 @@ final class Exportar
                      . $c(t('Texto como NVARCHAR con cotejamiento binario (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos), enteros como BIGINT, fechas como DATETIME2(3), autoincremento como IDENTITY. Una clave foránea de una tabla hacia sí misma va sin ON DELETE/ON UPDATE: SQL Server no admite acciones en cadena que puedan formar un ciclo. Las vistas y los triggers van comentados.'))
                      . "SET NOCOUNT ON;\nSET XACT_ABORT ON;\nSET ANSI_NULLS ON;\nSET QUOTED_IDENTIFIER ON;\nBEGIN TRANSACTION;\n";
             case 'access':
-                return $out . $c(t('Para Microsoft Access (Jet / ACE, en modo ANSI-92). Access no ejecuta un fichero de sentencias: hay que lanzarlas una a una, por ejemplo con OLEDB desde PowerShell o con CurrentProject.Connection.Execute desde VBA, saltando las líneas que empiezan por --.'))
-                     . $c(t('Texto de hasta 255 caracteres como TEXT(n) y más largo como MEMO, enteros como LONG, autonumérico como COUNTER, fechas como DATETIME. Las vistas van como consultas guardadas (CREATE VIEW). Access no tiene triggers: van comentados al final.'));
+                return $out . $c(t('Para Microsoft Access, en su sintaxis de siempre (ANSI-89), la de la vista SQL de una consulta. Access ejecuta una sola sentencia cada vez: copia cada una (sin las líneas que empiezan por --) en Crear → Diseño de consulta → Vista SQL y pulsa Ejecutar. Para cargar el fichero entero de una vez, usa el script access-to-jsonsqldb.ps1 (opción «Load an SQL file into Access»).'))
+                     . $c(t('Las consultas guardadas van como CREATE VIEW, que Access solo admite en bases .mdb de Access 2000 a 2003 y .accdb, y solo con la sintaxis ANSI-92 (por ADO/OLEDB, o con la opción «Sintaxis compatible con SQL Server (ANSI 92)» de la base, desde Access 2002); con la de siempre da error, y en Access 97 o anterior no existe. En cualquier versión: pega lo que va detrás de AS en una consulta nueva y guárdala con el nombre de la vista, o carga el fichero con el script, que las crea como consultas guardadas sin CREATE VIEW. Lo que esta sintaxis no tiene va en una línea -- encima de su tabla o relación, para hacerlo a mano: «-- [tabla].[columna] DEFAULT valor» (en Access, vista Diseño de la tabla → Valor predeterminado) y «-- [relación] ON DELETE CASCADE» u ON UPDATE (Herramientas de base de datos → Relaciones → Exigir integridad referencial → Eliminar o Actualizar en cascada). Al importar este fichero en jsonSQLDBadmin, esas líneas se aplican solas.'))
+                     . $c(t('DECIMAL pasa a CURRENCY (hasta 4 decimales) o DOUBLE; un salto de línea dentro de un texto, a Chr(13) & Chr(10). Access no tiene triggers: van comentados al final.'));
             default:
                 return $out . $c(t('Se carga en jsonSQLDB (Importar un volcado SQL, en la página de la base) y en SQLite: {orden}', ['orden' => "sqlite3 $base.db < $base.sql"]));
         }
@@ -521,11 +530,12 @@ final class Exportar
                 : str_replace('RESTRICT', 'NO ACTION', $acciones);
         }
         if (self::$d === 'access') {
-            // Access solo escribe CASCADE y SET NULL; lo demás es no hacer nada
+            // La sintaxis ANSI-89 de Access no tiene ON DELETE ni ON UPDATE: la
+            // relación se crea sin ellas y se dice qué hay que marcar a mano
             $acciones = '';
             foreach (['DELETE' => $k['on_delete'], 'UPDATE' => $k['on_update']] as $cuando => $accion) {
                 if (in_array($accion, ['CASCADE', 'SET NULL'], true)) {
-                    $acciones .= " ON $cuando $accion";
+                    self::$notasAccess[] = '[' . (string)$k['nombre'] . "] ON $cuando $accion";
                 }
             }
         }
@@ -582,18 +592,28 @@ final class Exportar
                         . ((int)$c['pk'] === 1 || (int)$c['notnull'] === 1 ? ' NOT NULL' : '') . ($esPk ? ' PRIMARY KEY' : '');
                     break;
                 case 'access':
-                    // El autonumérico de Access es su propio tipo: COUNTER
+                    // El autonumérico de Access es su propio tipo: COUNTER. Las
+                    // claves, con CONSTRAINT y nombre, como las pide la sintaxis
+                    // ANSI-89 de la vista SQL de Access
                     $d = self::q($nombre) . ' ' . ($auto ? 'COUNTER' : $tipo)
-                        . (!$auto && ((int)$c['pk'] === 1 || (int)$c['notnull'] === 1) ? ' NOT NULL' : '') . ($esPk ? ' PRIMARY KEY' : '');
+                        . (!$auto && ((int)$c['pk'] === 1 || (int)$c['notnull'] === 1) ? ' NOT NULL' : '')
+                        . ($esPk ? ' CONSTRAINT ' . self::q(self::nombreObjeto($tabla, 'PK_' . $tabla)) . ' PRIMARY KEY' : '');
                     break;
             }
             if ((int)$c['unico'] === 1) {
                 // En SQL Server, NULL cuenta como un valor en UNIQUE: dos filas sin
                 // dato chocarían. Se crea como índice único filtrado, después
-                if (self::$d !== 'sqlserver') { $d .= ' UNIQUE'; }
+                if (self::$d === 'access') {
+                    $d .= ' CONSTRAINT ' . self::q(self::nombreObjeto($tabla, 'UQ_' . $tabla . '_' . $nombre)) . ' UNIQUE';
+                } elseif (self::$d !== 'sqlserver') {
+                    $d .= ' UNIQUE';
+                }
                 $sueltas[$nombre] = true;
             }
-            if ($c['defecto'] !== null) {
+            if ($c['defecto'] !== null && self::$d === 'access') {
+                // La sintaxis ANSI-89 no tiene DEFAULT: se dice, para ponerlo a mano
+                self::$notasAccess[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . self::literal($c['defecto']);
+            } elseif ($c['defecto'] !== null) {
                 // MySQL 8 solo admite el valor por defecto de un TEXT entre paréntesis
                 $lit = self::literal($c['defecto']);
                 $d  .= ' DEFAULT ' . (self::$d === 'mysql' && $tipo === 'TEXT' ? '(' . $lit . ')' : $lit);
@@ -601,7 +621,8 @@ final class Exportar
             $partes[] = $d;
         }
         if ($compuesta) {
-            $partes[] = 'PRIMARY KEY (' . implode(', ', array_map(static fn($c) => self::q((string)$c), $pk)) . ')';
+            $partes[] = (self::$d === 'access' ? 'CONSTRAINT ' . self::q(self::nombreObjeto($tabla, 'PK_' . $tabla)) . ' ' : '')
+                . 'PRIMARY KEY (' . implode(', ', array_map(static fn($c) => self::q((string)$c), $pk)) . ')';
         }
         $aplazadas = [];
         foreach ($diferidas as [$t, $k]) {
@@ -624,7 +645,15 @@ final class Exportar
             }
         }
 
-        return 'CREATE TABLE ' . self::q($tabla) . " (\n  " . implode(",\n  ", $partes) . "\n)"
+        $notas = '';
+        if (self::$d === 'access') {
+            // Lo que la sintaxis ANSI-89 no deja escribir, encima de la tabla
+            foreach (self::$notasAccess as $n) {
+                $notas .= '-- ' . $n . "\n";
+            }
+            self::$notasAccess = [];
+        }
+        return $notas . 'CREATE TABLE ' . self::q($tabla) . " (\n  " . implode(",\n  ", $partes) . "\n)"
              . (self::$d === 'mysql' ? ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin' : '') . ";\n" . $despues;
     }
 
@@ -697,15 +726,17 @@ final class Exportar
             return (int)$c['longitud'] <= 255 ? 'TEXT(' . (int)$c['longitud'] . ')' : 'MEMO';
         }
         if ($c['escala'] !== null || $tipo === 'DECIMAL') {
+            // La sintaxis ANSI-89 no tiene DECIMAL: CURRENCY, exacto con 4
+            // decimales; con más, DOUBLE (aquí DECIMAL ya es de coma flotante)
             $escala = $c['escala'] !== null ? (int)$c['escala'] : 6;
-            return 'DECIMAL(' . min(28, max(18, $escala + 12)) . ',' . $escala . ')';
+            return $escala <= 4 ? 'CURRENCY' : 'DOUBLE';
         }
         switch ($tipo) {
             case 'INTEGER':
                 foreach ($filas as $f) {
                     $v = $f[$col] ?? null;
                     if (is_int($v) && ($v > 2147483647 || $v < -2147483648)) {
-                        return 'DECIMAL(19,0)';
+                        return 'DOUBLE';            // LONG es de 32 bits; DOUBLE, exacto hasta 2^53
                     }
                 }
                 return 'LONG';
@@ -790,6 +821,18 @@ final class Exportar
         // En MySQL la barra invertida también escapa dentro de una cadena; en
         // SQL Server, una cadena con N delante es Unicode
         $s = self::$d === 'mysql' ? str_replace(['\\', "'"], ['\\\\', "''"], (string)$v) : str_replace("'", "''", (string)$v);
+        if (self::$d === 'access' && strpbrk($s, "\r\n") !== false) {
+            // En Access no hay forma de escribir un salto de línea dentro de un
+            // texto: se une con Chr(13) y Chr(10). Así la sentencia cabe en una
+            // línea, se puede pegar en la vista SQL, y ningún editor ni Git
+            // cambia el dato al cambiar los finales de línea del fichero
+            $trozos = preg_split('/(\r|\n)/', $s, -1, PREG_SPLIT_DELIM_CAPTURE);
+            $partes = [];
+            foreach ($trozos as $t) {
+                $partes[] = $t === "\r" ? 'Chr(13)' : ($t === "\n" ? 'Chr(10)' : "'" . $t . "'");
+            }
+            return implode(' & ', array_values(array_filter($partes, static fn($p) => $p !== "''")) ?: ["''"]);
+        }
         return (self::$d === 'sqlserver' ? 'N' : '') . "'" . $s . "'";
     }
 

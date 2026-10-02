@@ -382,6 +382,9 @@ final class Traductor
         if ($this->ss && $p1 === 'INSERT' && $p2 !== 'INTO') {
             array_splice($t, 1, 0, [['k' => 'id', 'v' => 'INTO']]);  // INSERT [t] … de SQL Server
         }
+        if ($this->access) {
+            $t = $this->textosConChr($t);
+        }
         if ($this->mysql && ($p1 === 'INSERT' || $p1 === 'REPLACE')) {
             $t = $this->valoresMysql($t);
         }
@@ -488,6 +491,53 @@ final class Traductor
         $this->reemplazos[$n] = $otro;
         $this->avisar(t("Nombre '{n}' cambiado a '{otro}': '{ya}' ya se llamaba '{destino}' aquí", ['n' => $n, 'otro' => $otro, 'ya' => $ya, 'destino' => $destino]));
         return '"' . $otro . '"';
+    }
+
+    /**
+     * 'Primera' & Chr(13) & Chr(10) & 'línea': así escribe el volcado de Access un
+     * texto con saltos de línea (el SQL de Access no tiene otra forma). Una
+     * cadena de textos y Chr(n) unidos con & pasa a ser un solo texto.
+     */
+    private function textosConChr(array $t): array
+    {
+        $out = [];
+        for ($k = 0, $n = count($t); $k < $n; $k++) {
+            $pieza = $this->piezaDeTexto($t, $k);
+            if ($pieza === null || ($t[$pieza[1] + 1]['v'] ?? '') !== '&') {
+                $out[] = $t[$k];
+                continue;
+            }
+            $texto = $pieza[0];
+            $fin = $pieza[1];
+            while (($t[$fin + 1]['k'] ?? '') === 'op' && $t[$fin + 1]['v'] === '&' && ($sig = $this->piezaDeTexto($t, $fin + 2)) !== null) {
+                $texto .= $sig[0];
+                $fin = $sig[1];
+            }
+            if ($fin === $pieza[1]) {
+                $out[] = $t[$k];                    // un & con algo que no es texto: se deja
+                continue;
+            }
+            $out[] = ['k' => 'str', 'v' => $texto];
+            $k = $fin;
+        }
+        return $out;
+    }
+
+    /** Un texto o un Chr(n) en $k: [su valor, dónde acaba], o null. */
+    private function piezaDeTexto(array $t, int $k): ?array
+    {
+        $x = $t[$k] ?? null;
+        if ($x === null) {
+            return null;
+        }
+        if ($x['k'] === 'str') {
+            return [(string)$x['v'], $k];
+        }
+        if ($x['k'] === 'id' && empty($x['q']) && strcasecmp((string)$x['v'], 'Chr') === 0 && ($t[$k + 1]['v'] ?? '') === '('
+            && ($t[$k + 2]['k'] ?? '') === 'num' && ($t[$k + 3]['v'] ?? '') === ')') {
+            return [mb_chr((int)$t[$k + 2]['v'], 'UTF-8'), $k + 3];
+        }
+        return null;
     }
 
     /** Importar dice si la sentencia que viene venía en Latin-1 (ya pasada a UTF-8). */

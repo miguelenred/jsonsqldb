@@ -52,15 +52,21 @@ usort($tablas, static fn($a, $b) => strcasecmp((string)$a['tabla'], (string)$b['
 </div>
 
 <?php if (Auth::esAdmin()): ?>
+<?php require __DIR__ . '/guia_volcados.php'; ?>
 <div class="row g-3 mt-1">
   <div class="col-lg-6">
     <div class="card h-100">
       <div class="card-header"><?= icono('upload') ?> <?= h(t('Importar un volcado SQL')) ?></div>
       <div class="card-body">
-        <p class="small text-body-secondary"><?= t('El volcado del panel, o uno de SQLite (<code>sqlite3 base.db .dump</code>), MySQL / MariaDB (<code>mysqldump</code>), PostgreSQL (<code>pg_dump</code>, en texto) o SQL Server (el script de «Generar scripts» de Management Studio, con esquema y datos). Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual (un <code>CHECK</code>, un <code>ENUM</code>…). Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen. <strong>No hay transacciones</strong>: si una sentencia falla, las anteriores ya están hechas y se dice cuál era.') ?></p>
-        <p class="small"><?= t('Cómo hacer el volcado de cada motor: <a href="{1}" target="_blank" rel="noopener">guía</a>.',
-            [1 => 'https://github.com/miguelenred/jsonsqldb/blob/main/docs/05-admin.md#how-to-make-an-sql-dump-of-each-database']) ?></p>
-        <p class="small"><?= t('<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> que vuelca un .mdb o .accdb a un fichero que se importa aquí, con sus tablas, claves, índices, relaciones, datos y consultas. Necesita <strong>Windows</strong>. Lo más fácil para ejecutarlo: <strong>botón derecho sobre el fichero descargado → «Ejecutar con PowerShell»</strong>; pregunta qué base volcar y en qué carpeta guardar el volcado. Si falta el controlador de Access, lo dice y da el enlace para descargarlo.',
+        <p class="small text-body-secondary"><?= t('El volcado del panel, o uno de SQLite, MySQL / MariaDB, PostgreSQL, SQL Server o Microsoft Access, con sus vistas y sus triggers. Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual. Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen.') ?></p>
+        <p class="small text-body-secondary"><?= t('Con el panel en la misma máquina que el motor es <strong>todo o nada</strong>: si algo falla, la base queda como estaba. Si no, lo anterior al fallo queda hecho y se dice dónde paró.') ?></p>
+        <p class="small d-flex gap-2 flex-wrap">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#guiaVolcados">
+            <?= h(t('Cómo hacer el volcado de cada motor')) ?></button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#guiaVolcados" data-pestana="access">
+            <?= h(t('Microsoft Access: script y limitaciones')) ?></button>
+        </p>
+        <p class="small"><?= t('<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> (necesita <strong>Windows</strong>; botón derecho → «Ejecutar con PowerShell»). Vuelca un .mdb o .accdb a un fichero que se importa aquí, y carga en Access lo que exportes como «SQL: Microsoft Access». Con un .mdb no hace falta instalar nada; con un .accdb, si falta el controlador de Access, lo dice y da el enlace para descargarlo.',
             [1 => h(url(['p' => 'script_access']))]) ?></p>
         <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap">
           <?= csrf() ?>

@@ -995,7 +995,7 @@ php tests/f2_select.php       → OK: 149   SELECT execution and collation
 php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 60    real requests against the API
 php tests/f5_esquema.php      → OK: 95    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 137   the panel, driven like a user
+php tests/f5_admin.php        → OK: 139   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
 php tests/f8_indices.php      → OK: 60    indexes, against a full scan every time
@@ -1008,7 +1008,7 @@ php tests/f14_volcados.php     → OK: 18 (30 with every server)  dumps to and f
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
 php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQL and PostgreSQL do the same there
 php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
-php tests/f18_access.php       → OK: 11    Microsoft Access: the PowerShell script, import and export
+php tests/f18_access.php       → OK: 13    Microsoft Access: the PowerShell script, import and export
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that

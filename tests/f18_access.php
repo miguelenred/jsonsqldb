@@ -65,6 +65,22 @@ function estado(Database $bd): array {
 borrarArbol($raiz);
 mkdir($raiz, 0775, true);
 
+/**
+ * Lo que la vista SQL de Access no admite en su sintaxis de siempre (ANSI-89),
+ * fuera de las líneas --: DECIMAL, DEFAULT, ON DELETE / ON UPDATE, BIGINT, ni
+ * un INSERT de varias filas. CREATE VIEW es la excepción elegida: el script lo
+ * convierte en una consulta guardada al cargar el fichero.
+ */
+function sinAnsi92(string $sql): array {
+    $sentencias = (string)preg_replace('/^\s*--.*$/m', '', $sql);
+    $sentencias = (string)preg_replace("/'(?:[^']|'')*'/", "''", $sentencias);       // sin los textos
+    $mal = [];
+    foreach (['/\bDECIMAL\s*\(/i', '/\bDEFAULT\b/i', '/\bON\s+(DELETE|UPDATE)\b/i', '/\bBIGINT\b/i', '/\)\s*,\s*\(/'] as $re) {
+        if (preg_match($re, $sentencias, $m)) { $mal[] = $m[0]; }
+    }
+    return $mal;
+}
+
 $script = dirname(__DIR__) . '/jsonsqldbadmin/herramientas/access-to-jsonsqldb.ps1';
 $fijo = __DIR__ . '/volcados/access.sql';
 $pwsh = trim((string)shell_exec('command -v pwsh 2>/dev/null')) ?: (is_file('/opt/pwsh/pwsh') ? '/opt/pwsh/pwsh' : '');
@@ -168,7 +184,7 @@ chk('cada consulta da lo que da en Access', function () {
 
 echo "\n== Exportar a Access y volver ==\n";
 $volcado = '';
-chk('el volcado para Access tiene los tipos de Access, #fechas#, COUNTER y las consultas como vistas', function () use (&$volcado) {
+chk('el volcado para Access está en la sintaxis ANSI-89 de Access (salvo CREATE VIEW): claves con nombre, sin DEFAULT ni CASCADE en las sentencias', function () use (&$volcado) {
     $bd = new Database('acc');
     $tablas = [];
     foreach ($bd->consultar('SHOW TABLES') as $t) {
@@ -177,9 +193,10 @@ chk('el volcado para Access tiene los tipos de Access, #fechas#, COUNTER y las c
                      'filas' => $bd->consultar("SELECT * FROM \"$n\"")];
     }
     $volcado = Exportar::volcado('acc', $tablas, $bd->consultar('SHOW TRIGGERS'), $bd->consultar('SHOW VIEWS'), $bd->consultar('SHOW INDEXES'), 'access');
-    return str_contains($volcado, '-- jsonsqldb-dialecto: access') && str_contains($volcado, '[Id] COUNTER PRIMARY KEY')
+    return str_contains($volcado, '-- jsonsqldb-dialecto: access') && str_contains($volcado, '[Id] COUNTER CONSTRAINT [PK_Clientes] PRIMARY KEY')
         && str_contains($volcado, '[Nombre] TEXT(50) NOT NULL') && str_contains($volcado, '#2026-01-05 10:00:00#')
-        && str_contains($volcado, 'CREATE VIEW [qryTextos] AS') && str_contains($volcado, 'ON DELETE CASCADE')
+        && str_contains($volcado, 'CREATE VIEW [qryTextos] AS SELECT') && str_contains($volcado, '-- [ClientesPedidos] ON DELETE CASCADE')
+        && sinAnsi92($volcado) === []
         && !str_contains($volcado, 'Sin traducir') ?: substr($volcado, 0, 1500);
 });
 chk('y se vuelve a importar con las mismas tablas, los mismos datos y lo mismo en cada vista', function () use (&$volcado, $raiz) {
@@ -198,6 +215,30 @@ chk('y se vuelve a importar con las mismas tablas, los mismos datos y lo mismo e
     return $mal === [] && !str_contains($resumen, 'sin importar') ?: implode(' | ', $mal) . " · $resumen";
 });
 
+chk('el volcado del script también está en ANSI-89', fn() => sinAnsi92((string)file_get_contents($fijo)) ?: true);
+chk('el script parte un volcado en sus sentencias como las pide la vista SQL de Access (para cargarlo en Access)', function () use ($pwsh, $script, $fijo, &$volcado, $raiz) {
+    // Split-SqlStatements es lo que usa la opción «Load an SQL file into
+    // Access»: cada sentencia sin las líneas --, y cada CREATE VIEW como el
+    // nombre de la consulta guardada y su SELECT
+    if ($pwsh === '') { return null; }
+    $mal = [];
+    file_put_contents("$raiz/panel.access.sql", $volcado);
+    foreach ([$fijo, "$raiz/panel.access.sql"] as $f) {
+        $orden = '. ' . "'" . $script . "'" . '; $r = Split-SqlStatements ([System.IO.File]::ReadAllText(' . "'" . $f . "'" . ')); $r | ForEach-Object { [pscustomobject]@{ n = $_.Name; s = $_.Sql } } | ConvertTo-Json -Compress -Depth 3';
+        $partes = json_decode(trim((string)shell_exec(escapeshellarg($pwsh) . ' -NoProfile -Command ' . escapeshellarg($orden) . ' 2>&1')), true);
+        if (!is_array($partes)) { $mal[] = basename($f) . ': no devolvió nada'; continue; }
+        $texto = (string)file_get_contents($f);
+        // Lo esperado: una sentencia por cada ; de final de línea fuera de las líneas --
+        $esperadas = preg_match_all('/;\s*$/m', (string)preg_replace('/^\s*--.*$/m', '', $texto));
+        preg_match_all('/^CREATE VIEW \[(.+?)\] AS /m', $texto, $mq);
+        $nombres = array_values(array_filter(array_column($partes, 'n')));
+        $raras = array_filter($partes, static fn($p) => !preg_match('/^(CREATE (TABLE|UNIQUE INDEX|INDEX)|ALTER TABLE|INSERT INTO|SELECT|TRANSFORM)\b/', (string)$p['s']) || str_contains((string)$p['s'], '--'));
+        if (count($partes) !== $esperadas || $nombres !== $mq[1] || $raras !== []) {
+            $mal[] = basename($f) . ': ' . count($partes) . " sentencias (esperadas $esperadas), consultas " . implode(',', $nombres) . ', raras ' . count($raras);
+        }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
 chk('las 25 formas de vista van al volcado de Access y vuelven dando lo mismo', function () use ($raiz) {
     [$tablasF, $formas] = require __DIR__ . '/volcados/formas_de_vista.php';
     Database::crear('formas_access');

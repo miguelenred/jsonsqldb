@@ -764,6 +764,22 @@ chk('ningún script en línea sin su nonce, ni código en atributos (la CSP ya n
     }
     return $mal === [] ?: implode(', ', $mal);
 });
+chk('los CSS y JS del panel llevan su fecha en la dirección, para que el navegador no use los de antes', function () {
+    $html = pedir('p=bases');
+    return preg_match('/src="assets\/panel\.js\?v=\d+"/', $html) && preg_match('/href="assets\/panel\.css\?v=\d+"/', $html)
+        && preg_match('/src="assets\/bootstrap\.bundle\.min\.js\?v=\d+"/', $html) ?: 'sin ?v= en algún recurso';
+});
+chk('la guía de volcados se ve en el propio panel, en una ventana con una pestaña por motor y las limitaciones de Access', function () {
+    $html = pedir('p=tablas&db=tienda');
+    $pestanas = ['sqlite', 'mysql', 'postgresql', 'sqlserver', 'access'];
+    foreach ($pestanas as $p) {
+        if (!str_contains($html, 'id="guia-' . $p . '"')) { return "falta la pestaña $p"; }
+    }
+    return str_contains($html, 'id="guiaVolcados"') && str_contains($html, 'data-bs-target="#guiaVolcados" data-pestana="access"')
+        && !str_contains($html, 'github.com/miguelenred/jsonsqldb/blob') && str_contains($html, 'Limitaciones de Access')
+        && str_contains($html, 'Una sentencia cada vez') && str_contains($html, 'Load an SQL file into Access')
+        && str_contains($html, 'mysqldump --default-character-set=utf8mb4') ?: 'falta la ventana, el botón o un texto, o sigue el enlace a GitHub';
+});
 chk('la página de importar ofrece el script de Access y explica cómo ejecutarlo; el panel lo descarga', function () {
     $html = pedir('p=tablas&db=tienda');
     $script = pedir('p=script_access');

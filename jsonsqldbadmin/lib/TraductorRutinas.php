@@ -2015,6 +2015,11 @@ final class TraductorRutinas
         };
         switch ($u) {
             case 'NZ':      return 'COALESCE(' . $a[0] . ', ' . ($a[1] ?? "''") . ')';
+            case 'CHR':
+                if (!preg_match('/^\d+$/', trim($a[0]))) {
+                    throw new NoTraducible(t('Chr() con un código calculado'));
+                }
+                return $this->tr->texto([['k' => 'str', 'v' => mb_chr((int)$a[0], 'UTF-8')]]);
             case 'IIF':     return "(CASE WHEN {$a[0]} THEN {$a[1]} ELSE {$a[2]} END)";
             case 'ISNULL':  return "({$a[0]} IS NULL)";
             case 'MID':     return 'SUBSTR(' . implode(', ', $a) . ')';

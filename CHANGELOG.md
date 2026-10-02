@@ -144,6 +144,9 @@ first; this is what was real and what was done.
   - The API and collation tests passed accented text to a child process
     through `escapeshellarg()`, which drops non-ASCII characters under the C
     locale; they now start it without a shell.
+  - Git turned the CRLF inside a multi-line text of the Access test dump into
+    LF (`* text=auto` in `.gitattributes`), so the check of that text failed
+    in CI: the test dumps (`tests/volcados/`) are now kept byte for byte.
   - Two tests reached private members with Reflection, which needs
     `setAccessible()` on PHP 8.0 and warns as deprecated on 8.5; they now use a
     closure bound to the class, the same on every version. A test function
@@ -262,25 +265,49 @@ first; this is what was real and what was done.
   pg_dump as it does MySQL (8 views, 8 triggers), and an SSMS-style script
   with the same rules against the result already checked in MySQL (there is no
   SQL Server here).
-- **Microsoft Access, both ways.** *Import*: the panel offers
+- **Microsoft Access, both ways, in Access's own SQL.** The panel offers
   `access-to-jsonsqldb.ps1`, a PowerShell script (Windows; right-click → *Run
-  with PowerShell*) that asks for the `.mdb`/`.accdb` file and the folder for
-  the dump, reads it read-only through OLEDB and writes the tables, keys,
-  indexes, relationships, data and saved select queries. Without the Access
-  Database Engine it says so, explains the 32/64-bit match and offers the
-  download page. The importer reads that dump (and mdbtools' `access` output):
-  Access types, `#dates#`, `COUNTER`, and the queries translated to views —
-  double-quoted text, `&`, `IIf`, `Nz`, `Mid`, `InStr`, `Format`, `DateAdd`,
-  `DateDiff`, `CCur`…, `Like` with `*`, `?` and `#`, `Table!Field`, joins in
-  parentheses, `TOP`. *Export*: a new *SQL: Microsoft Access* dump with
-  `TEXT(n)`/`MEMO`, `LONG`, `COUNTER`, `#dates#`, relationships and the views as
-  saved queries; Access has no triggers, so they go commented with the reason.
-  The panel text, in both languages, says that the script needs Windows and how
-  to run it. `tests/f18_access.php` (new) checks the script's syntax with
-  PowerShell and that its own functions write exactly the test dump, imports
-  that dump (4 tables, 8 queries checked against what Access returns), and
-  exports to Access and imports it back unchanged. Reading a real `.mdb` with
-  OLEDB needs Windows and could not be run here.
+  with PowerShell*) that asks what to do. *Dump an Access database to SQL* reads
+  the `.mdb`/`.accdb` read-only through OLEDB and writes the tables, keys,
+  indexes, relationships, data and saved select queries. *Load an SQL file into
+  Access* runs an `.access.sql` file statement by statement through DAO into a
+  new or existing database. An `.mdb` needs nothing installed: Windows has the
+  Jet engine for 32-bit programs, and from the usual 64-bit PowerShell the
+  script opens itself again in the 32-bit one. An `.accdb` needs the Access
+  Database Engine; without it the script says so, explains the 32/64-bit match
+  and offers the download page.
+  Both that dump and the panel's new *SQL: Microsoft Access* export are written
+  in Access SQL in its usual syntax (ANSI-89), so each statement can also be
+  pasted into a query's SQL view: keys with `CONSTRAINT` and a name, `CURRENCY`
+  or `DOUBLE` instead of `DECIMAL`, one `INSERT` per row, a line break inside a
+  text as `Chr(13) & Chr(10)`, and what that syntax cannot write — defaults
+  and cascading relationships — as `-- [table].[column] DEFAULT …` and
+  `-- [relationship] ON DELETE CASCADE` lines for doing it by hand. Saved
+  queries go as `CREATE VIEW`, which Access only runs in ANSI-92 mode: by hand,
+  what follows `AS` is pasted into a new query; the script's loader creates them
+  as saved queries through DAO. The importer reads all of it back (and
+  mdbtools' `access` output): the default and cascade lines are applied, and the
+  queries are
+  translated — double-quoted text, `&`, `IIf`, `Nz`, `Mid`, `InStr`, `Format`,
+  `DateAdd`, `DateDiff`, `CCur`…, `Like` with `*`, `?` and `#`, `Table!Field`,
+  joins in parentheses, `TOP`. Access's limits are documented in
+  docs/05-admin.md and shown in the panel.
+  `tests/f18_access.php` (new) checks the script's syntax with PowerShell, that
+  its own functions write exactly the test dump, that both files keep to ANSI-89,
+  that the script splits them into the statements Access runs one at a time,
+  imports the dump (4 tables, 8 queries checked against what Access returns),
+  and exports to Access and imports it back with the same keys, cascades,
+  defaults, data and views. Reading or writing a real `.mdb` needs Windows and
+  could not be run here.
+- **The panel's CSS and JavaScript carry their date in the address**
+  (`panel.js?v=…`): after an update the browser fetches the new files instead of
+  keeping the old ones, which could leave a new button doing nothing.
+- **The dump guide is in the panel**: *How to make the dump of each database*,
+  in the import box, opens a window with one tab per engine (commands and
+  steps for SQLite, MySQL / MariaDB, PostgreSQL, SQL Server and Access, and
+  Access's limitations) instead of a link to GitHub. The import box also says
+  now that importing is all or nothing when the panel reaches the database's
+  folder.
 - **Views and triggers are exported to MySQL / MariaDB, PostgreSQL, SQL Server
   and Access**, translated, instead of being left commented out. The view or
   trigger is analysed with the engine's own parser and written again in the

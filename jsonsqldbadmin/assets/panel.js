@@ -132,3 +132,12 @@
 document.querySelectorAll('[data-enviar-al-cambiar]').forEach(function (el) {
     el.addEventListener('change', function () { el.form.submit(); });
 });
+
+// La guía de volcados se abre en la pestaña que pida el botón (data-pestana)
+document.querySelectorAll('#guiaVolcados').forEach(function (modal) {
+    modal.addEventListener('show.bs.modal', function (ev) {
+        var pestana = ev.relatedTarget && ev.relatedTarget.getAttribute('data-pestana');
+        var boton = document.getElementById('pestana-' + (pestana || 'sqlite'));
+        if (boton && window.bootstrap) { bootstrap.Tab.getOrCreateInstance(boton).show(); }
+    });
+});

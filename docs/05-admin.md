@@ -408,39 +408,82 @@ here it would. `INSTEAD OF` triggers, cursors and loops have no equivalent and
 are skipped with the reason. Stored procedures are skipped.
 
 **Microsoft Access** — with the PowerShell script the panel offers in its import
-box (*download the PowerShell script*), `access-to-jsonsqldb.ps1`. It needs
-**Windows**. The easiest way to run it: **right-click the downloaded file →
-«Run with PowerShell»**. It asks for the `.mdb` or `.accdb` file and for the
-folder where the dump is saved, and writes `name.access.sql` there with the
-tables (autonumber, keys, indexes, `NOT NULL`), the data, the relationships (with
-their `CASCADE`/`SET NULL`) and the saved select queries as views. The database
-is opened read-only. Import the file here with the format on *Detect* (or
-*Microsoft Access*).
+box, `access-to-jsonsqldb.ps1`. It needs **Windows**. The easiest way to run it:
+**right-click the downloaded file → «Run with PowerShell»**. It asks what to do:
 
-It reads the database through OLEDB, so it needs the **Microsoft Access
-Database Engine**. If it is missing, the script says so and offers the download
-page (Microsoft Access Database Engine 2016 Redistributable). The engine must have
-the same bitness as the PowerShell running the script: with 32-bit Office the
-64-bit engine will not install, so use the 32-bit PowerShell
-(`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`) with the 32-bit
-engine. An `.mdb` can also be read with the old Jet engine, 32-bit only.
+- **Dump an Access database to SQL**: it asks for the `.mdb` or `.accdb` file and
+  for the folder where the dump is saved, and writes `name.access.sql` there with
+  the tables (autonumber, keys, indexes, `NOT NULL`), the data, the relationships
+  and the saved select queries. The database is opened read-only. Import the file
+  here with the format on *Detect* (or *Microsoft Access*).
+- **Load an SQL file into Access**: it asks for an `.access.sql` file (one it
+  made, or one exported by the panel as *SQL: Microsoft Access*) and for the
+  Access database to load it into — a new name creates it — and runs the
+  statements one by one, as if each were pasted into a query's SQL view. It
+  stops at the first statement that fails and says which one.
 
-The queries are translated as Access stores them: text in double quotes,
-`#dates#`, `&`, `IIf`, `Nz`, `Mid`, `Len`, `InStr` (without case, as in Access),
-`Format`, `DateAdd`, `DateDiff`, `Year`…, `CCur`/`CLng`/`CDate`…, the `*`, `?` and
-`#` wildcards of `Like`, `Table!Field`, joins in parentheses and `TOP`. What does
-not come along: attachments and OLE objects (binary data); action, crosstab and
-parameter queries; and the hidden queries of forms and reports. The script lists
-them when it finishes. Note that Access compares text without case in `=` too,
-and here `=` tells capitals apart.
+It reads through OLEDB and loads through DAO. **An `.mdb` needs nothing
+installed**: Windows has its engine (Jet), but only for 32-bit programs, so when
+the script runs in the 64-bit PowerShell (the usual one) it opens itself again in
+the 32-bit one, with what has been chosen so far. **An `.accdb` needs the
+Microsoft Access Database Engine** (2016 Redistributable) with the same bitness
+as the PowerShell running the script; if it is missing, the script says so and
+offers the download page. With 32-bit Office the 64-bit engine will not install:
+use the 32-bit engine and the 32-bit PowerShell
+(`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`).
 
-The panel also exports **for Access** (*SQL: Microsoft Access* in the dump
-dropdown): `TEXT(n)`/`MEMO`, `LONG`, `COUNTER`, `DATETIME` with `#…#` values,
-relationships with `CASCADE`/`SET NULL`, and the views as saved queries
-(`CREATE VIEW`), translated to Access SQL. Access has no triggers, so they go
-commented with that reason. Access does not run a file of statements: run them
-one by one (OLEDB from PowerShell, `CurrentProject.Connection.Execute` from VBA),
-skipping the `--` lines.
+The panel shows all this in its import box too: *How to make the dump of each
+database* opens a window with one tab per engine, and *Microsoft Access: script
+and limitations* opens it on the Access tab.
+
+#### The Access SQL file and Access's limits
+
+Both the script's dump and the panel's *SQL: Microsoft Access* export are written
+in Access SQL in its usual syntax (**ANSI-89**), the one of a query's SQL view, so
+every statement can also be pasted by hand into *Create → Query Design → SQL
+View* and run — all but the `CREATE VIEW`s, which Access only runs in its
+ANSI-92 syntax (see the table). That syntax sets the limits:
+
+| Access | What the file does |
+|---|---|
+| The SQL view runs **one statement at a time**, and has no comments | One statement per line or block; the `--` lines are not copied. To load a whole file, the script's *Load an SQL file into Access* |
+| `CREATE VIEW` only in some databases and modes (see below) | Saved queries go as `CREATE VIEW [name] AS SELECT …`. By hand, in any version: paste what follows `AS` into a new query and save it with that name. The script's *Load an SQL file into Access* creates them as saved queries without `CREATE VIEW` (through DAO, so their `SELECT` keeps Access's usual syntax), in any version |
+| No `DEFAULT` | `-- [table].[column] DEFAULT value` above the table: set it in the table's Design view (*Default Value*) |
+| No `ON DELETE` / `ON UPDATE CASCADE` | `-- [relationship] ON DELETE CASCADE` above it: *Database Tools → Relationships → Enforce Referential Integrity → Cascade Delete / Update* |
+| No `DECIMAL`, no `BIGINT` | `CURRENCY` (exact, up to 4 decimals) or `DOUBLE`; an integer beyond the 32 bits of `LONG` becomes `DOUBLE` (exact up to 2^53) |
+| No multi-row `INSERT` | One `INSERT` per row |
+| No way to write a line break inside a text | `'a' & Chr(13) & Chr(10) & 'b'`: the statement stays on one line and no editor changes the data |
+| No triggers | Commented out at the end; in an `.accdb`, data macros are made by hand |
+| No `FULL JOIN`, `INTERSECT`, `EXCEPT`, `OFFSET`, `GROUP_CONCAT` or regular expressions | The views that use them are commented out with the reason |
+| Text up to 255 characters; `MEMO` cannot be indexed | `TEXT(n)` up to 255, `MEMO` beyond; a text key or index wider than 255 keeps `MEMO` |
+| Dates from year 100 to 9999; Yes/No is -1 | `DATETIME` with `#yyyy-mm-dd hh:nn:ss#`; `True`/`False` (1/0 here) |
+| Text compares without case, also with `=` | Here `=` tells capitals apart; `Like` and `InStr` are translated without case, as in Access |
+
+**Where `CREATE VIEW` works.** It is part of the SQL that came with Jet 4.0,
+so Access accepts it in `.mdb` databases of Access 2000 to 2003 (Jet 4.0) and in
+`.accdb` ones (Access 2007 and later) — but only in **ANSI-92** syntax: through
+ADO/OLEDB, or in a query's SQL view when the database has *SQL Server Compatible
+Syntax (ANSI 92)* turned on (an option since Access 2002; in Access 2010 and
+later, *File → Options → Object Designers → Query design*). In the usual ANSI-89
+syntax of the SQL view it is a syntax error, and in an Access 97 or earlier
+database (Jet 3) it does not exist at all. Turning ANSI-92 on changes the
+wildcards of `Like` (`%` and `_` instead of `*` and `?`) for every query of that
+database, which is one more reason to paste the `SELECT` by hand or let the
+script create the queries.
+
+When the file is imported here, the importer reads it as written: the
+`CREATE VIEW`s become views, the `-- … DEFAULT` and `-- … ON DELETE CASCADE`
+lines are applied to the statement below them, and `Chr(13) & Chr(10)` becomes
+the line break again — so a database exported for Access and imported back has
+the same tables, keys, cascades, defaults, data and views.
+
+What does not come from Access: attachments and OLE objects (binary data);
+action, crosstab and parameter queries; and the hidden queries of forms and
+reports. The script lists them when it finishes. The saved queries are
+translated as Access stores them: text in double quotes, `#dates#`, `&`, `IIf`,
+`Nz`, `Mid`, `Len`, `InStr`, `Format`, `DateAdd`, `DateDiff`, `Year`…,
+`CCur`/`CLng`/`CDate`…, the `*`, `?` and `#` wildcards of `Like`, `Table!Field`,
+joins in parentheses and `TOP`.
 
 What does not arrive the same in any of them: `CHECK` constraints, computed
 default values (`CURRENT_TIMESTAMP`, `NOW()`, `getdate()`), `ENUM` value lists,
@@ -668,7 +711,7 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
 | `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields, selects that submit their form |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json`, and `codigo-instalacion.txt` until the installation finishes |
-| `tests/f5_admin.php` | 137 checks driving the real panel through the API |
+| `tests/f5_admin.php` | 139 checks driving the real panel through the API |
 | `tests/f11_asistente.php` | 35 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
 ## 9. Tests
@@ -680,13 +723,13 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php      → OK: 137   the panel, page by page
+php tests/f5_admin.php      → OK: 139   the panel, page by page
 php tests/f11_asistente.php → OK: 35    setup wizard, direct connection, configuration, sessions, languages
 php tests/f14_volcados.php  → OK: 18    dumps, difficult dumps, ZIP paths, all-or-nothing (30 with servers)
 php tests/f15_idiomas.php   → OK: 6     every text translated, none left over, browser language
 php tests/f16_vistas_triggers.php → OK: 11   views and triggers exported, run in MySQL and PostgreSQL
 php tests/f17_rutinas_importadas.php → OK: 11views and triggers imported from MySQL, PostgreSQL, SQL Server
-php tests/f18_access.php    → OK: 11    the Access script, importing and exporting Access
+php tests/f18_access.php    → OK: 13    the Access script, importing and exporting Access
 ```
 
 `tests/f14_volcados.php` loads the dumps into real servers when it is told where

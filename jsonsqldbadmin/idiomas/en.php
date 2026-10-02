@@ -367,8 +367,6 @@ return [
         => 'The user \'{usuario}\' does not exist',
     'El usuario admite de 3 a 32 caracteres: letras, números y . _ - @'
         => 'The user name takes 3 to 32 characters: letters, numbers and . _ - @',
-    'El volcado del panel, o uno de SQLite (<code>sqlite3 base.db .dump</code>), MySQL / MariaDB (<code>mysqldump</code>), PostgreSQL (<code>pg_dump</code>, en texto) o SQL Server (el script de «Generar scripts» de Management Studio, con esquema y datos). Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual (un <code>CHECK</code>, un <code>ENUM</code>…). Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen. <strong>No hay transacciones</strong>: si una sentencia falla, las anteriores ya están hechas y se dice cuál era.'
-        => 'The panel\'s dump, or one from SQLite (<code>sqlite3 base.db .dump</code>), MySQL / MariaDB (<code>mysqldump</code>), PostgreSQL (<code>pg_dump</code>, plain format) or SQL Server (Management Studio\'s «Generate Scripts», with schema and data). They are translated into the SQL used here, and at the end the panel says what did not arrive the same (a <code>CHECK</code>, an <code>ENUM</code>…). If the dump contains <code>DROP TABLE</code>, tables with the same name are replaced. <strong>There are no transactions</strong>: if a statement fails, the previous ones are already done and the panel says which one it was.',
     'El volcado supera el tope de {n} filas (ADMIN_EXPORT_MAX). Exporta las tablas por separado o usa el ZIP.'
         => 'The dump exceeds the limit of {n} rows (ADMIN_EXPORT_MAX). Export the tables separately or use the ZIP.',
     'Elige al menos una columna para el índice.'
@@ -1149,8 +1147,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Tables',
     'Inicio'
         => 'Home',
-    'Cómo hacer el volcado de cada motor: <a href="{1}" target="_blank" rel="noopener">guía</a>.'
-        => 'How to make the dump of each engine: <a href="{1}" target="_blank" rel="noopener">guide</a>.',
     'Sin traducir: {motivo}'
         => 'Not translated: {motivo}',
     'Sin traducir (van comentados al final): {lista}'
@@ -1287,18 +1283,12 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'to_char code with no translation: {c}',
     'EXTRACT de \'{u}\''
         => 'EXTRACT of \'{u}\'',
-    'Para Microsoft Access (Jet / ACE, en modo ANSI-92). Access no ejecuta un fichero de sentencias: hay que lanzarlas una a una, por ejemplo con OLEDB desde PowerShell o con CurrentProject.Connection.Execute desde VBA, saltando las líneas que empiezan por --.'
-        => 'For Microsoft Access (Jet / ACE, in ANSI-92 mode). Access does not run a file of statements: they have to be run one by one, for example with OLEDB from PowerShell or with CurrentProject.Connection.Execute from VBA, skipping the lines that start with --.',
-    'Texto de hasta 255 caracteres como TEXT(n) y más largo como MEMO, enteros como LONG, autonumérico como COUNTER, fechas como DATETIME. Las vistas van como consultas guardadas (CREATE VIEW). Access no tiene triggers: van comentados al final.'
-        => 'Text of up to 255 characters as TEXT(n) and longer as MEMO, integers as LONG, autonumber as COUNTER, dates as DATETIME. Views go as saved queries (CREATE VIEW). Access has no triggers: they are commented out at the end.',
     'Autonuméricos que no son la clave primaria: importados como enteros'
         => 'Autonumbers that are not the primary key: imported as integers',
     'el operador ^ con valores calculados'
         => 'the ^ operator with computed values',
     'SQL: Microsoft Access'
         => 'SQL: Microsoft Access',
-    '<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> que vuelca un .mdb o .accdb a un fichero que se importa aquí, con sus tablas, claves, índices, relaciones, datos y consultas. Necesita <strong>Windows</strong>. Lo más fácil para ejecutarlo: <strong>botón derecho sobre el fichero descargado → «Ejecutar con PowerShell»</strong>; pregunta qué base volcar y en qué carpeta guardar el volcado. Si falta el controlador de Access, lo dice y da el enlace para descargarlo.'
-        => '<strong>Microsoft Access</strong>: <a href="{1}">download the PowerShell script</a> that dumps an .mdb or .accdb to a file you import here, with its tables, keys, indexes, relationships, data and queries. It needs <strong>Windows</strong>. The easiest way to run it: <strong>right-click the downloaded file → «Run with PowerShell»</strong>; it asks which database to dump and which folder to save the dump in. If the Access engine is missing, it says so and gives the link to download it.',
     'Microsoft Access (script de PowerShell)'
         => 'Microsoft Access (PowerShell script)',
     'Ahora se deduce en cada petición de la cabecera Host, que manda el navegador: guarda la configuración para dejarla escrita.'
@@ -1347,4 +1337,96 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'So that only someone with access to the server can finish the installation: it is in the file <code>{fichero}</code> in the panel\'s data folder (<code>jsonsqldbadmin/datos/</code>, unless <code>ADMIN_DATA_PATH</code> says otherwise), and <code>php configurar.php</code> shows it too. It is deleted when the installation is done.',
     '<strong>PHP {v}: las escrituras no son duraderas ante un corte de luz.</strong> El motor necesita fsync(), que llega con PHP 8.1, para que una escritura confirmada sobreviva a un apagón o a un fallo del sistema. Usa PHP 8.1 o posterior en producción.'
         => '<strong>PHP {v}: writes are not durable across a power cut.</strong> The engine needs fsync(), which arrives with PHP 8.1, for a confirmed write to survive a power failure or a system crash. Use PHP 8.1 or later in production.',
+    'Para Microsoft Access, en su sintaxis de siempre (ANSI-89), la de la vista SQL de una consulta. Access ejecuta una sola sentencia cada vez: copia cada una (sin las líneas que empiezan por --) en Crear → Diseño de consulta → Vista SQL y pulsa Ejecutar. Para cargar el fichero entero de una vez, usa el script access-to-jsonsqldb.ps1 (opción «Load an SQL file into Access»).'
+        => 'For Microsoft Access, in its usual syntax (ANSI-89), the one of a query\'s SQL view. Access runs one statement at a time: copy each one (without the lines that start with --) into Create → Query Design → SQL View and click Run. To load the whole file at once, use the access-to-jsonsqldb.ps1 script (option «Load an SQL file into Access»).',
+    'DECIMAL pasa a CURRENCY (hasta 4 decimales) o DOUBLE; un salto de línea dentro de un texto, a Chr(13) & Chr(10). Access no tiene triggers: van comentados al final.'
+        => 'DECIMAL becomes CURRENCY (up to 4 decimals) or DOUBLE; a line break inside a text, Chr(13) & Chr(10). Access has no triggers: they are commented out at the end.',
+    'Chr() con un código calculado'
+        => 'Chr() with a computed code',
+    'Cómo hacer el volcado de cada motor'
+        => 'How to make the dump of each database',
+    'Haz el volcado, súbelo en la página de la base donde lo quieres y deja el formato en «Detectar el formato». Al terminar, el resumen dice lo que no ha llegado igual.'
+        => 'Make the dump, upload it on the page of the database you want it in, and leave the format on «Detect the format». When it finishes, the summary says what did not arrive the same.',
+    'Con la herramienta de línea de órdenes <code>sqlite3</code> (en Windows, <code>sqlite3.exe</code>, de sqlite.org):'
+        => 'With the <code>sqlite3</code> command-line tool (on Windows, <code>sqlite3.exe</code>, from sqlite.org):',
+    'La segunda línea vuelca solo algunas tablas. Con <em>DB Browser for SQLite</em>: Archivo → Exportar → Base de datos a archivo SQL.'
+        => 'The second line dumps only some tables. With <em>DB Browser for SQLite</em>: File → Export → Database to SQL file.',
+    'Con <code>mysqldump</code> (en las versiones recientes de MariaDB, <code>mariadb-dump</code>):'
+        => 'With <code>mysqldump</code> (on recent MariaDB versions, <code>mariadb-dump</code>):',
+    '<code>--default-character-set=utf8mb4</code> conserva los acentos y los emojis. Un volcado antiguo en Latin-1 también se lee.'
+        => '<code>--default-character-set=utf8mb4</code> keeps accents and emoji. An old dump in Latin-1 is read too.',
+    'No uses <code>--xml</code>, <code>--tab</code> ni <code>--compatible</code>: no escriben SQL que el importador lea.'
+        => 'Do not use <code>--xml</code>, <code>--tab</code> or <code>--compatible</code>: they do not write SQL the importer reads.',
+    'Desde phpMyAdmin: Exportar → Personalizado → Formato: SQL.'
+        => 'From phpMyAdmin: Export → Custom → Format: SQL.',
+    'Las vistas y los triggers se traducen, también como los guarda MySQL 8. Los procedimientos y las funciones se saltan.'
+        => 'Views and triggers are translated, also the way MySQL 8 stores them. Procedures and functions are skipped.',
+    'Con <code>pg_dump</code>, en su formato de texto, el de siempre:'
+        => 'With <code>pg_dump</code>, in its plain text format, the default one:',
+    'No uses <code>-Fc</code>, <code>-Fd</code> ni <code>-Ft</code>: son archivos binarios para <code>pg_restore</code>.'
+        => 'Do not use <code>-Fc</code>, <code>-Fd</code> or <code>-Ft</code>: they are binary archives for <code>pg_restore</code>.',
+    'Desde pgAdmin: Copia de seguridad → Formato: Plano.'
+        => 'From pgAdmin: Backup → Format: Plain.',
+    'Las vistas y los triggers se traducen, con la función plpgsql de cada trigger. Un trigger de varios eventos (INSERT OR UPDATE) pasa a ser uno por evento.'
+        => 'Views and triggers are translated, with each trigger\'s plpgsql function. A trigger for several events (INSERT OR UPDATE) becomes one per event.',
+    'Con SQL Server Management Studio:'
+        => 'With SQL Server Management Studio:',
+    'Botón derecho sobre la base → Tareas → Generar scripts…'
+        => 'Right-click the database → Tasks → Generate Scripts…',
+    'Elige las tablas, o la base entera.'
+        => 'Choose the tables, or the whole database.',
+    'En «Establecer opciones de scripting», abre «Avanzadas» y pon «Tipos de datos para incluir en el script» en «Esquema y datos».'
+        => 'In «Set Scripting Options», open «Advanced» and set «Types of data to script» to «Schema and data».',
+    'Guárdalo en un solo fichero, en Unicode o en UTF-8.'
+        => 'Save it to a single file, in Unicode or in UTF-8.',
+    'Las vistas y los triggers se traducen. Un trigger de SQL Server trabaja con todas las filas a la vez (<code>inserted</code> y <code>deleted</code>); aquí, fila a fila, así que se reescribe. Los triggers <code>INSTEAD OF</code>, los cursores y los procedimientos almacenados se saltan.'
+        => 'Views and triggers are translated. A SQL Server trigger works with all the rows at once (<code>inserted</code> and <code>deleted</code>); here, row by row, so it is rewritten. <code>INSTEAD OF</code> triggers, cursors and stored procedures are skipped.',
+    'Con el script de PowerShell <code>access-to-jsonsqldb.ps1</code>, que <a href="{1}">se descarga aquí</a>. Necesita <strong>Windows</strong>.'
+        => 'With the PowerShell script <code>access-to-jsonsqldb.ps1</code>, <a href="{1}">downloaded here</a>. It needs <strong>Windows</strong>.',
+    'Botón derecho sobre el fichero descargado → <strong>«Ejecutar con PowerShell»</strong>.'
+        => 'Right-click the downloaded file → <strong>«Run with PowerShell»</strong>.',
+    'Elige <strong>«Dump an Access database to SQL»</strong>, el .mdb o .accdb y la carpeta donde guardar el volcado.'
+        => 'Choose <strong>«Dump an Access database to SQL»</strong>, the .mdb or .accdb file and the folder to save the dump in.',
+    'Importa aquí el fichero .access.sql que deja en esa carpeta.'
+        => 'Import here the .access.sql file it leaves in that folder.',
+    'La base se abre solo para leer. Con un <strong>.mdb</strong> no hace falta instalar nada: Windows trae su controlador (Jet), aunque solo para programas de 32 bits, y el script se vuelve a abrir solo con el PowerShell de 32 bits. Un <strong>.accdb</strong> necesita el <strong>Access Database Engine 2016</strong>, de los mismos bits que PowerShell (con Office de 32 bits, el de 32 bits y el PowerShell de 32 bits); si falta, el script lo dice y da el enlace para descargarlo.'
+        => 'The database is opened read-only. An <strong>.mdb</strong> needs nothing installed: Windows has its engine (Jet), but only for 32-bit programs, and the script opens itself again in the 32-bit PowerShell. An <strong>.accdb</strong> needs the <strong>Access Database Engine 2016</strong>, with the same bitness as PowerShell (with 32-bit Office, the 32-bit one and the 32-bit PowerShell); if it is missing, the script says so and gives the link to download it.',
+    'Para el camino contrario, de aquí a Access: exporta la base como <strong>«SQL: Microsoft Access»</strong> y cárgalo con la opción <strong>«Load an SQL file into Access»</strong> del mismo script, que crea la base si no existe; o pega cada sentencia en Access a mano.'
+        => 'For the other way round, from here to Access: export the database as <strong>«SQL: Microsoft Access»</strong> and load it with the <strong>«Load an SQL file into Access»</strong> option of the same script, which creates the database if it does not exist; or paste each statement into Access by hand.',
+    'Limitaciones de Access'
+        => 'Access limitations',
+    'El fichero está escrito en el SQL de Access, en su sintaxis de siempre (ANSI-89): cada sentencia se puede pegar en Crear → Diseño de consulta → Vista SQL y ejecutar. Esa sintaxis tiene estos límites:'
+        => 'The file is written in Access SQL, in its usual syntax (ANSI-89): each statement can be pasted into Create → Query Design → SQL View and run. That syntax has these limits:',
+    '<strong>Una sentencia cada vez.</strong> La vista SQL no ejecuta varias seguidas, y las líneas que empiezan por <code>--</code> no se copian. Para un fichero entero, la opción del script.'
+        => '<strong>One statement at a time.</strong> The SQL view does not run several in a row, and the lines that start with <code>--</code> are not copied. For a whole file, the script\'s option.',
+    '<strong>Sin DEFAULT ni relaciones en cascada.</strong> Van en una línea encima de su tabla o relación (<code>-- [tabla].[columna] DEFAULT valor</code>, <code>-- [relación] ON DELETE CASCADE</code>) para ponerlas a mano: el valor predeterminado en la vista Diseño de la tabla; la cascada en Herramientas de base de datos → Relaciones → Exigir integridad referencial. Al importar el fichero aquí se aplican solas.'
+        => '<strong>No DEFAULT and no cascading relationships.</strong> They go in a line above their table or relationship (<code>-- [table].[column] DEFAULT value</code>, <code>-- [relationship] ON DELETE CASCADE</code>) to set them by hand: the default value in the table\'s Design view; the cascade in Database Tools → Relationships → Enforce Referential Integrity. When the file is imported here, they are applied on their own.',
+    '<strong>Sin DECIMAL.</strong> Pasa a <code>CURRENCY</code> con hasta 4 decimales y a <code>DOUBLE</code> con más. <code>LONG</code> es de 32 bits: un entero mayor pasa a <code>DOUBLE</code>, exacto hasta 2^53.'
+        => '<strong>No DECIMAL.</strong> It becomes <code>CURRENCY</code> with up to 4 decimals and <code>DOUBLE</code> with more. <code>LONG</code> is 32-bit: a larger integer becomes <code>DOUBLE</code>, exact up to 2^53.',
+    '<strong>Un INSERT por fila</strong>, y un salto de línea dentro de un texto se escribe <code>\'a\' &amp; Chr(13) &amp; Chr(10) &amp; \'b\'</code>.'
+        => '<strong>One INSERT per row</strong>, and a line break inside a text is written <code>\'a\' &amp; Chr(13) &amp; Chr(10) &amp; \'b\'</code>.',
+    '<strong>Sin triggers.</strong> Van comentados al final; en un .accdb, las macros de datos se hacen a mano.'
+        => '<strong>No triggers.</strong> They are commented out at the end; in an .accdb, data macros are made by hand.',
+    '<strong>Sin</strong> FULL JOIN, INTERSECT, EXCEPT, OFFSET, GROUP_CONCAT ni expresiones regulares: las vistas que los usan van comentadas con el motivo.'
+        => '<strong>No</strong> FULL JOIN, INTERSECT, EXCEPT, OFFSET, GROUP_CONCAT or regular expressions: the views that use them are commented out with the reason.',
+    'El texto llega hasta 255 caracteres; más largo es <code>MEMO</code>, que no se puede indexar. Las fechas van del año 100 al 9999. Sí/No vale -1 en Access y 1 aquí.'
+        => 'Text goes up to 255 characters; longer is <code>MEMO</code>, which cannot be indexed. Dates go from year 100 to 9999. Yes/No is -1 in Access and 1 here.',
+    'Access compara los textos sin distinguir mayúsculas, también con <code>=</code>; aquí <code>=</code> sí las distingue.'
+        => 'Access compares text without case, also with <code>=</code>; here <code>=</code> does tell capitals apart.',
+    '<strong>No llegan</strong> los adjuntos ni los objetos OLE (datos binarios), las consultas de acción, de referencias cruzadas o con parámetros, ni las consultas ocultas de formularios e informes. El script las nombra al terminar.'
+        => '<strong>What does not come along:</strong> attachments and OLE objects (binary data), action, crosstab or parameter queries, and the hidden queries of forms and reports. The script names them when it finishes.',
+    'En ninguno llegan igual: las restricciones <code>CHECK</code>, los valores por defecto calculados (<code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>), las listas <code>ENUM</code>, la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.'
+        => 'Not the same in any of them: <code>CHECK</code> constraints, computed default values (<code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>), <code>ENUM</code> value lists, the time zone of dates and binary data that is not text (kept in hexadecimal). A name that is not valid here is changed (<code>Order Details</code> → <code>Order_Details</code>). If the dump contains <code>DROP TABLE</code>, the table with the same name is replaced: when in doubt, import into a new database.',
+    'El volcado del panel, o uno de SQLite, MySQL / MariaDB, PostgreSQL, SQL Server o Microsoft Access, con sus vistas y sus triggers. Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual. Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen.'
+        => 'The panel\'s own dump, or one from SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft Access, with its views and triggers. They are translated to the SQL used here, and at the end it says what did not arrive the same. If the dump contains <code>DROP TABLE</code>, the tables with the same name are replaced.',
+    'Con el panel en la misma máquina que el motor es <strong>todo o nada</strong>: si algo falla, la base queda como estaba. Si no, lo anterior al fallo queda hecho y se dice dónde paró.'
+        => 'With the panel on the same machine as the engine it is <strong>all or nothing</strong>: if something fails, the database is left as it was. Otherwise, what came before the failure is already done and it says where it stopped.',
+    'Microsoft Access: script y limitaciones'
+        => 'Microsoft Access: script and limitations',
+    '<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> (necesita <strong>Windows</strong>; botón derecho → «Ejecutar con PowerShell»). Vuelca un .mdb o .accdb a un fichero que se importa aquí, y carga en Access lo que exportes como «SQL: Microsoft Access». Con un .mdb no hace falta instalar nada; con un .accdb, si falta el controlador de Access, lo dice y da el enlace para descargarlo.'
+        => '<strong>Microsoft Access</strong>: <a href="{1}">download the PowerShell script</a> (it needs <strong>Windows</strong>; right-click → «Run with PowerShell»). It dumps an .mdb or .accdb to a file you import here, and loads into Access what you export as «SQL: Microsoft Access». An .mdb needs nothing installed; with an .accdb, if the Access engine is missing, it says so and gives the link to download it.',
+    'Las consultas guardadas van como CREATE VIEW, que Access solo admite en bases .mdb de Access 2000 a 2003 y .accdb, y solo con la sintaxis ANSI-92 (por ADO/OLEDB, o con la opción «Sintaxis compatible con SQL Server (ANSI 92)» de la base, desde Access 2002); con la de siempre da error, y en Access 97 o anterior no existe. En cualquier versión: pega lo que va detrás de AS en una consulta nueva y guárdala con el nombre de la vista, o carga el fichero con el script, que las crea como consultas guardadas sin CREATE VIEW. Lo que esta sintaxis no tiene va en una línea -- encima de su tabla o relación, para hacerlo a mano: «-- [tabla].[columna] DEFAULT valor» (en Access, vista Diseño de la tabla → Valor predeterminado) y «-- [relación] ON DELETE CASCADE» u ON UPDATE (Herramientas de base de datos → Relaciones → Exigir integridad referencial → Eliminar o Actualizar en cascada). Al importar este fichero en jsonSQLDBadmin, esas líneas se aplican solas.'
+        => 'Saved queries go as CREATE VIEW, which Access only accepts in .mdb databases of Access 2000 to 2003 and in .accdb ones, and only in ANSI-92 syntax (through ADO/OLEDB, or with the database\'s «SQL Server Compatible Syntax (ANSI 92)» option, since Access 2002); in the usual syntax it is an error, and in Access 97 or earlier it does not exist. In any version: paste what follows AS into a new query and save it with the view\'s name, or load the file with the script, which creates them as saved queries without CREATE VIEW. What this syntax does not have goes in a -- line above its table or relationship, to do by hand: «-- [table].[column] DEFAULT value» (in Access, the table\'s Design view → Default Value) and «-- [relationship] ON DELETE CASCADE» or ON UPDATE (Database Tools → Relationships → Enforce Referential Integrity → Cascade Delete or Update). When this file is imported into jsonSQLDBadmin, those lines are applied on their own.',
+    '<strong>CREATE VIEW no vale en todas las bases ni en todos los modos.</strong> Las consultas guardadas van como <code>CREATE VIEW [nombre] AS SELECT …</code>. Access lo admite en las bases .mdb de Access 2000 a 2003 (Jet 4.0) y en las .accdb (Access 2007 y posteriores), pero solo con la sintaxis ANSI-92: por ADO/OLEDB, o en la vista SQL si la base tiene activada «Sintaxis compatible con SQL Server (ANSI 92)» (opción que existe desde Access 2002; en Access 2010 y posteriores, Archivo → Opciones → Diseñadores de objetos). Con la sintaxis de siempre (ANSI-89) da error de sintaxis, y en una base de Access 97 o anterior (Jet 3) no existe. A mano, en cualquier versión: pega lo que va detrás de <code>AS</code> en una consulta nueva y guárdala con ese nombre. El script de PowerShell las crea como consultas guardadas sin usar CREATE VIEW, así que con él vale cualquier versión.'
+        => '<strong>CREATE VIEW does not work in every database or mode.</strong> Saved queries go as <code>CREATE VIEW [name] AS SELECT …</code>. Access accepts it in .mdb databases of Access 2000 to 2003 (Jet 4.0) and in .accdb ones (Access 2007 and later), but only in ANSI-92 syntax: through ADO/OLEDB, or in the SQL view if the database has «SQL Server Compatible Syntax (ANSI 92)» turned on (an option that exists since Access 2002; in Access 2010 and later, File → Options → Object Designers). In the usual syntax (ANSI-89) it is a syntax error, and in an Access 97 or earlier database (Jet 3) it does not exist. By hand, in any version: paste what follows <code>AS</code> into a new query and save it with that name. The PowerShell script creates them as saved queries without CREATE VIEW, so with it any version works.',
 ];
