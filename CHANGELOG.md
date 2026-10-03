@@ -9,10 +9,294 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.8.0] - 2026-10-03
+
+Three things every application needs and the engine did not have — knowing the
+id of the row just inserted, a default that is the current date, and «insert or
+update» — plus `CREATE TABLE … AS SELECT` and more speed. The panel exports and
+imports databases larger than PHP's memory and files larger than its upload
+limit, loads Excel files and makes scheduled backups. 2.7.5 was never
+published: its changes are part of this release. The new SQL works as in SQLite and is checked against it; what
+already existed works as before, and the inserts, updates and deletes that do
+not use the new syntax were measured and are as fast as before. Nothing
+changes in the on-disk format of existing data.
+
+### Added
+
+- **`RETURNING` in `INSERT`, `UPDATE` and `DELETE`**: the statement returns the
+  rows written, like a `SELECT` (`RETURNING id`, `RETURNING *`,
+  `RETURNING qty * 2 AS twice`), and the API answers with that list. The way to
+  know the id of a new row: `SELECT MAX(id)` afterwards could return another
+  client's.
+- **Defaults worked out on insert**: `DEFAULT CURRENT_TIMESTAMP`,
+  `CURRENT_DATE`, `CURRENT_TIME` and `DEFAULT (expression)`, also for
+  `UPDATE … SET col = DEFAULT` and `ON DELETE SET DEFAULT`. `CURRENT_TIMESTAMP`
+  and the others can be used in any expression. As in SQLite, the expression
+  cannot use columns, subqueries or parameters, and such a column cannot be
+  added to a table that has rows. `SHOW SCHEMA` has a new key,
+  `defecto_calculado`, with its SQL; the table's `.meta.json` keeps it as
+  `default_expr`, a new key that older versions ignore (for them the column has
+  no default).
+- **Upsert**: `INSERT OR IGNORE`, `INSERT OR REPLACE`, `REPLACE INTO`, and
+  `ON CONFLICT [(columns)] DO NOTHING | DO UPDATE SET … [WHERE …]` with
+  `excluded.column`. `DO UPDATE` goes through everything an `UPDATE` does
+  (types, the other unique keys, foreign keys, `UPDATE` triggers); `OR REPLACE`
+  deletes the rows it collides with applying their foreign key actions, without
+  `DELETE` triggers, as SQLite does by default. Known difference: after a
+  collision SQLite uses up a number of the `AUTOINCREMENT` counter even for an
+  ignored row, so gaps can differ; numbers are unique and increasing in both.
+- **`CREATE TABLE … AS SELECT`** (also with `IF NOT EXISTS`, `WITH` and
+  `UNION`): a table with the result of a query, as in SQLite, without keys,
+  `NOT NULL` or defaults. A column taken as it is from a table keeps its type,
+  length and scale; any other takes it from its values (`INTEGER`, `DOUBLE`,
+  or `TEXT` if they are all `NULL` or mix numbers and text: unlike SQLite,
+  here a column has one type, so in that mix the numbers are kept as text). An
+  expression without `AS` names its column as in any `SELECT` (`id + 1`,
+  `COUNT(*)`; SQLite writes `id+1` as it was typed), and a repeated name gets
+  `_2`.
+- **Column names with spaces or signs**, as in SQLite: from 1 to 64
+  characters, no control characters; they are written between double quotes
+  (`"id + 1"`). Table, index and trigger names keep the old rule, because they
+  are part of file names. The automatic index of a key on such a column is
+  named with a hash.
+- **Import and export**: MySQL's `INSERT IGNORE` and `ON DUPLICATE KEY UPDATE`
+  (with `VALUES(col)`) are translated; defaults with the current date or time
+  from any engine (`now()`, `CURRENT_TIMESTAMP(6)`, `GETDATE()`, `curdate()`,
+  Access's `Now()`…) are kept instead of dropped; and the export writes
+  computed defaults in each dialect (`CURRENT_TIMESTAMP(3)` for a MySQL
+  `DATETIME(3)`, translated expressions in parentheses, a note line for Access).
+
+### Panel
+
+- **Exporting no longer has a row limit and does not need the database to fit
+  in memory.** The panel measures what a sample of 200 rows takes and how many
+  fit in the free memory (`memory_limit` minus what is in use): if the table or
+  the result fits, it is asked for at once, as before; if not, in batches of
+  that size, with only one batch in memory. This covers the SQL dump in its
+  five dialects, CSV and `INSERT` of a table or of a query, and scheduled
+  backups; the types a dump works out from the data (lengths, digits, the range
+  of integers for Access) come from a first pass that keeps no rows. Checked
+  with the panel and the API at `memory_limit = 32M` and a database of 120,000
+  rows. `ADMIN_EXPORT_MAX` is gone (it was there only for memory): a
+  `config.php` that still defines it keeps working. Two limits: a query with
+  `ORDER BY` needs the engine to sort the whole result in its own memory (with
+  the direct connection, the same memory as the panel); if it does not fit, the
+  panel says so before the download starts or in the last line of the file, so
+  it is never taken as complete. And through the API each batch is a request of
+  its own: for a consistent copy of a database being written to, use the ZIP.
+- **Importing files larger than PHP's upload limit.** The browser cuts the file
+  into pieces smaller than `upload_max_filesize` and `post_max_size` and sends
+  them one after another with a progress bar; if the connection drops, choosing
+  the same file again resumes from what had arrived. Or the file is left by FTP
+  in `jsonsqldbadmin/datos/importar/` and chosen from a list, without going
+  through the browser. For SQL, CSV, Excel and the ZIP restore. A file uploaded
+  in pieces is deleted when the import ends, well or not; one left half way is
+  deleted after two days. Importing already read the file statement by
+  statement: a single statement still has to fit in memory (mysqldump writes
+  them of 1 MB at most).
+- **Excel (.xlsx) into a table**: the first sheet, with the column names in the
+  first row. A reader of its own on `ZipArchive` and `XMLReader`, with no
+  external library, that reads row by row and keeps the shared strings in a
+  temporary file; cells with a date format arrive as dates. The button is
+  disabled when the PHP `zip` or `xml` extension is missing.
+- **Scheduled backups**: a page to choose the database, how often (every N
+  hours, every day or every week at an hour), the format (ZIP or SQL dump) and
+  how many to keep; older ones are deleted. They are kept in
+  `jsonsqldbadmin/datos/copias/`, written to a temporary file and renamed when
+  finished; a temporary file left by a backup that died is deleted by the next
+  one. `herramientas/copias-cron.php` makes the ones that are due, from
+  cron or the Windows Task Scheduler; without cron, when someone opens the
+  panel and one is due, the browser asks for it separately without waiting for
+  the answer. A lock stops two from running at once.
+- Long imports and exports are no longer cut by `max_execution_time`.
+
+### Faster
+
+- **`UPDATE` and `DELETE` with a `WHERE` no index can answer** go through the
+  table part by part instead of loading it whole: only the rows that match stay
+  in memory. On 60,000 rows: `UPDATE … WHERE edad = 30` 266 → 175 ms and
+  42.8 → 11.1 MB; `DELETE … WHERE edad = 30` 51.6 → 32.3 MB in the same time.
+  With triggers, a foreign key to itself or a unique key without an index, it
+  works as before.
+- **`DELETE` by blocks.** Deleting a row moves every row behind it one place
+  (rows are stored by position, and the format stays as it is), so those parts
+  and index chunks are rewritten. They used to be decoded, split again and
+  encoded again, and their index keys worked out again row by row. Now each row
+  is copied as its line of text to its new part (the offsets of each part say
+  where it starts), only a row that also changed is encoded, and the index keys
+  of the rows that move come from the old index chunks. The files left are byte
+  for byte the same as before. On 60,000 rows, in a new process: deleting one
+  row at the start 242 → 163 ms and 54 → 33 MB, in the middle 153 → 115 ms and
+  30 → 19 MB, three rows spread over the table 305 → 209 ms, by a text without
+  index 309 → 194 ms. It applies when the `DELETE` does not load the table (it
+  finds its rows through an index or by their text); a part written before 2.7
+  or edited by hand, or an index chunk that does not check out, is rewritten
+  as before.
+- **`ALTER TABLE … ADD COLUMN`, `DROP COLUMN` and `RENAME COLUMN` by blocks.**
+  They decoded the whole table, changed every row, encoded it again and rebuilt
+  every index. Now each row is changed as its line of text (the new column
+  added at the end, the dropped one taken out, the renamed one moved to the end
+  with its new name, as PHP did with the array), and the indexes that still
+  hold are left as they are, since no row moves. The data files are byte for
+  byte the same as before. On 60,000 rows, in a new process: `ADD COLUMN`
+  420 → 98 ms and 65 → 10 MB, `DROP COLUMN` 418 → 116 ms, `RENAME COLUMN`
+  413 → 123 ms. Dropping a column of the primary key, or a part that does not
+  have the expected form, goes as before.
+- **`WHERE col = 'text'` on a column without an index** (or `IN` with texts)
+  no longer decodes the parts of the table whose file does not contain that
+  text: a row can only match if the text is there, as it is, between quotes. It
+  is looked for with `strpos()` in the file just read, which costs very little
+  next to `json_decode()`. It is only used with texts that are not numbers and
+  that any JSON writes the same way (letters, digits, spaces and common signs;
+  no quotes, slashes, `<`, `>`, `&` or `'`); with any other value the table is
+  read as before. The same disk reads, much less work: on 60,000 rows,
+  `WHERE nota = 'nota 45000'` 104 → 14 ms, an `IN` of two texts 145 → 24 ms. A
+  value present in every part costs the same as before.
+- **`UPDATE` and `DELETE` with that kind of `WHERE`** no longer load the whole
+  table when there is no index to use: they take only the rows of the parts
+  that contain the text, as they already did with an index. `UPDATE … WHERE
+  nota = 'nota 45000'`: 161 ms and 44.8 MB → 19 ms and 4.2 MB.
+- **`COUNT(*)` with equalities an index covers** (`WHERE status = 'open'`, or
+  an `IN` of texts) counts the index positions instead of reading every row
+  that matches: 60,000 rows, a quarter of them matching, 122 → 11 ms. Only with
+  texts that are not numbers (with numbers the index puts together values the
+  `WHERE` can tell apart, such as `true` and `'1.0'`) and only when the index
+  covers exactly those columns and the `WHERE` has nothing else; otherwise it
+  is counted as before.
+- **Foreign key cascades through an index on the child's columns.** When the
+  child table has an index on the foreign key (`CREATE INDEX … ON
+  pedidos (cliente_id)`; as in SQLite, it is not created on its own), its rows
+  are found through it and the child table is not loaded: changing the key of
+  one customer with `ON UPDATE CASCADE`, 56 ms and 16 MB → 24 ms and 4.4 MB.
+  Deleting gains less (124 → 114 ms), because removing rows moves the ones
+  behind them and that part of the table is rewritten anyway. Without that
+  index, or with triggers on the child table, it works as before.
+
+- **Less work per row** in what every query does, measured with the table
+  parts already read (what is left once reading and decoding are paid):
+  - `WHERE column OP literal` is compiled into one function that reads the
+    column and compares with the literal directly (two numbers, or a text that
+    is not a number against a text), and `AND` checks the 0/1 of a comparison
+    without another call: `edad >= 10 AND edad <= 20` 57 → 46 ms,
+    `ciudad <> 'Oslo' AND edad < 30` 64 → 50 ms on 60,000 rows.
+  - `IN` with a list of literals is compiled too: 78 → 67 ms; with another
+    condition, 119 → 93 ms.
+  - `GROUP BY` no longer builds the evaluator's context for each row when
+    everything is compiled, and updates each group through a reference:
+    `GROUP BY edad` with `COUNT`, `AVG` and `MAX` 91 → 76 ms.
+  - `ORDER BY` of one column with `LIMIT` compares each row with the worst one
+    kept without the general comparator, and keeps the collation key of that
+    one while it does not change: `ORDER BY email LIMIT 50` 127 → 69 ms,
+    `ORDER BY saldo LIMIT 20` 54 → 39 ms.
+
+### Fixed
+
+- Exporting a view that used `DATETIME()`, `DATE()` or `TIME()` without
+  arguments (the current date) failed with a PHP error.
+- **Changing `JSONSQLDB_FILAS_POR_PARTE` with data already written could leave a
+  table inconsistent.** The first write after the change rewrote the table with
+  parts of the new size, but when that write went through the shared-lock path
+  (the one that merges with other writers at commit time) the revision file
+  kept the old size. From then on positions did not match the parts: a
+  `DELETE` by primary key answered «0 rows deleted» with the row still there.
+  Checked on 2.7.4. A write that changes the part size now always takes the
+  exclusive path. **If you changed that setting on a database with data**, run
+  `SELECT COUNT(*)` and a search by key on its tables; if anything looks wrong,
+  export and import it again.
+- **`DATEADD(week, n, …)` in views imported from SQL Server added n days**
+  instead of n weeks (since 2.7.3). PostgreSQL views with `'2 weeks'::interval`
+  were skipped; they are imported now.
+- An index lookup on an empty table read index chunks that do not exist
+  (`range(1, 0)` is `[1, 0]` in PHP): extra work, no wrong result.
+- The memory of index chunks already checked now tells apart a table dropped
+  and created again with the same name.
+- Code left without use in 2.7.4 is removed (`Writer::ponerFilas()`,
+  `Writer::marcarTodo()`), and an unused property of the import translator.
+
+### Measured and left out
+
+- Returning the row itself as the result of a `SELECT *` (no column-by-column
+  copy): 8 % faster but 10 MB more on 60,000 rows.
+
+### Checked and not changed
+
+An external report on 2.7.4 proposed a hash join for `JOIN`s without an index
+and aggregating `GROUP BY` while reading: both are already done that way (a
+`JOIN` of 30,000 × 20,000 rows takes 100 ms, a `GROUP BY` of 60,000 rows uses
+4 MB). Its proposal to `fsync` less is real but trades durability, and is left
+for a decision of its own.
+
+### Tests
+
+- **`tests/f20_memoria.php` (new)**: with the panel and the API at
+  `memory_limit = 32M`, a database of 120,000 rows is exported whole (SQL,
+  MySQL, CSV, a query with its order, ZIP), uploaded in pieces (a repeated
+  piece is not written twice) and imported, imported from the import folder,
+  and backed up by the panel, by «back up now» keeping only the ones asked for
+  (the oldest by file date, whatever their names say), and by the cron script.
+  A filtered table goes in batches with `LIMIT`, not by running the whole query
+  again for each batch. It runs again with `--directa`. With batches turned off
+  on purpose, the exports fail.
+- `f5_esquema`: `CREATE TABLE … AS SELECT` (types, no keys, no rows,
+  `IF NOT EXISTS`, names of expressions, the index file name of such a column);
+  `ADD`, `DROP` and `RENAME COLUMN` on columns whose names have quotes,
+  backslashes, accents and emojis (they go by blocks of text, and the key has to
+  be written as `json_encode()` writes it).
+- `f5_admin`: an Excel file with shared and inline strings, dates with and
+  without time, booleans and empty cells; one left in the import folder with
+  `#` in its name; and a file that is not an Excel.
+- `f3_escrituras`: 37 statements of `ON CONFLICT`, `OR IGNORE`, `OR REPLACE`,
+  `REPLACE INTO` and `RETURNING` with the results SQLite 3.45 gives (composite
+  keys named in another order, `NULL` in a unique key, the same key twice in
+  one statement, triggers, `INSERT OR IGNORE … SELECT`, `REPLACE` with a
+  cascade, errors), and the computed defaults. The results come from SQLite
+  through Python: PHP's SQLite3 extension runs a statement with `RETURNING`
+  again when its rows are read.
+- `f3_escrituras`: `DELETE`s at the start, in the middle, at the end and spread
+  over a table of several parts, with odd values and a unique and a plain
+  index: each part byte for byte as the full write would leave it, the indexes
+  giving the same rows as reading, and a check that they really went by blocks.
+- `f3_escrituras`: `ADD`, `DROP` and `RENAME COLUMN` on a table of several parts
+  with quotes, `"s":1` inside a text, backslashes, line breaks and emojis: the
+  same data as row by row, the unique index still finding rows, and a check
+  that the three went by blocks.
+- `f14_volcados`: a table with computed defaults, loaded into the real MySQL,
+  MariaDB and PostgreSQL servers.
+- **`tests/f19_escrituras_contra_sqlite.php` (new)**: on tables cut into parts of
+  12 rows, each round makes a random write (`UPDATE` and `DELETE` by a text
+  without index, by `IN`, by key, key changes and deletes in cascade) and then a
+  dozen queries (text equalities, `IN`, `COUNT(*)` through an index, `ORDER BY`
+  with `LIMIT` of one and two columns, `GROUP BY`, `AND` of comparisons,
+  `JOIN`), all compared with SQLite; even seeds add indexes on the foreign key
+  and the text. It covers what changed in 2.7.4 and 2.7.5. Six seeds by default
+  (`--semillas=N` for more); 70 seeds passed before release, and a fault put in
+  on purpose in the text skipping makes it fail.
+- `f8_indices`: `WHERE col = 'text'` on a column without an index against the
+  same condition written so it cannot skip anything (absent values, `IN`, a
+  text that looks like a number, special characters); `UPDATE` and `DELETE`
+  with that `WHERE` on a copy of a table of several parts; `COUNT(*)` through an
+  index against counting by reading.
+- `f5_esquema`: the cascades test against SQLite runs again with indexes on the
+  foreign keys, and with single-parent deletes and key changes.
+- `f9_journal`: with the part size changed, an `UPDATE` and a `DELETE` by a text
+  without index touch the right rows.
+- `f14_volcados`: weeks in imported views from SQL Server, MySQL, PostgreSQL and
+  Access.
+
+### Documentation
+
+- `docs/02-queries.md`: `CREATE TABLE … AS SELECT` and column names.
+  `docs/03-writes.md`: `UPDATE` and `DELETE` without an index. `docs/05-admin.md`:
+  exporting and importing without size limits, Excel, scheduled backups, the
+  folders of `datos/` and the write permissions they need.
+- The changelog no longer names the tools used for the external reviews: they
+  are referred to as reviews made with artificial intelligence.
+
 ## [2.7.4] - 2026-10-02
 
-Speed and memory, from an external review of 2.7.3 that measured where the
-engine chose the wrong path or held more than it needed. Every change was
+Speed and memory, from an external review of 2.7.3 made with artificial
+intelligence, which measured where the engine chose the wrong path or held more
+than it needed. Every change was
 measured against 2.7.3 with the same data (60,000 rows, warm and cold
 processes) and kept only if it was better; two that were not are listed at the
 end. None of them adds disk work: most read or write less. Nothing changes in
@@ -100,8 +384,8 @@ responses are byte for byte the same). Figures below are 2.7.3 → 2.7.4.
 
 ## [2.7.3] - 2026-10-01
 
-Security fixes found by four external reviews of 2.7.2 (Arena, ChatGPT, Grok and
-Gemini), each one checked in the code before fixing it, and each with a test
+Security fixes found by four external reviews of 2.7.2 made with artificial
+intelligence, each one checked in the code before fixing it, and each with a test
 that fails without the fix. **Update recommended; if you ran `configurar.php`
 with an earlier version, change the key of the «Clientes de ejemplo» account**
 (see the first item and SECURITY.md).
@@ -267,7 +551,7 @@ first; this is what was real and what was done.
   `JSONSQLDB_HMAC_SECRET`, `JSONSQLDB_URL`), `configurar.php` prints the values
   instead of writing them into the files, and `api/.htaccess`,
   `api/web.config` and `nginx/jsonsqldb.conf` refuse to serve
-  `cliente_ejemplo.*`. Found by Arena.
+  `cliente_ejemplo.*`.
 - **The API could be locked for everyone without a key.** 30 requests with an
   invented API key, from anywhere, tripped a global switch that closed the API
   to every client for up to 24 hours. The global switch is gone: authentication
@@ -275,41 +559,41 @@ first; this is what was real and what was done.
   default), checked before anything else. `RATE_LIMIT_GLOBAL_MAX` is no longer
   read. Going over the request limit no longer counts as an authentication
   failure (a well-signed request over its quota would otherwise get the IP
-  blocked for the whole window). Found by Arena.
+  blocked for the whole window).
 - **Rejected requests could fill the disk.** The request log stored the `db`
   field of a rejected request whole (up to 200 KB) and had no limit per day. The
   field is now cut to 64 characters and the error to 1,000, and once a day has
   20 full log files, requests rejected before their key is known are no longer
-  logged. Found by Arena.
+  logged.
 - **A CSV could carry spreadsheet formulas.** A text cell starting with `=`,
   `+`, `-` or `@`, written by any application with write access, was exported
   as is, and Excel runs it as a formula when the file is opened. Such cells now
   get an apostrophe in front, which Excel does not show; numbers are not
-  touched. Found by Arena.
+  touched.
 - **The nginx rule for hidden files missed those at the root** of the
   installation (`/jsonsqldb/.env`, `/jsonsqldb/.git/config`): it needed a folder
-  before the dot. Found by Arena; the test checks the rule's expression against
+  before the dot; the test checks the rule's expression against
   those URLs.
 - **Behind a TLS proxy, the panel's session cookie went out without `Secure`**:
   it looked only at `$_SERVER['HTTPS']`, while the HTTPS check already trusted
-  the proxy's header. It now uses the same check. Found by Arena.
+  the proxy's header. It now uses the same check.
 - **Failed sign-in attempts to the panel could be lost** when they arrived at
   the same time: the counter was read, increased and saved without a lock, so
   two attempts could count as one. It now goes under an exclusive lock
   (`Store::actualizar()`), as the API's state already did; eight processes
-  adding 25 failures each now count exactly 200. Found by ChatGPT.
+  adding 25 failures each now count exactly 200.
 - **Signing out was a link (GET)**: any page could sign a user out with an
-  image. It is now a POST with the CSRF token. Found by ChatGPT.
+  image. It is now a POST with the CSRF token.
 - **`SECURITY.md` said the supported version was 1.x**; it is the latest 2.x,
-  and it now lists the two advisories above. Found by Arena.
+  and it now lists the two advisories above.
 - The API's `salirConError()` declared the `never` return type, which only
   PHP 8.1 understands: on 8.0 it worked by accident, read as a class name. It is
-  `void` now. Found by ChatGPT.
+  `void` now.
 - The zip handed out for 2.7.2 carried a request log from the author's own test
   runs (test databases, no user data): it never reached the repository, which
   ignores `logs/`. CI now fails if a file under `data/`, `logs/` or
   `jsonsqldbadmin/datos/` other than their protection files is ever tracked.
-  Found by ChatGPT.
+ 
 
 ### Added
 
@@ -419,7 +703,7 @@ first; this is what was real and what was done.
   shape.
 - **A per-API-key request limit** (`RATE_LIMIT_POR_CLAVE`, off by default):
   requests of one key from any IP, so that a leaked key or a runaway
-  application cannot use up everything. Suggested by Grok.
+  application cannot use up everything. Suggested by one of the reviews.
 - **SQL Server scripts saved as «Unicode»** — UTF-16, what Management Studio
   proposes — are converted to UTF-8 on import, in pieces of 1 MB without
   splitting a character, and a UTF-8 byte-order mark is skipped.
@@ -429,10 +713,10 @@ first; this is what was real and what was done.
 
 ### Not changed, on purpose
 
-- Folders are still created as `0775` (ChatGPT suggested `0750`): on shared
+- Folders are still created as `0775` (one review suggested `0750`): on shared
   hosting PHP and the FTP user often need the group to write. SECURITY.md now
   says how to tighten them where PHP runs as its own user.
-- Gemini's report listed missing CSRF protection, path traversal, non-atomic
+- One report listed missing CSRF protection, path traversal, non-atomic
   writes, no rate limiting and plain-text passwords; all of them were already in
   place and tested, and nothing was changed for it.
 
@@ -1831,7 +2115,8 @@ and point lookups are several times faster. Nothing breaking.
   from serialising large tables.
 
 - The credit for the four performance findings in this release goes to an
-  external review by arena.ai, which measured them on the 2.0.0 release. Each was
+  external review made with artificial intelligence, which measured them on the
+  2.0.0 release. Each was
   verified independently here before being applied.
 
 ## [2.0.0] - 2026-08-27

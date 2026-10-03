@@ -138,7 +138,7 @@ $zipDisponible = mismoHostQueLaApi() !== false;
 <?php foreach ($bases as $b): ?>
 <div class="modal fade" id="imp<?= h(md5($b)) ?>" tabindex="-1">
   <div class="modal-dialog"><div class="modal-content">
-    <form method="post" enctype="multipart/form-data">
+    <form method="post" enctype="multipart/form-data"<?= atributosSubida() ?>>
       <?= csrf() ?>
       <input type="hidden" name="accion" value="importar_zip">
       <input type="hidden" name="nombre" value="<?= h($b) ?>">
@@ -151,8 +151,7 @@ $zipDisponible = mismoHostQueLaApi() !== false;
         </div>
         <div class="mb-2">
           <label class="form-label" for="zip<?= h(md5($b)) ?>"><?= h(t('Fichero ZIP')) ?></label>
-          <input class="form-control form-control-sm" type="file" name="zip" accept=".zip"
-                 id="zip<?= h(md5($b)) ?>" required>
+          <div class="d-flex gap-2 flex-wrap"><?= campoImportacion('zip', '.zip', 'zip' . md5($b)) ?></div>
         </div>
         <div class="form-text">
           <?= t('Tiene que ser una copia generada por este panel. Solo se restauran los ficheros <code>.json</code>; cualquier otra cosa que venga dentro se ignora, y si el ZIP trae rutas que salgan de la carpeta de destino se rechaza entero sin tocar nada.') ?>

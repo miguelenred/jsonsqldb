@@ -78,6 +78,10 @@ foreach ([
     'ALTER TABLE ca ADD CONSTRAINT fk_ca_cb FOREIGN KEY (cb) REFERENCES cb (id)',
     'CREATE INDEX ix_fecha ON pedidos (fecha)',
     'CREATE INDEX ix_fecha ON clientes (alta)',
+    // 2.8: valores por defecto que se calculan al insertar; cada motor tiene que aceptarlos
+    'CREATE TABLE marcas (id INTEGER PRIMARY KEY, creado DATETIME DEFAULT CURRENT_TIMESTAMP, dia DATE DEFAULT CURRENT_DATE,
+        codigo TEXT DEFAULT (upper(\'ab\') || \'-1\'))',
+    'INSERT INTO marcas (id) VALUES (1), (2)',
     'CREATE INDEX ix_nombre_saldo ON clientes (nombre, saldo)',
 ] as $q) {
     $bd->consultar($q);
@@ -513,6 +517,31 @@ chk('ALTER … OWNER TO de pg_dump (sin --no-owner) y demás ALTER que no son de
     Importar::sql($f, 'owner');
     $bd = new Database('owner');
     return count($bd->consultar('SELECT * FROM v')) === 2 ?: 'no';
+});
+chk('semanas en las vistas: DATEADD(week, …) de SQL Server, interval week de MySQL, \'2 weeks\' de PostgreSQL y DateAdd(\'ww\') de Access (2.7.5)', function () {
+    // DATEADD(week, 2, d) de SQL Server sumaba 2 días, no 14, y PostgreSQL no
+    // aceptaba '2 weeks'. Las cuatro, desde el 1 de marzo de 2026
+    $volcados = [
+        'ss'  => "CREATE TABLE [dbo].[t] ([id] int NOT NULL PRIMARY KEY, [d] datetime NULL)\nGO\nINSERT [dbo].[t] ([id], [d]) VALUES (1, CAST(N'2026-03-01T00:00:00.000' AS DateTime))\nGO\n"
+               . "CREATE VIEW [dbo].[v] AS SELECT DATEADD(week, 2, d) AS mas, DATEADD(wk, -1, d) AS menos, DATEADD(week, id, d) AS calc FROM dbo.t\nGO\n",
+        'my'  => "-- MySQL dump 10.13\nCREATE TABLE `t` (`id` int NOT NULL, `d` datetime DEFAULT NULL, PRIMARY KEY (`id`));\nINSERT INTO `t` VALUES (1,'2026-03-01 00:00:00');\n"
+               . "/*!50001 CREATE ALGORITHM=UNDEFINED */\n/*!50001 VIEW `v` AS select (`t`.`d` + interval 2 week) AS `mas`,(`t`.`d` - interval 1 week) AS `menos`,(`t`.`d` + interval `t`.`id` week) AS `calc` from `t` */;\n",
+        'pg'  => "-- PostgreSQL database dump\nCREATE TABLE public.t (id integer NOT NULL, d timestamp without time zone);\nCOPY public.t (id, d) FROM stdin;\n1\t2026-03-01 00:00:00\n\\.\n"
+               . "CREATE VIEW public.v AS\n SELECT (t.d + '2 weeks'::interval) AS mas,\n    (t.d - '1 week'::interval) AS menos,\n    (t.d + '7 days'::interval) AS calc\n   FROM public.t;\n",
+        'acc' => "-- jsonsqldb-dialecto: access\nCREATE TABLE [t] ([id] LONG CONSTRAINT [PK_t] PRIMARY KEY, [d] DATETIME);\nINSERT INTO [t] ([id], [d]) VALUES (1, #2026-03-01 00:00:00#);\n"
+               . "CREATE VIEW [v] AS SELECT DateAdd('ww', 2, [d]) AS mas, DateAdd('ww', -1, [d]) AS menos, DateAdd('ww', [id], [d]) AS calc FROM t;\n",
+    ];
+    $esperado = [['mas' => '2026-03-15 00:00:00', 'menos' => '2026-02-22 00:00:00', 'calc' => '2026-03-08 00:00:00']];
+    $mal = [];
+    foreach ($volcados as $n => $sql) {
+        $f = JSONSQLDB_DATA_PATH . "/semanas_$n.sql";
+        file_put_contents($f, $sql);
+        Database::crear("semanas_$n");
+        Importar::sql($f, "semanas_$n");
+        $r = (new Database("semanas_$n"))->consultar('SELECT mas, menos, calc FROM v');
+        if ($r !== $esperado) { $mal[] = "$n: " . json_encode($r); }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
 });
 chk('con la carpeta de la base a mano, una importación que falla deja la base como estaba (todo o nada)', function () {
     Database::crear('todo');

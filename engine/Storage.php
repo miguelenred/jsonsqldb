@@ -40,6 +40,23 @@ final class Storage
     private const JSON_META = self::JSON_FILA | JSON_PRETTY_PRINT;
 
     /**
+     * Una clave de fila tal como la escribe el motor, con los dos puntos:
+     * "nombre":. Con comillas, barras invertidas o caracteres de control en
+     * el nombre, escapados como json_encode() (2.8: los nombres de columna
+     * pueden llevarlos).
+     */
+    public static function claveJson(string $columna): string
+    {
+        return json_encode($columna, self::JSON_FILA) . ':';
+    }
+
+    /** Un valor de fila tal como lo escribe el motor. */
+    public static function valorJson($valor): string
+    {
+        return (string)json_encode($valor, self::JSON_FILA);
+    }
+
+    /**
      * Hasta cuántas filas de una misma parte se leen línea a línea en vez de
      * decodificar la parte: una línea cuesta unas 30 µs y una parte de mil
      * filas unos 400.
@@ -107,6 +124,8 @@ final class Storage
     private array   $pendientePartes = [];
     /** @var array{0: int, 1: int} escrituras por partes confirmadas y repetidas con la tabla entera, en este proceso */
     private static array $cuentaPartes = [0, 0];
+    /** Borrados recolocados por bloques de texto en este proceso (ver recolocarPorBloques()) */
+    private static int $cuentaBloques = 0;
     private bool    $txPropia    = false;   // la abrió guardarTabla() y la confirma ella
     private string  $txOperacion = '';
     private array   $txRenombrar = [];
@@ -470,6 +489,12 @@ final class Storage
     public static function cuentaPartes(): array
     {
         return self::$cuentaPartes;
+    }
+
+    /** Borrados recolocados por bloques de texto en este proceso (para las pruebas). */
+    public static function cuentaBloques(): int
+    {
+        return self::$cuentaBloques;
     }
 
     /** Anota una escritura por partes que tuvo que repetirse con la tabla entera. */
@@ -1202,7 +1227,12 @@ final class Storage
      *
      * @return \Generator<int, array>
      */
-    public function filas(string $tabla, bool $sinCache = false): \Generator
+    /**
+     * @param list<list<string>> $agujas textos que tiene que contener una parte
+     *        para poder tener alguna fila que interese: de cada lista, al menos
+     *        uno. Una parte que no los tiene no se decodifica (ver parte())
+     */
+    public function filas(string $tabla, bool $sinCache = false, array $agujas = []): \Generator
     {
         self::validarTabla($tabla);
         $this->bloquearLectura($tabla);
@@ -1211,7 +1241,7 @@ final class Storage
             if (!is_file($fichero)) {
                 return;
             }
-            foreach ($sinCache ? $this->decodificarParte($fichero) : $this->parte($tabla, $parte, $fichero) as $fila) {
+            foreach ($sinCache ? $this->decodificarParte($fichero) : $this->parte($tabla, $parte, $fichero, $agujas) as $fila) {
                 Memoria::comprobar('la lectura de la tabla');
                 yield $fila;
             }
@@ -1297,10 +1327,10 @@ final class Storage
      *
      * @return list<array>
      */
-    private function decodificarParte(string $fichero): array
+    private function decodificarParte(string $fichero, ?string $texto = null): array
     {
         Memoria::comprobarFichero($fichero);
-        $json = json_decode((string)file_get_contents($fichero), true);
+        $json = json_decode($texto ?? (string)file_get_contents($fichero), true);
         if (!is_array($json) || !is_array($json['rows'] ?? null)) {
             throw JsonSqlDbError::io('Datos ilegibles en ' . basename($fichero));
         }
@@ -1314,14 +1344,39 @@ final class Storage
      *
      * @return list<array>
      */
-    private function parte(string $tabla, int $parte, string $fichero): array
+    private function parte(string $tabla, int $parte, string $fichero, array $agujas = []): array
     {
         $clave = $this->claveParte($tabla, $parte);
         $filas = $this->cacheLeer($clave);
         if (is_array($filas)) {
             return $filas;
         }
-        $filas = $this->decodificarParte($fichero);
+        // Un WHERE col = 'texto' solo puede casar con filas que llevan ese
+        // texto, tal cual, en el fichero: si la parte no lo tiene, ninguna de
+        // sus filas sirve y no hace falta decodificarla. Buscar en el texto
+        // (strpos) cuesta muy poco frente a json_decode(), que se lleva la
+        // mayor parte del tiempo de recorrer una tabla. Se lee lo mismo del
+        // disco: lo que se ahorra es CPU y memoria. Sin decodificar no se
+        // guarda en la caché
+        $texto = null;
+        if ($agujas !== []) {
+            Memoria::comprobarFichero($fichero);
+            $texto = (string)file_get_contents($fichero);
+            foreach ($agujas as $alguna) {
+                $esta = false;
+                foreach ($alguna as $aguja) {
+                    if (strpos($texto, $aguja) !== false) {
+                        $esta = true;
+                        break;
+                    }
+                }
+                if (!$esta) {
+                    return [];
+                }
+            }
+        }
+        $filas = $this->decodificarParte($fichero, $texto);
+        unset($texto);
         $this->cacheGuardar($clave, $filas);
         return $filas;
     }
@@ -1518,7 +1573,19 @@ final class Storage
             }
         }
         $cola = null;
-        if ($borradas !== []) {
+        $colaClaves = null;
+        $bloques = $borradas !== []
+            ? $this->recolocarPorBloques($tabla, $primera, $partesAntes, $filasAntes, $desde, $fuera, $cambios, $definiciones)
+            : null;
+        if ($bloques !== null) {
+            // Por bloques de texto: las filas que se mueven no se decodifican ni
+            // se vuelven a codificar, y los índices salen de los suyos de antes
+            [$textos, $colaClaves] = $bloques;
+            $partes = array_intersect_key($partes, array_flip(range(0, max(0, $primera - 1))));
+            foreach ($textos as $i => $texto) {
+                $partes[$primera + $i] = $texto;
+            }
+        } elseif ($borradas !== []) {
             // Desde la primera borrada, todo se recoloca: se leen esas partes
             // y se vuelven a repartir sin las borradas
             $cola     = [];
@@ -1540,7 +1607,212 @@ final class Storage
             }
         }
         $this->escribirTabla($tabla, $meta, $definiciones, $todas, $partes,
-            $filasAntes - count($borradas), $desde, $cola, $sueltas, $partesAntes);
+            $filasAntes - count($borradas), $desde, $cola, $sueltas, $partesAntes, $colaClaves);
+    }
+
+    /**
+     * Un DELETE en medio de la tabla mueve todas las filas de detrás un
+     * puesto, así que hay que reescribir esas partes y esos trozos de índice.
+     * Antes se decodificaban las partes, se repartían las filas y se volvían a
+     * codificar, y los índices se calculaban otra vez fila a fila: casi todo el
+     * tiempo de borrar una fila al principio de una tabla grande. Aquí se hace
+     * por bloques de texto: cada fila es una línea de su parte (los desfases
+     * dicen dónde empieza), y las líneas se copian tal cual a su parte nueva;
+     * solo se codifica una fila que además ha cambiado. Las claves de índice
+     * de las filas que se mueven salen de los trozos de índice de antes, que
+     * ya las tienen, en vez de calcularse de las filas. El resultado es, byte
+     * a byte, lo que escribiría el camino de siempre (lo comprueba
+     * tests/f3_escrituras.php).
+     *
+     * Null si algo no tiene la forma esperada —una parte de antes de la 2.7 o
+     * editada a mano, un trozo de índice que no vale— y entonces se hace como
+     * siempre.
+     *
+     * @param array<int,true>  $fuera   posiciones borradas
+     * @param array<int,array> $cambios posición => fila nueva
+     * @return array{0: list<string>, 1: array<string,list<?string>>}|null
+     *         el texto de cada parte desde $primera, y por índice la clave de
+     *         cada posición nueva desde $desde (null: sin clave)
+     */
+    private function recolocarPorBloques(string $tabla, int $primera, int $partesAntes, int $filasAntes, int $desde,
+                                         array $fuera, array $cambios, array $definiciones): ?array
+    {
+        $chunk = $this->filasPorParte;
+        // Las líneas de las filas, de la primera parte afectada en adelante
+        $lineas = [];
+        for ($i = $primera; $i < $partesAntes; $i++) {
+            $suyas = $this->lineasDeParte($tabla, $i + 1, min($chunk, $filasAntes - $i * $chunk));
+            if ($suyas === null) {
+                return null;
+            }
+            foreach ($suyas as $j => $linea) {
+                $pos = $i * $chunk + $j;
+                if (isset($fuera[$pos])) {
+                    continue;
+                }
+                if (isset($cambios[$pos])) {
+                    $linea = json_encode($cambios[$pos], self::JSON_FILA);
+                    if ($linea === false) {
+                        return null;
+                    }
+                }
+                $lineas[] = $linea;
+            }
+            Memoria::comprobar('la lectura de la tabla');
+        }
+        // Por índice, la clave de cada fila que se mueve, de sus trozos de antes
+        $claves = [];
+        foreach ($this->indices ? $definiciones : [] as $def) {
+            $porPos = [];
+            for ($p = intdiv($desde, $chunk); $p < $partesAntes; $p++) {
+                $keys = $this->trozoIndice($tabla, $def, $p + 1);
+                if ($keys === null) {
+                    return null;
+                }
+                foreach ($keys as $clave => $v) {
+                    foreach (is_int($v) ? [$v] : (array)$v as $pos) {
+                        if ($pos >= $desde) {
+                            $porPos[(int)$pos] = (string)$clave;
+                        }
+                    }
+                }
+            }
+            $lista = [];
+            for ($pos = $desde; $pos < $filasAntes; $pos++) {
+                if (isset($fuera[$pos])) {
+                    continue;
+                }
+                if (isset($cambios[$pos])) {
+                    $valores = [];
+                    foreach ($def['columns'] as $c) {
+                        $valores[] = $cambios[$pos][$c] ?? null;
+                    }
+                    $lista[] = Indexes::clave($valores);
+                } else {
+                    $lista[] = $porPos[$pos] ?? null;
+                }
+            }
+            $claves[$def['name']] = $lista;
+        }
+        $textos = [];
+        foreach (array_chunk($lineas, $chunk) ?: [[]] as $bloque) {
+            $textos[] = $this->textoDeParte($tabla, $bloque);
+        }
+        self::$cuentaBloques++;
+        return [$textos, $claves];
+    }
+
+    /**
+     * Reescribe todas las filas de una tabla línea a línea, por bloques de
+     * texto: $porLinea recibe el JSON de cada fila y devuelve el nuevo (o null
+     * si no sabe, y entonces no se escribe nada). Las posiciones no se mueven,
+     * así que los índices que siguen valiendo se quedan como están. Es lo que
+     * usan ALTER TABLE … ADD, DROP y RENAME COLUMN: antes decodificaban la
+     * tabla entera, cambiaban cada fila y la volvían a codificar, y rehacían
+     * todos los índices. False si alguna parte no tiene la forma esperada:
+     * quien llama lo hace entonces como siempre.
+     *
+     * @param callable(string):?string $porLinea
+     */
+    public function reescribirLineas(string $tabla, callable $porLinea, array $meta, array $definiciones): bool
+    {
+        // Antes de abrir la escritura: si no se puede, quien llama la abre
+        // para hacerlo como siempre, y una tabla solo se abre una vez
+        $estado      = $this->estado($tabla);
+        $filasAntes  = isset($estado['rows']) ? (int)$estado['rows'] : 0;
+        $partesAntes = $this->partes($tabla);
+        $chunk       = $this->filasPorParte;
+        if ($filasAntes === 0 || ($estado['chunk'] ?? null) !== $chunk || $partesAntes !== (int)ceil($filasAntes / $chunk)) {
+            return false;
+        }
+        $partes = [];
+        for ($i = 0; $i < $partesAntes; $i++) {
+            $lineas = $this->lineasDeParte($tabla, $i + 1, min($chunk, $filasAntes - $i * $chunk));
+            if ($lineas === null) {
+                return false;
+            }
+            foreach ($lineas as $k => $linea) {
+                $nueva = $porLinea($linea);
+                if ($nueva === null) {
+                    return false;
+                }
+                $lineas[$k] = $nueva;
+            }
+            $partes[$i] = $this->textoDeParte($tabla, $lineas);
+            Memoria::comprobar('la reescritura de la tabla');
+        }
+        // Si un índice no vale tal cual (uno nuevo, o sobre una columna que
+        // cambia de nombre), se rehace de las filas nuevas
+        $todas = static function () use ($partes): array {
+            $filas = [];
+            foreach ($partes as $texto) {
+                foreach (json_decode($texto, true)['rows'] as $fila) {
+                    $filas[] = $fila;
+                }
+            }
+            return $filas;
+        };
+        $this->abrirEscritura($tabla, 'ESCRITURA');
+        $this->escribirTabla($tabla, $meta, $definiciones, $todas, $partes, $filasAntes, $filasAntes, [], [], $partesAntes);
+        self::$cuentaBloques++;
+        return true;
+    }
+
+    /**
+     * Las filas de una parte como sus líneas de texto, sin decodificarlas.
+     * Null si la parte no tiene la forma que escribe escribirParte() con
+     * $filas filas (ver empalmarParte(), que hace la misma comprobación).
+     *
+     * @return list<string>|null
+     */
+    private function lineasDeParte(string $tabla, int $parte, int $filas): ?array
+    {
+        $fichero = $this->ficheroDatos($tabla, $parte);
+        $desf    = $this->desfasesDeParte($tabla, $parte, $fichero);
+        $texto   = $desf === null ? false : @file_get_contents($fichero);
+        if ($texto === false || strlen($desf) !== 4 * $filas
+            || !preg_match('/"offsets_at": (\d+)\n\}\n$/', substr($texto, -40), $m)) {
+            return null;
+        }
+        $cierre   = $filas === 0 ? "],\n" : "\n  ],\n";
+        $finFilas = (int)$m[1] - strlen($cierre);
+        $cabecera = "{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [";
+        if (strncmp($texto, $cabecera, strlen($cabecera)) !== 0 || substr($texto, $finFilas, strlen($cierre)) !== $cierre) {
+            return null;
+        }
+        $desfases = $filas === 0 ? [] : array_values(unpack('N*', $desf));
+        $out = [];
+        foreach ($desfases as $j => $ini) {
+            // Cada línea acaba donde empieza la separación de la siguiente
+            $fin   = isset($desfases[$j + 1]) ? $desfases[$j + 1] - 6 : $finFilas;
+            $linea = substr($texto, $ini, $fin - $ini);
+            if ($linea === '' || $linea[0] !== '{' || substr($linea, -1) !== '}') {
+                return null;
+            }
+            $out[] = $linea;
+        }
+        return $out;
+    }
+
+    /**
+     * El texto de una parte con estas líneas de filas, ya codificadas: el
+     * mismo formato, byte a byte, que escribe escribirParte().
+     *
+     * @param list<string> $lineas
+     */
+    private function textoDeParte(string $tabla, array $lineas): string
+    {
+        $texto    = "{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [";
+        $desfases = [];
+        $sep      = "\n    ";
+        foreach ($lineas as $linea) {
+            $desfases[] = strlen($texto) + strlen($sep);
+            $texto     .= $sep . $linea;
+            $sep        = ",\n    ";
+        }
+        $texto .= $lineas === [] ? "],\n" : "\n  ],\n";
+        $aqui   = strlen($texto);
+        return $texto . '  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n";
     }
 
     /**
@@ -1636,7 +1908,8 @@ final class Storage
      * @param callable():list<array> $todas   devuelve todas las filas tal como
      *                                        quedan; solo se llama si un índice
      *                                        hay que rehacerlo entero
-     * @param array<int,list<array>> $partes  partes a escribir, índice base 0 => filas
+     * @param array<int,list<array>|string> $partes  partes a escribir, índice base 0 => filas,
+     *                                        o su texto ya hecho (ver empalmarParte())
      * @param int                    $nFilas  cuántas filas queda teniendo la tabla
      * @param int|null               $desde   primera posición cuyo contenido cambió
      *                                        respecto al índice anterior; null si
@@ -1655,7 +1928,8 @@ final class Storage
         ?int $desde,
         ?array $cola,
         array $sueltas,
-        int $partesAntes
+        int $partesAntes,
+        ?array $colaClaves = null
     ): void {
         $definiciones = $this->indices ? $definiciones : [];
         $estado       = $this->estado($tabla);
@@ -1717,7 +1991,8 @@ final class Storage
         foreach ($definiciones as $def) {
             $vigentes[$def['name']] = true;
             [$revsIndices[$def['name']], $rangosIndices[$def['name']]] = $this->escribirIndice(
-                $tabla, $def, $rev, $total, $nFilas, $desde, $cola, $sueltas, $viejas, $todas, $filas);
+                $tabla, $def, $rev, $total, $nFilas, $desde, $cola, $sueltas, $viejas, $todas, $filas,
+                $colaClaves[$def['name']] ?? null);
         }
         foreach ($indicesAntes as $nombre => $ficheros) {
             if (!isset($vigentes[$nombre])) {
@@ -1741,8 +2016,14 @@ final class Storage
         unset($this->autoincPendiente[$tabla]);
         if ($this->modoPartes !== null) {
             // Por partes, la revisión se escribe al confirmar, ya con el
-            // exclusivo, juntando esto con lo que otros hayan hecho entretanto
-            if ($meta !== null) {
+            // exclusivo, juntando esto con lo que otros hayan hecho entretanto.
+            // Un cambio de estructura, o de tamaño de parte, no se puede juntar:
+            // va por el camino de siempre. Con el tamaño cambiado, la tabla se
+            // reescribía entera con partes del tamaño nuevo, pero al juntar se
+            // quedaba el tamaño de antes en el fichero de revisión, y las
+            // posiciones dejaban de cuadrar: un DELETE posterior no encontraba
+            // la fila (comprobado en la 2.7.4)
+            if ($meta !== null || ($estado['chunk'] ?? null) !== $this->filasPorParte) {
                 throw new ConflictoPartes();
             }
             $nuevo['indexes'] = $revsIndices;
@@ -1775,14 +2056,15 @@ final class Storage
     }
 
     /** Crea los ficheros de una tabla nueva. */
-    public function crearTabla(string $tabla, array $meta, array $definiciones = []): void
+    /** @param list<array<string,mixed>> $filas */
+    public function crearTabla(string $tabla, array $meta, array $definiciones = [], array $filas = []): void
     {
         self::validarTabla($tabla);
         $this->exigirEscritura();
         if ($this->existe($tabla)) {
             throw JsonSqlDbError::schema("La tabla '$tabla' ya existe");
         }
-        $this->guardarTabla($tabla, [], $meta, $definiciones);
+        $this->guardarTabla($tabla, $filas, $meta, $definiciones);
     }
 
     /** Borra estructura, datos, índices y caché de una tabla. */
@@ -2317,7 +2599,8 @@ final class Storage
         array $sueltas,
         array $viejas,
         callable $todas,
-        ?array &$filas
+        ?array &$filas,
+        ?array $colaClaves = null
     ): array {
         $nombre = $def['name'];
         $estado = $this->estado($tabla);
@@ -2399,7 +2682,15 @@ final class Storage
                     // Las filas nuevas de este trozo: la cola empieza en $desde
                     $primera = max($inicio, $desde);
                     $ultima  = min($fin, $nFilas);
-                    if ($primera < $ultima) {
+                    if ($primera < $ultima && $colaClaves !== null) {
+                        // Las claves ya vienen hechas (ver recolocarPorBloques())
+                        foreach (array_slice($colaClaves, $primera - $desde, $ultima - $primera) as $k => $clave) {
+                            if ($clave !== null) {
+                                Indexes::anotar($keys, $clave, $primera + $k);
+                            }
+                        }
+                        $cambio = true;
+                    } elseif ($primera < $ultima) {
                         $keys   = Indexes::ampliar($keys, array_slice($cola ?? [], $primera - $desde, $ultima - $primera), $def['columns'], $primera);
                         $cambio = true;
                     }
@@ -2430,7 +2721,8 @@ final class Storage
         // Un trozo ya visto sano en esta revisión lo sigue estando: se reescribe
         // de una pieza (escribirAtomico) y con otra revisión. Cada escritura
         // miraba todos los que no tocaba: 109 aperturas por INSERT a 60.000 filas
-        if (($this->trozosSanos[$tabla][$def['name']][$parte] ?? null) === $rev) {
+        $etiqueta = $this->etiqueta($tabla);            // la tabla de ahora, no una anterior con el mismo nombre
+        if (($this->trozosSanos[$etiqueta][$def['name']][$parte] ?? null) === $rev) {
             return true;
         }
         $fh = @fopen($this->ficheroIndice($tabla, $def['name'], $parte), 'rb');
@@ -2449,7 +2741,7 @@ final class Storage
         ], self::JSON_FILA), 1, -1);
         $sano = strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0 && $cola === "}}\n";
         if ($sano) {
-            $this->trozosSanos[$tabla][$def['name']][$parte] = $rev;
+            $this->trozosSanos[$etiqueta][$def['name']][$parte] = $rev;
         }
         return $sano;
     }
@@ -2801,7 +3093,9 @@ final class Storage
         $comoAguja = static fn($c) => json_encode($c, self::JSON_FILA) . ':';
         $todas = array_map($comoAguja, $claves);
         $hallado = [];
-        foreach (is_array($partes) ? $partes : array_fill_keys(range(1, $partes), null) as $p => $deEste) {
+        // range(1, 0) da [1, 0], no una lista vacía: sin trozos no se busca en ninguno
+        $lista = is_array($partes) ? $partes : ($partes > 0 ? array_fill_keys(range(1, $partes), null) : []);
+        foreach ($lista as $p => $deEste) {
             $agujas = $deEste === null ? $todas : array_map($comoAguja, $deEste);
             $texto = @file_get_contents($this->ficheroIndice($tabla, $def['name'], $p));
             if ($texto === false || substr($texto, -3) !== "}}\n") {
@@ -2870,6 +3164,9 @@ final class Storage
             return false;
         }
         $firma = $plan['partes'] . ':' . implode(',', array_slice($revs, 0, $plan['partes']));
+        // Por la etiqueta de la tabla: una borrada y creada otra vez con el
+        // mismo nombre vuelve a empezar en las mismas revisiones
+        $firma = $this->etiqueta($tabla) . ':' . $firma;
         if (($this->indicesSanos[$tabla][$def['name']] ?? null) === $firma) {
             return true;
         }
@@ -2931,6 +3228,57 @@ final class Storage
             }
         }
         return $coste * 2 > max(1, $this->partes($tabla));
+    }
+
+    /**
+     * Las filas de las partes que contienen los textos buscados (ver parte()),
+     * con su posición: lo que un UPDATE o un DELETE con WHERE col = 'texto'
+     * sobre una columna sin índice puede tocar, sin cargar la tabla entera.
+     * Null si no hay textos. Aunque estén en casi todas las partes se sigue:
+     * renunciar a medias obligaba a leerlas otra vez por el camino de siempre.
+     *
+     * @param list<list<string>> $agujas
+     * @return array<int,array>|null posición => fila
+     */
+    public function filasConTexto(string $tabla, array $agujas): ?array
+    {
+        if ($agujas === []) {
+            return null;
+        }
+        self::validarTabla($tabla);
+        $this->bloquearLectura($tabla);
+        $todas = $this->partes($tabla);
+        // El tamaño con que se escribieron las partes, no el configurado ahora:
+        // si se cambió, las posiciones van por el de entonces
+        $chunk = max(1, (int)($this->estado($tabla)['chunk'] ?? $this->filasPorParte));
+        $out   = [];
+        for ($parte = 1; $parte <= $todas; $parte++) {
+            foreach ($this->parte($tabla, $parte, $this->ficheroDatos($tabla, $parte), $agujas) as $i => $fila) {
+                $out[($parte - 1) * $chunk + $i] = $fila;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Todas las filas de la tabla con su posición, parte a parte: en memoria
+     * solo hay una parte a la vez (un UPDATE o DELETE que recorre la tabla
+     * guarda solo las filas que cumplen su WHERE).
+     *
+     * @return \Generator<int, array>
+     */
+    public function filasConPosicion(string $tabla): \Generator
+    {
+        self::validarTabla($tabla);
+        $this->bloquearLectura($tabla);
+        $todas = $this->partes($tabla);
+        $chunk = max(1, (int)($this->estado($tabla)['chunk'] ?? $this->filasPorParte));
+        for ($parte = 1; $parte <= $todas; $parte++) {
+            foreach ($this->parte($tabla, $parte, $this->ficheroDatos($tabla, $parte)) as $i => $fila) {
+                Memoria::comprobar('la lectura de la tabla');
+                yield ($parte - 1) * $chunk + $i => $fila;
+            }
+        }
     }
 
     /**

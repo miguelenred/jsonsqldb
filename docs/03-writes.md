@@ -32,8 +32,53 @@ INSERT INTO customers (name, balance, city) VALUES ('Sara', 10 * 3 + 0.5, DEFAUL
 INSERT INTO copy (name, city) SELECT name, city FROM customers WHERE city = 'Madrid';
 ```
 
-`INSERT OR REPLACE` / `OR IGNORE` are rejected: there is no upsert. Run a
-`SELECT` and decide between `INSERT` and `UPDATE`.
+### Upsert: when the row already exists (2.8)
+
+As in SQLite, a row that would collide with the primary key or a `UNIQUE`
+constraint can be ignored, replaced or turned into an update:
+
+```sql
+-- Skip the rows that collide
+INSERT OR IGNORE INTO customers (email, name) VALUES ('ana@x.es', 'Ana');
+INSERT INTO customers (email, name) VALUES ('ana@x.es', 'Ana') ON CONFLICT (email) DO NOTHING;
+
+-- Delete the rows it collides with and insert this one (REPLACE INTO is the same)
+INSERT OR REPLACE INTO customers (id, email, name) VALUES (7, 'ana@x.es', 'Ana');
+
+-- Update the row it collides with: excluded.col is the value that was to be inserted
+INSERT INTO stock (ref, qty) VALUES ('A1', 5)
+  ON CONFLICT (ref) DO UPDATE SET qty = qty + excluded.qty
+  WHERE excluded.qty > 0;
+```
+
+`ON CONFLICT (cols)` has to name the columns of the primary key or of a `UNIQUE`
+constraint; without them, any of them counts. A collision with a key other than
+the named one is still an error. `DO UPDATE` goes through everything an `UPDATE`
+does: types, `NOT NULL`, the other unique keys, foreign keys and the table's
+`UPDATE` triggers. `OR REPLACE` deletes the rows it collides with applying their
+foreign key actions (`ON DELETE CASCADE`…), without `DELETE` triggers, as SQLite
+does by default. Rows with `NULL` in a unique key never collide. MySQL's
+`ON DUPLICATE KEY UPDATE` and `INSERT IGNORE` are translated on import.
+
+One difference with SQLite: after a collision, SQLite uses up a number of the
+`AUTOINCREMENT` counter even when the row is ignored, so its gaps can differ
+from these. The numbers are unique and increasing in both.
+
+### RETURNING: the rows written (2.8)
+
+`INSERT`, `UPDATE` and `DELETE` accept `RETURNING`, like a `SELECT` list, and
+then return those rows instead of the summary — the way to know the id of a new
+row without a second query, which another client could have changed in between:
+
+```sql
+INSERT INTO customers (name, email) VALUES ('Ana', 'ana@x.es') RETURNING id;
+UPDATE stock SET qty = qty - 1 WHERE ref = 'A1' RETURNING ref, qty;
+DELETE FROM sessions WHERE expires < CURRENT_TIMESTAMP RETURNING *;
+```
+
+`INSERT` returns the rows inserted, and the ones updated by `DO UPDATE` (not the
+ignored ones); `UPDATE` the rows as they are after it; `DELETE` the rows as they
+were. The order of the rows is not defined, as in SQLite.
 
 ### UPDATE and DELETE
 
@@ -43,6 +88,11 @@ DELETE FROM orders WHERE date < '2026-01-01';
 ```
 
 Without `WHERE` they affect the whole table.
+
+When no index can answer the `WHERE`, they go through the table part by part
+and keep in memory only the rows that match (2.8): an `UPDATE` of a few rows of
+a large table does not load it whole. With triggers on the table, a foreign
+key to itself or a unique key without an index, the table is loaded as before.
 
 ### CREATE TABLE
 
@@ -64,8 +114,44 @@ CREATE TABLE IF NOT EXISTS orders (
 - Table constraints: `PRIMARY KEY (cols)` (composite keys allowed),
   `UNIQUE (cols)`, `FOREIGN KEY (cols) REFERENCES ...`, with `CONSTRAINT name`.
 - One `AUTOINCREMENT` per table and only on `INTEGER`.
-- `DEFAULT` accepts a fixed value, not expressions.
+- `DEFAULT` accepts a fixed value, `CURRENT_TIMESTAMP`, `CURRENT_DATE`,
+  `CURRENT_TIME` or an expression in parentheses (`DEFAULT (upper('x'))`), as in
+  SQLite (2.8). The latter are worked out each time a row is inserted (and with
+  `UPDATE … SET col = DEFAULT`); they cannot use columns, subqueries or
+  parameters, and a column with one cannot be added to a table that has rows.
+  `CURRENT_TIMESTAMP` is the date and time of the server, like `DATETIME('now')`.
 - Not supported: `CHECK`, `COLLATE`, generated columns.
+- **Column names** can have spaces or signs, as in SQLite (2.8): from 1 to 64
+  characters, no control characters. Such a name is written between double
+  quotes: `"unit price"`. Table, index and trigger names are letters, digits
+  and `_`, starting with a letter or `_`, because they are part of file names.
+
+### CREATE TABLE … AS SELECT (2.8)
+
+```sql
+CREATE TABLE big_customers AS
+    SELECT id, name, balance * 1.21 AS with_vat FROM customers WHERE balance > 1000;
+```
+
+A table with the result of a query, filled in one write. As in SQLite it has no
+primary key, `UNIQUE`, `NOT NULL`, defaults or foreign keys: add them afterwards
+with `ALTER TABLE` if you need them. `IF NOT EXISTS`, `WITH` and `UNION` work.
+
+- A column taken as it is from a table keeps its type, length and scale.
+- Any other takes its type from its values: `INTEGER` if they are all whole
+  numbers, `DOUBLE` if there are decimals, `TEXT` if they are texts, all `NULL`
+  or a mix of numbers and texts. SQLite leaves such a column without a type and
+  keeps each value as it is; here a column has one type, so in that mix the
+  numbers are stored as text.
+- An expression without `AS` names its column as in any `SELECT`:
+  `SELECT id + 1 FROM t` gives a column `"id + 1"` (SQLite calls it `id+1`, as
+  it was typed). Two columns with the same name get `_2`, `_3`…
+- The whole result is in memory while it is written, as in `INSERT … SELECT`.
+- **An index on the foreign key columns of the child table** (`CREATE INDEX
+  ix_orders_customer ON orders (customer_id)`) is not created on its own, as in
+  SQLite, but it is worth creating when the child table is large: deleting or
+  changing a customer then finds its orders through the index instead of
+  loading the whole orders table (2.7.5).
 
 ### ALTER TABLE and DROP TABLE
 
@@ -209,7 +295,8 @@ What a write reads and rewrites, since 2.5:
 | `INSERT` (no triggers, unique constraints indexed) | the last part and the unique indexes | the last part (plus new parts), the last piece of each index, `rev.json` |
 | `UPDATE ... WHERE key = ?` (no triggers) | the parts of the candidate rows | those parts, the matching pieces of the indexes whose columns changed, `rev.json` |
 | `DELETE ... WHERE key = ?` (no triggers) | the parts from the first deleted row on | those parts, the index pieces from that part on, `rev.json` |
-| anything else (`WHERE` without index, triggers, self-referencing key, `UPDATE`/`DELETE` without `WHERE`) | the whole table | the parts that changed, the index pieces that changed, `rev.json` |
+| `UPDATE`/`DELETE` with a `WHERE` no index answers (no triggers, unique constraints indexed; 2.8) | every part, one at a time, keeping only the rows that match | the parts that changed, the index pieces that changed, `rev.json` |
+| anything else (triggers, self-referencing key, unique constraint without index, `UPDATE`/`DELETE` without `WHERE`) | the whole table | the parts that changed, the index pieces that changed, `rev.json` |
 
 An index is stored in one piece per part of the table (2.6), so a write
 rewrites the pieces of the parts it touched and leaves the rest alone.
@@ -251,16 +338,17 @@ the same as one `INSERT` with one row. Batch them.
 | `engine/Integrity.php` | CHECK KEYS and REPAIR KEYS |
 | `engine/Parser.php` | extended with DML, DDL, triggers and `RAISE` |
 | `engine/Database.php` | decides the lock scope of each statement |
-| `tests/f3_escrituras.php` | 64 checks |
+| `tests/f3_escrituras.php` | 68 checks |
+| `tests/f5_esquema.php` | 105 checks, `CREATE TABLE … AS SELECT` among them |
 
 ## 6. Tests
 
 ```
 php tests/f1_nucleo.php       → OK: 66
-php tests/f2_parser.php       → OK: 70
+php tests/f2_parser.php       → OK: 72
 php tests/f2_select.php       → OK: 151
-php tests/f3_escrituras.php   → OK: 63
-php tests/f8_indices.php      → OK: 62
+php tests/f3_escrituras.php   → OK: 68
+php tests/f8_indices.php      → OK: 65
 php tests/f10_indices_incrementales.php → OK: 18
 ```
 

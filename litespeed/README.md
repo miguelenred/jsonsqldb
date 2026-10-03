@@ -62,7 +62,7 @@ RewriteEngine On
 # Internal folders: data, logs, engine, documentation, tests, server notes,
 # and the panel's internals
 RewriteRule ^/jsonsqldb/(data|logs|engine|docs|tests|nginx|litespeed)(/|$) - [F,L]
-RewriteRule ^/jsonsqldb/jsonsqldbadmin/(lib|vistas|datos)(/|$) - [F,L]
+RewriteRule ^/jsonsqldb/jsonsqldbadmin/(lib|vistas|datos|idiomas|herramientas)(/|$) - [F,L]
 
 # Configuration files, at any level
 RewriteRule ^/jsonsqldb/.*(^|/)(config\.php|configurar\.php|[^/]*_config\.php|[^/]*\.dist\.php)$ - [F,L]

@@ -387,6 +387,7 @@ final class Traductor
         }
         if ($this->mysql && ($p1 === 'INSERT' || $p1 === 'REPLACE')) {
             $t = $this->valoresMysql($t);
+            $t = $this->upsertMysql($t);
         }
         // ALTER VIEW/FUNCTION/TYPE/SEQUENCE/SCHEMA … OWNER TO de pg_dump (sin
         // --no-owner) y demás ALTER que no son de una tabla: aquí no hay nada
@@ -538,6 +539,68 @@ final class Traductor
             return [mb_chr((int)$t[$k + 2]['v'], 'UTF-8'), $k + 3];
         }
         return null;
+    }
+
+    /**
+     * Un DEFAULT que es la fecha u hora de ahora, en cualquiera de sus formas
+     * (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(6), now(), GETDATE(), Now() de
+     * Access, CURRENT_DATE, CURDATE(), Date()…): CURRENT_TIMESTAMP,
+     * CURRENT_DATE o CURRENT_TIME, que aquí se calculan al insertar. Null si es
+     * otra cosa.
+     */
+    private static function fechaActual(array $tokens): ?string
+    {
+        $texto = '';
+        foreach ($tokens as $x) {
+            $texto .= strtolower((string)$x['v']);
+        }
+        while (preg_match('/^\((.*)\)$/s', $texto, $m)) {
+            $texto = $m[1];                         // ((getdate())) de SQL Server
+        }
+        $texto = (string)preg_replace('/\(\d*\)$/', '', $texto);   // now(), CURRENT_TIMESTAMP(6)
+        return [
+            'current_timestamp' => 'CURRENT_TIMESTAMP', 'now' => 'CURRENT_TIMESTAMP', 'localtimestamp' => 'CURRENT_TIMESTAMP',
+            'getdate' => 'CURRENT_TIMESTAMP', 'sysdatetime' => 'CURRENT_TIMESTAMP',
+            'current_date' => 'CURRENT_DATE', 'curdate' => 'CURRENT_DATE', 'date' => 'CURRENT_DATE',
+            'current_time' => 'CURRENT_TIME', 'curtime' => 'CURRENT_TIME', 'time' => 'CURRENT_TIME', 'localtime' => 'CURRENT_TIME',
+            // La fecha de hoy como la escribe la exportación del panel en cada motor
+            'date(now())' => 'CURRENT_DATE', 'cast(localtimestamp(0)asdate)' => 'CURRENT_DATE',
+            'cast(cast(getdate()asdatetime2(0))asdate)' => 'CURRENT_DATE', 'datevalue(now())' => 'CURRENT_DATE',
+            'cast(getdate()asdate)' => 'CURRENT_DATE',
+        ][$texto] ?? null;
+    }
+
+    /**
+     * INSERT IGNORE y ON DUPLICATE KEY UPDATE de MySQL, en la forma de aquí
+     * (2.8): INSERT OR IGNORE, y ON CONFLICT DO UPDATE SET … con VALUES(col)
+     * como excluded.col. Sin columnas tras ON CONFLICT, vale cualquier clave
+     * única, que es lo que hace MySQL.
+     */
+    private function upsertMysql(array $t): array
+    {
+        if (strtoupper((string)($t[1]['v'] ?? '')) === 'IGNORE' && empty($t[1]['q'])) {
+            array_splice($t, 1, 1, [['k' => 'id', 'v' => 'OR'], ['k' => 'id', 'v' => 'IGNORE']]);
+        }
+        $nivel = 0;
+        for ($k = 0, $n = count($t); $k < $n; $k++) {
+            $v = $t[$k]['v'];
+            if ($v === '(' && $t[$k]['k'] === 'op') { $nivel++; continue; }
+            if ($v === ')' && $t[$k]['k'] === 'op') { $nivel--; continue; }
+            if ($nivel !== 0 || strtoupper((string)$v) !== 'ON' || strtoupper((string)($t[$k + 1]['v'] ?? '')) !== 'DUPLICATE') {
+                continue;
+            }
+            // ON DUPLICATE KEY UPDATE → ON CONFLICT DO UPDATE SET
+            array_splice($t, $k, 4, [['k' => 'id', 'v' => 'ON'], ['k' => 'id', 'v' => 'CONFLICT'], ['k' => 'id', 'v' => 'DO'],
+                                     ['k' => 'id', 'v' => 'UPDATE'], ['k' => 'id', 'v' => 'SET']]);
+            for ($j = $k + 5; $j < count($t); $j++) {
+                if (strtoupper((string)$t[$j]['v']) === 'VALUES' && ($t[$j + 1]['v'] ?? '') === '(' && ($t[$j + 3]['v'] ?? '') === ')'
+                    && $t[$j + 2]['k'] === 'id') {
+                    array_splice($t, $j, 4, [['k' => 'id', 'v' => 'excluded'], ['k' => 'op', 'v' => '.'], $t[$j + 2]]);
+                }
+            }
+            break;
+        }
+        return $t;
     }
 
     /** Importar dice si la sentencia que viene venía en Latin-1 (ya pasada a UTF-8). */
@@ -1089,13 +1152,16 @@ final class Traductor
                 // DEFAULT -1 son dos tokens: el signo y el número
                 if (($d[$k + 1]['v'] ?? '') === '-' && ($d[$k + 2]['k'] ?? '') === 'num') { $fin = $k + 3; }
                 $lit = $this->literalDe(array_slice($d, $k + 1, $fin - $k - 1));
+                $ahora = $lit === null ? self::fechaActual(array_slice($d, $k + 1, $fin - $k - 1)) : null;
                 if ($lit !== null) {
                     $partes[] = 'DEFAULT ' . $lit;
+                } elseif ($ahora !== null) {
+                    $partes[] = 'DEFAULT ' . $ahora;        // 2.8: la fecha de ahora, al insertar
                 } elseif (preg_match('/^NEXTVAL\b/i', (string)($d[$k + 1]['v'] ?? ''))) {
                     if (!$auto) { $partes[] = 'AUTOINCREMENT'; }
                     $auto = true;
                 } else {
-                    $this->avisar(t('Valores por defecto calculados quitados (CURRENT_TIMESTAMP, NOW()…): aquí solo valen literales'));
+                    $this->avisar(t('Valores por defecto calculados quitados: aquí valen los literales y la fecha u hora actual (CURRENT_TIMESTAMP, NOW()…)'));
                 }
                 $k = $fin;
                 continue;

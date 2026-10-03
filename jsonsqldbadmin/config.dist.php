@@ -62,7 +62,9 @@ defined('ADMIN_SSL_AUTOFIRMADO') || define('ADMIN_SSL_AUTOFIRMADO', false);
 defined('ADMIN_TIMEOUT') || define('ADMIN_TIMEOUT', 60);
 
 // ------------------------------------------------------------
-// DATOS DEL PROPIO PANEL (usuarios y auditoría, en JSON)
+// DATOS DEL PROPIO PANEL (usuarios y auditoría, en JSON; y en sus
+// subcarpetas copias/ las copias programadas e importar/ los ficheros para
+// importar). PHP tiene que poder escribir en ella.
 // ------------------------------------------------------------
 defined('ADMIN_DATA_PATH') || define('ADMIN_DATA_PATH',
     (string)(getenv('ADMIN_DATA_PATH') ?: __DIR__ . '/datos'));
@@ -130,8 +132,9 @@ defined('ADMIN_CELDA_MAX') || define('ADMIN_CELDA_MAX', 120);
 // el fichero con otras herramientas.
 defined('ADMIN_CSV_SEPARADOR') || define('ADMIN_CSV_SEPARADOR', ';');
 
-// Tope de filas por exportación, para no agotar la memoria de PHP.
-defined('ADMIN_EXPORT_MAX') || define('ADMIN_EXPORT_MAX', 100000);
+// Las exportaciones no tienen tope de filas: si no caben en la memoria de PHP
+// se piden por lotes (2.8). ADMIN_EXPORT_MAX ya no se usa; si sigue en tu
+// config.php de una versión anterior, no molesta y lo puedes borrar.
 
 // Copia en ZIP: ruta de la carpeta 'data' del motor, la que contiene una
 // subcarpeta por base de datos.

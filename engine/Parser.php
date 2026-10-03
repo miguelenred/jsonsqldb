@@ -40,7 +40,7 @@ final class Parser
     private const RESERVADAS = [
         'FROM','WHERE','GROUP','ORDER','HAVING','LIMIT','OFFSET','JOIN','INNER','LEFT','RIGHT','UNION','INTERSECT','EXCEPT','WITH','RECURSIVE',
         'FULL','CROSS','OUTER','ON','AS','AND','OR','NOT','IN','IS','LIKE','REGEXP','RLIKE','BETWEEN','CASE','CAST','WHEN',
-        'THEN','ELSE','END','SELECT','DISTINCT','ALL','ASC','DESC','BY','NULL','UNION','VALUES','SET',
+        'THEN','ELSE','END','SELECT','DISTINCT','ALL','ASC','DESC','BY','NULL','UNION','VALUES','SET','RETURNING',
     ];
 
     /** @var list<Token> */
@@ -101,7 +101,7 @@ final class Parser
     private function sentencia(): array
     {
         if ($this->es('id', 'SELECT') || $this->es('id', 'WITH')) { return $this->select(); }
-        if ($this->es('id', 'INSERT')) { return $this->insert(); }
+        if ($this->es('id', 'INSERT') || $this->es('id', 'REPLACE')) { return $this->insert(); }
         if ($this->es('id', 'UPDATE')) { return $this->update(); }
         if ($this->es('id', 'DELETE')) { return $this->delete(); }
         if ($this->es('id', 'CREATE')) { return $this->create(); }
@@ -637,6 +637,15 @@ final class Parser
                 return ['k' => 'raise', 'accion' => $accion, 'mensaje' => $mensaje];
             }
 
+            // CURRENT_TIMESTAMP, CURRENT_DATE y CURRENT_TIME, sin paréntesis
+            // como en SQL: la fecha y hora de ahora, como DATETIME() y compañía
+            if (!$tk['q'] && in_array($tk['u'], ['CURRENT_TIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIME'], true)
+                && !$this->esSiguiente('punc', '(')) {
+                $this->avanzar();
+                return ['k' => 'fn', 'nombre' => ['CURRENT_TIMESTAMP' => 'DATETIME', 'CURRENT_DATE' => 'DATE', 'CURRENT_TIME' => 'TIME'][$tk['u']],
+                        'args' => [], 'star' => false, 'distinct' => false];
+            }
+
             // Llamada a función
             if ($this->esSiguiente('punc', '(')) {
                 $nombre = strtoupper($tk['v']);
@@ -721,24 +730,43 @@ final class Parser
     // INSERT / UPDATE / DELETE
     // ==================================================================
 
-    /** INSERT INTO t [(cols)] VALUES (...)[, (...)]  |  INSERT INTO t [(cols)] SELECT ... */
+    /**
+     * INSERT [OR IGNORE | OR REPLACE] INTO t [(cols)] VALUES (...)[, (...)] | SELECT ...
+     *     [ON CONFLICT [(cols)] DO NOTHING | DO UPDATE SET c = expr, ... [WHERE expr]]
+     *     [RETURNING ...]
+     * REPLACE INTO … es INSERT OR REPLACE, como en SQLite.
+     *
+     * 'conflicto' (2.8): null, o qué hacer si la fila choca con una clave única:
+     *   modo 'nada'       saltarse la fila (OR IGNORE, DO NOTHING)
+     *   modo 'reemplazar' borrar las filas con las que choca y meter esta (OR REPLACE)
+     *   modo 'actualizar' cambiar la fila con la que choca (DO UPDATE)
+     *   cols              las columnas de la clave que se mira (null: cualquiera)
+     */
     private function insert(): array
     {
-        $this->exigir('id', 'INSERT');
-
-        // Antes se aceptaban y se ignoraban, y eso es peor que no admitirlos: la
-        // sentencia parecía correcta y se comportaba como un INSERT normal.
-        if ($this->comer('id', 'OR')) {
-            $modo = strtoupper((string)$this->actual()['v']);
-            throw JsonSqlDbError::syntax(
-                "INSERT OR $modo no está soportado. Para un upsert, comprueba antes con un "
-                . 'SELECT y lanza el INSERT o el UPDATE que corresponda.'
-            );
+        $conflicto = null;
+        if ($this->comer('id', 'REPLACE')) {
+            $conflicto = ['modo' => 'reemplazar', 'cols' => null, 'set' => [], 'where' => null];
+        } else {
+            $this->exigir('id', 'INSERT');
+            if ($this->comer('id', 'OR')) {
+                $modo = strtoupper((string)$this->actual()['v']);
+                $this->avanzar();
+                if ($modo === 'IGNORE') {
+                    $conflicto = ['modo' => 'nada', 'cols' => null, 'set' => [], 'where' => null];
+                } elseif ($modo === 'REPLACE') {
+                    $conflicto = ['modo' => 'reemplazar', 'cols' => null, 'set' => [], 'where' => null];
+                } elseif ($modo !== 'ABORT') {
+                    // FAIL y ROLLBACK deshacen distinto que ABORT en SQLite; aquí
+                    // toda sentencia es todo o nada, así que no se admiten
+                    throw JsonSqlDbError::syntax("INSERT OR $modo no está soportado: usa OR IGNORE, OR REPLACE u ON CONFLICT");
+                }
+            }
         }
         $this->exigir('id', 'INTO');
 
         $ins = ['k' => 'insert', 'tabla' => $this->nombreTabla(), 'cols' => null,
-                'filas' => null, 'select' => null];
+                'filas' => null, 'select' => null, 'conflicto' => $conflicto, 'returning' => null];
 
         // Lista de columnas: hay que distinguirla de un VALUES sin columnas
         if ($this->es('punc', '(') && !$this->esSiguiente('id', 'SELECT')) {
@@ -765,20 +793,48 @@ final class Parser
                 $this->exigir('punc', ')');
                 $ins['filas'][] = $fila;
             } while ($this->comer('punc', ','));
-            return $ins;
-        }
-
-        if ($this->es('id', 'SELECT')) {
+        } elseif ($this->es('id', 'SELECT')) {
             $ins['select'] = $this->select();
-            return $ins;
-        }
-        if ($this->comer('punc', '(') && $this->es('id', 'SELECT')) {
+        } elseif ($this->comer('punc', '(') && $this->es('id', 'SELECT')) {
             $ins['select'] = $this->select();
             $this->exigir('punc', ')');
-            return $ins;
+        } else {
+            throw JsonSqlDbError::syntax('Se esperaba VALUES o SELECT en el INSERT');
         }
 
-        throw JsonSqlDbError::syntax('Se esperaba VALUES o SELECT en el INSERT');
+        if ($this->es('id', 'ON') && $this->esSiguiente('id', 'CONFLICT')) {
+            if ($conflicto !== null) {
+                throw JsonSqlDbError::syntax('ON CONFLICT junto con OR IGNORE, OR REPLACE o REPLACE INTO no está soportado: usa uno de los dos');
+            }
+            $this->avanzar();
+            $this->avanzar();
+            $cols = $this->es('punc', '(') ? $this->listaColumnasEntreParentesis() : null;
+            $this->exigir('id', 'DO');
+            if ($this->comer('id', 'NOTHING')) {
+                $ins['conflicto'] = ['modo' => 'nada', 'cols' => $cols, 'set' => [], 'where' => null];
+            } else {
+                $this->exigir('id', 'UPDATE');
+                $this->exigir('id', 'SET');
+                $set = [];
+                do {
+                    $col = $this->nombreSimple('columna');
+                    if (!$this->comer('op', '=')) {
+                        throw JsonSqlDbError::syntax("Falta '=' al asignar la columna '$col'");
+                    }
+                    $set[] = ['col' => $col, 'expr' => $this->expr()];
+                } while ($this->comer('punc', ','));
+                $where = $this->comer('id', 'WHERE') ? $this->expr() : null;
+                $ins['conflicto'] = ['modo' => 'actualizar', 'cols' => $cols, 'set' => $set, 'where' => $where];
+            }
+        }
+        $ins['returning'] = $this->returning();
+        return $ins;
+    }
+
+    /** RETURNING col, expr AS x, * (2.8): las filas escritas, como un SELECT. */
+    private function returning(): ?array
+    {
+        return $this->comer('id', 'RETURNING') ? $this->listaColumnas() : null;
     }
 
     /** UPDATE t SET c = expr [, ...] [WHERE expr] */
@@ -801,6 +857,7 @@ final class Parser
         if ($this->comer('id', 'WHERE')) {
             $upd['where'] = $this->expr();
         }
+        $upd['returning'] = $this->returning();
         return $upd;
     }
 
@@ -813,6 +870,7 @@ final class Parser
         if ($this->comer('id', 'WHERE')) {
             $del['where'] = $this->expr();
         }
+        $del['returning'] = $this->returning();
         return $del;
     }
 
@@ -905,7 +963,7 @@ final class Parser
                 'columnas' => $columnas, 'si_no_existe' => $siNoExiste];
     }
 
-    /** CREATE TABLE [IF NOT EXISTS] t (definiciones) */
+    /** CREATE TABLE [IF NOT EXISTS] t (definiciones) | CREATE TABLE [IF NOT EXISTS] t AS SELECT ... */
     private function createTable(): array
     {
         $siNoExiste = false;
@@ -915,6 +973,13 @@ final class Parser
             $siNoExiste = true;
         }
         $tabla = $this->nombreTabla();
+        if ($this->comer('id', 'AS')) {
+            if (!$this->es('id', 'SELECT') && !$this->es('id', 'WITH')) {
+                throw JsonSqlDbError::syntax('CREATE TABLE … AS espera un SELECT');
+            }
+            return ['k' => 'create_table', 'tabla' => $tabla, 'si_no_existe' => $siNoExiste, 'def' => null,
+                    'select' => $this->select()];
+        }
         $this->exigir('punc', '(');
 
         $def = ['columns' => [], 'unique' => [], 'foreign_keys' => []];
@@ -1039,7 +1104,12 @@ final class Parser
                 continue;
             }
             if ($this->comer('id', 'DEFAULT')) {
-                $col['default'] = $this->valorPorDefecto();
+                $v = $this->valorPorDefecto();
+                if (is_array($v)) {
+                    $col['default_expr'] = $v['expr'];     // se calcula al insertar
+                } else {
+                    $col['default'] = $v;
+                }
                 continue;
             }
             if ($this->es('id', 'REFERENCES')) {
@@ -1116,9 +1186,46 @@ final class Parser
         return $cols;
     }
 
-    /** Valor literal de un DEFAULT (no se admiten expresiones con columnas) */
+    /**
+     * Valor de un DEFAULT: un literal, o (2.8) ['expr' => texto] con una
+     * expresión que se calcula al insertar cada fila: CURRENT_TIMESTAMP,
+     * CURRENT_DATE, CURRENT_TIME o (expresión) entre paréntesis, como en
+     * SQLite. La expresión no puede usar columnas, subconsultas ni parámetros.
+     *
+     * @return mixed|array{expr: string}
+     */
     private function valorPorDefecto()
     {
+        $tk = $this->actual();
+        if ($tk['t'] === 'id' && !$tk['q'] && in_array($tk['u'], ['CURRENT_TIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIME'], true)) {
+            $this->avanzar();
+            return ['expr' => $tk['u']];
+        }
+        if ($this->es('punc', '(')) {
+            $ini = $this->i;
+            $this->avanzar();
+            $desde = (int)$this->actual()['p'];
+            $e = $this->expr();
+            $hasta = (int)$this->actual()['p'];
+            $this->exigir('punc', ')');
+            if ($e['k'] === 'lit') {
+                return $e['v'];                          // (5) o ('x'): un valor fijo, como antes
+            }
+            if ($e['k'] === 'un' && $e['op'] === '-' && ($e['e']['k'] ?? '') === 'lit' && is_numeric($e['e']['v'])) {
+                return -$e['e']['v'];
+            }
+            for ($k = $ini; $k < $this->i; $k++) {
+                $t = $this->t[$k];
+                if ($t['t'] === 'param' || ($t['t'] === 'id' && !$t['q'] && $t['u'] === 'SELECT')) {
+                    throw JsonSqlDbError::syntax('Un DEFAULT no puede llevar parámetros ni subconsultas');
+                }
+            }
+            if (self::usaColumnas($e)) {
+                throw JsonSqlDbError::syntax('Un DEFAULT no puede usar columnas');
+            }
+            return ['expr' => trim(substr($this->sql, $desde, $hasta - $desde))];
+        }
+
         $negativo = false;
         if ($this->es('op', '-')) { $this->avanzar(); $negativo = true; }
         elseif ($this->es('op', '+')) { $this->avanzar(); }
@@ -1139,12 +1246,21 @@ final class Parser
             $this->avanzar();
             return null;
         }
-        if ($this->comer('punc', '(')) {
-            $v = $this->valorPorDefecto();
-            $this->exigir('punc', ')');
-            return $v;
+        throw JsonSqlDbError::syntax("DEFAULT admite un valor fijo, CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIME o (una expresión), y se encontró '{$tk['v']}'");
+    }
+
+    /** ¿La expresión lee alguna columna? */
+    private static function usaColumnas(array $n): bool
+    {
+        if (($n['k'] ?? '') === 'col') {
+            return true;
         }
-        throw JsonSqlDbError::syntax("DEFAULT solo admite un valor fijo, y se encontró '{$tk['v']}'");
+        foreach ($n as $v) {
+            if (is_array($v) && self::usaColumnas($v)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

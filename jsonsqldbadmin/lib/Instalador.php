@@ -264,7 +264,6 @@ final class Instalador
             'audit_dias'       => ['ADMIN_AUDIT_DIAS', 1, 3650],
             'filas_pagina'     => ['ADMIN_FILAS_PAGINA', 10, 1000],
             'celda_max'        => ['ADMIN_CELDA_MAX', 20, 5000],
-            'export_max'       => ['ADMIN_EXPORT_MAX', 1000, 10000000],
         ];
     }
 
@@ -280,7 +279,6 @@ final class Instalador
             'audit_dias'       => 'Días que se guarda la auditoría',
             'filas_pagina'     => 'Filas por página',
             'celda_max'        => 'Caracteres visibles por celda',
-            'export_max'       => 'Filas como máximo en un volcado SQL',
         ][$campo] ?? $campo;
     }
 

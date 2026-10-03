@@ -328,8 +328,10 @@ chk('parámetro no simple', function () {
 
 echo "\n== Lo que no se soporta se rechaza, no se ignora ==\n";
 foreach ([
-    'INSERT OR IGNORE'  => "INSERT OR IGNORE INTO t (a) VALUES (1)",
-    'INSERT OR REPLACE' => "INSERT OR REPLACE INTO t (a) VALUES (1)",
+    // OR IGNORE y OR REPLACE sí existen desde la 2.8; FAIL y ROLLBACK, no
+    'INSERT OR FAIL'     => "INSERT OR FAIL INTO t (a) VALUES (1)",
+    'INSERT OR ROLLBACK' => "INSERT OR ROLLBACK INTO t (a) VALUES (1)",
+    'ON CONFLICT con OR IGNORE' => "INSERT OR IGNORE INTO t (a) VALUES (1) ON CONFLICT DO NOTHING",
     'CREATE TEMP'       => 'CREATE TEMP TABLE t (a INTEGER)',
     'CREATE TEMPORARY'  => 'CREATE TEMPORARY TABLE t (a INTEGER)',
     'WITHOUT ROWID'     => 'CREATE TABLE t (a INTEGER PRIMARY KEY) WITHOUT ROWID',
@@ -343,6 +345,18 @@ foreach ([
         return 'se aceptó en silencio';
     });
 }
+chk('INSERT OR IGNORE / OR REPLACE, REPLACE INTO, ON CONFLICT y RETURNING se analizan (2.8)', function () {
+    $a = Parser::analizar("INSERT OR IGNORE INTO t (a) VALUES (1)");
+    $b = Parser::analizar("REPLACE INTO t (a) VALUES (1) RETURNING *");
+    $c = Parser::analizar("INSERT INTO t (a, b) VALUES (1, 2) ON CONFLICT (a) DO UPDATE SET b = excluded.b + b WHERE b < 9 RETURNING a, b AS x");
+    $d = Parser::analizar("INSERT INTO t (a) SELECT a FROM u ON CONFLICT DO NOTHING");
+    $e = Parser::analizar("DELETE FROM t WHERE a = 1 RETURNING a");
+    return $a['conflicto']['modo'] === 'nada' && $b['conflicto']['modo'] === 'reemplazar' && $b['returning'][0]['star']
+        && $c['conflicto']['modo'] === 'actualizar' && $c['conflicto']['cols'] === ['a'] && count($c['conflicto']['set']) === 1
+        && $c['conflicto']['where'] !== null && $c['returning'][1]['alias'] === 'x'
+        && $d['select'] !== null && $d['conflicto']['modo'] === 'nada' && $e['returning'] !== null
+        ?: 'no se analizó como se esperaba';
+});
 chk('el INSERT normal sigue funcionando', function () {
     $a = Parser::analizar("INSERT INTO t (a) VALUES (1)");
     return $a['k'] === 'insert' && $a['tabla'] === 't';

@@ -143,8 +143,6 @@ return [
         => 'Characters, only for TEXT',
     'Cargar'
         => 'Load',
-    'Cargar un CSV en una tabla'
-        => 'Load a CSV into a table',
     'Carpeta de datos'
         => 'Data folder',
     'Carpeta de datos: {estado}'
@@ -347,8 +345,6 @@ return [
         => 'The file tries to create or delete a database; that is not imported.',
     'El fichero no es un ZIP válido o está dañado.'
         => 'The file is not a valid ZIP or it is damaged.',
-    'El fichero recibido no es una subida válida.'
-        => 'The file received is not a valid upload.',
     'El motor no responde: {error}'
         => 'The engine is not responding: {error}',
     'El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN; no los rangos, ni LIKE, ni ORDER BY. Y hace algo más lenta cada escritura de la tabla.'
@@ -367,8 +363,6 @@ return [
         => 'The user \'{usuario}\' does not exist',
     'El usuario admite de 3 a 32 caracteres: letras, números y . _ - @'
         => 'The user name takes 3 to 32 characters: letters, numbers and . _ - @',
-    'El volcado supera el tope de {n} filas (ADMIN_EXPORT_MAX). Exporta las tablas por separado o usa el ZIP.'
-        => 'The dump exceeds the limit of {n} rows (ADMIN_EXPORT_MAX). Export the tables separately or use the ZIP.',
     'Elige al menos una columna para el índice.'
         => 'Choose at least one column for the index.',
     'Elige cómo se conecta el panel con el motor.'
@@ -447,8 +441,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Row inserted.',
     'Filas'
         => 'Rows',
-    'Filas como máximo en un volcado SQL'
-        => 'Maximum rows in an SQL dump',
     'Filas por página'
         => 'Rows per page',
     'Filtrar'
@@ -531,8 +523,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'The password needs at least 10 characters',
     'La copia en ZIP necesita que el panel y el motor estén en la misma máquina, porque lee los ficheros directamente del disco. La API está en {api} y el panel se está sirviendo desde {panel}. Usa el volcado en SQL, que va por la API y funciona entre máquinas distintas.'
         => 'The ZIP copy needs the panel and the engine on the same machine, because it reads the files straight from disk. The API is on {api} and the panel is being served from {panel}. Use the SQL dump, which goes through the API and works between different machines.',
-    'La exportación supera el tope de {n} filas (ADMIN_EXPORT_MAX). Acota la consulta con WHERE o LIMIT.'
-        => 'The export exceeds the limit of {n} rows (ADMIN_EXPORT_MAX). Narrow the query with WHERE or LIMIT.',
     'La extensión zip de PHP no está activada. Actívala en php.ini (extension=zip) o restaura desde un volcado en SQL.'
         => 'PHP\'s zip extension is not enabled. Enable it in php.ini (extension=zip) or restore from an SQL dump.',
     'La plantilla config.dist.php no tiene {constante}: está incompleta.'
@@ -953,8 +943,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Empty = anyone',
     'Valor huérfano'
         => 'Orphan value',
-    'Valores por defecto calculados quitados (CURRENT_TIMESTAMP, NOW()…): aquí solo valen literales'
-        => 'Computed default values removed (CURRENT_TIMESTAMP, NOW()…): only literals are valid here',
+    'Valores por defecto calculados quitados: aquí valen los literales y la fecha u hora actual (CURRENT_TIMESTAMP, NOW()…)'
+        => 'Computed default values dropped: here only literals and the current date or time (CURRENT_TIMESTAMP, NOW()…) are accepted',
     'Versión'
         => 'Version',
     'Vista'
@@ -1415,8 +1405,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Access compares text without case, also with <code>=</code>; here <code>=</code> does tell capitals apart.',
     '<strong>No llegan</strong> los adjuntos ni los objetos OLE (datos binarios), las consultas de acción, de referencias cruzadas o con parámetros, ni las consultas ocultas de formularios e informes. El script las nombra al terminar.'
         => '<strong>What does not come along:</strong> attachments and OLE objects (binary data), action, crosstab or parameter queries, and the hidden queries of forms and reports. The script names them when it finishes.',
-    'En ninguno llegan igual: las restricciones <code>CHECK</code>, los valores por defecto calculados (<code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>), las listas <code>ENUM</code>, la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.'
-        => 'Not the same in any of them: <code>CHECK</code> constraints, computed default values (<code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>), <code>ENUM</code> value lists, the time zone of dates and binary data that is not text (kept in hexadecimal). A name that is not valid here is changed (<code>Order Details</code> → <code>Order_Details</code>). If the dump contains <code>DROP TABLE</code>, the table with the same name is replaced: when in doubt, import into a new database.',
+    'En ninguno llegan igual: las restricciones <code>CHECK</code>, los valores por defecto calculados que no son la fecha u hora actual (esos sí llegan: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), las listas <code>ENUM</code>, la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.'
+        => 'Not the same in any of them: <code>CHECK</code> constraints, computed default values other than the current date or time (those do arrive: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), <code>ENUM</code> value lists, the time zone of dates and binary data that is not text (kept in hexadecimal). A name that is not valid here is changed (<code>Order Details</code> → <code>Order_Details</code>). If the dump contains <code>DROP TABLE</code>, the table with the same name is replaced: when in doubt, import into a new database.',
     'El volcado del panel, o uno de SQLite, MySQL / MariaDB, PostgreSQL, SQL Server o Microsoft Access, con sus vistas y sus triggers. Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual. Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen.'
         => 'The panel\'s own dump, or one from SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft Access, with its views and triggers. They are translated to the SQL used here, and at the end it says what did not arrive the same. If the dump contains <code>DROP TABLE</code>, the tables with the same name are replaced.',
     'Con el panel en la misma máquina que el motor es <strong>todo o nada</strong>: si algo falla, la base queda como estaba. Si no, lo anterior al fallo queda hecho y se dice dónde paró.'
@@ -1429,4 +1419,130 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Saved queries go as CREATE VIEW, which Access only accepts in .mdb databases of Access 2000 to 2003 and in .accdb ones, and only in ANSI-92 syntax (through ADO/OLEDB, or with the database\'s «SQL Server Compatible Syntax (ANSI 92)» option, since Access 2002); in the usual syntax it is an error, and in Access 97 or earlier it does not exist. In any version: paste what follows AS into a new query and save it with the view\'s name, or load the file with the script, which creates them as saved queries without CREATE VIEW. What this syntax does not have goes in a -- line above its table or relationship, to do by hand: «-- [table].[column] DEFAULT value» (in Access, the table\'s Design view → Default Value) and «-- [relationship] ON DELETE CASCADE» or ON UPDATE (Database Tools → Relationships → Enforce Referential Integrity → Cascade Delete or Update). When this file is imported into jsonSQLDBadmin, those lines are applied on their own.',
     '<strong>CREATE VIEW no vale en todas las bases ni en todos los modos.</strong> Las consultas guardadas van como <code>CREATE VIEW [nombre] AS SELECT …</code>. Access lo admite en las bases .mdb de Access 2000 a 2003 (Jet 4.0) y en las .accdb (Access 2007 y posteriores), pero solo con la sintaxis ANSI-92: por ADO/OLEDB, o en la vista SQL si la base tiene activada «Sintaxis compatible con SQL Server (ANSI 92)» (opción que existe desde Access 2002; en Access 2010 y posteriores, Archivo → Opciones → Diseñadores de objetos). Con la sintaxis de siempre (ANSI-89) da error de sintaxis, y en una base de Access 97 o anterior (Jet 3) no existe. A mano, en cualquier versión: pega lo que va detrás de <code>AS</code> en una consulta nueva y guárdala con ese nombre. El script de PowerShell las crea como consultas guardadas sin usar CREATE VIEW, así que con él vale cualquier versión.'
         => '<strong>CREATE VIEW does not work in every database or mode.</strong> Saved queries go as <code>CREATE VIEW [name] AS SELECT …</code>. Access accepts it in .mdb databases of Access 2000 to 2003 (Jet 4.0) and in .accdb ones (Access 2007 and later), but only in ANSI-92 syntax: through ADO/OLEDB, or in the SQL view if the database has «SQL Server Compatible Syntax (ANSI 92)» turned on (an option that exists since Access 2002; in Access 2010 and later, File → Options → Object Designers). In the usual syntax (ANSI-89) it is a syntax error, and in an Access 97 or earlier database (Jet 3) it does not exist. By hand, in any version: paste what follows <code>AS</code> into a new query and save it with that name. The PowerShell script creates them as saved queries without CREATE VIEW, so with it any version works.',
+
+    // 2.8.0: importar por trozos, Excel y copias programadas
+    'Esa programación no existe.'
+        => 'That schedule does not exist.',
+    'Hay otra copia en marcha: vuelve a intentarlo en un momento.'
+        => 'Another backup is running: try again in a moment.',
+    'No se puede escribir en la carpeta \'{dir}\'.'
+        => 'Cannot write to the folder \'{dir}\'.',
+    '{base}: copia {fichero} ({kb} KB)'
+        => '{base}: backup {fichero} ({kb} KB)',
+    'Esa copia no existe.'
+        => 'That backup does not exist.',
+    'ERROR: la exportación está incompleta: {error}'
+        => 'ERROR: the export is incomplete: {error}',
+    'Importar un Excel necesita las extensiones zip y xml de PHP.'
+        => 'Importing an Excel file needs the PHP zip and xml extensions.',
+    'El fichero no es un Excel (.xlsx) válido.'
+        => 'The file is not a valid Excel (.xlsx) file.',
+    'No llegó el trozo del fichero.'
+        => 'The file chunk did not arrive.',
+    'El fichero no ha llegado entero. Vuelve a elegirlo: la subida sigue desde donde se quedó.'
+        => 'The file did not arrive complete. Choose it again: the upload resumes where it stopped.',
+    'El fichero \'{f}\' no está en la carpeta de importar.'
+        => 'The file \'{f}\' is not in the import folder.',
+    'Identificador de subida no válido.'
+        => 'Invalid upload identifier.',
+    'Copia de \'{base}\' programada.'
+        => 'Backup of \'{base}\' scheduled.',
+    'Programación quitada.'
+        => 'Schedule removed.',
+    'Copia borrada.'
+        => 'Backup deleted.',
+    'Subiendo el fichero: {p} %'
+        => 'Uploading the file: {p} %',
+    'La subida se ha cortado. Vuelve a elegir el mismo fichero y a pulsar el botón: sigue desde donde se quedó.'
+        => 'The upload was interrupted. Choose the same file again and press the button: it resumes where it stopped.',
+    'O un fichero de la carpeta de importar'
+        => 'Or a file from the import folder',
+    '… o uno de la carpeta de importar'
+        => '… or one from the import folder',
+    'lunes'
+        => 'Monday',
+    'martes'
+        => 'Tuesday',
+    'miércoles'
+        => 'Wednesday',
+    'jueves'
+        => 'Thursday',
+    'viernes'
+        => 'Friday',
+    'sábado'
+        => 'Saturday',
+    'domingo'
+        => 'Sunday',
+    'cada {n} hora(s)'
+        => 'every {n} hour(s)',
+    'cada día a las {h}'
+        => 'every day at {h}',
+    'cada {dia} a las {h}'
+        => 'every {dia} at {h}',
+    'Copias programadas'
+        => 'Scheduled backups',
+    'Copias automáticas de las bases, en ZIP o en volcado SQL'
+        => 'Automatic backups of the databases, as ZIP or SQL dump',
+    'Programación'
+        => 'Schedule',
+    'Formato'
+        => 'Format',
+    'Conservar'
+        => 'Keep',
+    'Última'
+        => 'Last',
+    'No hay ninguna copia programada.'
+        => 'There are no scheduled backups.',
+    'nunca'
+        => 'never',
+    'Hacer la copia ahora'
+        => 'Back up now',
+    '¿Quitar esta programación? Las copias ya hechas se quedan.'
+        => 'Remove this schedule? Backups already made are kept.',
+    'Copias de «{base}»'
+        => 'Backups of «{base}»',
+    'Todavía no hay copias.'
+        => 'No backups yet.',
+    'Descargar'
+        => 'Download',
+    '¿Borrar esta copia?'
+        => 'Delete this backup?',
+    'Nueva copia programada'
+        => 'New scheduled backup',
+    'Frecuencia'
+        => 'Frequency',
+    'Cada día'
+        => 'Every day',
+    'Cada semana'
+        => 'Every week',
+    'Cada N horas'
+        => 'Every N hours',
+    'N horas'
+        => 'N hours',
+    'Día (semanal)'
+        => 'Day (weekly)',
+    'Volcado SQL'
+        => 'SQL dump',
+    'Copias que se conservan'
+        => 'Backups to keep',
+    'Programar'
+        => 'Schedule',
+    'Quién hace las copias'
+        => 'Who makes the backups',
+    'Lo mejor es el <strong>cron</strong> del servidor, cada 15 minutos (hace solo las que tocan):'
+        => 'Best is the server\'s <strong>cron</strong>, every 15 minutes (it only makes the ones that are due):',
+    'En Windows, con el <strong>Programador de tareas</strong>:'
+        => 'On Windows, with the <strong>Task Scheduler</strong>:',
+    '<strong>Sin cron</strong>, las hace el panel: cuando alguien lo abre y hay una pendiente, el navegador la pide aparte sin esperar la respuesta. Así una copia puede llegar tarde si nadie entra. Se guardan en la carpeta <code>copias/</code> de los datos del panel, en la que PHP tiene que poder escribir.'
+        => '<strong>Without cron</strong>, the panel makes them: when someone opens it and one is due, the browser requests it separately without waiting for the answer. So a backup can be late if nobody logs in. They are kept in the <code>copias/</code> folder of the panel\'s data, where PHP must be able to write.',
+    'Cargar un CSV o un Excel en una tabla'
+        => 'Load a CSV or an Excel file into a table',
+    'O la primera hoja de un <strong>Excel (.xlsx)</strong>: la primera fila, con los nombres de las columnas; las celdas con formato de fecha llegan como fecha.'
+        => 'Or the first sheet of an <strong>Excel (.xlsx)</strong> file: the first row, with the column names; cells with a date format arrive as dates.',
+    'Necesita las extensiones zip y xml de PHP.'
+        => 'Needs the PHP zip and xml extensions.',
+    'Cargar Excel'
+        => 'Load Excel',
+    'Para cargar un Excel hay que activar las extensiones zip y xml de PHP (extension=zip en php.ini).'
+        => 'To load an Excel file, enable the PHP zip and xml extensions (extension=zip in php.ini).',
 ];

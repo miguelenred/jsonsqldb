@@ -105,7 +105,7 @@ sqlite3 tienda.db ".dump clientes pedidos" &gt; dos_tablas.sql</code></pre>
         </div>
 
         <hr>
-        <p class="small mb-0"><?= t('En ninguno llegan igual: las restricciones <code>CHECK</code>, los valores por defecto calculados (<code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>), las listas <code>ENUM</code>, la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.') ?></p>
+        <p class="small mb-0"><?= t('En ninguno llegan igual: las restricciones <code>CHECK</code>, los valores por defecto calculados que no son la fecha u hora actual (esos sí llegan: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), las listas <code>ENUM</code>, la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.') ?></p>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><?= h(t('Cerrar')) ?></button>

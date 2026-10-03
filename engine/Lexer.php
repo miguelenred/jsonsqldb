@@ -25,7 +25,7 @@ namespace JsonSQLDB;
  *
  * @phpstan-type TokenId    array{t: 'id', v: string, u: string, q: bool, l: int, p: int}
  * @phpstan-type TokenOtro  array{t: 'str'|'op'|'punc'|'param'|'eof', v: string, l: int, p: int}
- * @phpstan-type TokenNum   array{t: 'num', v: int|float, l: int, p: int}
+ * @phpstan-type TokenNum   array{t: 'num', v: int|float, l: int, p: int, texto: string}
  * @phpstan-type Token      TokenId|TokenOtro|TokenNum
  */
 final class Lexer

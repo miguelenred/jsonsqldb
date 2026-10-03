@@ -68,7 +68,7 @@ usort($tablas, static fn($a, $b) => strcasecmp((string)$a['tabla'], (string)$b['
         </p>
         <p class="small"><?= t('<strong>Microsoft Access</strong>: <a href="{1}">descarga el script de PowerShell</a> (necesita <strong>Windows</strong>; botón derecho → «Ejecutar con PowerShell»). Vuelca un .mdb o .accdb a un fichero que se importa aquí, y carga en Access lo que exportes como «SQL: Microsoft Access». Con un .mdb no hace falta instalar nada; con un .accdb, si falta el controlador de Access, lo dice y da el enlace para descargarlo.',
             [1 => h(url(['p' => 'script_access']))]) ?></p>
-        <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap">
+        <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap"<?= atributosSubida() ?>>
           <?= csrf() ?>
           <input type="hidden" name="accion" value="importar_sql">
           <input type="hidden" name="db" value="<?= h($base) ?>">
@@ -81,7 +81,7 @@ usort($tablas, static fn($a, $b) => strcasecmp((string)$a['tabla'], (string)$b['
             <option value="sqlserver"><?= h(t('SQL Server (Generar scripts)')) ?></option>
             <option value="access"><?= h(t('Microsoft Access (script de PowerShell)')) ?></option>
           </select>
-          <input class="form-control" type="file" name="fichero" accept=".sql,text/plain" required style="max-width:22rem">
+          <?= campoImportacion('fichero', '.sql,text/plain') ?>
           <button class="btn btn-primary"><?= icono('upload') ?> <?= h(t('Importar')) ?></button>
         </form>
       </div>
@@ -89,22 +89,35 @@ usort($tablas, static fn($a, $b) => strcasecmp((string)$a['tabla'], (string)$b['
   </div>
   <div class="col-lg-6">
     <div class="card h-100">
-      <div class="card-header"><?= icono('upload') ?> <?= h(t('Cargar un CSV en una tabla')) ?></div>
+      <div class="card-header"><?= icono('upload') ?> <?= h(t('Cargar un CSV o un Excel en una tabla')) ?></div>
       <div class="card-body">
         <p class="small text-body-secondary"><?= t('La primera línea, con los nombres de las columnas. El separador (coma, punto y coma o tabulador) se deduce solo, y un campo vacío es <code>NULL</code>. Se inserta en lotes de 200 filas; sin transacciones, como arriba.') ?></p>
         <?php if ($tablas === []): ?>
           <p class="small mb-0"><?= h(t('Crea antes la tabla.')) ?></p>
         <?php else: ?>
-        <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap">
+        <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap"<?= atributosSubida() ?>>
           <?= csrf() ?>
           <input type="hidden" name="accion" value="importar_csv">
           <input type="hidden" name="db" value="<?= h($base) ?>">
           <select class="form-select" name="tabla" required style="max-width:12rem">
             <?php foreach ($tablas as $t): ?><option><?= h((string)$t['tabla']) ?></option><?php endforeach; ?>
           </select>
-          <input class="form-control" type="file" name="fichero" accept=".csv,text/csv,text/plain" required style="max-width:18rem">
+          <?= campoImportacion('fichero', '.csv,text/csv,text/plain') ?>
           <button class="btn btn-primary"><?= icono('upload') ?> <?= h(t('Cargar')) ?></button>
         </form>
+        <?php $xlsx = class_exists('ZipArchive') && class_exists('XMLReader'); ?>
+        <p class="small text-body-secondary mt-3 mb-2"><?= t('O la primera hoja de un <strong>Excel (.xlsx)</strong>: la primera fila, con los nombres de las columnas; las celdas con formato de fecha llegan como fecha.') ?></p>
+        <form method="post" enctype="multipart/form-data" class="d-flex gap-2 flex-wrap"<?= atributosSubida() ?>>
+          <?= csrf() ?>
+          <input type="hidden" name="accion" value="importar_xlsx">
+          <input type="hidden" name="db" value="<?= h($base) ?>">
+          <select class="form-select" name="tabla" required style="max-width:12rem" aria-label="<?= h(t('Tabla')) ?>">
+            <?php foreach ($tablas as $t): ?><option><?= h((string)$t['tabla']) ?></option><?php endforeach; ?>
+          </select>
+          <?= campoImportacion('fichero', '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') ?>
+          <button class="btn btn-primary"<?= $xlsx ? '' : ' disabled title="' . h(t('Necesita las extensiones zip y xml de PHP.')) . '"' ?>><?= icono('upload') ?> <?= h(t('Cargar Excel')) ?></button>
+        </form>
+        <?php if (!$xlsx): ?><p class="small text-body-secondary mt-1 mb-0"><?= h(t('Para cargar un Excel hay que activar las extensiones zip y xml de PHP (extension=zip en php.ini).')) ?></p><?php endif; ?>
         <?php endif; ?>
       </div>
     </div>

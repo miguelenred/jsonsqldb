@@ -16,7 +16,7 @@ namespace JsonSQLDB;
 final class Select
 {
     private Catalog $cat;
-    /** @var callable(string):iterable<array> lector de filas; permite ver cambios aún no volcados a disco */
+    /** @var callable(string, list<list<string>>=):iterable<array> lector de filas (tabla y, si sirven, los textos que tiene que contener una parte: ver Storage::filas()); permite ver cambios aún no volcados a disco */
     private $lector;
 
     /**
@@ -60,7 +60,7 @@ final class Select
     {
         $this->cat       = $cat;
         $this->indexable = $lector === null;
-        $this->lector    = $lector ?? static fn(string $t): iterable => $cat->storage()->filas($t);
+        $this->lector    = $lector ?? static fn(string $t, array $agujas = []): iterable => $cat->storage()->filas($t, false, $agujas);
     }
 
     /** @var (callable(array):void)|null adónde van las filas de la consulta de fuera (ejecutarHacia()) */
@@ -74,6 +74,18 @@ final class Select
     public function ejecutar(array $ast): array
     {
         return $this->correr($ast)['filas'];
+    }
+
+    /**
+     * Como ejecutar(), con los nombres de las columnas de salida, que hacen
+     * falta aunque no salga ninguna fila (CREATE TABLE … AS SELECT).
+     *
+     * @return array{cols: list<string>, filas: list<array<string,mixed>>}
+     */
+    public function ejecutarConColumnas(array $ast): array
+    {
+        $r = $this->correr($ast);
+        return ['cols' => array_values($r['cols']), 'filas' => $r['filas']];
     }
 
     /**
@@ -737,7 +749,44 @@ final class Select
             $liston    = count($ordenados) === $cuantas ? $ordenados[$cuantas - 1] : null;
             return $ordenados;
         };
+        // Con una sola clave, la comparación con el listón se hace aquí, sin
+        // pasar por el comparador general (una llamada y un bucle por fila) y
+        // sin guardar la clave de una fila que no entra. Mismo resultado: a
+        // igualdad gana la que llegó antes, que es la del listón
+        $una  = count($claves) === 1 ? $claves[0] : null;
+        $desc = $una !== null && $orden[0]['dir'] === 'DESC';
+        // Entre dos textos, compararOrden() calcula la clave de colación de los
+        // dos en cada llamada: la del listón se guarda mientras no cambie
+        $texto   = Collation::activa();
+        $deListo = null;                            // [índice del listón, su valor, su clave de colación]
         foreach ($filas as $fila) {
+            if ($una !== null) {
+                $v = $fila[$una] ?? null;
+                if ($liston !== null) {
+                    $lv = $clavesOrden[0][$liston];
+                    if ($texto && is_string($v) && is_string($lv) && !is_numeric(trim($v)) && !is_numeric(trim($lv))) {
+                        if ($deListo === null || $deListo[0] !== $liston) {
+                            $deListo = [$liston, $lv, Collation::clave($lv)];
+                        }
+                        $c = strcmp(Collation::clave($v), $deListo[2]) <=> 0;
+                        $c = $c !== 0 ? $c : (strcmp($v, $lv) <=> 0);
+                    } else {
+                        $c = Valor::compararOrden($v, $lv);
+                    }
+                    if ($desc ? $c <= 0 : $c >= 0) {
+                        $k++;
+                        continue;                   // no entra: va detrás de la peor guardada
+                    }
+                }
+                $clavesOrden[0][$k] = $v;
+                $vivas[$k] = $fila;
+                if (count($vivas) >= $tope) {
+                    $recortar();
+                }
+                $k++;
+                Memoria::comprobar('la ordenación');
+                continue;
+            }
             foreach ($claves as $i => $clave) {
                 $clavesOrden[$i][$k] = $fila[$clave] ?? null;
             }
@@ -852,10 +901,51 @@ final class Select
     /**
      * SELECT COUNT(*) FROM tabla, sin nada más: el resultado es el número de
      * filas, que Storage sabe contar sin decodificar ni materializar la tabla.
-     * En cuanto la consulta tiene cualquier otra cosa —WHERE, GROUP BY, JOIN,
-     * DISTINCT, más columnas, una vista o una CTE— se sigue el camino normal,
-     * que es quien sabe hacerla bien.
+     * Con un WHERE de igualdades que un índice cubre entero, el número de
+     * posiciones del índice (ver contarPorIndice()). En cuanto la consulta
+     * tiene cualquier otra cosa —otro WHERE, GROUP BY, JOIN, DISTINCT, más
+     * columnas, una vista o una CTE— se sigue el camino normal, que es quien
+     * sabe hacerla bien.
      */
+    /**
+     * COUNT(*) con WHERE col = 'texto' [AND …] que un índice cubre entero: las
+     * filas que cumplen son exactamente las posiciones que el índice tiene
+     * para esas claves, y contarlas no exige leer ninguna fila. Antes se
+     * leían todas las que cumplían (un 10 % de la tabla, 18 ms con 20.000
+     * filas) solo para contarlas. Solo con textos que no son números: con
+     * números, el índice junta valores que el WHERE puede separar (true y
+     * '1.0' tienen la misma clave) y hay que mirar cada fila. Null si no se
+     * puede: lo cuenta el camino normal.
+     */
+    private function contarPorIndice(string $tabla, string $alias, array $where): ?int
+    {
+        $st = $this->cat->storage();
+        if (!$st->indicesActivos()) {
+            return null;
+        }
+        $predicados = Indexes::predicados($where, strtolower($alias))[strtolower($alias)] ?? [];
+        if ($predicados === [] || count(Indexes::conjunciones($where)) !== count($predicados)) {
+            return null;                             // hay más condiciones que las igualdades
+        }
+        foreach ($predicados as $valores) {
+            foreach ($valores as $v) {
+                if (!is_string($v) || is_numeric(trim($v))) {
+                    return null;
+                }
+            }
+        }
+        foreach (Indexes::candidatos($this->cat->indicesDe($tabla), $predicados) as $c) {
+            if ($c['prefijo'] || count($c['def']['columns']) !== count($predicados)) {
+                continue;                            // tiene que cubrirlas todas y solo esas
+            }
+            $posiciones = $st->posicionesPorIndice($tabla, $c['def'], $c['claves'], false);
+            if ($posiciones !== null) {
+                return count($posiciones);
+            }
+        }
+        return null;
+    }
+
     private function contarRapido(array $ast): ?array
     {
         // Con un lector propio (un trigger en mitad de una escritura) las filas
@@ -863,7 +953,7 @@ final class Select
         if (!$this->indexable) {
             return null;
         }
-        if ($ast['where'] !== null || $ast['group'] !== null || $ast['having'] !== null
+        if ($ast['group'] !== null || $ast['having'] !== null
             || $ast['distinct'] || $ast['order'] !== [] || $ast['limit'] !== null
             || $ast['offset'] !== null || count($ast['from']) !== 1 || count($ast['cols']) !== 1) {
             return null;
@@ -883,8 +973,14 @@ final class Select
         if (!$this->cat->existe($o['nombre'])) {
             throw JsonSqlDbError::schema("La tabla '{$o['nombre']}' no existe");
         }
+        $n = $ast['where'] === null
+            ? $this->cat->storage()->contarFilas($o['nombre'])
+            : $this->contarPorIndice($o['nombre'], $o['alias'] ?? $o['nombre'], $ast['where']);
+        if ($n === null) {
+            return null;
+        }
         $nombre = $c['alias'] ?? self::etiqueta($e);
-        return ['cols' => [$nombre], 'filas' => [[$nombre => $this->cat->storage()->contarFilas($o['nombre'])]]];
+        return ['cols' => [$nombre], 'filas' => [[$nombre => $n]]];
     }
 
     private function correrUnion(array $ast): array
@@ -1054,6 +1150,7 @@ final class Select
      *
      * @param array<string, list<mixed>> $predicados
      */
+
     private function porIndice(string $tabla, array $predicados): ?array
     {
         if (!$this->indexable || $predicados === []) {
@@ -1601,7 +1698,7 @@ final class Select
             // filas buscadas; si no lo hay, o no compensa, se recorre la tabla.
             $origen = $this->porIndice($nombre, $predicados[strtolower($alias)] ?? [])
                    ?? $this->porRango($nombre, $rangos[strtolower($alias)] ?? [])
-                   ?? ($this->lector)($nombre);
+                   ?? ($this->lector)($nombre, Indexes::agujas($predicados[strtolower($alias)] ?? []));
         }
 
         if ($prefijar && $usadas !== null && !isset($usadas[2][strtolower($alias)])) {
@@ -2038,12 +2135,27 @@ final class Select
             $claves[] = Evaluator::compilar($e) ?? $e;
         }
 
+        // ¿Hace falta el contexto del evaluador? Si todo está compilado, no: se
+        // ahorra construir un array por fila
+        $conCtx = false;
+        foreach (array_merge($claves, array_values($args)) as $e) {
+            $conCtx = $conCtx || ($e !== null && !($e instanceof \Closure));
+        }
+        foreach ($defs as $d) {
+            $conCtx = $conCtx || ($d['orden'] ?? []) !== [];
+        }
+
         // Por grupo: la primera fila, cuántas filas, y por acumulador la suma
         // y el recuento de no nulos (SUM, AVG, COUNT), el mejor valor visto
-        // (MIN, MAX) o la lista de valores (DISTINCT, GROUP_CONCAT)
+        // (MIN, MAX) o la lista de valores (DISTINCT, GROUP_CONCAT). Cada
+        // grupo se toca por referencia: escribir $grupos[$clave]['suma'][$id]
+        // buscaba el grupo tres veces por fila y acumulador
         $grupos = [];
+        $ctx    = null;
         foreach ($filas as $fila) {
-            $ctx   = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa];
+            if ($conCtx) {
+                $ctx = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa];
+            }
             $clave = '';
             foreach ($claves as $e) {
                 $clave .= Valor::clave($e instanceof \Closure ? $e($fila) : Evaluator::evaluar($e, $ctx)) . "\0";
@@ -2052,7 +2164,8 @@ final class Select
                 $grupos[$clave] = ['fila' => $fila, 'n' => 0, 'suma' => [], 'cuenta' => [], 'mejor' => [], 'lista' => []];
                 Memoria::comprobar('la agrupación');
             }
-            $grupos[$clave]['n']++;
+            $g = &$grupos[$clave];
+            $g['n']++;
             foreach ($defs as $id => $d) {
                 if ($d['star']) {
                     continue;                           // COUNT(*): basta con contar filas
@@ -2063,25 +2176,26 @@ final class Select
                     continue;                           // los agregados ignoran los NULL
                 }
                 if ($d['distinct'] || $d['nombre'] === 'GROUP_CONCAT') {
-                    $grupos[$clave]['lista'][$id][] = $v;
+                    $g['lista'][$id][] = $v;
                     // GROUP_CONCAT … ORDER BY: con cada valor, sus claves de orden
                     foreach ($d['orden'] ?? [] as $i => $o) {
-                        $grupos[$clave]['claves'][$id][$i][] = Evaluator::evaluar($o['expr'], $ctx);
+                        $g['claves'][$id][$i][] = Evaluator::evaluar($o['expr'], $ctx);
                     }
                 } elseif ($d['nombre'] === 'MIN' || $d['nombre'] === 'MAX') {
-                    if (!array_key_exists($id, $grupos[$clave]['mejor'])) {
-                        $grupos[$clave]['mejor'][$id] = $v;
+                    if (!array_key_exists($id, $g['mejor'])) {
+                        $g['mejor'][$id] = $v;
                     } else {
-                        $c = Valor::comparar($v, $grupos[$clave]['mejor'][$id]);
+                        $c = Valor::comparar($v, $g['mejor'][$id]);
                         if ($c !== null && (($d['nombre'] === 'MIN' && $c < 0) || ($d['nombre'] === 'MAX' && $c > 0))) {
-                            $grupos[$clave]['mejor'][$id] = $v;
+                            $g['mejor'][$id] = $v;
                         }
                     }
                 } else {                                // COUNT(x), SUM, AVG
-                    $grupos[$clave]['suma'][$id]   = ($grupos[$clave]['suma'][$id] ?? 0) + Valor::aNumero($v);
-                    $grupos[$clave]['cuenta'][$id] = ($grupos[$clave]['cuenta'][$id] ?? 0) + 1;
+                    $g['suma'][$id]   = ($g['suma'][$id] ?? 0) + (is_int($v) || is_float($v) ? $v : Valor::aNumero($v));
+                    $g['cuenta'][$id] = ($g['cuenta'][$id] ?? 0) + 1;
                 }
             }
+            unset($g);
         }
         if ($exprs === [] && $grupos === []) {
             // Agregación total: una fila aunque no haya datos

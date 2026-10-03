@@ -12,27 +12,7 @@ declare(strict_types=1);
  * https://miguelenred.es/jsonsqldb
  */
 
-// Primero config.php, si existe; después la plantilla, que solo define lo que
-// falte. Así un config.php de una versión anterior, sin las opciones nuevas,
-// sigue funcionando con sus valores por defecto, y sin config.php se arranca
-// con los de la plantilla, lo justo para que el asistente pueda pintarse
-$rutaConfig = (string)(getenv('JSONSQLDBADMIN_CONFIG') ?: __DIR__ . '/config.php');
-if (is_file($rutaConfig)) {
-    require_once $rutaConfig;
-}
-require_once __DIR__ . '/config.dist.php';
-require_once __DIR__ . '/lib/Store.php';
-require_once __DIR__ . '/lib/Auth.php';
-require_once __DIR__ . '/lib/Audit.php';
-require_once __DIR__ . '/lib/Api.php';
-require_once __DIR__ . '/lib/Exportar.php';
-require_once __DIR__ . '/lib/Traductor.php';
-require_once __DIR__ . '/lib/Importar.php';
-require_once __DIR__ . '/lib/util.php';
-require_once __DIR__ . '/lib/acciones.php';
-require_once __DIR__ . '/lib/iconos.php';
-require_once __DIR__ . '/lib/Instalador.php';
-require_once __DIR__ . '/lib/Idioma.php';
+require_once __DIR__ . '/lib/arranque.php';
 
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
@@ -183,7 +163,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && post('accion') !== '') {
 // Páginas
 // ----------------------------------------------------------------------
 $paginas = ['bases', 'tablas', 'vistas', 'integridad', 'crear_tabla', 'estructura', 'datos',
-            'sql', 'auditoria', 'usuarios', 'configuracion'];
+            'sql', 'auditoria', 'usuarios', 'configuracion', 'copias'];
+if ($pagina === 'copias' && !Auth::esAdmin()) {
+    $pagina = 'bases';
+}
 if (!in_array($pagina, $paginas, true)) {
     $pagina = 'bases';
 }

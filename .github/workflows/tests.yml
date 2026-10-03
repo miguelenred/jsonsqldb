@@ -57,6 +57,11 @@ jobs:
       - name: Admin panel setup wizard and direct connection
         run: php tests/f11_asistente.php
 
+      - name: Export and import larger than PHP memory, scheduled backups (API and direct connection)
+        run: |
+          php tests/f20_memoria.php
+          php tests/f20_memoria.php --directa
+
       - name: No runtime data in the repository
         run: |
           sobra=$(git ls-files data logs jsonsqldbadmin/datos | grep -vE '(\.htaccess|web\.config|\.gitkeep)$' || true)
@@ -84,10 +89,11 @@ jobs:
           JSONSQLDB_TEST_POSTGRESQL_EXIGIR: 1
           JSONSQLDB_TEST_NORTHWIND: 1
 
-      - name: Random queries against SQLite (fixed seed, with and without indexes)
+      - name: Random queries and writes against SQLite (fixed seeds, with and without indexes)
         run: |
           php tests/f13_fuzz_contra_sqlite.php --semilla=20260930 --n=3000
           php tests/f13_fuzz_contra_sqlite.php --semilla=20260930 --n=3000 --sin-indices
+          php tests/f19_escrituras_contra_sqlite.php
 
       - name: Crash recovery
         run: php tests/f6_cortes.php

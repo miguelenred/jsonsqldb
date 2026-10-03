@@ -394,6 +394,46 @@ final class Evaluator
             case 'bin':
                 return self::compilarBinaria($n);
 
+            case 'in':
+                // IN con una lista de literales, ya preparada como conjunto en
+                // resolver(): lo mismo que in(), sin pasar por evaluar() en
+                // cada fila. Con una subconsulta, por el camino general
+                if (($n['select'] ?? null) !== null || !isset($n['conjunto'])) {
+                    return null;
+                }
+                $e = self::compilar($n['e']);
+                if ($e === null) {
+                    return null;
+                }
+                [$conjunto, $dudosos, $hayNulo] = $n['conjunto'];
+                $no = (bool)$n['not'];
+                return static function (array $f) use ($e, $conjunto, $dudosos, $hayNulo, $no) {
+                    if ($conjunto === [] && $dudosos === [] && !$hayNulo) {
+                        return $no ? 1 : 0;
+                    }
+                    $v = $e($f);
+                    if ($v === null) {
+                        return null;
+                    }
+                    $candidatos = $dudosos;
+                    if (Indexes::claveFiable($v)) {
+                        $clave = Indexes::clave([$v]);
+                        if ($clave !== null && isset($conjunto[$clave])) {
+                            $candidatos = $dudosos === [] ? $conjunto[$clave] : array_merge($conjunto[$clave], $dudosos);
+                        }
+                    } else {
+                        foreach ($conjunto as $grupo) {
+                            $candidatos = array_merge($candidatos, $grupo);
+                        }
+                    }
+                    foreach ($candidatos as $x) {
+                        if (Valor::comparar($v, $x) === 0) {
+                            return $no ? 0 : 1;
+                        }
+                    }
+                    return $hayNulo ? null : ($no ? 1 : 0);
+                };
+
             case 'un':
                 $e = self::compilar($n['e']);
                 if ($e === null) {
@@ -457,6 +497,10 @@ final class Evaluator
 
     private static function compilarBinaria(array $n): ?\Closure
     {
+        $directa = self::compararConLiteral($n);
+        if ($directa !== null) {
+            return $directa;
+        }
         $i = self::compilar($n['i']);
         $d = self::compilar($n['d']);
         if ($i === null || $d === null) {
@@ -464,10 +508,14 @@ final class Evaluator
         }
         switch ($n['op']) {
             case 'AND':
+                // Una comparación devuelve 0, 1 o NULL: esos se miran sin
+                // llamar a Valor::verdadero()
                 return static function (array $f) use ($i, $d) {
-                    $a = Valor::verdadero($i($f));
+                    $a = $i($f);
+                    $a = $a === 0 ? false : ($a === 1 ? true : Valor::verdadero($a));
                     if ($a === false) { return 0; }
-                    $b = Valor::verdadero($d($f));
+                    $b = $d($f);
+                    $b = $b === 0 ? false : ($b === 1 ? true : Valor::verdadero($b));
                     if ($b === false) { return 0; }
                     return ($a === null || $b === null) ? null : 1;
                 };
@@ -538,6 +586,59 @@ final class Evaluator
                 };
         }
         return null;
+    }
+
+    /**
+     * columna OP literal (o literal OP columna), que es casi todo WHERE: la
+     * columna se lee de la fila y el literal va dentro de la función, sin una
+     * llamada para cada lado, y con dos números o con un texto que no es un
+     * número se compara directamente. Es el mismo resultado que
+     * Valor::comparar(), que es quien decide en cualquier otro caso. Null si
+     * no es esa forma.
+     */
+    private static function compararConLiteral(array $n): ?\Closure
+    {
+        $invertido = ['=' => '=', '<>' => '<>', '<' => '>', '<=' => '>=', '>' => '<', '>=' => '<='];
+        $op = $n['op'];
+        if (!isset($invertido[$op])) {
+            return null;
+        }
+        [$col, $lit] = [$n['i'], $n['d']];
+        if ($col['k'] === 'lit' && $lit['k'] === 'col') {
+            [$col, $lit, $op] = [$lit, $col, $invertido[$op]];
+        }
+        if ($col['k'] !== 'col' || isset($col['externa']) || !isset($col['clave']) || $lit['k'] !== 'lit' || $lit['v'] === null) {
+            return null;
+        }
+        $c = $col['clave'];
+        $v = $lit['v'];
+        $numero = is_int($v) || is_float($v);
+        // Un texto que no es un número se compara con otro texto byte a byte
+        $texto  = is_string($v) && !is_numeric($v) && !is_numeric(trim($v));
+        return static function (array $f) use ($c, $v, $op, $numero, $texto) {
+            $x = $f[$c] ?? null;
+            if ($x === null) {
+                return null;
+            }
+            if ($numero && (is_int($x) || is_float($x))) {
+                $r = $x <=> $v;
+            } elseif ($texto && is_string($x)) {
+                $r = strcmp($x, $v) <=> 0;
+            } else {
+                $r = Valor::comparar($x, $v);
+                if ($r === null) {
+                    return null;
+                }
+            }
+            switch ($op) {
+                case '=':  return $r === 0 ? 1 : 0;
+                case '<>': return $r !== 0 ? 1 : 0;
+                case '<':  return $r < 0 ? 1 : 0;
+                case '<=': return $r <= 0 ? 1 : 0;
+                case '>':  return $r > 0 ? 1 : 0;
+                default:   return $r >= 0 ? 1 : 0;
+            }
+        };
     }
 
     private static function binaria(array $n, array $ctx)

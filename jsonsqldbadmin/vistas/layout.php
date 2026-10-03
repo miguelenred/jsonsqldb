@@ -15,7 +15,7 @@ $tablaAct = $tabla ?? '';
 $mensajes = $suelto ? $mensajes : flashes();
 $titulos  = ['bases' => t('Bases de datos'), 'tablas' => t('Tablas'), 'vistas' => t('Vistas'), 'sql' => t('Consola SQL'),
              'integridad' => t('Integridad'), 'crear_tabla' => t('Nueva tabla'), 'auditoria' => t('Auditoría'),
-             'usuarios' => t('Usuarios'), 'configuracion' => t('Configuración'), 'error' => 'Error',
+             'usuarios' => t('Usuarios'), 'configuracion' => t('Configuración'), 'copias' => t('Copias programadas'), 'error' => 'Error',
              'login' => 'Acceso', 'instalar' => t('Instalación')];
 $titulo   = $titulos[$vistaActual] ?? '';
 
@@ -61,7 +61,10 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 </body>
 </html>
 <?php return; endif; ?>
-<body class="app">
+<body class="app"<?php
+    // Sin cron, las copias pendientes las pide el navegador aparte (assets/panel.js)
+    try { $copiasPendientes = Copias::hayPendientes(); } catch (Throwable $e) { $copiasPendientes = false; }
+    if ($copiasPendientes): ?> data-copias="<?= h(Auth::csrf()) ?>"<?php endif; ?>>
 
 <aside class="sidebar" id="sidebar" aria-label="<?= h(t('Navegación')) ?>">
     <a class="brand" href="<?= h(url(['p' => 'bases'])) ?>">
@@ -78,6 +81,7 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
         <?= $nav('auditoria', 'history', t('Auditoría')) ?>
         <?= $nav('usuarios', 'users', t('Usuarios')) ?>
         <?php if (Auth::esAdmin()): ?>
+            <?= $nav('copias', 'archive', t('Copias programadas')) ?>
             <?= $nav('configuracion', 'settings', t('Configuración')) ?>
         <?php endif; ?>
     </nav>

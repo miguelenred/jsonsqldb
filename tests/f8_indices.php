@@ -105,6 +105,46 @@ chk('IN con muchas claves repartidas da lo mismo por el índice que recorriendo 
     }
     return true;
 });
+chk('col = texto sin índice salta las partes que no lo contienen y da lo mismo que sin saltar (2.7.5)', function () use ($bd) {
+    // mote no tiene índice: se recorre la tabla, pero una parte cuyo fichero
+    // no contiene el texto buscado no se decodifica. Comparado con la misma
+    // condición escrita para que no se pueda aprovechar (mote || '')
+    $bd->consultar("UPDATE gente SET mote = 'raro/ñ\"x' WHERE id = 400");      // con caracteres que no se buscan
+    $bd->consultar("UPDATE gente SET mote = '00123' WHERE id = 401");           // parece un número
+    $casos = ["mote = 'm599'", "mote = 'm1'", "mote = 'no está'", "mote IN ('m3', 'm598', 'nada')",
+              "mote = 'raro/ñ\"x'", "mote = '00123'", "mote = 'm599' AND edad > 0", "mote = 'Madrid'",
+              "ciudad = 'Rojales' AND mote = 'm2'", "mote = 'm' || '599'"];
+    foreach ($casos as $c) {
+        $sin = str_replace('mote ', "mote || '' ", $c);
+        if (!igual($bd, "SELECT * FROM gente WHERE $c ORDER BY id", "SELECT * FROM gente WHERE $sin ORDER BY id")) {
+            return "distinto: $c";
+        }
+    }
+    return true;
+});
+chk('UPDATE y DELETE con col = texto sin índice tocan solo esas filas y dejan las demás igual (2.7.5)', function () use ($bd) {
+    // Sin índice sobre mote, se leen solo las partes que contienen el texto,
+    // sin cargar la tabla: el resto tiene que quedar exactamente como estaba.
+    // Sobre una copia, para no cambiar los datos de las demás pruebas
+    $bd->consultar('CREATE TABLE gente_tx (id INTEGER PRIMARY KEY, dni VARCHAR(12) UNIQUE, ciudad VARCHAR(20),
+                                           edad INTEGER, mote VARCHAR(20))');
+    $bd->consultar('INSERT INTO gente_tx SELECT id, dni, ciudad, edad, mote FROM gente ORDER BY id');
+    $antes = $bd->consultar('SELECT * FROM gente_tx ORDER BY id');
+    $bd->consultar("UPDATE gente_tx SET edad = edad + 1000 WHERE mote = 'm599'");
+    $bd->consultar("DELETE FROM gente_tx WHERE mote IN ('m598', 'm3', 'no está')");
+    $bd->consultar("UPDATE gente_tx SET edad = 1 WHERE mote = 'nada'");
+    $esperado = [];
+    foreach ($antes as $f) {
+        if (in_array($f['mote'], ['m598', 'm3'], true)) { continue; }
+        if ($f['mote'] === 'm599') { $f['edad'] += 1000; }
+        $esperado[] = $f;
+    }
+    $despues = $bd->consultar('SELECT * FROM gente_tx ORDER BY id');
+    // Y el índice de dni sigue cuadrando con los datos tras el borrado
+    $porIndice = $bd->consultar("SELECT id FROM gente_tx WHERE dni = 'D0597'");
+    $bd->consultar('DROP TABLE gente_tx');
+    return count($antes) > 500 && $despues === $esperado && array_column($porIndice, 'id') === [597] ?: 'distinto tras escribir';
+});
 chk('búsqueda por PK igual que el escaneo', fn() => igual($bd,
     'SELECT * FROM gente WHERE id = 431',
     'SELECT * FROM gente WHERE id + 0 = 431'));
@@ -142,6 +182,19 @@ esperaError('columna repetida en el índice', 'SCHEMA',
 echo "\n== Índices compuestos ==\n";
 chk('CREATE INDEX sobre dos columnas', function () use ($bd) {
     $bd->consultar('CREATE INDEX idx_ciu_edad ON gente (ciudad, edad)');
+    return true;
+});
+chk('COUNT(*) con igualdades que cubre un índice cuenta lo mismo que recorriendo (2.7.5)', function () use ($bd) {
+    // Se cuentan las posiciones del índice sin leer filas; con números u
+    // otras condiciones va por el camino normal. Todas contra el recorrido
+    $casos = ["ciudad = 'Elche'", "ciudad = 'Nadie'", "ciudad IN ('Elche', 'Rojales', 'x')", "dni = 'D0007'",
+              "dni IN ('D0001', 'D0001', 'D9999')", "ciudad = 'Elche' AND edad > 30", "edad = 30", "ciudad = 'Elche' AND ciudad = 'Rojales'"];
+    foreach ($casos as $c) {
+        $sin = preg_replace("/\\b(ciudad|dni|edad) /", "\$1 || '' ", $c);
+        $a = $bd->consultar("SELECT COUNT(*) AS n FROM gente WHERE $c");
+        $b = $bd->consultar("SELECT COUNT(*) AS n FROM gente WHERE $sin");
+        if ($a !== $b) { return "$c: " . json_encode($a) . ' / ' . json_encode($b); }
+    }
     return true;
 });
 chk('las dos columnas igual que el escaneo', fn() => igual($bd,

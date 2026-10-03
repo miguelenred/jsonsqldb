@@ -83,6 +83,8 @@ final class Show
                 'notnull'  => $c['notnull'] ? 1 : 0,
                 'unico'    => $c['unique'] ? 1 : 0,
                 'defecto'  => $c['default'],
+                // El DEFAULT que se calcula al insertar (2.8): su SQL, o null
+                'defecto_calculado' => $c['default_expr'] ?? null,
             ];
         }
         return $out;

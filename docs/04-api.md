@@ -218,6 +218,9 @@ $db->consultar('UPDATE customers SET balance = balance + ? WHERE id = ?', [25.40
 // INSERT / UPDATE / DELETE / DDL
 {"success":true,"filas":2,"mensaje":"2 fila(s) insertada(s)"}
 
+// INSERT / UPDATE / DELETE … RETURNING id, name (2.8): the rows written, like a SELECT
+[ {"id":3,"name":"Marta"} ]
+
 // Error
 {"error":"Error en la consulta: CONSTRAINT: La columna 'customers.name' no admite NULL"}
 ```
@@ -478,10 +481,10 @@ them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 
 ```
 php tests/f1_nucleo.php       → OK: 66
-php tests/f2_parser.php       → OK: 70
+php tests/f2_parser.php       → OK: 72
 php tests/f2_select.php       → OK: 151
-php tests/f3_escrituras.php   → OK: 63
+php tests/f3_escrituras.php   → OK: 68
 php tests/f4_api.php          → OK: 61
-php tests/f5_esquema.php      → OK: 96
-php tests/f5_admin.php        → OK: 128
+php tests/f5_esquema.php      → OK: 105
+php tests/f5_admin.php        → OK: 142
 ```

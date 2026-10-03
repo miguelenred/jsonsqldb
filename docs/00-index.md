@@ -46,7 +46,7 @@ data/             one folder per database, one .json per table
 | [02-queries.md](02-queries.md) | `SELECT`: syntax, functions, alphabetical order, performance |
 | [03-writes.md](03-writes.md) | `INSERT`/`UPDATE`/`DELETE`, DDL, keys, triggers, views, integrity |
 | [04-api.md](04-api.md) | HTTP endpoint, HMAC signature, bound parameters, clients |
-| [05-admin.md](05-admin.md) | jsonSQLDBadmin: installation, users, what it can do, import and export with other engines, languages, configuration |
+| [05-admin.md](05-admin.md) | jsonSQLDBadmin: installation, users, what it can do, import and export with other engines and without size limits, Excel, scheduled backups, languages, configuration |
 | [../nginx/README.md](../nginx/README.md) | **Required if you use nginx**: the equivalent of the `.htaccess` rules |
 | [../litespeed/README.md](../litespeed/README.md) | LiteSpeed Enterprise (works as Apache) and OpenLiteSpeed (**needs the rules in the vhost**) |
 
@@ -99,30 +99,32 @@ $rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja']
 
 ## Tests
 
-Twelve files, no dependencies. They use temporary folders and never touch your
+The test files, no dependencies. They use temporary folders and never touch your
 data.
 
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 70    parser and bound parameters
+php tests/f2_parser.php       → OK: 72    parser and bound parameters
 php tests/f2_select.php       → OK: 151   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
+php tests/f3_escrituras.php   → OK: 68    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 61    real requests against the API
-php tests/f5_esquema.php      → OK: 96    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 139   the panel, driven like a user
+php tests/f5_esquema.php      → OK: 105   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 142   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 62    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
+php tests/f8_indices.php      → OK: 65    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 33    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 18   indexes corrected instead of rebuilt
 php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
 php tests/f12_contra_sqlite.php → OK: 4    145 queries and 16 writes, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 18 (30 with every server)  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
+php tests/f14_volcados.php     → OK: 31 with every server  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
 php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQL and PostgreSQL do the same there
 php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
 php tests/f18_access.php       → OK: 13    Microsoft Access: the PowerShell script, import and export
+php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries on tables of many parts, against SQLite
+php tests/f20_memoria.php      → OK: 19    the panel with 32 MB: export, import and backups of a larger database (--directa: 20)
 ```
 
 `f5_admin.php` needs the cURL extension and starts two PHP built-in servers,

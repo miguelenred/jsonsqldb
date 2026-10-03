@@ -547,29 +547,13 @@ final class Importar
                 if (substr_count($primera, $s) > substr_count($primera, $sep)) { $sep = $s; }
             }
             $cols = array_map('trim', str_getcsv(rtrim($primera, "\r\n"), $sep, '"', ''));
-            if ($cols === [] || in_array('', $cols, true)) {
-                throw new RuntimeException(t('La primera línea tiene que traer los nombres de las columnas.'));
-            }
-            $cab = 'INSERT INTO ' . cita($tabla) . ' (' . implode(', ', array_map('cita', $cols)) . ') VALUES ';
-            $marcas = '(' . implode(', ', array_fill(0, count($cols), '?')) . ')';
-            $lote = [];
-            $filas = 0;
-            $linea = 1;
             $noUtf8 = 0;
-            $insertar = static function () use (&$lote, &$filas, $base, $cab, $marcas): void {
-                if ($lote === []) { return; }
-                Api::sql($base, $cab . implode(', ', array_fill(0, count($lote), $marcas)), array_merge(...$lote));
-                $filas += count($lote);
-                $lote = [];
-            };
-            try {
+            $filas = (static function () use ($fh, $sep, &$noUtf8): Generator {
+                $linea = 1;
                 while (($r = fgetcsv($fh, 0, $sep, '"', '')) !== false) {
                     $linea++;
                     if ($r === [null]) { continue; }                       // línea en blanco
-                    if (count($r) !== count($cols)) {
-                        throw new RuntimeException('tiene ' . count($r) . ' campo(s) y la cabecera ' . count($cols) . '.');
-                    }
-                    $lote[] = array_map(static function ($v) use (&$noUtf8) {
+                    yield $linea => array_map(static function ($v) use (&$noUtf8) {
                         if ($v === '' || $v === null) {
                             return null;
                         }
@@ -579,23 +563,89 @@ final class Importar
                         }
                         return $v;
                     }, $r);
-                    if (count($lote) >= self::LOTE) {
-                        $insertar();
-                    }
                 }
-                $insertar();
-            } catch (Throwable $e) {
-                throw new RuntimeException($deshacible
-                    ? t('El problema está en la línea {linea} o en las {lote} anteriores: {error}. No se ha cargado nada: la tabla ha vuelto a como estaba.',
-                        ['linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')])
-                    : t('Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: no hay transacciones.',
-                        ['n' => $filas, 'linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
-            }
+            })();
+            $r = self::cargarFilas($cols, $filas, $base, $tabla, $deshacible);
         } finally {
             fclose($fh);
         }
-        return t("{n} fila(s) cargadas en '{tabla}'.", ['n' => $filas, 'tabla' => $tabla])
-            . ($noUtf8 > 0 ? ' ' . t('Campos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252: {n}.', ['n' => $noUtf8]) : '');
+        return $r . ($noUtf8 > 0 ? ' ' . t('Campos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252: {n}.', ['n' => $noUtf8]) : '');
+    }
+
+    /**
+     * Inserta en $tabla las filas que llegan (número de línea o de fila =>
+     * valores, en el orden de $cols) en lotes de LOTE: en memoria solo hay un
+     * lote, sea cual sea el tamaño del fichero.
+     *
+     * @param list<string> $cols
+     * @param iterable<int,list<mixed>> $filas
+     */
+    private static function cargarFilas(array $cols, iterable $filas, string $base, string $tabla, bool $deshacible): string
+    {
+        if ($cols === [] || in_array('', $cols, true)) {
+            throw new RuntimeException(t('La primera línea tiene que traer los nombres de las columnas.'));
+        }
+        $cab = 'INSERT INTO ' . cita($tabla) . ' (' . implode(', ', array_map('cita', $cols)) . ') VALUES ';
+        $marcas = '(' . implode(', ', array_fill(0, count($cols), '?')) . ')';
+        $lote = [];
+        $hechas = 0;
+        $linea = 1;
+        $insertar = static function () use (&$lote, &$hechas, $base, $cab, $marcas): void {
+            if ($lote === []) { return; }
+            Api::sql($base, $cab . implode(', ', array_fill(0, count($lote), $marcas)), array_merge(...$lote));
+            $hechas += count($lote);
+            $lote = [];
+        };
+        try {
+            foreach ($filas as $linea => $r) {
+                if (count($r) !== count($cols)) {
+                    throw new RuntimeException('tiene ' . count($r) . ' campo(s) y la cabecera ' . count($cols) . '.');
+                }
+                $lote[] = $r;
+                if (count($lote) >= self::LOTE) {
+                    $insertar();
+                }
+            }
+            $insertar();
+        } catch (Throwable $e) {
+            throw new RuntimeException($deshacible
+                ? t('El problema está en la línea {linea} o en las {lote} anteriores: {error}. No se ha cargado nada: la tabla ha vuelto a como estaba.',
+                    ['linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')])
+                : t('Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: no hay transacciones.',
+                    ['n' => $hechas, 'linea' => $linea, 'lote' => self::LOTE, 'error' => rtrim($e->getMessage(), '. ')]), 0, $e);
+        }
+        return t("{n} fila(s) cargadas en '{tabla}'.", ['n' => $hechas, 'tabla' => $tabla]);
+    }
+
+    /** Importa la primera hoja de un .xlsx en una tabla; con $rutaBase, todo o nada (como sql()). */
+    public static function xlsx(string $fichero, string $base, string $tabla, ?string $rutaBase = null): string
+    {
+        if (!class_exists('ZipArchive') || !class_exists('XMLReader')) {
+            throw new RuntimeException(t('Importar un Excel necesita las extensiones zip y xml de PHP.'));
+        }
+        return self::deshacible($rutaBase, static function (bool $d) use ($fichero, $base, $tabla): string {
+            $hoja = new LectorXlsx($fichero);
+            try {
+                $filas = $hoja->filas();
+                $cols  = $filas->valid() ? array_map(static fn($v): string => trim((string)$v), $filas->current()) : [];
+                $filas->next();
+                $resto = (static function () use ($filas, $cols): Generator {
+                    // Las filas, con tantos valores como columnas: Excel no guarda
+                    // las celdas vacías del final de una fila, y una con formato
+                    // pero sin dato llega vacía. Un dato de más sí es un error
+                    for (; $filas->valid(); $filas->next()) {
+                        $r = array_pad($filas->current(), count($cols), null);
+                        while (count($r) > count($cols) && end($r) === null) {
+                            array_pop($r);
+                        }
+                        yield $filas->key() => $r;
+                    }
+                })();
+                return self::cargarFilas($cols, $resto, $base, $tabla, $d);
+            } finally {
+                $hoja->cerrar();
+            }
+        });
     }
 
     /** Ficheros sueltos que sí se aceptan además de los .json */

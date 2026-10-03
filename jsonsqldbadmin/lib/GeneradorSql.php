@@ -1344,8 +1344,9 @@ final class GeneradorSql
     private function fecha(string $f, array $args): string
     {
         $d = $this->d;
-        $base = array_shift($args);
-        $ahora = $base !== null && $base['k'] === 'lit' && is_string($base['v']) && strtolower($base['v']) === 'now';
+        // Sin argumentos (DATETIME(), y CURRENT_TIMESTAMP, que es eso) es 'now'
+        $base = array_shift($args) ?? ['k' => 'lit', 'v' => 'now'];
+        $ahora = $base['k'] === 'lit' && is_string($base['v']) && strtolower($base['v']) === 'now';
         // 'unixepoch': el valor son segundos desde 1970, en UTC
         $epoch = isset($args[0]) && $args[0]['k'] === 'lit' && is_string($args[0]['v']) && strtolower(trim($args[0]['v'])) === 'unixepoch';
         if ($epoch) {

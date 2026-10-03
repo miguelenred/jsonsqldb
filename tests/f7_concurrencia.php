@@ -547,11 +547,6 @@ chk('dos escrituras sobre grupos de tablas sin relación no se esperan', functio
              . '$st->desbloquear();';
     };
 
-    $lanzar = static function (string $codigo) {
-        return proc_open([PHP_BINARY, '-r', $codigo],
-                         [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub) ?: null;
-    };
-
     $ventanas = [];
     foreach ([['a', 'b'], ['a', 'a']] as $par) {
         $procs = [];

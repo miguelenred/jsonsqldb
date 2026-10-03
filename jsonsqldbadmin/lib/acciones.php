@@ -205,41 +205,111 @@ function ejecutarAccion(string $accion): void
             if (mismoHostQueLaApi() === false) {
                 throw new RuntimeException(t('Restaurar desde ZIP necesita que el panel y el motor estén en la misma máquina, porque escribe los ficheros directamente. Usa el volcado en SQL: se importa desde la página de la base y funciona entre máquinas distintas.'));
             }
-            $subido = $_FILES['zip'] ?? null;
-            if (!is_array($subido) || ($subido['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
-                throw new RuntimeException(t('No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP (upload_max_filesize y post_max_size).'));
+            [$fichero, $original, $porTrozos] = Subidas::fichero('zip');
+            try {
+                // rutaDeLaBase() ya comprueba que la carpeta existe y que el motor
+                // está en esta máquina, y explica el motivo si no es así
+                $resumen = Importar::zip($fichero, $nombre, rutaDeLaBase($nombre));
+            } finally {
+                Subidas::borrar($fichero, $porTrozos);
             }
-            if (!is_uploaded_file((string)$subido['tmp_name'])) {
-                throw new RuntimeException(t('El fichero recibido no es una subida válida.'));
-            }
-
-            // rutaDeLaBase() ya comprueba que la carpeta existe y que el motor
-            // está en esta máquina, y explica el motivo si no es así
-            $resumen = Importar::zip((string)$subido['tmp_name'], $nombre, rutaDeLaBase($nombre));
-            Audit::registrar('importar_zip', $resumen, $nombre);
+            Audit::registrar('importar_zip', $resumen . ' (' . $original . ')', $nombre);
             flash('success', t('Base \'{nombre}\' restaurada. {resumen}', ['nombre' => $nombre, 'resumen' => $resumen]));
             redirigir(['p' => 'bases']);
 
         case 'importar_sql':
         case 'importar_csv':
+        case 'importar_xlsx':
             Auth::exigirAdmin();
+            @set_time_limit(0);                    // un fichero grande tarda lo que tarda
             $nombre = nombreBase(post('db'));
-            $subido = $_FILES['fichero'] ?? null;
-            if (!is_array($subido) || ($subido['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
-                || !is_uploaded_file((string)$subido['tmp_name'])) {
-                throw new RuntimeException(t('No llegó ningún fichero. Comprueba que no supera el límite de subida de PHP (upload_max_filesize y post_max_size).'));
+            [$fichero, $original, $porTrozos] = Subidas::fichero('fichero');
+            try {
+                // Con la carpeta de la base a mano (misma máquina), todo o nada
+                $ruta = rutaDeLaBaseSiSeAlcanza($nombre);
+                if ($accion === 'importar_sql') {
+                    $resumen = Importar::sql($fichero, $nombre, (string)post('formato', 'auto'), $ruta);
+                } elseif ($accion === 'importar_csv') {
+                    $resumen = Importar::csv($fichero, $nombre, identificador(post('tabla'), 'tabla'), $ruta);
+                } else {
+                    $resumen = Importar::xlsx($fichero, $nombre, identificador(post('tabla'), 'tabla'), $ruta);
+                }
+            } finally {
+                Subidas::borrar($fichero, $porTrozos);
             }
-            // Con la carpeta de la base a mano (misma máquina), todo o nada
-            $ruta = rutaDeLaBaseSiSeAlcanza($nombre);
-            if ($accion === 'importar_sql') {
-                $resumen = Importar::sql((string)$subido['tmp_name'], $nombre, (string)post('formato', 'auto'), $ruta);
-            } else {
-                $tabla   = identificador(post('tabla'), 'tabla');
-                $resumen = Importar::csv((string)$subido['tmp_name'], $nombre, $tabla, $ruta);
-            }
-            Audit::registrar($accion, $resumen . ' (' . basename((string)$subido['name']) . ')', $nombre);
+            Audit::registrar($accion, $resumen . ' (' . $original . ')', $nombre);
             flash('success', $resumen);
             redirigir(['p' => 'tablas', 'db' => $nombre]);
+
+        case 'subir_trozo':
+            // Un trozo de un fichero que se sube por partes (ver Subidas): la
+            // respuesta es JSON, para el navegador, nunca una redirección
+            header('Content-Type: application/json; charset=UTF-8');
+            try {
+                Auth::exigirAdmin();
+                $recibido = Subidas::recibirTrozo(post('id'), (int)post('desde'), $_FILES['trozo'] ?? null);
+                echo json_encode(['recibido' => $recibido]);
+            } catch (Throwable $e) {
+                http_response_code(400);
+                echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+            }
+            exit;
+
+        // ---------------- Copias programadas ----------------
+        case 'programar_copia':
+            Auth::exigirAdmin();
+            $p = Copias::anadir($_POST);
+            Audit::registrar('programar_copia', $p['frecuencia'] . ' · ' . $p['formato'], $p['base']);
+            flash('success', t('Copia de \'{base}\' programada.', ['base' => $p['base']]));
+            redirigir(['p' => 'copias']);
+
+        case 'borrar_programacion':
+            Auth::exigirAdmin();
+            Copias::borrar(post('id'));
+            Audit::registrar('borrar_programacion', post('id'));
+            flash('success', t('Programación quitada.'));
+            redirigir(['p' => 'copias']);
+
+        case 'copia_ahora':
+            Auth::exigirAdmin();
+            @set_time_limit(0);
+            flash('success', Copias::ejecutar(post('id')));
+            redirigir(['p' => 'copias']);
+
+        case 'descargar_copia':
+            Auth::exigirAdmin();
+            $ruta = Copias::ruta(nombreBase(post('nombre')), post('fichero'));
+            while (ob_get_level() > 0) { ob_end_clean(); }
+            header('Content-Type: ' . (str_ends_with($ruta, '.zip') ? 'application/zip' : 'text/plain; charset=UTF-8'));
+            header('Content-Disposition: attachment; filename="' . basename($ruta) . '"');
+            header('Content-Length: ' . (string)filesize($ruta));
+            header('Cache-Control: no-store');
+            readfile($ruta);
+            exit;
+
+        case 'borrar_copia':
+            Auth::exigirAdmin();
+            $nombre = nombreBase(post('nombre'));
+            @unlink(Copias::ruta($nombre, post('fichero')));
+            Audit::registrar('borrar_copia', post('fichero'), $nombre);
+            flash('success', t('Copia borrada.'));
+            redirigir(['p' => 'copias']);
+
+        case 'ejecutar_copias':
+            // La pide el navegador por su cuenta cuando la página avisa de que
+            // hay copias pendientes (assets/panel.js): sigue aunque se cierre
+            // la página, y suelta la sesión para no bloquear las siguientes
+            header('Content-Type: application/json; charset=UTF-8');
+            ignore_user_abort(true);
+            @set_time_limit(0);
+            session_write_close();
+            try {
+                echo json_encode(['hechas' => Copias::ejecutarPendientes()], JSON_UNESCAPED_UNICODE);
+            } catch (Throwable $e) {
+                http_response_code(500);
+                echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+            }
+            exit;
 
         // ---------------- Vistas ----------------
         case 'crear_vista':
@@ -368,6 +438,7 @@ function ejecutarAccion(string $accion): void
 
         // ---------------- Exportación ----------------
         case 'exportar':
+            @set_time_limit(0);                    // una exportación grande tarda lo que tarda
             $formato = post('formato') === 'sql' ? 'sql' : 'csv';
             $sql     = post('sql');
 
@@ -394,16 +465,14 @@ function ejecutarAccion(string $accion): void
                 $nombre = tablaDeLaConsulta($sql);
             }
 
-            $filas = Api::sql($base, $sql, $params);
-            if (isset($filas['success'])) {
+            // SHOW devuelve poco y no admite LIMIT: entero. Un SELECT, por lotes
+            // si no cabe en memoria (ver Lotes)
+            $filas = preg_match('/^\s*SHOW\b/i', $sql) ? Api::sql($base, $sql, $params) : Lotes::filas($base, $sql, $params);
+            if (is_array($filas) && isset($filas['success'])) {
                 throw new RuntimeException(t('Esa sentencia no devuelve filas que exportar.'));
             }
-            if (count($filas) > ADMIN_EXPORT_MAX) {
-                throw new RuntimeException(t('La exportación supera el tope de {n} filas (ADMIN_EXPORT_MAX). Acota la consulta con WHERE o LIMIT.',
-                    ['n' => Idioma::numero((int)ADMIN_EXPORT_MAX)]));
-            }
 
-            Audit::registrar('exportar_' . $formato, $nombre . ' · ' . count($filas) . ' fila(s)', $base);
+            Audit::registrar('exportar_' . $formato, $nombre, $base);
 
             if ($formato === 'sql') {
                 Exportar::inserts($filas, $nombre);
@@ -412,6 +481,7 @@ function ejecutarAccion(string $accion): void
             // Exportar termina la petición
 
         case 'exportar_base':
+            @set_time_limit(0);
             $nombre  = nombreBase(post('nombre'));
             $formato = in_array(post('formato'), ['zip', 'mysql', 'postgresql', 'sqlserver', 'access'], true) ? post('formato') : 'sql';
 
@@ -426,29 +496,10 @@ function ejecutarAccion(string $accion): void
                 Exportar::zip($nombre, $ruta);       // termina la petición
             }
 
-            // Primero se cuentan las filas (para el tope); las de cada tabla se
-            // piden al escribir esa tabla, y en memoria solo hay una a la vez
-            $tablas = [];
-            $filas  = 0;
-            foreach (Api::sql($nombre, 'SHOW TABLES') as $t) {
-                $tabla = (string)$t['tabla'];
-                $n = (int)(Api::sql($nombre, 'SELECT COUNT(*) AS n FROM ' . cita($tabla))[0]['n'] ?? 0);
-                $filas += $n;
-                if ($filas > ADMIN_EXPORT_MAX) {
-                    throw new RuntimeException(t('El volcado supera el tope de {n} filas (ADMIN_EXPORT_MAX). Exporta las tablas por separado o usa el ZIP.',
-                        ['n' => Idioma::numero((int)ADMIN_EXPORT_MAX)]));
-                }
-                $tablas[] = [
-                    'tabla'    => $tabla,
-                    'columnas' => Api::sql($nombre, 'SHOW SCHEMA ' . cita($tabla)),
-                    'claves'   => Api::sql($nombre, 'SHOW KEYS FROM ' . cita($tabla)),
-                    'n'        => $n,
-                ];
-            }
-            Audit::registrar('exportar_base', $nombre . ' · ' . $filas . ' fila(s)', $nombre);
+            $tablas = Exportar::tablasDe($nombre);
+            Audit::registrar('exportar_base', $nombre . ' · ' . array_sum(array_column($tablas, 'n')) . ' fila(s)', $nombre);
             Exportar::base($nombre, $tablas, Api::sql($nombre, 'SHOW TRIGGERS'), Api::sql($nombre, 'SHOW VIEWS'),
-                           Api::sql($nombre, 'SHOW INDEXES'), $formato === 'sql' ? 'sqlite' : $formato,
-                           static fn(string $tabla): array => Api::sql($nombre, 'SELECT * FROM ' . cita($tabla)));
+                           Api::sql($nombre, 'SHOW INDEXES'), $formato === 'sql' ? 'sqlite' : $formato, Exportar::cargador($nombre, $tablas));
             // Exportar termina la petición
 
         // ---------------- Usuarios ----------------

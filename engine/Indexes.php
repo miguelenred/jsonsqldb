@@ -145,7 +145,8 @@ final class Indexes
     private static function nombreAuto(array $columnas): string
     {
         $nombre = self::PREFIJO_AUTO . implode('_', $columnas);
-        return strlen($nombre) <= 64
+        // Una columna con espacios o signos no puede ir en un nombre de fichero
+        return preg_match(self::RE_NOMBRE, $nombre)
             ? $nombre
             : self::PREFIJO_AUTO . md5(strtolower(implode(',', $columnas)));
     }
@@ -605,6 +606,37 @@ final class Indexes
     // ------------------------------------------------------------------
     // Predicados aprovechables de un WHERE
     // ------------------------------------------------------------------
+
+    /**
+     * De las igualdades del WHERE (col = 'texto' o col IN ('a', 'b')), los
+     * textos que una parte tiene que contener, entre comillas como van en el
+     * fichero, para que alguna de sus filas pueda cumplirlas (ver
+     * Storage::parte()). Sirven a la lectura y a UPDATE y DELETE. Solo textos que no son números (un número se compara
+     * por su valor, '5' = 5.0) y de caracteres que ningún JSON escribe de otra
+     * manera: letras, cifras, espacios y signos corrientes, sin comillas,
+     * barras ni < > & '. Con cualquier otro valor, esa columna no aporta nada.
+     *
+     * @param array<string, list<mixed>> $predicados columna => valores
+     * @return list<list<string>>
+     */
+    public static function agujas(array $predicados): array
+    {
+        $out = [];
+        foreach ($predicados as $valores) {
+            $lista = [];
+            foreach ($valores as $v) {
+                if (!is_string($v) || $v === '' || is_numeric(trim($v)) || !preg_match('#^[\x20-\x7E]+$#', $v)
+                    || strpbrk($v, "\"\\/<>&'") !== false) {
+                    continue 2;
+                }
+                $lista[] = '"' . $v . '"';
+            }
+            if ($lista !== []) {
+                $out[] = $lista;
+            }
+        }
+        return $out;
+    }
 
     /**
      * Saca del WHERE los predicados de igualdad que un índice puede resolver.

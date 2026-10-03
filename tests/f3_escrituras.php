@@ -128,6 +128,99 @@ chk('el autoincremento continúa tras un id explícito mayor', function () use (
     $bd->consultar("INSERT INTO clientes (nombre) VALUES ('Óscar')");
     return uno("SELECT id FROM clientes WHERE nombre = 'Óscar'") === 101;
 });
+chk('un DELETE en medio mueve las filas por bloques de texto y deja los mismos ficheros e índices que reescribiendo (2.8)', function () use ($raiz) {
+    // Al borrar, las filas de detrás se mueven como líneas de texto, sin
+    // decodificarlas, y sus claves de índice salen de los trozos de antes
+    // (Storage::recolocarPorBloques()). Cada parte tiene que quedar byte a
+    // byte como la escribiría la escritura completa, y cada índice igual que
+    // si se rehiciera de las filas
+    $dir = "$raiz/bloques";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/e")) { Database::borrar('e', $dir); }
+    Database::crear('e', $dir);
+    $bd = new Database('e', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, s VARCHAR(80) UNIQUE, d DOUBLE, n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_n ON t (n)');
+    $raros = ["con \"comillas\"", "barra \\ y /", "salto\nde línea", "acentos áéíóú ñ", "emoji 😀", 'normal'];
+    $vals = [];
+    for ($i = 0; $i < 2600; $i++) { $vals[] = [$raros[$i % 6] . " $i", $i % 5 === 0 ? null : $i / 3, $i % 7 === 0 ? null : $i % 40]; }
+    foreach (array_chunk($vals, 500) as $b) {
+        $bd->consultar('INSERT INTO t (s, d, n) VALUES ' . implode(',', array_fill(0, count($b), '(?,?,?)')), array_merge(...$b));
+    }
+    $quedan = 2600;
+    $antes = Storage::cuentaBloques();
+    foreach (['DELETE FROM t WHERE id = 3', 'DELETE FROM t WHERE id IN (1200, 1201, 2599)', "DELETE FROM t WHERE s = 'normal 5'",
+              'DELETE FROM t WHERE id = 2600', 'DELETE FROM t WHERE id BETWEEN 100 AND 150'] as $q) {
+        $quedan -= $bd->consultar($q)['filas'];
+    }
+    foreach (glob("$dir/e/t*.json") as $f) {
+        if (!preg_match('/\/t(\.part\d+)?\.json$/', $f)) { continue; }
+        $texto = (string)file_get_contents($f);
+        $filas = json_decode($texto, true)['rows'];
+        $esperado = "{\n  \"table\": \"t\",\n  \"rows\": [";
+        $desf = [];
+        $sep  = "\n    ";
+        foreach ($filas as $fila) {
+            $desf[] = strlen($esperado) + strlen($sep);
+            $esperado .= $sep . json_encode($fila, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
+            $sep = ",\n    ";
+        }
+        $esperado .= $filas === [] ? "],\n" : "\n  ],\n";
+        $aqui = strlen($esperado);
+        $esperado .= '  "offsets": [' . implode(',', $desf) . "],\n  \"offsets_at\": $aqui\n}\n";
+        if ($texto !== $esperado) { return basename($f) . ' no es lo que escribiría la escritura completa'; }
+    }
+    // Cada índice, como si se rehiciera: las mismas filas por el índice que recorriendo
+    $todas = $bd->consultar('SELECT * FROM t ORDER BY id');
+    foreach ([12, 39, 0] as $n) {
+        if ($bd->consultar("SELECT id FROM t WHERE n = $n ORDER BY id") !== $bd->consultar("SELECT id FROM t WHERE n + 0 = $n ORDER BY id")) {
+            return "el índice de n no cuadra con $n";
+        }
+    }
+    foreach ([$todas[0], $todas[700], $todas[count($todas) - 1]] as $f) {
+        if (($bd->consultar('SELECT id FROM t WHERE s = ?', [$f['s']])[0]['id'] ?? null) !== $f['id']) {
+            return "el índice único no encuentra la fila {$f['id']}";
+        }
+    }
+    unset($bd);
+    Database::borrar('e', $dir);
+    @rmdir($dir);
+    // Los cinco por bloques, no por el camino de siempre (al que se vuelve si
+    // algo no tiene la forma esperada, y que daría lo mismo)
+    $porBloques = Storage::cuentaBloques() - $antes;
+    if ($porBloques < 4) { return "solo $porBloques borrados fueron por bloques"; }
+    return count($todas) === $quedan && $quedan === 2543 ?: 'quedan ' . count($todas) . " filas, se esperaban $quedan";
+});
+
+chk('ALTER TABLE ADD, DROP y RENAME COLUMN por bloques de texto dejan los mismos datos que fila a fila (2.8)', function () use ($raiz) {
+    $dir = "$raiz/alter";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/e")) { Database::borrar('e', $dir); }
+    Database::crear('e', $dir);
+    $bd = new Database('e', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT UNIQUE, d DOUBLE, n INTEGER)');
+    $raros = ["con \"comillas\" y \"s\":1", "barra \\ y /", "salto\nde línea", "emoji 😀 ñ", ''];
+    $vals = [];
+    for ($i = 1; $i <= 2300; $i++) { $vals[] = [$i, $raros[$i % 5] . " $i", $i % 4 === 0 ? null : $i / 4, $i % 3 === 0 ? null : $i]; }
+    foreach (array_chunk($vals, 500) as $b) {
+        $bd->consultar('INSERT INTO t VALUES ' . implode(',', array_fill(0, count($b), '(?,?,?,?)')), array_merge(...$b));
+    }
+    $esperado = [];
+    foreach ($vals as [$id, $sv, $dv, $nv]) { $esperado[] = ['id' => $id, 'texto' => $sv, 'd' => $dv, 'nuevo' => 'x "y"']; }
+    $antes = Storage::cuentaBloques();
+    foreach (["ALTER TABLE t ADD COLUMN nuevo TEXT DEFAULT 'x \"y\"'", 'ALTER TABLE t DROP COLUMN n', 'ALTER TABLE t RENAME COLUMN s TO texto'] as $q) {
+        $bd->consultar($q);
+    }
+    $porBloques = Storage::cuentaBloques() - $antes;
+    $filas = $bd->consultar('SELECT * FROM t ORDER BY id');
+    $porIndice = $bd->consultar('SELECT id FROM t WHERE texto = ?', [$raros[2] . ' 1502'])[0]['id'] ?? null;
+    unset($bd);
+    Database::borrar('e', $dir);
+    @rmdir($dir);
+    if ($porBloques !== 3) { return "por bloques: $porBloques de 3"; }
+    return $filas === $esperado && $porIndice === 1502 ?: 'los datos no son los esperados: ' . json_encode([$filas[0] ?? null, $porIndice], JSON_UNESCAPED_UNICODE);
+});
+
 chk('empalmar filas en una parte deja el mismo fichero que escribirla entera', function () use ($raiz) {
     // Un INSERT añade sus filas al texto de la última parte y un UPDATE cambia
     // sus líneas, sin decodificar ni recodificar las demás. El fichero tiene
@@ -681,6 +774,143 @@ chk('reescribir solo las partes que cambian deja lo mismo que reescribirlas toda
         }
     }
     return true;
+});
+
+echo "\n== Upsert, RETURNING y valores por defecto calculados (2.8) ==\n";
+chk('ON CONFLICT, OR IGNORE, OR REPLACE, REPLACE INTO y RETURNING dan lo mismo que SQLite', function () use ($raiz) {
+    // Lo esperado salió de SQLite 3.45 (por Python: la extensión SQLite3 de PHP
+    // vuelve a ejecutar una sentencia con RETURNING al leer sus filas). Las
+    // filas de RETURNING se comparan sin orden: no está definido, tampoco en SQLite
+    $nombre = 'upsert' . getmypid();
+    Database::crear($nombre, $raiz);
+    $bd = new Database($nombre, $raiz);
+    $casos = [
+        ['CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, n INTEGER DEFAULT 0, nota TEXT)',
+         []],
+        ['CREATE TABLE h (id INTEGER PRIMARY KEY, tid INTEGER REFERENCES t (id) ON DELETE CASCADE, x TEXT)',
+         []],
+        ['INSERT INTO t (email, nota) VALUES (\'a@x\', \'uno\'), (\'b@x\', \'dos\') RETURNING id, email',
+         [['id' => 1, 'email' => 'a@x'], ['id' => 2, 'email' => 'b@x']]],
+        ['INSERT INTO t (email) VALUES (\'c@x\') RETURNING *',
+         [['id' => 3, 'email' => 'c@x', 'n' => 0, 'nota' => null]]],
+        ['INSERT INTO h VALUES (1, 1, \'h1\'), (2, 2, \'h2\') RETURNING id',
+         [['id' => 1], ['id' => 2]]],
+        ['INSERT INTO t (email, nota) VALUES (\'a@x\', \'otra\') ON CONFLICT (email) DO NOTHING RETURNING id',
+         []],
+        ['INSERT INTO t (id, email, nota) VALUES (1, \'a@x\', \'nueva\'), (7, \'d@x\', \'cuatro\') ON CONFLICT (email) DO UPDATE SET n = n + 1, nota = excluded.nota RETURNING id, email, n, nota',
+         [['id' => 1, 'email' => 'a@x', 'n' => 1, 'nota' => 'nueva'], ['id' => 7, 'email' => 'd@x', 'n' => 0, 'nota' => 'cuatro']]],
+        ['INSERT INTO t (email, nota) VALUES (\'a@x\', \'x\') ON CONFLICT (email) DO UPDATE SET n = n + 10 WHERE excluded.nota = \'no\' RETURNING id, n',
+         []],
+        ['INSERT INTO t (email, nota) VALUES (\'a@x\', \'y\') ON CONFLICT DO UPDATE SET n = n + 100 RETURNING n',
+         [['n' => 101]]],
+        ['INSERT OR IGNORE INTO t (id, email) VALUES (1, \'z@x\'), (50, \'b@x\'), (51, \'e@x\') RETURNING id',
+         [['id' => 51]]],
+        ['INSERT OR REPLACE INTO t (id, email, nota) VALUES (2, \'b2@x\', \'reemplazada\') RETURNING *',
+         [['id' => 2, 'email' => 'b2@x', 'n' => 0, 'nota' => 'reemplazada']]],
+        ['REPLACE INTO t (id, email, nota) VALUES (60, \'c@x\', \'quita la 3\') RETURNING id, email',
+         [['id' => 60, 'email' => 'c@x']]],
+        ['SELECT * FROM t ORDER BY id',
+         [['id' => 1, 'email' => 'a@x', 'n' => 101, 'nota' => 'nueva'], ['id' => 2, 'email' => 'b2@x', 'n' => 0, 'nota' => 'reemplazada'], ['id' => 7, 'email' => 'd@x', 'n' => 0, 'nota' => 'cuatro'], ['id' => 51, 'email' => 'e@x', 'n' => 0, 'nota' => null], ['id' => 60, 'email' => 'c@x', 'n' => 0, 'nota' => 'quita la 3']]],
+        ['SELECT * FROM h ORDER BY id',
+         [['id' => 1, 'tid' => 1, 'x' => 'h1']]],
+        ['UPDATE t SET n = n + 1 WHERE email LIKE \'%x\' RETURNING id, n * 2 AS doble',
+         [['id' => 1, 'doble' => 204], ['id' => 2, 'doble' => 2], ['id' => 7, 'doble' => 2], ['id' => 51, 'doble' => 2], ['id' => 60, 'doble' => 2]]],
+        ['DELETE FROM t WHERE id > 50 RETURNING id, email',
+         [['id' => 51, 'email' => 'e@x'], ['id' => 60, 'email' => 'c@x']]],
+        ['INSERT INTO t (email) VALUES (\'a@x\') ON CONFLICT (nota) DO NOTHING',
+         'ERROR'],
+        ['INSERT INTO t (email) VALUES (\'a@x\') ON CONFLICT (id) DO NOTHING',
+         'ERROR'],
+        ['INSERT INTO t (id, email) VALUES (1, \'nuevo@x\') ON CONFLICT (id) DO UPDATE SET email = excluded.email RETURNING id, email',
+         [['id' => 1, 'email' => 'nuevo@x']]],
+        ['INSERT INTO t (id, email) VALUES (1, \'b2@x\') ON CONFLICT (id) DO UPDATE SET email = excluded.email',
+         'ERROR'],
+        ['SELECT * FROM t ORDER BY id',
+         [['id' => 1, 'email' => 'nuevo@x', 'n' => 102, 'nota' => 'nueva'], ['id' => 2, 'email' => 'b2@x', 'n' => 1, 'nota' => 'reemplazada'], ['id' => 7, 'email' => 'd@x', 'n' => 1, 'nota' => 'cuatro']]],
+        ['CREATE TABLE c (a INTEGER, b TEXT, v INTEGER DEFAULT 1, UNIQUE (a, b))',
+         []],
+        ['CREATE TABLE log (ev TEXT, a INTEGER, v INTEGER)',
+         []],
+        ['CREATE TRIGGER c_ai AFTER INSERT ON c BEGIN INSERT INTO log VALUES (\'ins\', NEW.a, NEW.v); END',
+         []],
+        ['CREATE TRIGGER c_au AFTER UPDATE ON c BEGIN INSERT INTO log VALUES (\'upd\', NEW.a, NEW.v); END',
+         []],
+        ['INSERT INTO c (a, b) VALUES (1, \'x\'), (1, \'y\'), (1, \'x\'), (2, NULL), (2, NULL) ON CONFLICT (a, b) DO UPDATE SET v = v + 10 RETURNING a, b, v',
+         [['a' => 1, 'b' => 'x', 'v' => 1], ['a' => 1, 'b' => 'y', 'v' => 1], ['a' => 1, 'b' => 'x', 'v' => 11], ['a' => 2, 'b' => null, 'v' => 1], ['a' => 2, 'b' => null, 'v' => 1]]],
+        ['SELECT * FROM c ORDER BY a, b, v',
+         [['a' => 1, 'b' => 'x', 'v' => 11], ['a' => 1, 'b' => 'y', 'v' => 1], ['a' => 2, 'b' => null, 'v' => 1], ['a' => 2, 'b' => null, 'v' => 1]]],
+        ['SELECT * FROM log ORDER BY ev, a, v',
+         [['ev' => 'ins', 'a' => 1, 'v' => 1], ['ev' => 'ins', 'a' => 1, 'v' => 1], ['ev' => 'ins', 'a' => 2, 'v' => 1], ['ev' => 'ins', 'a' => 2, 'v' => 1], ['ev' => 'upd', 'a' => 1, 'v' => 11]]],
+        ['INSERT INTO c (a, b, v) VALUES (1, \'y\', 5) ON CONFLICT (b, a) DO UPDATE SET b = \'x\'',
+         'ERROR'],
+        ['SELECT * FROM c ORDER BY a, b, v',
+         [['a' => 1, 'b' => 'x', 'v' => 11], ['a' => 1, 'b' => 'y', 'v' => 1], ['a' => 2, 'b' => null, 'v' => 1], ['a' => 2, 'b' => null, 'v' => 1]]],
+        ['INSERT OR IGNORE INTO c (a, b) SELECT a, b FROM c RETURNING a',
+         [['a' => 2], ['a' => 2]]],
+        ['INSERT INTO h VALUES (10, 1, \'del uno\')',
+         []],
+        ['INSERT OR REPLACE INTO t (id, email) VALUES (1, \'otro@x\')',
+         []],
+        ['SELECT * FROM h ORDER BY id',
+         []],
+        ['DELETE FROM c WHERE v > 5 RETURNING a || \'-\' || b AS k, v',
+         [['k' => '1-x', 'v' => 11]]],
+        ['INSERT INTO c (a, b) VALUES (9, \'z\') ON CONFLICT DO NOTHING RETURNING *',
+         [['a' => 9, 'b' => 'z', 'v' => 1]]],
+        ['INSERT INTO c (a, b) VALUES (9, \'z\') ON CONFLICT DO NOTHING RETURNING *',
+         []],
+    ];
+    foreach ($casos as $i => [$sql, $esperado]) {
+        try {
+            $r = $bd->consultar($sql);
+            $obtenido = isset($r['success']) ? [] : $r;
+        } catch (JsonSQLDB\JsonSqlDbError $e) {
+            $obtenido = 'ERROR';
+        }
+        if (is_array($esperado) && is_array($obtenido) && stripos($sql, 'RETURNING') !== false) {
+            sort($esperado);
+            sort($obtenido);
+        }
+        if ($obtenido !== $esperado) {
+            Database::borrar($nombre, $raiz);
+            return "sentencia $i: $sql -> " . json_encode($obtenido, JSON_UNESCAPED_UNICODE);
+        }
+    }
+    Database::borrar($nombre, $raiz);
+    return true;
+});
+
+chk('DEFAULT CURRENT_TIMESTAMP, CURRENT_DATE y (expresión): se calculan al insertar y con SET col = DEFAULT', function () use ($raiz) {
+    $nombre = 'defectos' . getmypid();
+    Database::crear($nombre, $raiz);
+    $bd = new Database($nombre, $raiz);
+    $bd->consultar("CREATE TABLE d (id INTEGER PRIMARY KEY, c DATETIME DEFAULT CURRENT_TIMESTAMP, f DATE DEFAULT CURRENT_DATE,
+                    x TEXT DEFAULT (upper('a') || 'b'), k INTEGER DEFAULT (2 * 21), m INTEGER DEFAULT -5, z TEXT DEFAULT ('fijo'))");
+    $antes = date('Y-m-d H:i:s');
+    $bd->consultar('INSERT INTO d (id) VALUES (1)');
+    $bd->consultar("INSERT INTO d (id, x, k) VALUES (2, 'otro', 1)");
+    $bd->consultar('UPDATE d SET x = DEFAULT, k = DEFAULT WHERE id = 2');
+    $f = $bd->consultar('SELECT * FROM d ORDER BY id');
+    $despues = date('Y-m-d H:i:s');
+    $esquema = array_column($bd->consultar('SHOW SCHEMA d'), 'defecto_calculado', 'columna');
+    $bien = $f[0]['c'] >= $antes && $f[0]['c'] <= $despues && $f[0]['f'] === substr($f[0]['c'], 0, 10)
+        && $f[0]['x'] === 'Ab' && $f[0]['k'] === 42 && $f[0]['m'] === -5 && $f[0]['z'] === 'fijo'
+        && $f[1]['x'] === 'Ab' && $f[1]['k'] === 42
+        && $esquema === ['id' => null, 'c' => 'CURRENT_TIMESTAMP', 'f' => 'CURRENT_DATE', 'x' => "upper('a') || 'b'", 'k' => '2 * 21', 'm' => null, 'z' => null];
+    if (!$bien) {
+        Database::borrar($nombre, $raiz);
+        return json_encode([$f, $esquema]);
+    }
+    // Lo que SQLite tampoco admite
+    $mal = [];
+    foreach (['CREATE TABLE e1 (a INTEGER DEFAULT (b + 1), b INTEGER)', 'CREATE TABLE e2 (a INTEGER DEFAULT ((SELECT 1)))',
+              'ALTER TABLE d ADD COLUMN w DATETIME DEFAULT CURRENT_TIMESTAMP'] as $q) {
+        try { $bd->consultar($q); $mal[] = $q; } catch (JsonSQLDB\JsonSqlDbError $e) { }
+    }
+    $ahora = $bd->consultar('SELECT CURRENT_TIMESTAMP AS a, CURRENT_DATE AS b, CURRENT_TIME AS c')[0];
+    Database::borrar($nombre, $raiz);
+    return $mal === [] && strlen($ahora['a']) === 19 && strlen($ahora['b']) === 10 && strlen($ahora['c']) === 8
+        ?: 'admitió: ' . implode(' | ', $mal) . ' · ' . json_encode($ahora);
 });
 
 echo "\n== Limpieza ==\n";

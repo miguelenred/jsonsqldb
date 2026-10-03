@@ -877,6 +877,9 @@ chk('el WHERE compilado decide lo mismo que el evaluador general', function () u
         "NOT (f > 50 OR n IS NULL)", "s LIKE 'a%'", "s NOT LIKE '%c'", "s LIKE 'z_'", "s IS NOT NULL AND n < 3",
         "n = 3 OR f = 12.5 OR s = 'zz'", "n * 2 + 1 > f", "s || 'x' = 'abcx'", "n % 3 = 0", "f / 0 IS NULL",
         "NOT n IS NULL", "-n < -5", "n <> 4 AND NOT s = 'abc'", "d >= '2026-05-01' AND d < '2026-08-01'",
+        // IN con literales y columna = literal (compilados en 2.7.5)
+        "n IN (1, 3, 5)", "n NOT IN (1, 3, 5)", "n NOT IN (1, NULL)", "s IN ('abc', 'zz', 'ñu')", "s NOT IN ('abc')",
+        "n IN ('3', 4.0)", "f IN (12.5, 50)", "5 < n", "'abc' = s", "n >= 2 AND n <= 9 AND s <> 'zz'", "f = '12.5'",
         // Los caminos rápidos con literal numérico, contra columnas de todo tipo:
         // enteros con NULL, decimales, y textos entre los que hay números ('12', '9')
         "s BETWEEN 1 AND 20", "s NOT BETWEEN 1 AND 20", "f BETWEEN 10 AND 50.5", "f NOT BETWEEN 10 AND 50.5",

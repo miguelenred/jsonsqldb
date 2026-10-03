@@ -393,7 +393,6 @@ chk('un corte antes del manifiesto no toca nada: los temporales sobran', functio
     $dir = "$raiz/tienda";
     file_put_contents("$dir/diario2.json.999999.tmp", 'a medias');
     @mkdir("$dir/.tx/_base", 0775, true);                // carpeta sin manifiesto
-    $antes = (string)file_get_contents("$dir/diario2.json");
 
     $bd2 = new Database('tienda', $raiz);
     $bd2->consultar('SELECT 1 AS uno');                  // basta con abrir la base
@@ -694,7 +693,8 @@ chk('lo que pone SET NEW pasa las mismas comprobaciones: NOT NULL, únicos y cla
     $bd->consultar('DROP TABLE snn');
     return $mal === [] && $n === 1 ?: implode(', ', $mal) . " · $n filas";
 });
-chk('cascadas con muchos padres a la vez (borrar, cambiar la clave, SET NULL, tres niveles) dejan lo mismo que SQLite', function () use ($bd) {
+foreach (['sin índice' => [], 'con índice en las claves foráneas (2.7.5: las hijas se leen por él sin cargar la tabla)' => ['CREATE INDEX ix_ch_pid ON ch (pid)', 'CREATE INDEX ix_cn_hid ON cn (hid)']] as $variante => $indices) {
+chk("cascadas con muchos padres a la vez (borrar, cambiar la clave, SET NULL, tres niveles) dejan lo mismo que SQLite, $variante", function () use ($bd, $indices) {
     // El lado hijo se resuelve con un mapa que se mantiene al escribir (2.7.4):
     // tiene que dar exactamente lo mismo que recorrer la tabla por cada padre
     if (!class_exists('SQLite3')) { return null; }
@@ -712,7 +712,10 @@ chk('cascadas con muchos padres a la vez (borrar, cambiar la clave, SET NULL, tr
                    'UPDATE ch SET id = id + 5000 WHERE k = 2',                    // dos niveles
                    'DELETE FROM ch WHERE k IN (0, 3)',                            // SET NULL en los nietos
                    'DELETE FROM cp WHERE id > 1015'];
-    foreach (array_merge($ddl, $datos, $escrituras) as $q) {
+    // Una a una, también el borrado de un solo padre y el cambio de una clave
+    $escrituras = array_merge(['DELETE FROM cp WHERE id = 33', 'UPDATE cp SET id = 2000 WHERE id = 34',
+                               'UPDATE ch SET id = 9000 WHERE id = 7'], $escrituras);
+    foreach (array_merge($ddl, $indices, $datos, $escrituras) as $q) {
         $lite->exec($q);
         $bd->consultar($q);
     }
@@ -726,6 +729,7 @@ chk('cascadas con muchos padres a la vez (borrar, cambiar la clave, SET NULL, tr
     foreach (['cn', 'ch', 'cp'] as $t) { $bd->consultar("DROP TABLE $t"); }
     return $mal === [] ?: 'distinto en ' . implode(', ', $mal);
 });
+}
 chk('SET NEW solo se admite en BEFORE INSERT y BEFORE UPDATE, y solo sobre NEW', function () use ($bd) {
     $mal = [];
     foreach (["CREATE TRIGGER x1 AFTER INSERT ON prod BEGIN SET NEW.tramo = 'x'; END",
@@ -781,6 +785,68 @@ chk('una consulta repetida se sirve de la caché y una escritura la invalida', f
     unset($bd);
     Database::borrar('c', $dir);
     @rmdir($dir);
+    return true;
+});
+
+echo "\n== CREATE TABLE … AS SELECT ==\n";
+chk('crea la tabla con las filas, los tipos de las columnas de origen y sin restricciones', function () use ($bd) {
+    $bd->consultar('CREATE TABLE ctas_o (id INTEGER PRIMARY KEY AUTOINCREMENT, n VARCHAR(20) NOT NULL UNIQUE, p DECIMAL(10,3), f DATETIME)');
+    $bd->consultar("INSERT INTO ctas_o (n, p, f) VALUES ('a', 1.5, '2026-01-02'), ('b', 2, NULL), ('c', NULL, NULL)");
+    $r = $bd->consultar('CREATE TABLE ctas_c AS SELECT * FROM ctas_o WHERE id > 1');
+    if ($r['filas'] !== 2) { return $r; }
+    $esq = array_map(static fn($c) => [$c['columna'], $c['tipo'], $c['longitud'], $c['escala'], $c['pk'], $c['notnull'], $c['unico'], $c['auto']],
+        $bd->consultar('SHOW SCHEMA ctas_c'));
+    $esperado = [['id', 'INTEGER', null, null, 0, 0, 0, 0], ['n', 'TEXT', 20, null, 0, 0, 0, 0],
+                 ['p', 'DECIMAL', null, 3, 0, 0, 0, 0], ['f', 'DATETIME', null, null, 0, 0, 0, 0]];
+    if ($esq !== $esperado) { return $esq; }
+    // Sin UNIQUE ni clave primaria: admite repetidos
+    $bd->consultar("INSERT INTO ctas_c (id, n) VALUES (2, 'b')");
+    return $bd->consultar('SELECT COUNT(*) AS n FROM ctas_c')[0]['n'] === 3;
+});
+chk('las expresiones toman el tipo de sus valores', function () use ($bd) {
+    $bd->consultar("CREATE TABLE ctas_e AS SELECT n AS nombre, id * 2 AS doble, id / 2.0 AS mitad, NULL AS nada, id || 'z' AS texto FROM ctas_o");
+    $tipos = array_column($bd->consultar('SHOW SCHEMA ctas_e'), 'tipo', 'columna');
+    if ($tipos !== ['nombre' => 'TEXT', 'doble' => 'INTEGER', 'mitad' => 'DOUBLE', 'nada' => 'TEXT', 'texto' => 'TEXT']) { return $tipos; }
+    return $bd->consultar('SELECT doble, texto FROM ctas_e ORDER BY doble') === [['doble' => 2, 'texto' => '1z'], ['doble' => 4, 'texto' => '2z'], ['doble' => 6, 'texto' => '3z']];
+});
+chk('sin filas también crea las columnas; con IF NOT EXISTS no toca la que ya existe', function () use ($bd) {
+    $bd->consultar('CREATE TABLE ctas_v AS SELECT id, n FROM ctas_o WHERE 0');
+    if (array_column($bd->consultar('SHOW SCHEMA ctas_v'), 'columna') !== ['id', 'n']) { return 'columnas'; }
+    $r = $bd->consultar('CREATE TABLE IF NOT EXISTS ctas_v AS SELECT 1 AS x');
+    return $r['filas'] === 0 && array_column($bd->consultar('SHOW SCHEMA ctas_v'), 'columna') === ['id', 'n'];
+});
+chk('una expresión sin AS da nombre a su columna, como en SQLite, y se usa entre comillas', function () use ($bd) {
+    $bd->consultar('CREATE TABLE ctas_x AS SELECT id + 1, COUNT(*) FROM ctas_o GROUP BY id');
+    if (array_column($bd->consultar('SHOW SCHEMA ctas_x'), 'columna') !== ['id + 1', 'COUNT(*)']) { return 'nombres'; }
+    // Una clave sobre esa columna no pone su nombre en el del fichero del índice
+    $bd->consultar('ALTER TABLE ctas_x ADD UNIQUE ("id + 1")');
+    $idx = glob(sys_get_temp_dir() . '/jsonsqldb_test_f5/tienda/ctas_x.idx.*');
+    if ($idx === []) { return 'no se creó el índice'; }
+    foreach ($idx as $f) {
+        if (!preg_match('/^ctas_x\.idx\.auto_[a-f0-9]{32}\.json$/', basename($f))) { return basename($f); }
+    }
+    $r = $bd->consultar('SELECT "id + 1" AS v FROM ctas_x WHERE "id + 1" = 3');
+    $bd->consultar('DROP TABLE ctas_x');
+    return $r === [['v' => 3]];
+});
+chk('ADD, DROP y RENAME COLUMN con comillas, barras, acentos y emojis en los nombres dejan las filas legibles', function () use ($bd) {
+    // Las tres van por bloques de texto: la clave de la fila tiene que
+    // escribirse como la escribe json_encode(), con sus escapes
+    $c = static fn(string $n): string => '"' . str_replace('"', '""', $n) . '"';
+    $bd->consultar('CREATE TABLE raros (id INTEGER PRIMARY KEY, ' . $c('a"b') . ' TEXT, ' . $c('c\\d') . ' TEXT, ' . $c('x/y') . ' TEXT)');
+    $bd->consultar('INSERT INTO raros VALUES (1, ?, ?, ?), (2, ?, ?, ?)', ['uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis']);
+    $bd->consultar('ALTER TABLE raros RENAME COLUMN ' . $c('a"b') . ' TO ' . $c('año "😀"'));
+    $bd->consultar('ALTER TABLE raros DROP COLUMN ' . $c('c\\d'));
+    $bd->consultar('ALTER TABLE raros ADD COLUMN ' . $c('nueva\\"') . " TEXT DEFAULT 'x'");
+    $r = $bd->consultar('SELECT * FROM raros ORDER BY id');
+    $bd->consultar('DROP TABLE raros');
+    return $r === [['id' => 1, 'año "😀"' => 'uno', 'x/y' => 'tres', 'nueva\\"' => 'x'],
+                   ['id' => 2, 'año "😀"' => 'cuatro', 'x/y' => 'seis', 'nueva\\"' => 'x']] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+esperaError('un nombre de columna con caracteres de control no vale', 'SCHEMA', fn() => $bd->consultar("CREATE TABLE ctas_y (\"a\tb\" INTEGER)"));
+esperaError('la tabla ya existe', 'SCHEMA', fn() => $bd->consultar('CREATE TABLE ctas_o AS SELECT 1 AS x'));
+chk('limpieza de las tablas de CREATE TABLE … AS', function () use ($bd) {
+    foreach (['ctas_o', 'ctas_c', 'ctas_e', 'ctas_v'] as $t) { $bd->consultar("DROP TABLE $t"); }
     return true;
 });
 

@@ -13,9 +13,10 @@ require_once __DIR__ . '/GeneradorSql.php';   // vistas y triggers en el SQL de 
  */
 final class Exportar
 {
-    /** @param array<int,array<string,mixed>> $filas */
-    public static function csv(array $filas, string $nombre): void
+    /** @param iterable<array<string,mixed>> $filas  un array o un generador (por lotes, ver Lotes) */
+    public static function csv(iterable $filas, string $nombre): void
     {
+        self::primerLote($filas);
         self::cabeceras($nombre . '.csv', 'text/csv; charset=UTF-8');
 
         $salida = fopen('php://output', 'wb');
@@ -23,25 +24,51 @@ final class Exportar
         fwrite($salida, "\xEF\xBB\xBF");
 
         $sep = (string)ADMIN_CSV_SEPARADOR;
-        if ($filas !== []) {
-            fputcsv($salida, array_keys($filas[0]), $sep, '"', '\\');
-            foreach ($filas as $f) {
-                $linea = [];
-                foreach ($f as $v) {
-                    $texto = $v === null ? '' : (is_bool($v) ? ($v ? '1' : '0') : (is_float($v) ? var_export($v, true) : (string)$v));
-                    // Un texto que empieza por = + - @ lo toma Excel por una fórmula
-                    // y la ejecuta al abrir el fichero: con un apóstrofo delante, es
-                    // texto (Excel no lo muestra). Los números no se tocan
-                    if (is_string($v) && preg_match('/^[\s]*[=+\-@]|^[\t\r]/', $v)) {
-                        $texto = "'" . $texto;
-                    }
-                    $linea[] = $texto;
-                }
-                fputcsv($salida, $linea, $sep, '"', '\\');
-            }
+        $primera = true;
+        try {
+            self::lineasCsv($filas, $salida, $sep, $primera);
+        } catch (Throwable $e) {
+            // La descarga ya ha empezado: el error, en la última línea, para
+            // que nadie tome el fichero por completo
+            fwrite($salida, "\n" . t('ERROR: la exportación está incompleta: {error}', ['error' => $e->getMessage()]) . "\n");
         }
         fclose($salida);
         exit;
+    }
+
+    /** @param resource $salida */
+    private static function lineasCsv(iterable $filas, $salida, string $sep, bool $primera): void
+    {
+        foreach ($filas as $f) {
+            if ($primera) {
+                fputcsv($salida, array_keys($f), $sep, '"', '\\');
+                $primera = false;
+            }
+            $linea = [];
+            foreach ($f as $v) {
+                $texto = $v === null ? '' : (is_bool($v) ? ($v ? '1' : '0') : (is_float($v) ? var_export($v, true) : (string)$v));
+                // Un texto que empieza por = + - @ lo toma Excel por una fórmula
+                // y la ejecuta al abrir el fichero: con un apóstrofo delante, es
+                // texto (Excel no lo muestra). Los números no se tocan
+                if (is_string($v) && preg_match('/^[\s]*[=+\-@]|^[\t\r]/', $v)) {
+                    $texto = "'" . $texto;
+                }
+                $linea[] = $texto;
+            }
+            fputcsv($salida, $linea, $sep, '"', '\\');
+        }
+    }
+
+    /**
+     * Pide el primer lote antes de enviar las cabeceras de la descarga: si la
+     * consulta falla, el error se ve en el panel en vez de acabar dentro del
+     * fichero descargado.
+     */
+    private static function primerLote(iterable $filas): void
+    {
+        if ($filas instanceof Generator) {
+            $filas->current();
+        }
     }
 
     /**
@@ -53,12 +80,6 @@ final class Exportar
      */
     public static function zip(string $base, string $ruta): void
     {
-        if (!class_exists('ZipArchive')) {
-            throw new RuntimeException(
-                t('La extensión zip de PHP no está activada, así que no se puede generar el ZIP. Actívala en php.ini (extension=zip) o usa el volcado en SQL.')
-            );
-        }
-
         $tmp = tempnam(sys_get_temp_dir(), 'jsonsqldb_');
         if ($tmp === false) {
             throw new RuntimeException(t('No se pudo crear el fichero temporal del ZIP.'));
@@ -69,36 +90,7 @@ final class Exportar
         });
 
         try {
-            $ruta = rtrim(str_replace('\\', '/', $ruta), '/');
-            // Con el bloqueo exclusivo de la base (el del motor) hasta cerrar el
-            // ZIP, que es cuando se leen los ficheros: sin él, una escritura a
-            // mitad de la copia dejaba partes, índices y revisiones de dos momentos
-            conBaseBloqueada($ruta, static function () use ($tmp, $ruta, $base): void {
-                $zip = new ZipArchive();
-                if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) {
-                    throw new RuntimeException(t('No se pudo abrir el ZIP temporal para escribir.'));
-                }
-                $corte = strlen(dirname($ruta)) + 1;      // deja fuera todo lo anterior a la base
-                $items = new RecursiveIteratorIterator(
-                    new RecursiveDirectoryIterator($ruta, FilesystemIterator::SKIP_DOTS),
-                    RecursiveIteratorIterator::SELF_FIRST
-                );
-                $zip->addEmptyDir($base);
-                foreach ($items as $item) {
-                    /** @var SplFileInfo $item */
-                    $real    = str_replace('\\', '/', $item->getPathname());
-                    $interna = substr($real, $corte);
-                    if ($item->isDir()) {
-                        $zip->addEmptyDir($interna);
-                    } elseif ($item->isFile() && !esFicheroDeBloqueo($item->getFilename())) {
-                        $zip->addFile($real, $interna);
-                    }
-                }
-                if ($zip->close() !== true) {
-                    throw new RuntimeException(t('No se pudo cerrar el ZIP temporal.'));
-                }
-            });
-
+            self::zipEn($base, $ruta, $tmp);
             self::cabeceras($base . '.zip', 'application/zip');
             header('Content-Length: ' . (string)filesize($tmp));
             readfile($tmp);
@@ -108,13 +100,72 @@ final class Exportar
         exit;
     }
 
+    /** Escribe en $destino la copia ZIP de la base (ver zip()). */
+    public static function zipEn(string $base, string $ruta, string $destino): void
+    {
+        if (!class_exists('ZipArchive')) {
+            throw new RuntimeException(
+                t('La extensión zip de PHP no está activada, así que no se puede generar el ZIP. Actívala en php.ini (extension=zip) o usa el volcado en SQL.')
+            );
+        }
+        $ruta = rtrim(str_replace('\\', '/', $ruta), '/');
+        // Con el bloqueo exclusivo de la base (el del motor) hasta cerrar el
+        // ZIP, que es cuando se leen los ficheros: sin él, una escritura a
+        // mitad de la copia dejaba partes, índices y revisiones de dos momentos
+        conBaseBloqueada($ruta, static function () use ($destino, $ruta, $base): void {
+            $zip = new ZipArchive();
+            if ($zip->open($destino, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+                throw new RuntimeException(t('No se pudo abrir el ZIP temporal para escribir.'));
+            }
+            $corte = strlen(dirname($ruta)) + 1;      // deja fuera todo lo anterior a la base
+            $items = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($ruta, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST
+            );
+            $zip->addEmptyDir($base);
+            foreach ($items as $item) {
+                /** @var SplFileInfo $item */
+                $real    = str_replace('\\', '/', $item->getPathname());
+                $interna = substr($real, $corte);
+                if ($item->isDir()) {
+                    $zip->addEmptyDir($interna);
+                } elseif ($item->isFile() && !esFicheroDeBloqueo($item->getFilename())) {
+                    $zip->addFile($real, $interna);
+                }
+            }
+            if ($zip->close() !== true) {
+                throw new RuntimeException(t('No se pudo cerrar el ZIP temporal.'));
+            }
+        });
+    }
+
+    /** Escribe en $destino el volcado SQL de la base, tabla a tabla y por lotes si no cabe en memoria. */
+    public static function volcadoEn(string $base, string $destino): void
+    {
+        $f = fopen($destino, 'wb');
+        if ($f === false) {
+            throw new RuntimeException(t('No se puede escribir en la carpeta \'{dir}\'.', ['dir' => dirname($destino)]));
+        }
+        try {
+            $tablas = self::tablasDe($base);
+            self::volcado($base, $tablas, Api::sql($base, 'SHOW TRIGGERS'), Api::sql($base, 'SHOW VIEWS'), Api::sql($base, 'SHOW INDEXES'),
+                'sqlite', self::cargador($base, $tablas), static function (string $trozo) use ($f, $destino): void {
+                    if (fwrite($f, $trozo) !== strlen($trozo)) {
+                        throw new RuntimeException(t('No se puede escribir en la carpeta \'{dir}\'.', ['dir' => dirname($destino)]));
+                    }
+                });
+        } finally {
+            fclose($f);
+        }
+    }
+
     /**
      * Volcado completo de una base: estructura y datos, en SQL.
      *
      * Las claves foráneas y los triggers van al final, después de que existan
      * todas las tablas, así que el fichero se puede ejecutar de arriba abajo.
      *
-     * @param array<int,array{tabla:string,columnas:array,claves:array,filas:array}> $tablas
+     * @param array<int,array{tabla:string,columnas:array,claves:array,filas?:array,n?:int}> $tablas  las filas, o cuántas son si se cargan por tablas ($cargar)
      * @param array<int,array<string,mixed>> $triggers
      */
     public static function base(string $base, array $tablas, array $triggers, array $vistas = [],
@@ -134,6 +185,37 @@ final class Exportar
             echo "\n-- " . t('ERROR: el volcado está incompleto: {error}', ['error' => $e->getMessage()]) . "\n";
         }
         exit;
+    }
+
+    /**
+     * Estructura de cada tabla de la base y cuántas filas tiene, para
+     * volcado(): las filas se piden después, tabla a tabla, con cargador().
+     *
+     * @return list<array{tabla:string,columnas:array,claves:array,n:int}>
+     */
+    public static function tablasDe(string $base): array
+    {
+        $tablas = [];
+        foreach (Api::sql($base, 'SHOW TABLES') as $t) {
+            $tabla = (string)$t['tabla'];
+            $tablas[] = [
+                'tabla'    => $tabla,
+                'columnas' => Api::sql($base, 'SHOW SCHEMA ' . cita($tabla)),
+                'claves'   => Api::sql($base, 'SHOW KEYS FROM ' . cita($tabla)),
+                'n'        => (int)$t['filas'],
+            ];
+        }
+        return $tablas;
+    }
+
+    /**
+     * Las filas de cada tabla de tablasDe(): enteras si caben en memoria, o
+     * por lotes (ver Lotes).
+     */
+    public static function cargador(string $base, array $tablas): callable
+    {
+        $n = array_column($tablas, 'n', 'tabla');
+        return static fn(string $tabla): iterable => Lotes::filas($base, 'SELECT * FROM ' . cita($tabla), [], $n[$tabla] ?? 0);
     }
 
     /** @var list<string> lo que la sintaxis ANSI-89 de Access no deja escribir en la sentencia que viene */
@@ -179,14 +261,14 @@ final class Exportar
      * sí misma) esa clave va al final con ALTER TABLE, que SQLite no acepta, y
      * el volcado lo dice en un comentario.
      *
-     * @param array<int,array{tabla:string,columnas:array,claves:array,filas:array}> $tablas
+     * @param array<int,array{tabla:string,columnas:array,claves:array,filas?:array,n?:int}> $tablas  las filas, o cuántas son si se cargan por tablas ($cargar)
      */
     /**
      * El volcado de una base. Las filas pueden venir ya en cada tabla
-     * ('filas') o pedirse tabla a tabla con $cargar(nombre); y el texto puede
-     * devolverse entero o entregarse por trozos a $salida (uno por tabla). Con
-     * los dos, en memoria solo hay una tabla a la vez: antes estaba la base
-     * entera, y una base mediana agotaba la memoria de PHP.
+     * ('filas') o pedirse tabla a tabla con $cargar(nombre), que devuelve un
+     * array o, si no cabe en memoria, un generador (ver Lotes); y el texto puede
+     * devolverse entero o entregarse por trozos a $salida (cada 500 filas). Con
+     * los dos, en memoria hay como mucho una tabla, o un lote si no cabe.
      */
     public static function volcado(string $base, array $tablas, array $triggers, array $vistas = [],
                                    array $indices = [], string $dialecto = 'sqlite',
@@ -202,7 +284,7 @@ final class Exportar
     }
 
     /**
-     * @param array<int,array{tabla:string,columnas:array,claves:array,filas:array}> $tablas
+     * @param array<int,array{tabla:string,columnas:array,claves:array,filas?:array,n?:int}> $tablas  las filas, o cuántas son si se cargan por tablas ($cargar)
      * @param array<int,array{indice:string,tabla:string,columnas:string,automatico:int}> $indices
      */
     private static function componer(string $base, array $tablas, array $triggers, array $vistas, array $indices,
@@ -235,33 +317,54 @@ final class Exportar
         $out .= self::cabeceraDialecto($base);
         foreach ($orden as $nombre) {
             $t = $porNombre[$nombre];
-            if (!isset($t['filas'])) {
-                $t['filas'] = $cargar !== null ? $cargar($nombre) : [];
-            }
+            $filasT = $t['filas'] ?? ($cargar !== null ? $cargar($nombre) : []);
             $out .= "\n-- ------------------------------------------------------------\n";
             $out .= '-- ' . t('Tabla: {tabla}', ['tabla' => $nombre]) . "\n";
             $out .= "-- ------------------------------------------------------------\n";
-            // Las filas primero: si una tabla que se apunta a sí misma tiene un
-            // ciclo, su clave pasa a las diferidas y ya no va en el CREATE TABLE
-            $filasT = self::padresPrimero($t, $diferidas);
+            if (is_array($filasT)) {
+                // Las filas primero: si una tabla que se apunta a sí misma tiene un
+                // ciclo, su clave pasa a las diferidas y ya no va en el CREATE TABLE
+                $t['filas'] = $filasT;
+                $filasT = self::padresPrimero($t, $diferidas);
+                $est = self::estadisticas($filasT);
+            } else {
+                // No cabe en memoria y llega por lotes: una pasada para saber qué
+                // tipos piden los datos y otra para escribirlos. Sin la tabla
+                // entera no se pueden ordenar padres antes que hijos, así que su
+                // clave hacia sí misma va al final, con las diferidas
+                $est = self::estadisticas($filasT);
+                $filasT = $cargar($nombre);
+                foreach ($t['claves'] as $k) {
+                    if ($k['tipo'] === 'FOREIGN' && (string)$k['tabla_destino'] === $nombre) {
+                        $diferidas[] = [$nombre, $k];
+                    }
+                }
+            }
             $enIndice = [];
             foreach ($propios as $i) {
                 if ($i['tabla'] === $nombre) {
                     foreach (explode(',', (string)$i['columnas']) as $c) { $enIndice[$c] = true; }
                 }
             }
-            $out .= self::createTable($nombre, $t['columnas'], $t['claves'], $diferidas, $enIndice, $filasT);
+            $out .= self::createTable($nombre, $t['columnas'], $t['claves'], $diferidas, $enIndice, $est);
             $auto = null;
             foreach ($t['columnas'] as $c) {
                 if ((int)$c['auto'] === 1) { $auto = (string)$c['columna']; }
             }
-            if ($filasT !== []) {
+            if ($est['filas'] > 0) {
                 // SQL Server no deja escribir en una columna IDENTITY sin pedirlo
                 $identidad = self::$d === 'sqlserver' && $auto !== null;
-                $out .= "\n" . ($identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " ON;\n" : '')
-                      . self::lineasInsert($filasT, $nombre, array_column(array_filter($t['columnas'],
-                            static fn(array $c): bool => strtoupper((string)$c['tipo']) === 'DATETIME'), 'columna'))
-                      . ($identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " OFF;\n" : '');
+                $out .= "\n" . ($identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " ON;\n" : '');
+                $fechas = array_column(array_filter($t['columnas'],
+                    static fn(array $c): bool => strtoupper((string)$c['tipo']) === 'DATETIME'), 'columna');
+                foreach (self::bloques($filasT) as $bloque) {
+                    $out .= self::lineasInsert($bloque, $nombre, $fechas);
+                    if ($salida !== null) {
+                        $salida($out);
+                        $out = '';
+                    }
+                }
+                $out .= $identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " OFF;\n" : '';
             }
             // En PostgreSQL la secuencia de una columna IDENTITY no se entera de
             // los id insertados a mano: se pone detrás del último
@@ -547,8 +650,9 @@ final class Exportar
     }
 
     /** CREATE TABLE reconstruido a partir de la estructura, con sus restricciones dentro. */
+    /** @param array{filas:int,enteras:array<string,int>,largo:array<string,int>,fuera32:array<string,true>} $est ver estadisticas() */
     private static function createTable(string $tabla, array $columnas, array $claves, array $diferidas,
-                                        array $enIndice = [], array $filas = []): string
+                                        array $enIndice, array $est): string
     {
         // Columnas que forman parte de una clave o un índice: en MySQL y SQL
         // Server un texto sin longitud no puede estar en uno
@@ -568,7 +672,7 @@ final class Exportar
         $partes = [];
         foreach ($columnas as $c) {
             $nombre = (string)$c['columna'];
-            $tipo   = self::$d === 'sqlite' ? self::tipo($c) : self::tipoDestino($c, isset($enClave[$nombre]), $filas);
+            $tipo   = self::$d === 'sqlite' ? self::tipo($c) : self::tipoDestino($c, isset($enClave[$nombre]), $est);
             $esPk   = (int)$c['pk'] === 1 && !$compuesta;
             $auto   = (int)$c['auto'] === 1;
             $d = self::q($nombre) . ' ' . $tipo;
@@ -610,7 +714,16 @@ final class Exportar
                 }
                 $sueltas[$nombre] = true;
             }
-            if ($c['defecto'] !== null && self::$d === 'access') {
+            $calculado = $c['defecto_calculado'] ?? null;
+            if ($calculado !== null) {
+                // 2.8: un DEFAULT que se calcula al insertar (CURRENT_TIMESTAMP, (expresión))
+                $expr = self::defectoCalculado((string)$calculado, $tipo);
+                if ($expr !== null && self::$d === 'access') {
+                    self::$notasAccess[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . $expr;
+                } elseif ($expr !== null) {
+                    $d .= ' DEFAULT ' . $expr;
+                }
+            } elseif ($c['defecto'] !== null && self::$d === 'access') {
                 // La sintaxis ANSI-89 no tiene DEFAULT: se dice, para ponerlo a mano
                 self::$notasAccess[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . self::literal($c['defecto']);
             } elseif ($c['defecto'] !== null) {
@@ -666,10 +779,10 @@ final class Exportar
      * fechas, con milisegundos. El texto de SQL Server, NVARCHAR con
      * cotejamiento binario, para que compare como aquí.
      */
-    private static function tipoDestino(array $c, bool $enClave, array $filas): string
+    private static function tipoDestino(array $c, bool $enClave, array $est): string
     {
         if (self::$d === 'access') {
-            return self::tipoAccess($c, $enClave, $filas);
+            return self::tipoAccess($c, $enClave, $est);
         }
         $tipo = strtoupper((string)$c['tipo']);
         $ss   = self::$d === 'sqlserver';
@@ -683,13 +796,7 @@ final class Exportar
             // Cifras: las que piden los datos, al menos 20 y como mucho las del
             // motor (65 en MySQL, 38 en SQL Server); más no cabe y dará error
             $escala = $c['escala'] !== null ? (int)$c['escala'] : 6;
-            $enteras = 20 - $escala;
-            foreach ($filas as $f) {
-                $v = $f[(string)$c['columna']] ?? null;
-                if (is_int($v) || is_float($v)) {
-                    $enteras = max($enteras, strlen(number_format(abs((float)$v), 0, '.', '')));
-                }
-            }
+            $enteras = max(20 - $escala, $est['enteras'][(string)$c['columna']] ?? 0);
             $max = ['mysql' => 65, 'sqlserver' => 38][self::$d] ?? 1000;
             return (self::$d === 'postgresql' ? 'NUMERIC(' : 'DECIMAL(') . min($max, $enteras + $escala) . ',' . $escala . ')';
         }
@@ -701,13 +808,7 @@ final class Exportar
         if (!$enClave || self::$d === 'postgresql') {
             return $ss ? 'NVARCHAR(MAX)' . $cot : 'TEXT';
         }
-        $max = 191;
-        foreach ($filas as $f) {
-            $v = $f[(string)$c['columna']] ?? null;
-            if (is_string($v)) {
-                $max = max($max, mb_strlen($v, 'UTF-8'));
-            }
-        }
+        $max = max(191, $est['largo'][(string)$c['columna']] ?? 0);
         // En SQL Server la clave de un índice no pasa de 900 bytes (450 NVARCHAR)
         return $ss ? ($max <= 450 ? "NVARCHAR($max)" : 'NVARCHAR(MAX)') . $cot : 'VARCHAR(' . $max . ')';
     }
@@ -718,7 +819,7 @@ final class Exportar
      * Enteros, LONG, que es de 32 bits: si los datos no caben, DECIMAL(19,0).
      * DECIMAL, con 28 cifras como mucho, las de Access.
      */
-    private static function tipoAccess(array $c, bool $enClave, array $filas): string
+    private static function tipoAccess(array $c, bool $enClave, array $est): string
     {
         $tipo = strtoupper((string)$c['tipo']);
         $col = (string)$c['columna'];
@@ -733,13 +834,8 @@ final class Exportar
         }
         switch ($tipo) {
             case 'INTEGER':
-                foreach ($filas as $f) {
-                    $v = $f[$col] ?? null;
-                    if (is_int($v) && ($v > 2147483647 || $v < -2147483648)) {
-                        return 'DOUBLE';            // LONG es de 32 bits; DOUBLE, exacto hasta 2^53
-                    }
-                }
-                return 'LONG';
+                // LONG es de 32 bits; DOUBLE, exacto hasta 2^53
+                return isset($est['fuera32'][$col]) ? 'DOUBLE' : 'LONG';
             case 'DOUBLE':   return 'DOUBLE';
             case 'DATETIME': return 'DATETIME';
             case 'BOOLEAN':  return 'BIT';
@@ -748,12 +844,56 @@ final class Exportar
             return 'MEMO';
         }
         // Un texto en una clave o un índice: TEXT(255) si los datos caben
+        return ($est['largo'][$col] ?? 0) > 255 ? 'MEMO' : 'TEXT(255)';
+    }
+
+    /**
+     * Lo que los tipos de destino necesitan saber de los datos de una tabla,
+     * en una pasada y sin guardar las filas: cuántas hay, las cifras enteras
+     * de cada columna numérica, el texto más largo de cada una (en
+     * caracteres) y qué enteros no caben en 32 bits.
+     *
+     * @param iterable<array<string,mixed>> $filas
+     * @return array{filas:int,enteras:array<string,int>,largo:array<string,int>,fuera32:array<string,true>}
+     */
+    private static function estadisticas(iterable $filas): array
+    {
+        $est = ['filas' => 0, 'enteras' => [], 'largo' => [], 'fuera32' => []];
         foreach ($filas as $f) {
-            if (is_string($f[$col] ?? null) && mb_strlen($f[$col], 'UTF-8') > 255) {
-                return 'MEMO';
+            $est['filas']++;
+            foreach ($f as $col => $v) {
+                if (is_int($v) || is_float($v)) {
+                    $cifras = strlen(number_format(abs((float)$v), 0, '.', ''));
+                    if ($cifras > ($est['enteras'][$col] ?? 0)) { $est['enteras'][$col] = $cifras; }
+                    if (is_int($v) && ($v > 2147483647 || $v < -2147483648)) { $est['fuera32'][$col] = true; }
+                } elseif (is_string($v)) {
+                    $largo = mb_strlen($v, 'UTF-8');
+                    if ($largo > ($est['largo'][$col] ?? 0)) { $est['largo'][$col] = $largo; }
+                }
             }
         }
-        return 'TEXT(255)';
+        return $est;
+    }
+
+    /**
+     * Las filas en bloques de 500, para escribir la salida según se genera.
+     *
+     * @param iterable<array<string,mixed>> $filas
+     * @return Generator<int,list<array<string,mixed>>>
+     */
+    private static function bloques(iterable $filas): Generator
+    {
+        $bloque = [];
+        foreach ($filas as $f) {
+            $bloque[] = $f;
+            if (count($bloque) === 500) {
+                yield $bloque;
+                $bloque = [];
+            }
+        }
+        if ($bloque !== []) {
+            yield $bloque;
+        }
     }
 
     /** Declaración del tipo, con longitud o decimales si los tiene. */
@@ -772,20 +912,32 @@ final class Exportar
     /**
      * Una sentencia INSERT por fila, lista para volver a ejecutar.
      *
-     * @param array<int,array<string,mixed>> $filas
+     * @param iterable<array<string,mixed>> $filas  un array o un generador (por lotes, ver Lotes)
      */
-    public static function inserts(array $filas, string $tabla): void
+    public static function inserts(iterable $filas, string $tabla): void
     {
+        self::primerLote($filas);
         self::cabeceras($tabla . '.sql', 'text/plain; charset=UTF-8');
 
-        echo "-- jsonSQLDB · $tabla · " . date('Y-m-d H:i:s') . "\n";
-        echo '-- ' . t('{n} fila(s)', ['n' => count($filas)]) . "\n\n";
-        echo self::lineasInsert($filas, $tabla);
+        echo "-- jsonSQLDB · $tabla · " . date('Y-m-d H:i:s') . "\n\n";
+        $n = 0;
+        try {
+            foreach (self::bloques($filas) as $bloque) {
+                echo self::lineasInsert($bloque, $tabla);
+                $n += count($bloque);
+                flush();
+            }
+            echo "\n-- " . t('{n} fila(s)', ['n' => $n]) . "\n";
+        } catch (Throwable $e) {
+            echo "\n-- " . t('ERROR: la exportación está incompleta: {error}', ['error' => $e->getMessage()]) . "\n";
+        }
         exit;
     }
 
-    /** @param array<int,array<string,mixed>> $filas */
-    /** @param list<string> $fechas columnas DATETIME: en Access, sus valores van como #fecha# */
+    /**
+     * @param list<array<string,mixed>> $filas
+     * @param list<string> $fechas columnas DATETIME: en Access, sus valores van como #fecha#
+     */
     private static function lineasInsert(array $filas, string $tabla, array $fechas = []): string
     {
         $fechas = array_flip($fechas);
@@ -810,6 +962,41 @@ final class Exportar
     }
 
     /** Un valor escrito como literal SQL. */
+    /**
+     * Un DEFAULT calculado en el SQL del dialecto: CURRENT_TIMESTAMP,
+     * CURRENT_DATE y CURRENT_TIME tal cual donde existen; cualquier otra
+     * expresión, traducida como en las vistas y entre paréntesis. Null si no
+     * tiene traducción (entonces no se escribe).
+     */
+    private static function defectoCalculado(string $expr, string $tipo): ?string
+    {
+        $clave = strtoupper(trim($expr));
+        $fijas = ['CURRENT_TIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIME'];
+        if (self::$d === 'sqlite') {
+            return in_array($clave, $fijas, true) ? $clave : '(' . $expr . ')';
+        }
+        // CURRENT_TIMESTAMP sin paréntesis vale en PostgreSQL y SQL Server; en
+        // MySQL solo en una columna de fecha y hora y con su misma precisión
+        // (DATETIME(3) pide CURRENT_TIMESTAMP(3)), que vale desde la 5.6
+        if ($clave === 'CURRENT_TIMESTAMP' && (self::$d === 'postgresql' || self::$d === 'sqlserver')) {
+            return 'CURRENT_TIMESTAMP';
+        }
+        if ($clave === 'CURRENT_TIMESTAMP' && self::$d === 'mysql' && preg_match('/^(DATETIME|TIMESTAMP)(\((\d)\))?$/', $tipo, $m)) {
+            return 'CURRENT_TIMESTAMP' . (isset($m[3]) ? '(' . $m[3] . ')' : '');
+        }
+        try {
+            $g = new GeneradorSql(self::$d === 'access' ? 'access' : self::$d);
+            $sql = $g->consulta(\JsonSQLDB\Parser::analizar('SELECT ' . $expr . ' AS v'));
+            // SELECT <expresión> AS <v entre comillas del dialecto>
+            if (!preg_match('/^SELECT (.+) AS \S+$/s', $sql, $m)) {
+                return null;
+            }
+            return '(' . $m[1] . ')';
+        } catch (NoTraducible $e) {
+            return null;
+        }
+    }
+
     private static function literal($v): string
     {
         if ($v === null)    { return 'NULL'; }

@@ -181,7 +181,6 @@ $numero   = static function (string $campo, string $texto, string $ayuda = '') u
       <div class="row g-3">
         <?= $numero('filas_pagina', t('Filas por página')) ?>
         <?= $numero('celda_max', t('Caracteres visibles por celda')) ?>
-        <?= $numero('export_max', t('Filas como máximo en un volcado SQL')) ?>
         <div class="col-sm-6 col-lg-4">
           <label class="form-label" for="csv_separador"><?= h(t('Separador del CSV')) ?></label>
           <select class="form-select" id="csv_separador" name="csv_separador">

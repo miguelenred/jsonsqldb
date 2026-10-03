@@ -138,7 +138,7 @@ These constructs exist in SQLite and **raise an error** here:
 
 | Construct | Why, and what to do |
 |---|---|
-| `INSERT OR IGNORE` / `OR REPLACE` | There is no upsert. `SELECT` first and decide between `INSERT` and `UPDATE` |
+| `INSERT OR FAIL` / `OR ROLLBACK` | Every statement here is all or nothing. Use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT` (2.8) |
 | `CREATE TEMP TABLE` / `TEMPORARY` | No temporary tables. Create a normal one and `DROP TABLE` it |
 | `WITHOUT ROWID` | There is no `rowid`: rows are JSON objects and the key is the one you declare |
 | `BEGIN` / `COMMIT` / `ROLLBACK` | No multi-statement transactions. Each statement is atomic on its own |
@@ -196,7 +196,11 @@ Operators: `= <> != < <= > >=`, `AND OR NOT`, `IN`, `NOT IN`, `BETWEEN`,
 `NOT BETWEEN`, `LIKE ... [ESCAPE c]`, `NOT LIKE`, `REGEXP`, `IS NULL`,
 `IS NOT NULL`, `+ - * / %`, `||` (concatenation).
 
-Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``.
+Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``. A
+column can be named that way (2.8); tables, indexes and triggers cannot. A
+column without `AS` is named after its expression: `SELECT id + 1 FROM t`
+returns the key `"id + 1"` (SQLite writes it as it was typed, `id+1`).
+`CREATE TABLE … AS SELECT` is in [Part 3](03-writes.md).
 
 ## 3. Functions
 
@@ -381,14 +385,14 @@ silently wrong result.
 | `engine/Database.php` | façade: parses, locks, executes and logs |
 | `engine/Config.php` | reads `config.php` with defaults |
 | `engine/Logger.php` | query log |
-| `tests/f2_parser.php` | 70 checks of the parser |
+| `tests/f2_parser.php` | 72 checks of the parser |
 | `tests/f2_select.php` | 151 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
 php tests/f1_nucleo.php     → OK: 66
-php tests/f2_parser.php     → OK: 70
+php tests/f2_parser.php     → OK: 72
 php tests/f2_select.php     → OK: 151
-php tests/f8_indices.php    → OK: 62
+php tests/f8_indices.php    → OK: 65
 ```

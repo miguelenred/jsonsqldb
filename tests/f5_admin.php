@@ -1022,6 +1022,56 @@ chk('un CSV con un dato que no encaja dice dónde paró y no deja nada a medias 
     return str_contains($html, 'línea 301') && str_contains($html, 'No se ha cargado nada') && $antes !== null && $antes === $despues
         ?: 'no explicó el fallo o dejó filas: ' . json_encode([$antes, $despues]) . ' ' . (preg_match('/alert-danger[^>]*>(.*?)</s', $html, $m) ? trim(strip_tags($m[1])) : '?');
 });
+/**
+ * Un .xlsx mínimo, escrito a mano como lo guarda Excel: textos compartidos y
+ * en línea, números, una fecha con formato de Excel (14), otra con formato
+ * propio con hora, un booleano, una celda vacía en medio y una con formato y
+ * sin dato al final.
+ */
+function xlsxDePrueba(string $fichero): void {
+    $zip = new ZipArchive();
+    $zip->open($fichero, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $zip->addFromString('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>');
+    $zip->addFromString('xl/workbook.xml', '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Datos" sheetId="1" r:id="rId7"/></sheets></workbook>');
+    $zip->addFromString('xl/_rels/workbook.xml.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="worksheet" Target="worksheets/hoja.xml"/></Relationships>');
+    $zip->addFromString('xl/styles.xml', '<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="dd/mm/yyyy\ hh:mm"/></numFmts><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/></cellXfs></styleSheet>');
+    $zip->addFromString('xl/sharedStrings.xml', '<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>nombre</t></si><si><t>edad</t></si><si><t>alta</t></si><si><t>activo</t></si><si><r><t>Ana </t></r><r><t>Pérez</t></r></si><si/></sst>');
+    $zip->addFromString('xl/worksheets/hoja.xml', '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+        . '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c></row>'
+        . '<row r="2"><c r="A2" t="s"><v>4</v></c><c r="B2"><v>41</v></c><c r="C2" s="1"><v>46023</v></c><c r="D2" t="b"><v>1</v></c><c r="E2" s="1"/></row>'
+        . '<row r="4"><c r="A4" t="inlineStr"><is><t>Luis &amp; Cía</t></is></c><c r="C4" s="2"><v>46023.5</v></c><c r="D4" t="b"><v>0</v></c></row>'
+        . '</sheetData></worksheet>');
+    $zip->close();
+}
+chk('cargar un Excel: textos, números, fechas con y sin hora, booleanos y celdas vacías', function () use ($raizDatos) {
+    if (!class_exists('ZipArchive')) { return 'falta la extensión zip'; }
+    enviar('p=sql&db=importada', ['sql' => 'CREATE TABLE excel (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre VARCHAR(40), edad INTEGER, alta DATETIME, activo INTEGER)']);
+    if (!str_contains(pedir('p=tablas&db=importada'), 'value="importar_xlsx"')) { return 'no está el formulario'; }
+    $fichero = $raizDatos . '/datos.xlsx';
+    xlsxDePrueba($fichero);
+    $html = subir('p=tablas&db=importada', ['accion' => 'importar_xlsx', 'db' => 'importada', 'tabla' => 'excel'], 'fichero', $fichero);
+    @unlink($fichero);
+    if (!str_contains($html, '2 fila(s) cargadas')) { return mensajeDe($html); }
+    $r = enviar('p=sql&db=importada', ['sql' => "SELECT nombre || '|' || COALESCE(edad, 'nulo') || '|' || alta || '|' || activo AS f FROM excel ORDER BY id"]);
+    return str_contains($r, 'Ana Pérez|41|2026-01-01|1') && str_contains($r, 'Luis &amp; Cía|nulo|2026-01-01 12:00:00|0')
+        ?: strip_tags((string)preg_replace('/.*<table/s', '<table', $r));
+});
+chk('un Excel dejado en la carpeta de importar con # en el nombre se carga', function () use ($raizDatos) {
+    // zip:// toma el # por el separador de la entrada del ZIP
+    @mkdir($raizDatos . '/admin/importar', 0775, true);
+    $fichero = $raizDatos . '/admin/importar/datos #1.xlsx';
+    xlsxDePrueba($fichero);
+    $html = enviar('p=tablas&db=importada', ['accion' => 'importar_xlsx', 'db' => 'importada', 'tabla' => 'excel', 'servidor' => 'datos #1.xlsx']);
+    @unlink($fichero);
+    return str_contains($html, '2 fila(s) cargadas') && glob(sys_get_temp_dir() . '/jsonsqldb_xlsx_*') === [] ?: mensajeDe($html);
+});
+chk('un fichero que no es un Excel lo dice', function () use ($raizDatos) {
+    $fichero = $raizDatos . '/falso.xlsx';
+    file_put_contents($fichero, 'no es un zip');
+    $html = subir('p=tablas&db=importada', ['accion' => 'importar_xlsx', 'db' => 'importada', 'tabla' => 'excel'], 'fichero', $fichero);
+    @unlink($fichero);
+    return str_contains($html, 'no es un Excel') ?: mensajeDe($html);
+});
 chk('con la API en otra máquina, el ZIP se desactiva y se explica', function () use ($raizDatos, $puertoApi) {
     // Se pide el listado de bases haciendo creer al panel que la API está fuera
     $conf = $raizDatos . '/_otrohost.php';

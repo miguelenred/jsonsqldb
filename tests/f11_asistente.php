@@ -201,7 +201,7 @@ $guardar = static function (array $campos): string {
     $html = peticion('p=configuracion');
     $base = ['csrf' => csrf('p=configuracion'), 'accion' => 'guardar_configuracion', 'conexion' => 'directa'];
     foreach (['timeout', 'sesion_minutos', 'login_max_fallos', 'bloqueo_min', 'bcrypt', 'audit_dias',
-              'filas_pagina', 'celda_max', 'export_max'] as $c) {
+              'filas_pagina', 'celda_max'] as $c) {
         if (preg_match('/name="' . $c . '"[^>]*value="(\d+)"/', $html, $m)) { $base[$c] = $m[1]; }
     }
     $base['csv_separador'] = ';';

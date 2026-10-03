@@ -140,10 +140,17 @@ final class Database
         return $this->enviadas ?? $res;
     }
 
+    /** Lo que devuelve una escritura: sus filas si lleva RETURNING (2.8), o el resumen de siempre. */
+    private static function resultadoEscritura(array $res): array
+    {
+        return $res['devueltas'] ?? ['success' => true, 'filas' => $res['filas'], 'mensaje' => $res['mensaje']];
+    }
+
     /**
      * Ejecuta una sentencia SQL.
      *
      * SELECT devuelve la lista de filas.
+     * INSERT, UPDATE y DELETE con RETURNING, las filas escritas.
      * El resto devuelve ['success'=>true, 'filas'=>n, 'mensaje'=>'...'].
      *
      * $params son los valores de los ? de la sentencia. Se insertan en el árbol
@@ -206,7 +213,7 @@ final class Database
                         $this->cat->olvidar();
                     }
                     Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
-                    return ['success' => true, 'filas' => $res['filas'], 'mensaje' => $res['mensaje']];
+                    return self::resultadoEscritura($res);
                 } catch (ConflictoPartes $e) {
                     Storage::anotarRepeticion();          // a la cola: con la tabla entera, abajo
                 }
@@ -235,7 +242,7 @@ final class Database
             }
 
             Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
-            return ['success' => true, 'filas' => $res['filas'], 'mensaje' => $res['mensaje']];
+            return self::resultadoEscritura($res);
 
         } catch (JsonSqlDbError $e) {
             Logger::registrar($this->base, $op, $sql, null, (microtime(true) - $t0) * 1000,

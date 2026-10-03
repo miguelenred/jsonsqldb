@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, with
 the data stored as JSON files you can read. No database server, no Composer, no
 extensions beyond the standard ones. You copy a folder and it works.
 
-**Version 2.7.4** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
+**Version 2.8.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
 8.1 or later recommended, [see why](#php-80-works-but-81-or-later-is-recommended))
 
 ---
@@ -221,7 +221,7 @@ not for a power cut (see
 | **PHP** | 8.0 or later. Developed on 8.3; CI runs every version from **8.0 to 8.5**. **8.1 or later recommended**: 8.0 has no `fsync()`, so a power cut can lose roughly the last 30 seconds of writes (a crashed or killed process loses nothing on any version). See [below](#php-80-works-but-81-or-later-is-recommended) |
 | **PHP extensions** | Only the standard ones (`json`, `pcre`, `hash`, `filter`). **No** mbstring, **no** intl, **no** PDO |
 | **cURL** | Optional. **jsonSQLDBadmin** uses it for the API when it is there, and PHP's own streams when it is not; with the direct connection it makes no HTTP calls at all. The panel tests (`f5_admin.php`, `f11_asistente.php`) do need it. Not needed by the engine |
-| **zip** | Optional. Only for the panel's "ZIP backup" button |
+| **zip** | Optional. Only for the panel's ZIP backup and restore and for loading Excel (.xlsx) files |
 | **Web server** | Apache, LiteSpeed, IIS or nginx — see below |
 | **Composer** | Optional. Only to install this project; it pulls in nothing else |
 
@@ -291,7 +291,7 @@ Only these three. Everything else can stay read-only.
 ```
 data/                    the databases themselves
 logs/                    query log and API state (rate limiting, nonces)
-jsonsqldbadmin/datos/    panel users, failed-login counters, audit trail
+jsonsqldbadmin/datos/    panel users, failed-login counters, audit trail, scheduled backups (copias/), files to import (importar/)
 ```
 
 On Linux with Apache, LiteSpeed or nginx:
@@ -567,8 +567,14 @@ It manages databases, tables, columns, keys, views, triggers and rows; checks
 and repairs referential integrity; exports to CSV, `INSERT` statements, ZIP or
 an SQL dump for SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft
 Access — views and triggers translated to each one's SQL — and imports the dumps
-those engines make, with their views and triggers, CSV files and its own ZIP (for
-Access, with a PowerShell script it offers); and has its own users
+those engines make, with their views and triggers, CSV and Excel (.xlsx) files
+and its own ZIP (for Access, with a PowerShell script it offers). Exports and
+imports have no size limit: what does not fit in PHP's memory goes in batches
+worked out from the free memory, a file larger than the upload limit is sent in
+pieces (and resumes if the connection drops), and a file can also be left by FTP
+in its import folder (2.8). It makes **scheduled backups** (ZIP or SQL dump,
+keeping the last N) from cron or, without cron, when someone opens it. It has
+its own users
 with `admin` / read-only roles, bcrypt passwords, per-IP lockout, CSRF tokens
 and a daily audit trail. Its configuration can be changed from its own page,
 which also warns if the data folder can be downloaded from outside. It is in
@@ -589,7 +595,7 @@ theme. The panel makes **zero** external requests.
 |---|---|
 | **Query** | `SELECT` |
 | **Write** | `INSERT`, `UPDATE`, `DELETE` |
-| **Schema** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW`, `CREATE INDEX`, `DROP INDEX` |
+| **Schema** | `CREATE TABLE`, `CREATE TABLE … AS SELECT`, `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW`, `CREATE INDEX`, `DROP INDEX` |
 | **Database** | `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` |
 | **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` |
 | **Maintenance** | `CHECK KEYS`, `REPAIR KEYS` |
@@ -653,8 +659,8 @@ The rule: **if a statement is accepted, it does exactly what it promises;
 otherwise it is rejected with a clear error.** Nothing is accepted and silently
 ignored.
 
-These exist in SQLite and raise an error here: `INSERT OR IGNORE` / `OR REPLACE`
-(no upsert — do a `SELECT` and pick), `CREATE TEMP`/`TEMPORARY TABLE` (no
+These exist in SQLite and raise an error here: `INSERT OR FAIL` / `OR ROLLBACK`
+(use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT`, supported since 2.8), `CREATE TEMP`/`TEMPORARY TABLE` (no
 temporary tables), `WITHOUT ROWID` (there is no rowid), `BEGIN`/`COMMIT`/
 `ROLLBACK` (no multi-statement transactions), `CHECK` constraints (use a `BEFORE`
 trigger with `RAISE(ABORT, …)`), `CREATE UNIQUE INDEX` (an index here only speeds
@@ -990,25 +996,27 @@ touch your data.
 
 ```
 php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 70    parser and bound parameters
+php tests/f2_parser.php       → OK: 72    parser and bound parameters
 php tests/f2_select.php       → OK: 151   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 64    writes, DDL, keys and triggers
+php tests/f3_escrituras.php   → OK: 68    writes, DDL, keys and triggers
 php tests/f4_api.php          → OK: 61    real requests against the API
-php tests/f5_esquema.php      → OK: 96    SHOW, ALTER, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 139   the panel, driven like a user
+php tests/f5_esquema.php      → OK: 105   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 142   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 62    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 32    every intermediate state a crash can leave
+php tests/f8_indices.php      → OK: 65    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 33    every intermediate state a crash can leave
 php tests/f10_indices_incrementales.php → OK: 18   indexes corrected instead of rebuilt
 php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
 php tests/f12_contra_sqlite.php → OK: 4    145 queries and 16 writes, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 18 (30 with every server)  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
+php tests/f14_volcados.php     → OK: 31 with every server  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
 php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQL and PostgreSQL do the same there
 php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
 php tests/f18_access.php       → OK: 13    Microsoft Access: the PowerShell script, import and export
+php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries on tables of many parts, against SQLite
+php tests/f20_memoria.php      → OK: 19    the panel with 32 MB: export, import and backups of a larger database (--directa: 20)
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that

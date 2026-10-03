@@ -199,8 +199,11 @@ function get(string $nombre, string $defecto = ''): string
 /** Comprueba un identificador de tabla, columna o restricción. */
 function identificador(string $valor, string $que): string
 {
-    // Lo mismo que admite el motor (engine/Storage.php): hasta 64 caracteres
-    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $valor)) {
+    // Lo mismo que admite el motor: hasta 64 caracteres. Una columna, como en
+    // SQLite, puede llevar espacios o signos (engine/Catalog.php); va siempre
+    // entre comillas con cita()
+    $re = $que === 'columna' ? '/^(?=.*\S)[^\x00-\x1f\x7f]{1,64}$/u' : '/^[A-Za-z_][A-Za-z0-9_]{0,63}$/';
+    if (!preg_match($re, $valor)) {
         throw new RuntimeException(t('Nombre de {que} no válido: \'{valor}\'', ['que' => t($que), 'valor' => $valor]));
     }
     return $valor;
@@ -423,4 +426,51 @@ function self_soloHost(string $host): string
 function cita(string $nombre): string
 {
     return '"' . str_replace('"', '""', $nombre) . '"';
+}
+
+/** Bytes de una directiva de php.ini como memory_limit o upload_max_filesize ('128M'); -1 o 0 si no tiene límite. */
+function bytesIni(string $directiva): int
+{
+    $v = trim((string)ini_get($directiva));
+    $n = (int)$v;
+    switch (strtoupper(substr($v, -1))) {
+        case 'G': $n *= 1024;
+        // no break
+        case 'M': $n *= 1024;
+        // no break
+        case 'K': $n *= 1024;
+    }
+    return $n;
+}
+
+/**
+ * Atributos de un formulario de importación para que el navegador suba el
+ * fichero por trozos si pasa del límite de subida de PHP (assets/panel.js,
+ * lib/Subidas.php).
+ */
+function atributosSubida(): string
+{
+    return ' data-trozo="' . Subidas::tamanoTrozo() . '" data-texto-subiendo="' . h(t('Subiendo el fichero: {p} %')) . '"'
+         . ' data-texto-error="' . h(t('La subida se ha cortado. Vuelve a elegir el mismo fichero y a pulsar el botón: sigue desde donde se quedó.')) . '"';
+}
+
+/**
+ * El campo del fichero de una importación y, si hay ficheros dejados por FTP
+ * en la carpeta de importar, un desplegable para elegir uno de ellos.
+ */
+function campoImportacion(string $campo, string $accept, string $id = ''): string
+{
+    $html = '<input class="form-control" type="file" name="' . h($campo) . '" accept="' . h($accept) . '"'
+          . ($id !== '' ? ' id="' . h($id) . '"' : '') . ' style="max-width:22rem">';
+    $enServidor = Subidas::delServidor();
+    if ($enServidor !== []) {
+        $html .= '<select class="form-select" name="servidor" style="max-width:22rem" aria-label="'
+               . h(t('O un fichero de la carpeta de importar')) . '"><option value="">'
+               . h(t('… o uno de la carpeta de importar')) . '</option>';
+        foreach ($enServidor as $nombre => $bytes) {
+            $html .= '<option value="' . h($nombre) . '">' . h($nombre) . ' (' . h(Idioma::numero((int)ceil($bytes / 1024))) . ' KB)</option>';
+        }
+        $html .= '</select>';
+    }
+    return $html;
 }

@@ -409,9 +409,8 @@ final class TraductorRutinas
         'THROW', 'ROLLBACK', 'RETURN', 'PRINT', 'COMMIT', 'WHILE', 'EXEC', 'EXECUTE', 'ELSE', 'MERGE', 'OPEN', 'FETCH',
         'CLOSE', 'DEALLOCATE'];
 
-    /** El evento que se traduce, la tabla del trigger, sus columnas y las variables vistas. */
+    /** El evento que se traduce, las columnas de la tabla del trigger y las variables vistas. */
     private string $ssEvento = '';
-    private string $ssTabla = '';
     /** @var array<string,string> */
     private array $ssColumnas = [];
     /** @var array<string,string> @variable → su valor, ya en el SQL de aquí */
@@ -461,7 +460,6 @@ final class TraductorRutinas
         $out = [];
         foreach ($eventos as $evento) {
             $this->ssEvento = $evento;
-            $this->ssTabla = $tabla;
             $this->ssColumnas = $this->tr->columnas($tabla);
             $this->ssVars = ['@@ROWCOUNT' => '1'];
             $sentencias = $this->bloqueSs($cuerpo);
@@ -1688,6 +1686,10 @@ final class TraductorRutinas
                      'minute' => 'minutes', 'minutes' => 'minutes', 'sec' => 'seconds', 'secs' => 'seconds', 'second' => 'seconds', 'seconds' => 'seconds'];
         preg_match_all('/(-?\d+(?:\.\d+)?)\s*([a-z]+)/i', $resto, $mm, PREG_SET_ORDER);
         foreach ($mm as $p) {
+            // Una semana, siete días (pg_dump ya las escribe en días; a mano, no)
+            if (in_array(strtolower($p[2]), ['week', 'weeks'], true)) {
+                $p = [$p[0], (string)((float)$p[1] * 7), 'days'];
+            }
             $u = $unidades[strtolower($p[2])] ?? throw new NoTraducible(t("intervalo '{i}'", ['i' => $i]));
             $mods[] = (str_starts_with($p[1], '-') ? '' : '+') . $p[1] . " $u";
         }
@@ -1947,8 +1949,11 @@ final class TraductorRutinas
                 return '(' . implode(' || ', array_map(static fn($x) => "COALESCE(CAST($x AS TEXT), '')", $a)) . ')';
             case 'DATEADD':
                 $unidad = $unidades[$this->palabra($args[0] ?? [])] ?? throw new NoTraducible(t("INTERVAL en '{u}'", ['u' => (string)($args[0]['v'] ?? '')]));
-                $n = $unidad === 'weeks' ? "(({$a[1]}) * 7)" : $a[1];
-                $unidad = $unidad === 'weeks' ? 'days' : $unidad;
+                // Las semanas, como días por siete. Antes la cuenta fija se
+                // escribía tal cual en días: DATEADD(week, 2, d) sumaba 2 días
+                $semanas = $unidad === 'weeks';
+                $n = $semanas ? "(({$a[1]}) * 7)" : $a[1];
+                $unidad = $semanas ? 'days' : $unidad;
                 $partes = $this->separar($args);
                 $cant = $partes[1];
                 $signo = '+';
@@ -1956,8 +1961,8 @@ final class TraductorRutinas
                     $signo = '-';
                     $cant = [$cant[1]];
                 }
-                return count($cant) === 1 && $cant[0]['k'] === 'num' && $unidad !== 'weeks'
-                    ? "DATETIME({$a[2]}, '$signo" . $cant[0]['v'] . " $unidad')"
+                return count($cant) === 1 && $cant[0]['k'] === 'num'
+                    ? "DATETIME({$a[2]}, '$signo" . ($semanas ? $cant[0]['v'] * 7 : $cant[0]['v']) . " $unidad')"
                     : "DATETIME({$a[2]}, CASE WHEN $n < 0 THEN '' ELSE '+' END || ($n) || ' $unidad')";
             case 'DATEDIFF':
                 // Cuántos límites de la unidad hay entre las dos, como SQL Server

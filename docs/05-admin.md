@@ -5,7 +5,7 @@ nothing from outside: Bootstrap, the stylesheet and the icons (inline SVG, no
 icon font) are in `jsonsqldbadmin/`. Light and dark theme, remembered in each
 browser; in Spanish and English (section 6).
 
-What is new in 2.7.1 and 2.7.2, and where it is described:
+What is new since 2.7.1, and where it is described:
 
 | Since | What | Section |
 |---|---|---|
@@ -18,6 +18,9 @@ What is new in 2.7.1 and 2.7.2, and where it is described:
 | 2.7.3 | Guide to making the dump of each engine; UTF-16 SQL Server scripts | 3 |
 | 2.7.3 | CSV cells that a spreadsheet would run as formulas are neutralised | 3 |
 | 2.7.3 | Signing out is a POST with its token; failed sign-ins counted under a lock; `Secure` cookie behind a trusted proxy | 5 |
+| 2.8 | Exports and imports with no size limit (batches, upload in pieces, import folder); `ADMIN_EXPORT_MAX` is gone | 3.1 |
+| 2.8 | Excel (.xlsx) into a table | 3.1 |
+| 2.8 | Scheduled backups, from cron or from the panel | 3.2 |
 
 The panel talks to the engine in one of two ways, chosen when it is installed:
 
@@ -268,8 +271,8 @@ the autoincrement continuing.
   the end, because dumps create tables in any order and load data with checks
   off; and session statements (`PRAGMA`, `SET`, `LOCK TABLES`, `BEGIN`…), the
   `sqlite_sequence` table and mysqldump's `/*! … */` blocks are skipped. What
-  has no equivalent here — `CHECK`, computed defaults such as
-  `CURRENT_TIMESTAMP`, `ON UPDATE`, `ENUM`'s list of values, binary `BLOB`
+  has no equivalent here — `CHECK`, computed defaults other than the current
+  date and time, `ON UPDATE`, `ENUM`'s list of values, binary `BLOB`
   data, MySQL views and triggers — is dropped, and the summary at the end says
   exactly what. `tests/f14_volcados.php` imports a real `sqlite3 .dump` and a
   real `mariadb-dump`, kept in `tests/volcados/`, and compares the data with
@@ -486,7 +489,8 @@ translated as Access stores them: text in double quotes, `#dates#`, `&`, `IIf`,
 joins in parentheses and `TOP`.
 
 What does not arrive the same in any of them: `CHECK` constraints, computed
-default values (`CURRENT_TIMESTAMP`, `NOW()`, `getdate()`), `ENUM` value lists,
+default values other than the current date and time (`CURRENT_TIMESTAMP`,
+`NOW()`, `getdate()`, `curdate()` and the like do arrive, since 2.8), `ENUM` value lists,
 time zones of dates, and binary data that is not text (kept as its hexadecimal,
 `\x…`). Names that are not valid here become valid: `Order Details` →
 `Order_Details`. And if the dump contains `DROP TABLE`, a table with the same name
@@ -495,8 +499,8 @@ here is replaced: import into a new, empty database if in doubt.
 **The SQL dump of a whole database is written table by table** (2.7.3): the
 rows of each table are read when that table is written, and the dump goes to the
 browser as it is made, so only one table is in memory at a time (before, the
-whole database was). `ADMIN_EXPORT_MAX` still caps the total number of rows. If
-something fails halfway, the download has already started: the file ends with an
+whole database was), and since 2.8 a table that does not fit in memory is read
+in batches (section 3.1). If something fails halfway, the download has already started: the file ends with an
 `-- ERROR: the dump is incomplete` line. The dump for SQLite writes
 `AUTOINCREMENT` only on an `INTEGER PRIMARY KEY`, the only place SQLite accepts
 it. In views exported to other engines, `CAST(x AS INTEGER)` truncates as it
@@ -520,9 +524,108 @@ the SQL editor's result (exports what the query returned).
   another database.
 - When exporting a query result, the table name of the INSERTs is taken from
   the first `FROM` of the statement; if there is none, it is called `consulta`.
-- The cap is `ADMIN_EXPORT_MAX` rows (100,000 by default) so PHP does not run
-  out of memory. If you exceed it, the panel says so and you narrow it with
-  `WHERE` or `LIMIT`.
+- There is no row cap (2.8): what does not fit in memory goes in batches
+  (section 3.1).
+
+### 3.1. Databases larger than memory, files larger than the upload limit (2.8)
+
+**Exporting.** Before asking for the rows, the panel measures what a sample of
+200 takes and works out how many fit in the free memory (`memory_limit` minus
+what is already in use, with room left for the API's answer and the text being
+written). If the whole table or result fits, it is asked for at once, as
+before; if not, in batches of that size (`LIMIT … OFFSET …`, at most 100,000
+rows per request), and only one batch is in memory. This holds for the SQL
+dumps in every dialect, CSV and `INSERT` of a table or a query, and scheduled
+backups. The types a dump works out from the data (text lengths, digits, the
+range of integers for Access) come from a first pass that keeps no rows; and a
+table that refers to itself, read in batches, cannot be ordered parents first,
+so its foreign key goes at the end with the deferred ones. `ADMIN_EXPORT_MAX`,
+the old row cap, is gone; a `config.php` that still defines it keeps working.
+
+Two limits:
+
+- A query with `ORDER BY` needs the engine to sort the whole result in its own
+  memory; with the direct connection, that is the same memory as the panel's.
+  If it does not fit, the panel says so before the download starts, or in the
+  last line of the file (`ERROR: the export is incomplete`) if it fails later:
+  the file is never taken as complete. Without `ORDER BY` there is no limit.
+- Through the API each batch is a request of its own, so a write in the middle
+  of a long export can show in part of the file. For a consistent copy of a
+  database that is being written to, use the ZIP, which locks it while copying.
+
+**Uploading.** `upload_max_filesize` and `post_max_size` limit each request,
+not the size of a file. When the file chosen is larger than what fits in one
+request, the browser cuts it into pieces that do (at most 8 MB) and sends them
+one after another, with a progress bar; when the last one arrives, the form is
+sent without the file. If the connection drops, choosing the same file again
+resumes from what had arrived: the pieces are identified by the file's name,
+size and date. A file uploaded in pieces is deleted when the import ends,
+whether it went well or not; one left half way is deleted after two days.
+
+**The import folder.** A file too large for the browser can be left by FTP in
+`jsonsqldbadmin/datos/importar/`: the import forms then offer it in a list,
+next to the file field. It is imported from there without being copied, and it
+stays there afterwards; delete it when you no longer need it.
+
+Importing already read the file statement by statement (SQL) or line by line
+(CSV) and inserted in batches of 200 rows, so its size never mattered; a single
+statement still has to fit in memory (mysqldump writes them of 1 MB at most).
+Long imports and exports are no longer cut by `max_execution_time`.
+
+**Excel.** Next to the CSV, the first sheet of an `.xlsx` file goes into a
+table the same way: the first row has the column names. It is read row by row
+with PHP's `ZipArchive` and `XMLReader`, without any library and without
+loading the sheet; the shared strings go to a temporary file. Cells with a
+date format arrive as `yyyy-MM-dd` or `yyyy-MM-dd HH:mm:ss`, booleans as 1 or
+0, errors (`#N/A`) as `NULL`, and formulas as their last calculated value. The
+button is disabled when the `zip` or `xml` extension of PHP is missing.
+
+### 3.2. Scheduled backups (2.8)
+
+The **Scheduled backups** page (administrators only) programs automatic
+backups: the database, how often (every N hours, every day at an hour, or every
+week on a day and at an hour), the format (ZIP or SQL dump) and how many to
+keep; when there are more, the oldest are deleted (by the date of the file, not its name: cron and the web server may have different time zones). Each one can also be made at
+once, downloaded or deleted from there.
+
+They are kept in `jsonsqldbadmin/datos/copias/<database>/`, named with the date
+and time. A backup is written to a temporary file and renamed when it is
+finished, so a backup cut halfway never looks complete. The ZIP needs the
+panel and the engine on the same machine, as the ZIP button does.
+
+Who makes them:
+
+- **cron** (best): every 15 minutes, `herramientas/copias-cron.php` makes the
+  ones that are due and no others. The page shows the exact line, for cron and
+  for the Windows Task Scheduler:
+
+  ```
+  0,15,30,45 * * * * php /path/to/jsonsqldbadmin/herramientas/copias-cron.php
+  ```
+
+  The script only runs from the command line; the `herramientas/` folder cannot
+  be reached from the browser anyway. It exits with code 1 if a backup failed.
+- **without cron**, the panel: when someone opens a page and a backup is due,
+  the page tells the browser, which asks for it in a separate request without
+  waiting for the answer, so nobody waits for it. The server finishes it even if
+  the page is closed, and lets go of the session first so the next pages are
+  not held up. A backup can then be late if nobody opens the panel.
+
+A lock stops two backups from running at the same time. A backup that fails
+shows its error on the page, is written to the audit trail, and is tried again
+at its next time.
+
+### 3.3. The panel's data folder
+
+`jsonsqldbadmin/datos/` (`ADMIN_DATA_PATH`) holds the panel's users and audit
+trail, and two folders of its own: `copias/` (scheduled backups) and
+`importar/` (files left by FTP to import, and uploads in pieces while they
+arrive). **PHP must be able to write in `datos/` and in both folders**; they are
+created on their own when needed. They are protected like the rest of
+`datos/`: the `.htaccess` and `web.config` of the folder deny them to the
+browser, and so do the rules in [`nginx/`](../nginx/README.md) and
+[`litespeed/`](../litespeed/README.md). If you move `ADMIN_DATA_PATH` outside
+the public folder of the website, both go with it.
 
 ## 4. Creating the first database
 
@@ -682,7 +785,6 @@ refusal leaves `config.php` untouched.
 | `ADMIN_FILAS_PAGINA` | `50` | rows per page in the data listing |
 | `ADMIN_CELDA_MAX` | `120` | characters before a cell is truncated |
 | `ADMIN_CSV_SEPARADOR` | `;` | separator of the exported CSV |
-| `ADMIN_EXPORT_MAX` | `100000` | row cap per export |
 | `ADMIN_RUTA_DATOS_MOTOR` | empty | the engine's `data/` folder, for the ZIP copy |
 
 ## 8. Files
@@ -697,7 +799,13 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/lib/Auth.php` | users, session, IP lockout and CSRF |
 | `jsonsqldbadmin/lib/Audit.php` | audit trail |
 | `jsonsqldbadmin/lib/Exportar.php` | export to CSV, `INSERT` statements, ZIP and SQL dumps for SQLite, MySQL / MariaDB, PostgreSQL and SQL Server |
-| `jsonsqldbadmin/lib/Importar.php` | import of SQL dumps and CSV, and restore of a ZIP backup |
+| `jsonsqldbadmin/lib/Importar.php` | import of SQL dumps, CSV and Excel, and restore of a ZIP backup |
+| `jsonsqldbadmin/lib/Lotes.php` | rows of a query at once or in batches, according to the free memory |
+| `jsonsqldbadmin/lib/Subidas.php` | where the file of an import comes from: uploaded whole, in pieces, or from the import folder |
+| `jsonsqldbadmin/lib/LectorXlsx.php` | reads the first sheet of an `.xlsx` row by row |
+| `jsonsqldbadmin/lib/Copias.php` | scheduled backups |
+| `jsonsqldbadmin/lib/arranque.php` | loads the configuration and the classes, for `index.php` and the cron script |
+| `jsonsqldbadmin/herramientas/copias-cron.php` | makes the scheduled backups that are due, from cron or the Task Scheduler |
 | `jsonsqldbadmin/lib/Traductor.php` | translation of SQLite, MySQL, PostgreSQL and SQL Server dumps into jsonSQLDB's SQL |
 | `jsonsqldbadmin/lib/Idioma.php` | the panel's language: browser, user choice, `t()` |
 | `jsonsqldbadmin/idiomas/en.php` | the English texts, keyed by the Spanish ones |
@@ -709,9 +817,10 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 (CSS and JS), local |
 | `jsonsqldbadmin/herramientas/access-to-jsonsqldb.ps1` | the PowerShell script that dumps a Microsoft Access database (Windows), downloaded from the import box |
 | `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
-| `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields, selects that submit their form |
-| `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json`, and `codigo-instalacion.txt` until the installation finishes |
-| `tests/f5_admin.php` | 139 checks driving the real panel through the API |
+| `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields, selects that submit their form, uploads in pieces, scheduled backups without cron |
+| `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json`, `copias.json`, the `copias/` and `importar/` folders, and `codigo-instalacion.txt` until the installation finishes |
+| `tests/f5_admin.php` | 142 checks driving the real panel through the API |
+| `tests/f20_memoria.php` | 19 checks (20 with `--directa`): a database larger than memory exported and imported, uploads in pieces, the import folder, scheduled backups |
 | `tests/f11_asistente.php` | 35 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
 ## 9. Tests
@@ -723,14 +832,20 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php      → OK: 139   the panel, page by page
+php tests/f5_admin.php      → OK: 142   the panel, page by page
 php tests/f11_asistente.php → OK: 35    setup wizard, direct connection, configuration, sessions, languages
-php tests/f14_volcados.php  → OK: 18    dumps, difficult dumps, ZIP paths, all-or-nothing (30 with servers)
+php tests/f14_volcados.php  → OK: 31    dumps, difficult dumps, ZIP paths, all-or-nothing (30 with servers)
 php tests/f15_idiomas.php   → OK: 6     every text translated, none left over, browser language
 php tests/f16_vistas_triggers.php → OK: 11   views and triggers exported, run in MySQL and PostgreSQL
-php tests/f17_rutinas_importadas.php → OK: 11views and triggers imported from MySQL, PostgreSQL, SQL Server
+php tests/f17_rutinas_importadas.php → OK: 11    views and triggers imported from MySQL, PostgreSQL, SQL Server
 php tests/f18_access.php    → OK: 13    the Access script, importing and exporting Access
+php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries against SQLite
+php tests/f20_memoria.php   → OK: 19    larger than memory, uploads in pieces, backups (20 with --directa)
 ```
+
+`tests/f20_memoria.php` runs the panel and the API with `memory_limit = 32M` on
+a database of 120,000 rows, which as a PHP array takes several times that; with
+`--directa` the panel uses the direct connection. It takes about a minute.
 
 `tests/f14_volcados.php` loads the dumps into real servers when it is told where
 they are (`JSONSQLDB_TEST_MYSQL`, `JSONSQLDB_TEST_POSTGRESQL`, as

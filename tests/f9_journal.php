@@ -265,7 +265,7 @@ chk('sin manifiesto no se toca nada, sea cual sea el estado de los temporales', 
 
 chk('un manifiesto que señala un temporal perdido detiene la recuperación', function () use ($raiz) {
     $dir = "$raiz/j";
-    $original = preparar($raiz);
+    preparar($raiz);
     // Un temporal que no está y cuyo destino tampoco: no se puede rehacer y
     // lo único seguro es pararse y conservar el journal para revisarlo a mano
     @unlink("$dir/t.part2.json");
@@ -753,6 +753,43 @@ chk('cambiar el tamaño de parte con datos ya escritos no corrompe la tabla', fu
       . '  if ($x["v"] !== $e) { $mal = "la fila " . $x["id"] . " vale " . $x["v"]; break; } } }'
       . 'echo $mal === "" ? "ok" : $mal;');
 
+    borrarArbol($dir);
+    return $salida === 'ok' ?: $salida;
+});
+
+chk('con el tamaño de parte cambiado, UPDATE y DELETE por un texto sin índice tocan las filas que son (2.7.5)', function () use ($raiz) {
+    // Sin índice sobre v, se leen solo las partes que contienen el texto, y la
+    // posición de cada fila sale de su parte. Tiene que salir con el tamaño
+    // con que se escribieron (40), no con el de ahora (80)
+    $dir = "$raiz/cambiaparte2";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    $correr = static function (int $parte, string $codigo): string {
+        $c = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+           . 'define("JSONSQLDB_FILAS_POR_PARTE", ' . $parte . ');'
+           . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+           . $codigo;
+        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($c) . ' 2>&1'));
+    };
+    $d = var_export($dir, true);
+    $correr(40,
+        'JsonSQLDB\\Database::crear("g", ' . $d . ');'
+      . '$bd = new JsonSQLDB\\Database("g", ' . $d . ');'
+      . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, v VARCHAR(20))");'
+      . '$v = []; for ($i = 1; $i <= 200; $i++) { $v[] = "($i, " . chr(39) . "f$i" . chr(39) . ")"; }'
+      . '$bd->consultar("INSERT INTO t VALUES " . implode(",", $v));');
+    $correr(80, '$bd = new JsonSQLDB\\Database("g", ' . $d . ');'
+              . '$bd->consultar("UPDATE t SET v = " . chr(39) . "X" . chr(39) . " WHERE v = " . chr(39) . "f150" . chr(39));'
+              . '$bd->consultar("DELETE FROM t WHERE v = " . chr(39) . "f170" . chr(39));');
+    borrarArbol("$dir/g/.cache");
+    $salida = $correr(80,
+        '$bd = new JsonSQLDB\\Database("g", ' . $d . ');'
+      . '$f = $bd->consultar("SELECT id, v FROM t ORDER BY id");'
+      . '$mal = count($f) !== 199 ? ("quedan " . count($f) . " filas de 199") : "";'
+      . 'if ($mal === "") { foreach ($f as $x) {'
+      . '  $e = (int)$x["id"] === 150 ? "X" : "f" . $x["id"];'
+      . '  if ((int)$x["id"] === 170 || $x["v"] !== $e) { $mal = "la fila " . $x["id"] . " vale " . $x["v"]; break; } } }'
+      . 'echo $mal === "" ? "ok" : $mal;');
     borrarArbol($dir);
     return $salida === 'ok' ?: $salida;
 });

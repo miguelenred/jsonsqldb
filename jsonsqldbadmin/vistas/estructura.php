@@ -367,7 +367,7 @@ require __DIR__ . '/_pestanas.php';
             <div class="col-md-6">
               <label class="form-label"><?= h(t('Nombre')) ?></label>
               <input class="form-control form-control-sm" name="nombre" required
-                     pattern="[A-Za-z_][A-Za-z0-9_]*" value="<?= h($cn) ?>">
+                     maxlength="64" value="<?= h($cn) ?>">
             </div>
             <div class="col-md-6">
               <label class="form-label"><?= h(t('Tipo')) ?></label>

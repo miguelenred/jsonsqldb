@@ -365,6 +365,19 @@ final class Catalog
     // ------------------------------------------------------------------
 
     /**
+     * Un nombre de columna: de 1 a 64 caracteres, sin caracteres de control.
+     * Como en SQLite, puede llevar espacios o signos (`CREATE TABLE t AS
+     * SELECT id + 1 …` da una columna «id + 1»); entonces se escribe entre
+     * comillas dobles. Nunca forma parte de un nombre de fichero.
+     */
+    public static function exigirNombreColumna(string $nombre): void
+    {
+        if (!preg_match('/^(?=.*\S)[^\x00-\x1f\x7f]{1,64}$/u', $nombre)) {
+            throw JsonSqlDbError::schema("Nombre de columna no válido: '" . (preg_match('//u', $nombre) ? $nombre : '?') . "'");
+        }
+    }
+
+    /**
      * Normaliza la definición de una columna.
      * Entrada: ['name'=>'id','type'=>'INTEGER','pk'=>true,'autoincrement'=>true,
      *           'notnull'=>true,'unique'=>false,'default'=>null]
@@ -372,9 +385,7 @@ final class Catalog
     public static function normalizarColumna(array $col): array
     {
         $nombre = trim((string)($col['name'] ?? ''));
-        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $nombre)) {
-            throw JsonSqlDbError::schema("Nombre de columna no válido: '$nombre'");
-        }
+        self::exigirNombreColumna($nombre);
         $tipo = Types::parse((string)($col['type'] ?? 'TEXT'));
 
         $out = [
@@ -385,6 +396,8 @@ final class Catalog
             // (el DECIMAL sin escala declarada toma 2 más abajo)
             'notnull'       => !empty($col['notnull']),
             'default'       => $col['default'] ?? null,
+            // Un DEFAULT que se calcula al insertar (2.8): CURRENT_TIMESTAMP o (expresión)
+            'default_expr'  => isset($col['default_expr']) && $col['default_expr'] !== '' ? (string)$col['default_expr'] : null,
             'pk'            => !empty($col['pk']),
             'autoincrement' => !empty($col['autoincrement']),
             'unique'        => !empty($col['unique']),
@@ -404,6 +417,10 @@ final class Catalog
         }
         if ($out['default'] !== null) {
             $out['default'] = Types::cast($out['default'], $out);
+        }
+        if ($out['default_expr'] !== null) {
+            $out['default'] = null;
+            Parser::analizar('SELECT ' . $out['default_expr']);   // que se pueda calcular
         }
         return $out;
     }
@@ -458,7 +475,8 @@ final class Catalog
      * Crea una tabla.
      * $def = ['columns'=>[...], 'unique'=>[...], 'foreign_keys'=>[...]]
      */
-    public function crearTabla(string $tabla, array $def): void
+    /** @param list<array<string,mixed>> $filas  filas iniciales, en el orden de las columnas (CREATE TABLE … AS SELECT) */
+    public function crearTabla(string $tabla, array $def, array $filas = []): void
     {
         Storage::validarTabla($tabla);
 
@@ -503,7 +521,14 @@ final class Catalog
             $meta['foreign_keys'][] = $this->normalizarFk($tabla, $meta, $fk);
         }
 
-        $this->st->crearTabla($tabla, self::compactar($meta), Indexes::definiciones($meta));
+        foreach ($filas as $i => $f) {
+            $nueva = [];
+            foreach (array_values($f) as $j => $v) {
+                $nueva[$columnas[$j]['name']] = Types::cast($v, $columnas[$j]);
+            }
+            $filas[$i] = $nueva;
+        }
+        $this->st->crearTabla($tabla, self::compactar($meta), Indexes::definiciones($meta), $filas);
         unset($this->memo[$tabla]);
         $this->memoTablas = null;          // hay una tabla más
     }
@@ -564,16 +589,29 @@ final class Catalog
             throw JsonSqlDbError::schema('No se puede añadir una columna AUTOINCREMENT a una tabla existente');
         }
 
-        $filas = $this->st->leerFilas($tabla);
-        if ($col['notnull'] && $col['default'] === null && $filas !== []) {
+        $hayFilas = $this->st->contarFilas($tabla) > 0;
+        if ($col['default_expr'] !== null && $hayFilas) {
+            // Como SQLite: el valor de las filas que ya están no se puede inventar
+            throw JsonSqlDbError::schema("No se puede añadir la columna '{$col['name']}' con un DEFAULT calculado: la tabla tiene datos");
+        }
+        if ($col['notnull'] && $col['default'] === null && $hayFilas) {
             throw JsonSqlDbError::schema("La columna '{$col['name']}' es NOT NULL y necesita DEFAULT: la tabla tiene datos");
         }
+        $meta['columns'][] = $col;
+
+        // Por bloques de texto: la columna nueva, con su valor, al final de
+        // cada fila (donde la pondría PHP al añadirla al array)
+        $par = Storage::claveJson($col['name']) . Storage::valorJson($col['default']);
+        $porLinea = static fn(string $l): string => $l === '{}' ? '{' . $par . '}' : substr($l, 0, -1) . ',' . $par . '}';
+        if ($this->st->reescribirLineas($tabla, $porLinea, self::compactar($meta), Indexes::definiciones($meta))) {
+            unset($this->memo[$tabla]);
+            return;
+        }
+        $filas = $this->st->leerFilas($tabla);
         foreach ($filas as $i => $fila) {
             $fila[$col['name']] = $col['default'];
             $filas[$i] = $fila;
         }
-
-        $meta['columns'][] = $col;
         $this->guardarTodo($tabla, $filas, $meta);
     }
 
@@ -691,6 +729,19 @@ final class Catalog
             }
         ));
 
+        // Por bloques de texto, salvo si era parte de la clave primaria (hay
+        // que comprobar que la que queda sigue siendo única, y eso pide las filas)
+        if (!$col['pk']) {
+            $porLinea = static function (string $l) use ($col): ?string {
+                $quitada = self::quitarDeLinea($l, $col['name']);
+                return $quitada === null ? null : $quitada[0];
+            };
+            if ($this->st->reescribirLineas($tabla, $porLinea, self::compactar($meta), Indexes::definiciones($meta))) {
+                unset($this->memo[$tabla]);
+                return;
+            }
+        }
+
         $filas = $this->st->leerFilas($tabla);
         foreach ($filas as $i => $fila) {
             unset($fila[$col['name']]);
@@ -731,6 +782,7 @@ final class Catalog
         if ($col === null) {
             throw JsonSqlDbError::schema("La columna '$desde' no existe en '$tabla'");
         }
+        self::exigirNombreColumna($hasta);
         if (self::columna($meta, $hasta) !== null) {
             throw JsonSqlDbError::schema("La columna '$hasta' ya existe en '$tabla'");
         }
@@ -755,6 +807,21 @@ final class Catalog
             $meta['autoincrement']['column'] = $hasta;
         }
 
+        // Por bloques de texto: el par sale de su sitio y vuelve con el nombre
+        // nuevo al final de la fila (donde lo deja PHP al renombrar la clave)
+        $porLinea = static function (string $l) use ($col, $hasta): ?string {
+            $quitada = self::quitarDeLinea($l, $col['name']);
+            if ($quitada === null) {
+                return null;
+            }
+            [$resto, $valor] = $quitada;
+            return ($resto === '{}' ? '{' : substr($resto, 0, -1) . ',') . Storage::claveJson($hasta) . $valor . '}';
+        };
+        if ($this->st->reescribirLineas($tabla, $porLinea, self::compactar($meta), Indexes::definiciones($meta))) {
+            unset($this->memo[$tabla]);
+            return;
+        }
+
         $filas = $this->st->leerFilas($tabla);
         foreach ($filas as $i => $fila) {
             if (array_key_exists($col['name'], $fila)) {
@@ -765,6 +832,44 @@ final class Catalog
         }
 
         $this->guardarTodo($tabla, $filas, $meta);
+    }
+
+    /**
+     * Quita el par "columna":valor del JSON de una fila, sin decodificarla:
+     * [la fila sin él, el valor tal como estaba escrito]. Null si la fila no
+     * lo tiene una vez exactamente, o el valor no es un escalar de JSON (y
+     * entonces se hace decodificando). "columna": solo puede aparecer como
+     * clave: dentro de un texto, una comilla va escapada (\").
+     *
+     * @return array{0: string, 1: string}|null
+     */
+    private static function quitarDeLinea(string $linea, string $columna): ?array
+    {
+        $aguja = Storage::claveJson($columna);
+        $donde = strpos($linea, $aguja);
+        if ($donde === false || $donde === 0 || !in_array($linea[$donde - 1], ['{', ','], true)
+            || strpos($linea, $aguja, $donde + 1) !== false) {
+            return null;
+        }
+        $desde = $donde + strlen($aguja);
+        if (!preg_match('/\G(?:"(?:[^"\\\\]|\\\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/', $linea, $m, 0, $desde)) {
+            return null;
+        }
+        $valor = $m[0];
+        $tras  = $desde + strlen($valor);
+        $sigue = $linea[$tras] ?? '';
+        if ($sigue !== ',' && $sigue !== '}') {
+            return null;
+        }
+        $antes = substr($linea, 0, $donde - 1);          // sin el { o la , de delante
+        $abre  = $linea[$donde - 1];
+        if ($abre === '{') {
+            // Era la primera: lo que sigue (tras su coma, si la hay) empieza la fila
+            $resto = '{' . ($sigue === ',' ? substr($linea, $tras + 1) : '}');
+        } else {
+            $resto = $antes . substr($linea, $tras);
+        }
+        return [$resto, $valor];
     }
 
     /** Impide tocar una columna usada por UNIQUE compuesto o por una FK (propia o ajena). */
@@ -1296,7 +1401,7 @@ final class Catalog
         $cols = [];
         foreach ($meta['columns'] as $col) {
             $c = ['name' => $col['name'], 'type' => $col['type']];
-            foreach (['length', 'scale', 'default'] as $k) {
+            foreach (['length', 'scale', 'default', 'default_expr'] as $k) {
                 if (($col[$k] ?? null) !== null) {
                     $c[$k] = $col[$k];
                 }
