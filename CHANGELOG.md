@@ -233,7 +233,8 @@ for a decision of its own.
   MySQL, CSV, a query with its order, ZIP), uploaded in pieces (a repeated
   piece is not written twice) and imported, imported from the import folder,
   and backed up by the panel, by «back up now» keeping only the ones asked for
-  (the oldest by file date, whatever their names say), and by the cron script.
+  (the oldest by file date, whatever their names say; two in the same second
+  get different names), and by the cron script.
   A filtered table goes in batches with `LIMIT`, not by running the whole query
   again for each batch. It runs again with `--directa`. With batches turned off
   on purpose, the exports fail.

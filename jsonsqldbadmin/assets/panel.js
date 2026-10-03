@@ -7,6 +7,7 @@
  *  - Ctrl/Cmd+Enter envía el formulario del editor SQL.
  *  - Asistente de instalación: marca la opción de conexión elegida.
  *  - Importar un fichero mayor que el límite de subida de PHP, por trozos.
+ *  - Campos que solo se ven con una opción de un desplegable (data-visible-si).
  *  - Copias programadas pendientes, pedidas aparte cuando no hay cron.
  *  - Formularios de columnas, que se explican a continuación.
  *
@@ -218,6 +219,22 @@ document.querySelectorAll('form[data-trozo]').forEach(function (form) {
                 function (x) { return ('0' + x.toString(16)).slice(-2); }).join(''));
         hash.then(function (h) { id = h; return peticion(-1, null); }).then(seguir).catch(fallo);
     });
+});
+
+// Un bloque con data-visible-si="id=valor" solo se ve cuando ese desplegable
+// tiene ese valor; mientras no se ve, sus campos no se envían (sin JavaScript
+// se ve siempre, y el servidor ignora lo que no corresponde)
+document.querySelectorAll('[data-visible-si]').forEach(function (bloque) {
+    var partes = bloque.getAttribute('data-visible-si').split('=');
+    var origen = document.getElementById(partes[0]);
+    if (!origen) { return; }
+    function ajustar() {
+        var visible = origen.value === partes[1];
+        bloque.hidden = !visible;
+        bloque.querySelectorAll('input, select, textarea').forEach(function (c) { c.disabled = !visible; });
+    }
+    origen.addEventListener('change', ajustar);
+    ajustar();
 });
 
 // Copias programadas sin cron: si la página avisa de que hay alguna pendiente

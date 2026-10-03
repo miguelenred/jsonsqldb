@@ -125,7 +125,7 @@ $cuando    = static function (array $p) use ($dias): string {
                 <option value="horas"><?= h(t('Cada N horas')) ?></option>
               </select>
             </div>
-            <div class="col-6">
+            <div class="col-6" data-visible-si="cp-frec=horas">
               <label class="form-label" for="cp-horas"><?= h(t('N horas')) ?></label>
               <input class="form-control" id="cp-horas" type="number" name="horas" min="1" max="168" value="6">
             </div>

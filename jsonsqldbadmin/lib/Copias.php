@@ -186,6 +186,21 @@ final class Copias
         return $hechas;
     }
 
+    /**
+     * El nombre de una copia nueva: la base, la fecha y la hora. Si ya hay una
+     * de ese mismo segundo (el cron justo después de «hacer ahora»), con -2,
+     * -3…: con el mismo nombre, la nueva pisaba a la anterior.
+     */
+    public static function nombreNuevo(string $dir, string $base, string $formato): string
+    {
+        $raiz   = $base . '-' . date('Ymd-His');
+        $nombre = "$raiz.$formato";
+        for ($n = 2; is_file("$dir/$nombre"); $n++) {
+            $nombre = "$raiz-$n.$formato";
+        }
+        return $nombre;
+    }
+
     /** Hace una copia y borra las que sobran. */
     private static function hacer(array $p): string
     {
@@ -193,7 +208,7 @@ final class Copias
         if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
             throw new RuntimeException(t('No se puede crear la carpeta \'{dir}\'.', ['dir' => $dir]));
         }
-        $nombre = $p['base'] . '-' . date('Ymd-His') . ($p['formato'] === 'zip' ? '.zip' : '.sql');
+        $nombre = self::nombreNuevo($dir, $p['base'], $p['formato'] === 'zip' ? 'zip' : 'sql');
         $tmp = "$dir/.$nombre.tmp";
         try {
             Api::sql($p['base'], 'SHOW TABLES');        // que la base exista y la clave pueda leerla

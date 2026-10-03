@@ -341,6 +341,29 @@ chk('cuándo toca una copia diaria, semanal o cada N horas', function () {
     }
     return true;
 });
+chk('dos copias del mismo segundo no se pisan: la segunda lleva -2', function () use ($raizDatos) {
+    $dir = $raizDatos . '/nombres';
+    @mkdir($dir, 0775, true);
+    $a = Copias::nombreNuevo($dir, 'b', 'zip');
+    touch("$dir/$a");
+    $b = Copias::nombreNuevo($dir, 'b', 'zip');
+    touch("$dir/$b");
+    $c = Copias::nombreNuevo($dir, 'b', 'zip');
+    array_map('unlink', glob("$dir/*"));
+    rmdir($dir);
+    return $a !== $b && $b !== $c && preg_match('/^b-\d{8}-\d{6}(-[23])?\.zip$/', $c) === 1 ?: [$a, $b, $c];
+});
+chk('el campo «N horas» solo se ve con «Cada N horas», y una copia diaria se programa sin él', function () use ($raizDatos) {
+    $html = peticion('p=copias', null);
+    if (!preg_match('/<div class="col-6" data-visible-si="cp-frec=horas">\s*<label[^>]*for="cp-horas"/', $html)) { return 'falta el atributo'; }
+    peticion('p=copias', ['csrf' => csrf('p=copias'), 'accion' => 'programar_copia', 'base' => 'copia', 'frecuencia' => 'diaria',
+        'hora' => '4', 'formato' => 'sql', 'conservar' => '3']);
+    $prog = array_values(array_filter(json_decode((string)file_get_contents($raizDatos . '/admin/copias.json'), true),
+        static fn(array $p): bool => $p['base'] === 'copia'));
+    // Se quita: las demás pruebas cuentan las copias de 'grande'
+    peticion('p=copias', ['csrf' => csrf('p=copias'), 'accion' => 'borrar_programacion', 'id' => $prog[0]['id'] ?? '', 'volver' => 'copias']);
+    return count($prog) === 1 && $prog[0]['frecuencia'] === 'diaria' && $prog[0]['hora'] === 4 ?: $prog;
+});
 chk('una copia pendiente hace que la página la pida aparte, y esa petición la hace (SQL, la base entera)', function () use ($raizDatos) {
     peticion('p=copias', ['csrf' => csrf('p=copias'), 'accion' => 'programar_copia', 'base' => 'grande', 'frecuencia' => 'horas',
         'horas' => '24', 'formato' => 'sql', 'conservar' => '2']);

@@ -124,7 +124,7 @@ php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQ
 php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
 php tests/f18_access.php       → OK: 13    Microsoft Access: the PowerShell script, import and export
 php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries on tables of many parts, against SQLite
-php tests/f20_memoria.php      → OK: 19    the panel with 32 MB: export, import and backups of a larger database (--directa: 20)
+php tests/f20_memoria.php      → OK: 21    the panel with 32 MB: export, import and backups of a larger database (--directa: 22)
 ```
 
 `f5_admin.php` needs the cURL extension and starts two PHP built-in servers,

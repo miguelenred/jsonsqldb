@@ -589,7 +589,8 @@ keep; when there are more, the oldest are deleted (by the date of the file, not 
 once, downloaded or deleted from there.
 
 They are kept in `jsonsqldbadmin/datos/copias/<database>/`, named with the date
-and time. A backup is written to a temporary file and renamed when it is
+and time (`-2`, `-3`… if two are made in the same second). The *N hours* field
+only shows when *Every N hours* is chosen. A backup is written to a temporary file and renamed when it is
 finished, so a backup cut halfway never looks complete. The ZIP needs the
 panel and the engine on the same machine, as the ZIP button does.
 
@@ -820,7 +821,7 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields, selects that submit their form, uploads in pieces, scheduled backups without cron |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json`, `copias.json`, the `copias/` and `importar/` folders, and `codigo-instalacion.txt` until the installation finishes |
 | `tests/f5_admin.php` | 142 checks driving the real panel through the API |
-| `tests/f20_memoria.php` | 19 checks (20 with `--directa`): a database larger than memory exported and imported, uploads in pieces, the import folder, scheduled backups |
+| `tests/f20_memoria.php` | 21 checks (22 with `--directa`): a database larger than memory exported and imported, uploads in pieces, the import folder, scheduled backups |
 | `tests/f11_asistente.php` | 35 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
 ## 9. Tests
@@ -840,7 +841,7 @@ php tests/f16_vistas_triggers.php → OK: 11   views and triggers exported, run 
 php tests/f17_rutinas_importadas.php → OK: 11    views and triggers imported from MySQL, PostgreSQL, SQL Server
 php tests/f18_access.php    → OK: 13    the Access script, importing and exporting Access
 php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries against SQLite
-php tests/f20_memoria.php   → OK: 19    larger than memory, uploads in pieces, backups (20 with --directa)
+php tests/f20_memoria.php   → OK: 21    larger than memory, uploads in pieces, backups (22 with --directa)
 ```
 
 `tests/f20_memoria.php` runs the panel and the API with `memory_limit = 32M` on
