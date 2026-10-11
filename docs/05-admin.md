@@ -636,6 +636,9 @@ PostgreSQL's `CONCAT`/`GREATEST` that skip `NULL`. A trigger's plpgsql function
 is translated with it — `IF/ELSIF`, `NEW.x := …`, `RAISE EXCEPTION`,
 `RETURN` — and a trigger for several events (`INSERT OR UPDATE`) becomes one
 per event, named `name_insert`, `name_update`…, with `TG_OP` set to its event.
+As in PostgreSQL, `OLD.col` is `NULL` in the `INSERT` one and `NEW.col` in the
+`DELETE` one (2.9), so a function that names both, in branches for each event
+or in `COALESCE(NEW.id, OLD.id)`, comes in whole.
 Other functions and procedures are skipped.
 
 **SQL Server** — with Management Studio:
@@ -1129,14 +1132,17 @@ separator). What it saves goes into `config.php`, replacing each
 - **It checks that the data folder cannot be downloaded** (2.7.2): it requests
   `data/web.config` over HTTP and shows in red if the server hands it out, as
   nginx does without its rules. The setup wizard shows the same check. It
-  cannot be done from PHP's built-in server. Since 2.9 the address comes only
-  from `ADMIN_API_URL` as written in `config.php`, with the certificate checked
-  as in the calls to the API (`ADMIN_SSL_CA`, `ADMIN_SSL_AUTOFIRMADO`); while
-  it is empty, as before installing or with the direct connection, the check
-  says it has not been made and you check by hand that `data/web.config`
-  cannot be downloaded. Before, it built the address from the request's `Host`
-  header, so anyone could open the wizard, before installation, and make the
-  server send a request to any machine and port of its network.
+  cannot be done from PHP's built-in server. Since 2.9 the address comes from
+  `ADMIN_API_URL` as written in `config.php`, with the certificate checked as
+  in the calls to the API (`ADMIN_SSL_CA`, `ADMIN_SSL_AUTOFIRMADO`). While it
+  is empty, as with the direct connection, which does not need it, this page
+  uses the address of the installation itself, worked out from the request's
+  `Host` header, because only a signed-in administrator sees it. The wizard,
+  which anyone can open before installation, does not: it says the check is
+  made on this page and that you can check by hand that `data/web.config`
+  cannot be downloaded. Before 2.9 the wizard also used the `Host` header, so
+  anyone could make the server send a request to any machine and port of its
+  network.
 - Where the users are kept (`ADMIN_DATA_PATH`), the engine's data folder for the
   ZIP copy and the session cookie name are only changed by hand: changing them
   with the panel running would leave whoever is using it out.
@@ -1148,7 +1154,7 @@ refusal leaves `config.php` untouched.
 |---|---|---|
 | `ADMIN_CONEXION` | `api` | `api` or `directa` (section 1); the wizard sets it |
 | `ADMIN_MOTOR_RUTA` | empty | direct connection: the jsonSQLDB folder (with `engine/` and `config.php`); empty = the panel's parent folder |
-| `ADMIN_API_URL` | empty | URL of the API; the wizard and the Configuration page write it; empty = worked out on every request from the `Host` header |
+| `ADMIN_API_URL` | empty | URL of the API; the wizard and the Configuration page write it; empty = worked out on every request from the `Host` header. Not needed with the direct connection |
 | `ADMIN_API_KEY` | admin key | API key the panel works with |
 | `ADMIN_HMAC_SECRET` | secret | the same as the API's |
 | `ADMIN_SSL_CA` | empty | path to the `.crt`/`.pem` of the API server |

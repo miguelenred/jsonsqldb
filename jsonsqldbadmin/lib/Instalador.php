@@ -516,13 +516,18 @@ final class Instalador
         if (Api::directa() && trim((string)ADMIN_MOTOR_RUTA) !== '') {
             return [null, t('no se puede comprobar: el motor está en otra carpeta que el panel')];
         }
-        // Solo con la URL de la API escrita en la configuración (2.9): sacada
-        // de la cabecera Host, que escribe quien pide, cualquiera, sin haber
-        // entrado, hacía que el servidor pidiera lo que quisiera a cualquier
-        // máquina y puerto de su red, solo con abrir el asistente
+        // La URL de la API de la configuración o, si no está, la de esta
+        // instalación, sacada de la cabecera Host. Esto último, solo con la
+        // sesión de un administrador (2.9): en el asistente, que ve cualquiera
+        // sin haber entrado, quien pide escribe la cabecera, y hacía que el
+        // servidor pidiera lo que quisiera a cualquier máquina y puerto de su
+        // red. Así se comprueba también la conexión directa, que no tiene URL
         $api = trim((string)ADMIN_API_URL);
         if ($api === '') {
-            return [null, t('sin comprobar hasta que la URL de la API (ADMIN_API_URL) esté en la configuración. Comprueba a mano que data/web.config no se puede descargar')];
+            if (!Auth::esAdmin()) {
+                return [null, t('se comprueba en Configuración, al entrar como administrador. Comprueba a mano que data/web.config no se puede descargar')];
+            }
+            $api = Api::urlDeducida();
         }
         if (!preg_match('#^(https?://.+)/api/[^/?]+\.php$#i', $api, $m)) {
             return [null, t('no se puede comprobar: la API ({api}) no está en la carpeta api/ de la instalación', ['api' => $api])];

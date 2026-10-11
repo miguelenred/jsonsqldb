@@ -35,6 +35,7 @@ function chk(string $titulo, callable $fn): void {
     try {
         $r = $fn();
         if ($r === true) { $ok++; echo "  OK   $titulo\n"; }
+        elseif ($r === null) { echo "  --   $titulo (se salta en esta versión de PHP)\n"; }
         else { $ko++; echo "  FALLO $titulo -> " . var_export($r, true) . "\n"; }
     } catch (Throwable $e) {
         $ko++;
@@ -46,8 +47,48 @@ borrarArbol($raiz);
 @mkdir($raiz, 0775, true);
 Database::crear('c', $raiz);
 $bd = new Database('c', $raiz);
-$sqlite = new PDO('sqlite::memory:');
-$sqlite->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+/**
+ * SQLite en memoria para comparar. PDO de SQLite da todo como texto antes de
+ * PHP 8.1, y aquí se comparan también los tipos: en 8.0 cada valor se lee con
+ * el que SQLite le da en su fila. La clase SQLite3 no sirve: ejecuta dos
+ * veces un INSERT … RETURNING
+ */
+function sqliteParaComparar(): PDO {
+    $l = new PDO('sqlite::memory:');
+    $l->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    if (PHP_VERSION_ID < 80100) {
+        $l->setAttribute(PDO::ATTR_STATEMENT_CLASS, [FilasConTipo::class]);
+    }
+    return $l;
+}
+
+/** Ver sqliteParaComparar(): getColumnMeta() da el tipo de la fila recién leída */
+final class FilasConTipo extends PDOStatement {
+    public function fetch(int $mode = PDO::FETCH_DEFAULT, int $cursorOrientation = PDO::FETCH_ORI_NEXT, int $cursorOffset = 0): mixed {
+        $f = parent::fetch(PDO::FETCH_NUM);
+        if ($f === false) {
+            return false;
+        }
+        $nombres = [];
+        foreach ($f as $i => $v) {
+            $meta = $this->getColumnMeta($i);
+            $nombres[] = $meta['name'];
+            $f[$i] = $v === null ? null : match ($meta['native_type']) { 'integer' => (int)$v, 'double' => (float)$v, default => $v };
+        }
+        return match ($mode) { PDO::FETCH_NUM => $f, PDO::FETCH_COLUMN => $f[0], default => array_combine($nombres, $f) };
+    }
+
+    public function fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array {
+        $filas = [];
+        while (($f = $this->fetch($mode)) !== false) {
+            $filas[] = $f;
+        }
+        return $filas;
+    }
+}
+
+$sqlite = sqliteParaComparar();
 
 /** El valor de una expresión en jsonSQLDB */
 function valor(string $expr) {
@@ -1004,6 +1045,8 @@ chk('FROM a, b WHERE a.x = b.y se cruza por hash: el mismo resultado que JOIN �
     return $comas === $join && $comas[0]['n'] === 5997 && $ms < 1000 ?: json_encode([$comas, $join, $ms]);
 });
 chk('DISTINCT, GROUP BY, UNION e INTERSECT: 1 y 1.0 son el mismo valor, y 0.3 no es 0.30000000000000004 (como SQLite)', function () use ($bd, $sqlite) {
+    // PDO de SQLite en PHP 8.0 da los decimales escritos con 15 cifras: los dos llegan como 0.3
+    if (PHP_VERSION_ID < 80100) { return null; }
     $mal = [];
     foreach (['SELECT DISTINCT f FROM tja UNION ALL SELECT DISTINCT f FROM tjb ORDER BY 1', 'SELECT f FROM tja UNION SELECT f FROM tjb ORDER BY 1',
               'SELECT f, COUNT(*) FROM (SELECT f FROM tja UNION ALL SELECT f FROM tjb) u GROUP BY f ORDER BY 1',
@@ -1030,11 +1073,10 @@ function escriturasComoSqlite(string $dir, array $inicio, array $casos): bool|st
         if (is_dir("$dir/x")) { Database::borrar('x', $dir); }
         Database::crear('x', $dir);
         $b = new Database('x', $dir);
-        $l = new PDO('sqlite::memory:');
-        $l->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $l = sqliteParaComparar();
         $l->exec('PRAGMA foreign_keys = ON');
         foreach ($inicio as $i) { $b->consultar($i); $l->exec($i); }
-        try { $r = $b->consultar($q); $n = array_is_list($r) ? $r : $r['filas']; } catch (JsonSqlDbError) { $n = 'error'; }   // con RETURNING, las filas
+        try { $r = $b->consultar($q); $n = $r['filas'] ?? $r; } catch (JsonSqlDbError) { $n = 'error'; }   // con RETURNING, las filas
         try { $st = $l->query($enSqlite ?? $q); $m = $st->columnCount() > 0 ? $st->fetchAll(PDO::FETCH_ASSOC) : $st->rowCount(); } catch (PDOException) { $m = 'error'; }
         if (is_array($m)) { usort($m, fn($a, $c) => $a['id'] <=> $c['id']); usort($n, fn($a, $c) => $a['id'] <=> $c['id']); }
         $x = $y = [];
@@ -1444,8 +1486,7 @@ chk('Por un índice con COLLATE, como SQLite: ORDER BY con LIMIT, MIN y MAX, COU
     if (is_dir("$dir/x")) { Database::borrar('x', $dir); }
     Database::crear('x', $dir);
     $b = new Database('x', $dir);
-    $l = new PDO('sqlite::memory:');
-    $l->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $l = sqliteParaComparar();
     foreach (['CREATE TABLE g (id INTEGER PRIMARY KEY, k TEXT COLLATE NOCASE, r TEXT COLLATE RTRIM, b TEXT)', 'CREATE INDEX g_k ON g (k)', 'CREATE INDEX g_r ON g (r)'] as $q) {
         $b->consultar($q); $l->exec($q);
     }
@@ -1498,8 +1539,7 @@ chk('UNIQUE, PRIMARY KEY y claves foráneas con COLLATE, y UPDATE y DELETE por s
         if (is_dir("$dir/x")) { Database::borrar('x', $dir); }
         Database::crear('x', $dir);
         $b = new Database('x', $dir);
-        $l = new PDO('sqlite::memory:');
-        $l->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $l = sqliteParaComparar();
         $l->exec('PRAGMA foreign_keys = ON');
         foreach ($inicio as $i) { $b->consultar($i); $l->exec($i); }
         try { $b->consultar($q); $x = ['ok']; } catch (JsonSqlDbError) { $x = ['error']; }
@@ -1523,8 +1563,7 @@ chk('Un JOIN por índice con COLLATE, como SQLite: el índice sirve si tiene la 
     if (is_dir("$dir/x")) { Database::borrar('x', $dir); }
     Database::crear('x', $dir);
     $b = new Database('x', $dir);
-    $l = new PDO('sqlite::memory:');
-    $l->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $l = sqliteParaComparar();
     foreach (['CREATE TABLE g (id INTEGER PRIMARY KEY, k TEXT COLLATE NOCASE, kb TEXT, r TEXT COLLATE RTRIM)', 'CREATE INDEX g_k ON g (k)', 'CREATE INDEX g_kb ON g (kb)',
               'CREATE INDEX g_r ON g (r)', 'CREATE TABLE s (id INTEGER PRIMARY KEY, k TEXT COLLATE NOCASE, kb TEXT)',
               "INSERT INTO s VALUES (1, 'k7', 'K7'), (2, 'K8', 'k8'), (3, 'zz', 'ZZ'), (4, 'K9 ', 'K9 ')"] as $q) {

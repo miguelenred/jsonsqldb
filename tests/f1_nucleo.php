@@ -503,7 +503,8 @@ chk('el registro escribe la línea aunque el corte de la SQL caiga en medio de u
         . '$b->consultar("INSERT INTO t VALUES (\'añoñ\')");'                  // el corte, a los 25 bytes, cae dentro de la ñ
         . '$b->consultar("INSERT /* \xff */ INTO t VALUES (\'b\')");'           // un byte que no es UTF-8, en un comentario
         . 'JsonSQLDB\\Logger::registrar("l", "INSERT", "X", 1, 1.0, null, [NAN, "a\xffb"]);';
-    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    // Sin shell: con PHP 8.0, escapeshellarg() quita las ñ si el locale es C
+    proc_close(proc_open([PHP_BINARY, '-r', $codigo], [], $tubos));
     $vistas = [];
     foreach ((array)glob("$dir/logs/consultas-*.json") as $f) {
         foreach (file((string)$f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) {

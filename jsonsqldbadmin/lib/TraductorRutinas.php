@@ -383,9 +383,24 @@ final class TraductorRutinas
 
         $out = [];
         foreach ($eventos as $evento) {
-            // TG_OP es el evento que dispara: con un trigger por evento, un literal
-            $deEste = array_map(static fn($x) => strtoupper((string)$x['v']) === 'TG_OP' && empty($x['q'])
-                ? ['k' => 'str', 'v' => $evento] : $x, $b);
+            // TG_OP es el evento que dispara: con un trigger por evento, un literal.
+            // Y la fila que el evento no tiene, OLD en INSERT y NEW en DELETE, da
+            // NULL en cada columna, como en PostgreSQL (2.9: aquí no se podía
+            // crear un trigger que las nombrara, aunque fuera en una rama de
+            // otro evento); NEW.col := … en un DELETE queda en nada, como allí
+            $sinFila = ['INSERT' => 'OLD', 'DELETE' => 'NEW'][$evento] ?? null;
+            $deEste = [];
+            for ($i = 0; $i < count($b); $i++) {
+                $u = $this->palabra($b[$i]);
+                if ($u === 'TG_OP') {
+                    $deEste[] = ['k' => 'str', 'v' => $evento];
+                } elseif ($u === $sinFila && self::esOp($b[$i + 1] ?? [], '.') && ($b[$i + 2]['k'] ?? '') === 'id') {
+                    $deEste[] = ['k' => 'id', 'v' => 'NULL'];
+                    $i += 2;
+                } else {
+                    $deEste[] = $b[$i];
+                }
+            }
             $sentencias = $this->bloque($deEste, $momento);
             if ($sentencias === '') {
                 continue;                           // en este evento no hace nada

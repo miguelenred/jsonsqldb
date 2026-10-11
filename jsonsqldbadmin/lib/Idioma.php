@@ -36,7 +36,8 @@ final class Idioma
         // Fuera del panel (una herramienta o una prueba que carga sus clases) no hay usuarios
         $conUsuario = class_exists('Auth', false) && Auth::identificado();
         $elegido = $conUsuario ? Auth::idiomaDe((string)($_SESSION['usuario']['usuario'] ?? '')) : null;
-        $elegido ??= $_SESSION['idioma'] ?? null;
+        // Sin elegir, '': null como índice está obsoleto en PHP 8.5, y el aviso salía en las páginas
+        $elegido ??= $_SESSION['idioma'] ?? '';
         return self::$actual = isset(self::DISPONIBLES[$elegido]) ? (string)$elegido : self::delNavegador();
     }
 

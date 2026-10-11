@@ -987,7 +987,7 @@ chk('al devolver una base a como estaba, se vacía la caché del motor en APCu, 
         . ' require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ';'
         . ' foreach (["Idioma", "Api", "Importar"] as $c) { require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/', true) . ' . "$c.php"; }'
         . ' apcu_store("jsq2:abc:x", 1); apcu_store("jsq:abc:x", 1); apcu_store("otra", 1);'
-        . ' $m = new ReflectionMethod("Importar", "olvidarCache"); $m->setAccessible(true); $m->invoke(null);'
+        . ' $m = new ReflectionMethod("Importar", "olvidarCache"); PHP_VERSION_ID < 80100 && $m->setAccessible(true); $m->invoke(null);'
         . ' echo json_encode([apcu_exists("jsq2:abc:x"), apcu_exists("jsq:abc:x"), apcu_exists("otra")]);';
     $r = shell_exec(escapeshellarg(PHP_BINARY) . ' -d apc.enable_cli=1 -r ' . escapeshellarg($codigo) . ' 2>&1');
     return trim((string)$r) === '[false,false,true]' ?: (string)$r;
@@ -1061,7 +1061,11 @@ chk('restaurar un ZIP con una parte de 18 MB y un original de .reparados/ de 100
             . ' foreach (["Idioma", "Exportar", "Api", "Traductor", "Importar"] as $c) { require ' . var_export($lib . 'lib/', true) . ' . "$c.php"; }'
             . ' Idioma::elegir("es");'
             . ' try { Importar::zip(' . var_export($z, true) . ', ' . var_export($dir, true) . '); echo "pasó"; } catch (RuntimeException $e) { echo $e->getMessage(); }';
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=96M -r ' . escapeshellarg($codigo) . ' 2>&1'));
+        // Sin shell: con PHP 8.0, escapeshellarg() quita la ó de «pasó» si el locale es C
+        $p = proc_open([PHP_BINARY, '-d', 'memory_limit=96M', '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $tubos);
+        $salida = (string)stream_get_contents($tubos[1]);
+        proc_close($p);
+        return trim($salida);
     };
     file_put_contents("$dir/t.json", '');                    // estropeada: la restauración la devuelve
     $grande = $restaurar($z1);
@@ -1210,7 +1214,8 @@ chk('un trigger con IF … END IF, también con el END y el IF en dos líneas, e
     require_once dirname(__DIR__) . '/jsonsqldbadmin/lib/JsonFlujo.php';
     $trozos = [];
     $json = new ReflectionMethod(Exportar::class, 'volcadoJson');
-    $json->setAccessible(true);
+    // Solo hace falta en PHP 8.0, y desde 8.5 avisa de obsoleta
+    PHP_VERSION_ID < 80100 && $json->setAccessible(true);
     $json->invoke(null, 'endif', [['tabla' => 't', 'columnas' => $tablas[0]['columnas'], 'claves' => [], 'n' => 1]], $trgs, [], [], static fn(): array => $tablas[0]['filas'],
         static function (string $s) use (&$trozos): void { $trozos[] = $s; });
     $mal = [];

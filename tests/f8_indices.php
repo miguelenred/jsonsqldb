@@ -1435,11 +1435,14 @@ chk('JOIN, GROUP BY, subconsultas del FROM, UNION, IN, EXISTS, WITH, ventanas y 
         'SELECT id, FIRST_VALUE(t) OVER (PARTITION BY g % 3 ORDER BY v DESC, id) AS f, CUME_DIST() OVER (ORDER BY g) AS c FROM a ORDER BY id',
     ];
     foreach (array_merge($consultas, $justas) as $q) {
+        // Antes de PHP 8.2 una lista de enteros ocupa el doble: con 60.000
+        // filas, las ventanas necesitan allí 32 MB
+        $limite = PHP_VERSION_ID < 80200 && str_contains($q, ' OVER ') ? '32M' : '24M';
         $mucha = $correr('1G', $q);
-        $poca  = $correr('24M', $q);
+        $poca  = $correr($limite, $q);
         if (!preg_match('/^\d+:\w+:0$/', $mucha) || ($poca !== $mucha && !(in_array($q, $justas, true) && $poca === 'MEMORIA:0'))) {
             borrarArbol($dir);
-            return "$q: con memoria $mucha / con 24 MB " . substr($poca, 0, 300);
+            return "$q: con memoria $mucha / con $limite " . substr($poca, 0, 300);
         }
     }
     borrarArbol($dir);

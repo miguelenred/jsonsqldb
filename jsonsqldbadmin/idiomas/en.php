@@ -1031,8 +1031,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'protected ({url} answers {codigo})',
     'siempre'
         => 'forever',
-    'sin comprobar hasta que la URL de la API (ADMIN_API_URL) esté en la configuración. Comprueba a mano que data/web.config no se puede descargar'
-        => 'not checked until the API URL (ADMIN_API_URL) is in the configuration. Check by hand that data/web.config cannot be downloaded',
+    'se comprueba en Configuración, al entrar como administrador. Comprueba a mano que data/web.config no se puede descargar'
+        => 'checked in Configuration, once signed in as an administrator. Check by hand that data/web.config cannot be downloaded',
     'sin conexión'
         => 'no connection',
     'sin configurar'

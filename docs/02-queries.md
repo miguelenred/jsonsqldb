@@ -735,10 +735,12 @@ Decisions that make this possible:
     value once as it comes, and if they do not fit, sends them to 64 files by
     their key and adds up the distinct ones of each. What still has to fit:
     the rows already seen by a `DISTINCT` or a `UNION`, the groups of one of
-    the 64 files, and about 16 bytes per row for each value a window uses. When even that does not fit,
+    the 64 files, and about 16 bytes per row for each value a window uses
+    (about 32 on PHP 8.0 and 8.1, whose lists take twice the memory). When even that does not fit,
     the query stops with the usual memory error, not with PHP's fatal. With
     `memory_limit = 24M` on 60,000 + 60,000 rows, each of these answers the
-    same as with memory to spare (`tests/f8_indices.php`); 2.8.0 stopped with
+    same as with memory to spare (`tests/f8_indices.php`; the window
+    functions, with 32M on PHP 8.0 and 8.1); 2.8.0 stopped with
     the memory error in every one it can run (it has no window functions). A
     million rows: see
     [01-core.md](01-core.md#a-million-rows-29).

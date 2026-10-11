@@ -261,6 +261,37 @@ if ($pg !== null) {
     pg_close($pg);
     @pg_query($admin, "DROP DATABASE IF EXISTS $bdPg");
 }
+chk('una función con TG_OP para varios eventos: cada trigger lleva solo lo de su evento, y OLD o NEW donde no hay fila valen NULL, como allí (2.9)', function () {
+    // Sin servidor: el volcado tal como lo da pg_dump. La rama de DELETE usa
+    // OLD, la de UPDATE y el ELSE cambian NEW, y la última sentencia es de los tres
+    $volcado = "--\n-- PostgreSQL database dump\n--\n"
+        . "CREATE FUNCTION public.cuentas_fn() RETURNS trigger\n    LANGUAGE plpgsql\n    AS \$\$\nBEGIN\n"
+        . "  IF (TG_OP = 'DELETE') THEN\n    INSERT INTO registro VALUES ('baja ' || OLD.id);\n"
+        . "  ELSIF TG_OP = 'UPDATE' AND OLD.saldo <> NEW.saldo THEN\n    NEW.cambiado := 'saldo';\n"
+        . "  ELSE\n    NEW.cambiado := 'no';\n  END IF;\n"
+        . "  INSERT INTO registro VALUES (TG_OP || ' ' || COALESCE(NEW.id, OLD.id) || ' ' || CASE TG_OP WHEN 'DELETE' THEN OLD.saldo ELSE NEW.saldo END);\n"
+        . "  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n  RETURN NEW;\nEND\n\$\$;\n"
+        . "CREATE TABLE public.cuentas (\n    id integer NOT NULL,\n    saldo integer,\n    cambiado text\n);\n"
+        . "CREATE TABLE public.registro (\n    msg text\n);\n"
+        . "CREATE TRIGGER cuentas_t BEFORE INSERT OR DELETE OR UPDATE ON public.cuentas FOR EACH ROW EXECUTE FUNCTION public.cuentas_fn();\n";
+    $f = JSONSQLDB_DATA_PATH . '/tg_op.pg.sql';
+    file_put_contents($f, $volcado);
+    Database::crear('tg_op');
+    $resumen = Importar::sql($f, 'tg_op');
+    @unlink($f);
+    $bd = new Database('tg_op');
+    foreach (['INSERT INTO cuentas (id, saldo) VALUES (1, 10), (2, 5)', 'UPDATE cuentas SET saldo = 20 WHERE id = 1',
+              'UPDATE cuentas SET saldo = 5 WHERE id = 2', 'DELETE FROM cuentas WHERE id = 2'] as $sql) {
+        $bd->consultar($sql);
+    }
+    // Lo que deja PostgreSQL 16 con las mismas escrituras
+    $cuentas = $bd->consultar('SELECT * FROM cuentas');
+    $registro = array_column($bd->consultar('SELECT msg FROM registro'), 'msg');
+    sort($registro, SORT_STRING);
+    return $cuentas === [['id' => 1, 'saldo' => 20, 'cambiado' => 'saldo']]
+        && $registro === ['DELETE 2 5', 'INSERT 1 10', 'INSERT 2 5', 'UPDATE 1 20', 'UPDATE 2 5', 'baja 2']
+        ?: json_encode([$cuentas, $registro]) . " · $resumen";
+});
 
 // ---------------------------------------------------------------------
 echo "\n== SQL Server (sin servidor: contra lo que da la misma base de MySQL) ==\n";

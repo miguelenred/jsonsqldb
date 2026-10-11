@@ -113,7 +113,7 @@ chk('el asistente, que ve cualquiera antes de instalar, no enseña la versión e
     return str_contains($html, '…/admin') && !str_contains($html, PHP_VERSION) && !str_contains($html, $tmp) && !str_contains($html, dirname(__DIR__))
         ?: 'enseña ' . (str_contains($html, PHP_VERSION) ? PHP_VERSION : 'una ruta completa');
 });
-chk('el asistente no pide nada a la máquina que diga la cabecera Host; con la URL de la API en la configuración, sí comprueba la carpeta de datos (2.9)', function () use ($raizProyecto, $tmp) {
+chk('el asistente no pide nada a la máquina que diga la cabecera Host; con la URL de la API en la configuración, o con la sesión de un administrador, sí comprueba la carpeta de datos (2.9)', function () use ($raizProyecto, $tmp) {
     // Fuera del servidor integrado, que no hace la comprobación: como en Apache o nginx
     $oyente = stream_socket_server('tcp://127.0.0.1:0');
     $puerto = (int)substr((string)strrchr((string)stream_socket_get_name($oyente, false), ':'), 1);
@@ -130,22 +130,30 @@ chk('el asistente no pide nada a la máquina que diga la cabecera Host; con la U
     $errores = (string)stream_get_contents($tubos[2]);
     proc_close($proc);
     $conexion = @stream_socket_accept($oyente, 0);
-    if ($conexion !== false || !is_array($sinUrl) || $sinUrl[0] !== null || !str_contains((string)$sinUrl[1], 'ADMIN_API_URL')) {
+    if ($conexion !== false || !is_array($sinUrl) || $sinUrl[0] !== null || !str_contains((string)$sinUrl[1], 'Configura')) {
         return 'sin ADMIN_API_URL: ' . ($conexion !== false ? 'se conectó a la máquina del Host' : json_encode($sinUrl) . $errores);
     }
-    // Con ella, la comprobación sigue: pide data/web.config y lee lo que contesta
-    [$proc, $tubos] = $comprobar('define("ADMIN_API_URL", "http://127.0.0.1:' . $puerto . '/api/jsonsqldb_api.php");');
-    $cliente = @stream_socket_accept($oyente, 10);
-    $pedido = $cliente !== false ? (string)fread($cliente, 4096) : '';
-    if ($cliente !== false) {
-        fwrite($cliente, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        fclose($cliente);
+    // Con ella, o sin ella con la sesión de un administrador (la página de
+    // Configuración, también con la conexión directa), la comprobación sigue:
+    // pide data/web.config y lee lo que contesta
+    $mal = [];
+    foreach (['con ADMIN_API_URL' => 'define("ADMIN_API_URL", "http://127.0.0.1:' . $puerto . '/api/jsonsqldb_api.php");',
+              'con la sesión de un administrador' => '$_SESSION = ["usuario" => ["rol" => "admin"]];'] as $caso => $antes) {
+        [$proc, $tubos] = $comprobar($antes);
+        $cliente = @stream_socket_accept($oyente, 10);
+        $pedido = $cliente !== false ? (string)fread($cliente, 4096) : '';
+        if ($cliente !== false) {
+            fwrite($cliente, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            fclose($cliente);
+        }
+        $r = json_decode((string)stream_get_contents($tubos[1]), true);
+        proc_close($proc);
+        if (!str_starts_with($pedido, 'GET /data/web.config ') || !is_array($r) || $r[0] !== true) {
+            $mal[] = "$caso: " . json_encode([strtok($pedido, "\r"), $r], JSON_UNESCAPED_UNICODE);
+        }
     }
-    $conUrl = json_decode((string)stream_get_contents($tubos[1]), true);
-    proc_close($proc);
     fclose($oyente);
-    return str_starts_with($pedido, 'GET /data/web.config ') && is_array($conUrl) && $conUrl[0] === true
-        ?: 'con ADMIN_API_URL: ' . json_encode([strtok($pedido, "\r"), $conUrl], JSON_UNESCAPED_UNICODE);
+    return $mal === [] ?: implode(' · ', $mal);
 });
 chk('ninguna otra página se sirve mientras no está instalado', fn() =>
     str_contains(peticion('p=bases'), 'Asistente de configuración inicial'));
@@ -328,7 +336,7 @@ chk('el asistente escribe config.php con claves que llevan «$1», «\\1», «);
     $valores = ['ADMIN_API_KEY' => 'a$1b\\1c', 'ADMIN_HMAC_SECRET' => "s');x;\"y", 'ADMIN_CONEXION' => 'api'];
     $codigo = 'define("ADMIN_CONEXION", "directa"); require ' . var_export("$raizProyecto/jsonsqldbadmin/config.dist.php", true) . ';'
         . ' foreach (["util", "Idioma", "Store", "Auth", "Api", "Instalador"] as $c) { require_once ' . var_export("$raizProyecto/jsonsqldbadmin/lib/", true) . ' . ($c === "util" ? "util" : $c) . ".php"; }'
-        . ' $m = new ReflectionMethod("Instalador", "configPanel"); $m->setAccessible(true);'
+        . ' $m = new ReflectionMethod("Instalador", "configPanel"); PHP_VERSION_ID < 80100 && $m->setAccessible(true);'
         . ' file_put_contents(' . var_export("$tmp/config-asistente.php", true) . ', $m->invoke(null, ' . var_export($valores, true) . '));';
     shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
     $l = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg("$tmp/config-asistente.php") . ' 2>&1');

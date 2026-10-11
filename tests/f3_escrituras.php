@@ -1213,6 +1213,7 @@ chk('en un mismo proceso, el estado de una tabla escrita en este segundo no se r
     return $mal === [] && $n === ['n' => 12, 'd' => 12] ?: json_encode([$mal, $n], JSON_UNESCAPED_UNICODE);
 });
 chk('el estado de una tabla guardado en OPcache no se usa si otro proceso la cambió, y DROP TABLE lo borra (2.9)', function () use ($raiz) {
+    if (!function_exists('opcache_get_status')) { return null; }
     if (is_dir("$raiz/est")) { Database::borrar('est', $raiz); }
     Database::crear('est', $raiz);
     $bd = new Database('est', $raiz);

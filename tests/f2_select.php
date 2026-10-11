@@ -1091,7 +1091,8 @@ function selectEnDisco(): JsonSQLDB\Select {
     global $raiz, $base;
     $s = new JsonSQLDB\Select(new Catalog(new Storage($raiz, $base)));
     $p = new ReflectionProperty(JsonSQLDB\Select::class, 'enDisco');
-    $p->setAccessible(true);
+    // Solo hace falta en PHP 8.0, y desde 8.5 avisa de obsoleta
+    PHP_VERSION_ID < 80100 && $p->setAccessible(true);
     $p->setValue($s, true);
     return $s;
 }
@@ -1150,7 +1151,7 @@ chk('Las subconsultas correlacionadas guardan como mucho 4.096 resultados entre 
     $s = new JsonSQLDB\Select(new Catalog(new Storage($GLOBALS['raiz'], $GLOBALS['base'])));
     $filas = $s->ejecutar(JsonSQLDB\Parser::analizar('SELECT id, (SELECT MAX(v) FROM cp WHERE cp.k = cg.k) AS m, (SELECT COUNT(*) FROM cp WHERE cp.k IN (cg.k, cg.k + 3)) AS c FROM cg'));
     $p = new ReflectionProperty(JsonSQLDB\Select::class, 'subsCorr');
-    $p->setAccessible(true);
+    PHP_VERSION_ID < 80100 && $p->setAccessible(true);
     $guardados = array_sum(array_map('count', $p->getValue($s)));
     $mal = 0;
     foreach ($filas as $f) {

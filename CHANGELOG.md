@@ -420,10 +420,13 @@ without its fix:
   downloaded, which anyone can open before installation, requested
   `<scheme>://<Host>/data/web.config` with the `Host` the client sent and
   without checking the certificate: a request from the server to any machine
-  and port of its network (`Host: 10.0.0.5:6379`). It now uses only
-  `ADMIN_API_URL` as written in the configuration, checks the certificate as
-  the calls to the API do (`ADMIN_SSL_CA`, `ADMIN_SSL_AUTOFIRMADO`), and while
-  that URL is empty says the check has not been made.
+  and port of its network (`Host: 10.0.0.5:6379`). It now uses
+  `ADMIN_API_URL` as written in the configuration and checks the certificate
+  as the calls to the API do (`ADMIN_SSL_CA`, `ADMIN_SSL_AUTOFIRMADO`). While
+  that URL is empty, the wizard says the check is made in Configuration, and
+  that page, which only a signed-in administrator sees, uses the address of
+  the installation from the `Host` header, so the direct connection, which
+  has no API URL, is still checked.
 - **Panel: a link could change the language saved for a signed-in user** (also
   in 2.8.0): `?idioma=en` by GET saved it in `usuarios.json`, so a link or an
   image on another page could change it. The selector's links now carry a
@@ -914,7 +917,10 @@ without its fix:
 - **`CREATE TRIGGER` refuses `NEW` in a `DELETE` trigger and `OLD` in an
   `INSERT` one**, as MySQL does, and a statement a trigger cannot run (a
   `DROP TABLE`, a `SHOW`…) in its body (also in 2.8.0): the error came on every
-  write to the table instead.
+  write to the table instead. A PostgreSQL trigger function for several
+  events, which names both in the branches for each one or in
+  `COALESCE(NEW.id, OLD.id)`, is still imported: `OLD.col` is `NULL` in the
+  `INSERT` trigger and `NEW.col` in the `DELETE` one, as in PostgreSQL.
 - **A write by parts that committed after an `INSERT` had opened a new part cut
   the table's state to the parts it had seen** (also in 2.8.0): three data
   files and two revisions, so every lookup by any index became a scan until
@@ -951,7 +957,9 @@ without its fix:
   in an untranslated PHP error after writing `config.php`.
 - **No PHP 8.5 deprecation notices**: `curl_close()` and
   `$http_response_header`, deprecated in 8.5, are no longer used, in the panel
-  or in the PHP example client.
+  or in the PHP example client, and the panel no longer looks up its language
+  with `null` as an array key, which 8.5 reports and which ended up inside
+  exported files.
 - **Panel: a trigger with `IF … END IF` can be imported again from the panel's
   own dumps** (also in 2.8.0): the `END` of `END IF` closed it, so the SQL and
   JSON dumps failed with «Falta el END del trigger», and the SQL console split
@@ -1770,6 +1778,23 @@ same time.
   `mbstring` nor a fixed wait in its concurrency test; `f3_escrituras` and
   `f5_esquema` skip, instead of failing, the checks that need APCu, OPcache or
   SQLite when they are missing.
+- The whole suite ran before release on every PHP version, 8.0 to 8.5, with
+  real PostgreSQL and MySQL servers. `f17_rutinas_importadas` imports a
+  PostgreSQL trigger function for three events and compares what it leaves
+  with PostgreSQL 16; `f11_asistente` checks the data folder with an
+  administrator's session and no API URL. Fixed in the tests themselves: the
+  scheduled backup test takes 02:00 on the day the clocks go back as the
+  running PHP does (8.0 takes the second one, 8.1 and later the first); the
+  tests that read private members call `setAccessible()` only on PHP 8.0, as
+  8.5 warns that it is deprecated; `f1_nucleo` and `f14_volcados` start their
+  child process without a shell, as `escapeshellarg()` in PHP 8.0 drops
+  non-ASCII letters under the C locale; `f3_escrituras` skips its OPcache
+  state check without OPcache; `f8_indices` gives the window functions over
+  60,000 rows 32 MB instead of 24 MB before PHP 8.2, where a list of integers
+  takes twice the memory; and `f21_compatibilidad` reads SQLite's values with
+  their types on PHP 8.0, where PDO returns them as text, does not use
+  `array_is_list()` (8.1), and skips there the one check that needs the 17
+  digits of a decimal, which PDO gives with 15.
 
 ### Documentation
 

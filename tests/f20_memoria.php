@@ -519,10 +519,13 @@ chk('cuándo toca una copia diaria, semanal o cada N horas', function () {
     // ir al día anterior salía una copia de más a medianoche
     $zona = date_default_timezone_get();
     date_default_timezone_set('Europe/Madrid');
+    // Ese domingo las 2:00 son dos veces: PHP 8.0 toma la segunda y los
+    // siguientes la primera. La copia se hizo a la que toma este PHP
+    $dosDelDomingo = date(DATE_ATOM, mktime(2, 0, 0, 10, 25, 2026));
     $dst = [
         Copias::toca(['frecuencia' => 'diaria', 'hora' => 1, 'ultima' => '2026-10-25T01:00:00+02:00'], $t('2026-10-26 00:00:00')),
         Copias::toca(['frecuencia' => 'diaria', 'hora' => 1, 'ultima' => '2026-10-25T01:00:00+02:00'], $t('2026-10-26 01:00:00')),
-        Copias::toca(['frecuencia' => 'semanal', 'dia' => 7, 'hora' => 2, 'ultima' => '2026-10-25T02:00:00+02:00'], $t('2026-10-26 00:00:00')),
+        Copias::toca(['frecuencia' => 'semanal', 'dia' => 7, 'hora' => 2, 'ultima' => $dosDelDomingo], $t('2026-10-26 00:00:00')),
         Copias::toca(['frecuencia' => 'diaria', 'hora' => 3, 'ultima' => '2026-10-24T03:00:00+02:00'], $t('2026-10-25 00:30:00')),
     ];
     date_default_timezone_set($zona);
