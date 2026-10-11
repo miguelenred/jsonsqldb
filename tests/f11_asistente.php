@@ -56,7 +56,9 @@ file_put_contents($prepend, "<?php\n"
 
 $cmd  = escapeshellarg(PHP_BINARY) . ' -d auto_prepend_file=' . escapeshellarg($prepend)
       . " -S 127.0.0.1:$puerto -t " . escapeshellarg($raizProyecto);
-$proc = proc_open($cmd, [1 => ['file', "$tmp/server.log", 'a'], 2 => ['file', "$tmp/server.log", 'a']], $t);
+// Con exec, el shell se convierte en el servidor: si no, proc_terminate()
+// mata el shell y el servidor se queda funcionando, huérfano
+$proc = proc_open((PHP_OS_FAMILY === 'Windows' ? '' : 'exec ') . $cmd, [1 => ['file', "$tmp/server.log", 'a'], 2 => ['file', "$tmp/server.log", 'a']], $t);
 register_shutdown_function(static function () use ($proc, $tmp) {
     if (is_resource($proc)) { proc_terminate($proc); proc_close($proc); }
     borrarArbol($tmp);
@@ -80,7 +82,6 @@ function peticion(string $query, ?array $campos = null): string {
         CURLOPT_HTTPHEADER     => ['Accept-Language: ' . ($GLOBALS['idiomaPrueba'] ?? 'es')],
     ] + ($campos === null ? [] : [CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query($campos)]));
     $r = curl_exec($ch);
-    curl_close($ch);
     return is_string($r) ? $r : '';
 }
 function csrf(string $query = ''): string {
@@ -105,6 +106,46 @@ chk('sin config.php se abre el asistente, no el login', function () {
     $html = peticion('');
     return str_contains($html, 'Asistente de configuración inicial') && str_contains($html, 'Conexión directa')
         && !str_contains($html, 'Iniciar sesión');
+});
+chk('el asistente, que ve cualquiera antes de instalar, no enseña la versión exacta de PHP ni rutas completas del servidor (2.9)', function () use ($tmp) {
+    $html = peticion('');
+    // Sin la barra del final: la carpeta del motor, en el campo de la conexión directa, iba sin ella (2.9)
+    return str_contains($html, '…/admin') && !str_contains($html, PHP_VERSION) && !str_contains($html, $tmp) && !str_contains($html, dirname(__DIR__))
+        ?: 'enseña ' . (str_contains($html, PHP_VERSION) ? PHP_VERSION : 'una ruta completa');
+});
+chk('el asistente no pide nada a la máquina que diga la cabecera Host; con la URL de la API en la configuración, sí comprueba la carpeta de datos (2.9)', function () use ($raizProyecto, $tmp) {
+    // Fuera del servidor integrado, que no hace la comprobación: como en Apache o nginx
+    $oyente = stream_socket_server('tcp://127.0.0.1:0');
+    $puerto = (int)substr((string)strrchr((string)stream_socket_get_name($oyente, false), ':'), 1);
+    $comprobar = static function (string $antes) use ($raizProyecto, $tmp, $puerto): array {
+        $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=' . $tmp . '/no-existe.php"); define("ADMIN_DATA_PATH", ' . var_export("$tmp/admin", true) . ');'
+            . $antes . '$_SERVER["HTTP_HOST"] = "127.0.0.1:' . $puerto . '"; $_SERVER["SCRIPT_NAME"] = "/jsonsqldbadmin/index.php";'
+            . 'require ' . var_export("$raizProyecto/jsonsqldbadmin/lib/arranque.php", true) . ';'
+            . 'echo json_encode(Instalador::datosExpuestos(), JSON_UNESCAPED_UNICODE);';
+        return [proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos), $tubos];
+    };
+    // Sin la URL en la configuración: la del Host no se usa, ni se conecta a ella
+    [$proc, $tubos] = $comprobar('');
+    $sinUrl = json_decode((string)stream_get_contents($tubos[1]), true);
+    $errores = (string)stream_get_contents($tubos[2]);
+    proc_close($proc);
+    $conexion = @stream_socket_accept($oyente, 0);
+    if ($conexion !== false || !is_array($sinUrl) || $sinUrl[0] !== null || !str_contains((string)$sinUrl[1], 'ADMIN_API_URL')) {
+        return 'sin ADMIN_API_URL: ' . ($conexion !== false ? 'se conectó a la máquina del Host' : json_encode($sinUrl) . $errores);
+    }
+    // Con ella, la comprobación sigue: pide data/web.config y lee lo que contesta
+    [$proc, $tubos] = $comprobar('define("ADMIN_API_URL", "http://127.0.0.1:' . $puerto . '/api/jsonsqldb_api.php");');
+    $cliente = @stream_socket_accept($oyente, 10);
+    $pedido = $cliente !== false ? (string)fread($cliente, 4096) : '';
+    if ($cliente !== false) {
+        fwrite($cliente, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        fclose($cliente);
+    }
+    $conUrl = json_decode((string)stream_get_contents($tubos[1]), true);
+    proc_close($proc);
+    fclose($oyente);
+    return str_starts_with($pedido, 'GET /data/web.config ') && is_array($conUrl) && $conUrl[0] === true
+        ?: 'con ADMIN_API_URL: ' . json_encode([strtok($pedido, "\r"), $conUrl], JSON_UNESCAPED_UNICODE);
 });
 chk('ninguna otra página se sirve mientras no está instalado', fn() =>
     str_contains(peticion('p=bases'), 'Asistente de configuración inicial'));
@@ -134,6 +175,11 @@ chk('una API que no responde se rechaza sin escribir nada', function () use ($ad
 chk('las dos contraseñas tienen que coincidir', fn() =>
     str_contains(peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'directa', 'clave2' => 'otra-distinta-1'] + $admin),
                  'no coinciden'));
+chk('una contraseña con el carácter nulo se rechaza con su mensaje, sin escribir config.php (2.9: un error de PHP sin traducir, con config.php ya escrito)', function () use ($admin, $config) {
+    $html = peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'directa', 'motor' => '', 'http' => '1',
+                          'clave' => "clave\0muy-larga-1", 'clave2' => "clave\0muy-larga-1"] + $admin);
+    return str_contains($html, 'carácter nulo') && !is_file($config) ?: (is_file($config) ? 'escribió config.php' : 'no avisó');
+});
 chk('con conexión directa, prueba el motor y lo instala', function () use ($admin, $config) {
     $html = peticion('', ['csrf' => csrf(), 'codigo' => codigo(), 'conexion' => 'directa', 'motor' => '', 'http' => '1'] + $admin);
     if (!str_contains($html, 'jsonSQLDBadmin está instalado')) { return 'no terminó'; }
@@ -144,9 +190,9 @@ chk('con conexión directa, prueba el motor y lo instala', function () use ($adm
     if (DIRECTORY_SEPARATOR === '/' && (fileperms($config) & 0077) !== 0) { return 'config.php legible por otros'; }
     return true;
 });
-chk('instalado, el asistente ya no aparece: pide entrar', function () {
+chk('instalado, el asistente ya no aparece: pide entrar, sin enseñar la versión de PHP (2.9)', function () {
     $html = peticion('');
-    return str_contains($html, 'Iniciar sesión') && !str_contains($html, 'Asistente');
+    return str_contains($html, 'Iniciar sesión') && !str_contains($html, 'Asistente') && !str_contains($html, PHP_VERSION);
 });
 
 echo "\n== Panel por conexión directa ==\n";
@@ -266,6 +312,31 @@ chk('las claves no se muestran y la auditoría no guarda valores', function () u
     $guardar(['quitar_lectura' => '1']);
     return !str_contains((string)file_get_contents($config), 'SECRETO-LECTURA-456') ?: 'no la quitó';
 });
+chk('una clave con «);» o «;» se guarda dos veces y config.php sigue siendo PHP válido, con ese valor (2.9)', function () use ($guardar, $config) {
+    $clave = "k');echo 'x;y";
+    foreach ([1, 2] as $vez) {
+        $html = $guardar(['lectura_key' => $clave, 'lectura_secret' => "s$vez;);"]);
+        if (!str_contains($html, 'Configuración guardada')) { return "vez $vez: " . strip_tags(substr($html, 0, 200)); }
+    }
+    $l = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg($config) . ' 2>&1');
+    $v = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg('require ' . var_export($config, true)
+        . '; echo json_encode([ADMIN_API_KEY_LECTURA, ADMIN_HMAC_SECRET_LECTURA]);') . ' 2>&1');
+    $guardar(['quitar_lectura' => '1']);
+    return str_contains($l, 'No syntax errors') && trim($v) === json_encode([$clave, 's2;);']) ?: "$l / $v";
+});
+chk('el asistente escribe config.php con claves que llevan «$1», «\\1», «);» o comillas tal cual (2.9: «$1» desaparecía)', function () use ($raizProyecto, $tmp) {
+    $valores = ['ADMIN_API_KEY' => 'a$1b\\1c', 'ADMIN_HMAC_SECRET' => "s');x;\"y", 'ADMIN_CONEXION' => 'api'];
+    $codigo = 'define("ADMIN_CONEXION", "directa"); require ' . var_export("$raizProyecto/jsonsqldbadmin/config.dist.php", true) . ';'
+        . ' foreach (["util", "Idioma", "Store", "Auth", "Api", "Instalador"] as $c) { require_once ' . var_export("$raizProyecto/jsonsqldbadmin/lib/", true) . ' . ($c === "util" ? "util" : $c) . ".php"; }'
+        . ' $m = new ReflectionMethod("Instalador", "configPanel"); $m->setAccessible(true);'
+        . ' file_put_contents(' . var_export("$tmp/config-asistente.php", true) . ', $m->invoke(null, ' . var_export($valores, true) . '));';
+    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $l = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg("$tmp/config-asistente.php") . ' 2>&1');
+    $v = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg('require ' . var_export("$tmp/config-asistente.php", true)
+        . '; echo json_encode([ADMIN_API_KEY, ADMIN_HMAC_SECRET, ADMIN_CONEXION]);') . ' 2>&1');
+    @unlink("$tmp/config-asistente.php");
+    return str_contains($l, 'No syntax errors') && trim($v) === json_encode(array_values($valores)) ?: "$l / $v";
+});
 
 echo "\n== El motor aplica el rol del usuario ==\n";
 chk('crear un usuario de solo lectura', function () {
@@ -315,7 +386,7 @@ chk('cambiarle la contraseña a un usuario cierra sus sesiones abiertas', functi
     $html = peticion('p=bases');
     return str_contains($html, 'La sesión se ha cerrado') && str_contains($html, 'Iniciar sesión') ?: 'la sesión seguía abierta';
 });
-chk('borrar un usuario cierra sus sesiones abiertas', function () use ($admin) {
+chk('borrar un usuario cierra sus sesiones abiertas', function () {
     global $cookies;
     $suya = $cookies;
     peticion('', ['csrf' => csrf(), 'usuario' => 'mirona', 'clave' => 'otra-clave-lectura-2']);
@@ -328,8 +399,8 @@ chk('borrar un usuario cierra sus sesiones abiertas', function () use ($admin) {
 chk('cambiar la propia contraseña no cierra la propia sesión', function () use ($admin) {
     global $cookies;
     $cookies .= '.admin';
-    peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'cambiar_clave', 'clave' => 'clave-muy-larga-2']);
-    return str_contains(peticion('p=bases'), 'Bases de datos') ?: 'la cerró';
+    $html = peticion('p=usuarios', ['csrf' => csrf('p=usuarios'), 'accion' => 'cambiar_clave', 'clave' => 'clave-muy-larga-2', 'actual' => $admin['clave']]);
+    return str_contains($html, 'Contraseña cambiada') && str_contains(peticion('p=bases'), 'Bases de datos') ?: 'no la cambió, o la cerró';
 });
 
 echo "\n== Idiomas ==\n";
@@ -343,16 +414,33 @@ chk('sin pedir idioma, o pidiendo uno que no hay, el panel sale en inglés', fun
         $idiomaPrueba = $cab;
         $html = peticion('');
         if (!str_contains($html, '<html lang="' . $esp . '"') || !str_contains($html, $esp === 'en' ? 'Sign in' : 'Iniciar sesión')) {
-            $mal[] = "«$cab»";
+            $mal[] = "«{$cab}»";
         }
     }
     @unlink($cookies);
     [$cookies, $idiomaPrueba] = $antes;
     return $mal === [] ?: 'mal con ' . implode(', ', $mal);
 });
+/** La dirección del enlace del selector de idioma de una página, como la seguiría quien lo pulsa. */
+function enlaceIdioma(string $query, string $idioma): string {
+    return preg_match('/<a href="index\.php\?([^"]*)" hreflang="' . $idioma . '"/', peticion($query), $m) ? html_entity_decode($m[1], ENT_QUOTES) : '';
+}
+chk('?idioma=en sin el token del selector, como lo pediría otra página, cambia el idioma de la sesión pero no el guardado en el usuario; el enlace del selector, los dos (2.9)', function () use ($tmp) {
+    $usuarios = "$tmp/admin/usuarios.json";
+    $antes = (string)file_get_contents($usuarios);
+    $sesion = peticion('p=bases&idioma=en');
+    $falso  = peticion('p=bases&idioma=en&token=' . str_repeat('0', 64));
+    $sin = (string)file_get_contents($usuarios);
+    $enlace = enlaceIdioma('p=bases', 'en');
+    peticion($enlace);
+    $jefa = array_values(array_filter((array)json_decode((string)file_get_contents($usuarios), true), static fn($u) => ($u['usuario'] ?? '') === 'jefa'));
+    return str_contains($sesion, '<html lang="en"') && str_contains($falso, '<html lang="en"') && $sin === $antes
+        && str_contains($enlace, 'token=') && ($jefa[0]['idioma'] ?? null) === 'en'
+        ?: ($sin !== $antes ? 'sin token se guardó en el usuario' : 'el enlace del selector no lo guardó: ' . $enlace);
+});
 chk('el selector guarda el idioma en el usuario y le sigue en otra sesión y otro navegador', function () use ($admin) {
     global $cookies;
-    $html = peticion('p=bases&idioma=en');
+    $html = peticion(enlaceIdioma('p=bases', 'en'));
     if (!str_contains($html, '<html lang="en"') || !str_contains($html, 'Databases')) { return 'el selector no cambió el idioma'; }
     $suya = $cookies;
     $cookies = $suya . '.otra';                         // otro navegador, que pide español
@@ -378,7 +466,7 @@ chk('las páginas en inglés no dejan textos en español', function () {
             if (preg_match('/\b' . preg_quote($palabra, '/') . '\b/u', $texto)) { return "{$q}: «{$palabra}»"; }
         }
     }
-    peticion('p=bases&idioma=es');                     // como estaba, para lo que venga después
+    peticion(enlaceIdioma('p=bases', 'es'));          // como estaba, para lo que venga después
     return true;
 });
 

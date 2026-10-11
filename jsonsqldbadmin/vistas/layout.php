@@ -63,7 +63,7 @@ $nav = static function (string $pagina, string $ico, string $texto, array $extra
 <?php return; endif; ?>
 <body class="app"<?php
     // Sin cron, las copias pendientes las pide el navegador aparte (assets/panel.js)
-    try { $copiasPendientes = Copias::hayPendientes(); } catch (Throwable $e) { $copiasPendientes = false; }
+    try { $copiasPendientes = Copias::hayPendientes(); } catch (Throwable) { $copiasPendientes = false; }
     if ($copiasPendientes): ?> data-copias="<?= h(Auth::csrf()) ?>"<?php endif; ?>>
 
 <aside class="sidebar" id="sidebar" aria-label="<?= h(t('Navegación')) ?>">

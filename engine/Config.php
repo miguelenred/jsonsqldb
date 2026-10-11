@@ -12,7 +12,6 @@ namespace JsonSQLDB;
  */
 final class Config
 {
-    /** Versión de jsonSQLDB. */
     /**
      * Versión del motor. Se lee del fichero VERSION para que no haya dos sitios
      * que puedan decir cosas distintas: estaba fijada a mano en '1.0.0' y no la
@@ -61,7 +60,26 @@ final class Config
         return (bool)JSONSQLDB_CACHE_ACTIVA;
     }
 
-    /** ¿Se escriben por partes los UPDATE y DELETE que lo admiten? (ver Storage::bloquearPartes()) */
+    /**
+     * ¿Se usa APCu para la caché, si está disponible? (2.9) Sí por defecto;
+     * JSONSQLDB_CACHE_APCU = false lo deja de lado y la caché va a disco.
+     */
+    public static function cacheApcu(): bool
+    {
+        return !defined('JSONSQLDB_CACHE_APCU') || (bool)JSONSQLDB_CACHE_APCU;
+    }
+
+    /**
+     * ¿Se usa OPcache para la caché de las partes, si está activo? (2.9, ver
+     * Storage::cacheLeer()). Sí por defecto: vale la pena, y sin OPcache el
+     * motor funciona igual. Se desactiva con JSONSQLDB_CACHE_OPCACHE = false.
+     */
+    public static function cacheOpcache(): bool
+    {
+        return !defined('JSONSQLDB_CACHE_OPCACHE') || (bool)JSONSQLDB_CACHE_OPCACHE;
+    }
+
+    /** ¿Se escriben por partes los UPDATE y DELETE que lo admiten? (ver StorageCambios::bloquearPartes()) */
     public static function escrituraPorPartes(): bool
     {
         return !defined('JSONSQLDB_ESCRITURA_POR_PARTES') || (bool)JSONSQLDB_ESCRITURA_POR_PARTES;
@@ -85,11 +103,14 @@ final class Config
         return $ruta !== '' ? rtrim(str_replace('\\', '/', $ruta), '/') : '';
     }
 
-    /** 'todo' | 'escrituras' | 'errores' */
+    /**
+     * 'todo' | 'escrituras' | 'errores'. Por defecto 'escrituras', como pone
+     * config.php desde la 2.9: sin definirla (un config.php de antes) daba 'todo'
+     */
     public static function logNivel(): string
     {
-        $n = defined('JSONSQLDB_LOG_NIVEL') ? strtolower((string)JSONSQLDB_LOG_NIVEL) : 'todo';
-        return in_array($n, ['todo', 'escrituras', 'errores'], true) ? $n : 'todo';
+        $n = defined('JSONSQLDB_LOG_NIVEL') ? strtolower((string)JSONSQLDB_LOG_NIVEL) : 'escrituras';
+        return in_array($n, ['todo', 'escrituras', 'errores'], true) ? $n : 'escrituras';
     }
 
     public static function logMaxSql(): int
@@ -133,7 +154,6 @@ final class Config
         return defined('JSONSQLDB_LOG_PARAMS') && JSONSQLDB_LOG_PARAMS === true;
     }
 
-    /** ¿Journal también en las escrituras que tocan varias tablas? */
     /**
      * ¿Se permite usar el motor directamente, sin pasar por la API?
      *
@@ -143,6 +163,12 @@ final class Config
     public static function conexionDirecta(): bool
     {
         return defined('JSONSQLDB_CONEXION_DIRECTA') && JSONSQLDB_CONEXION_DIRECTA === true;
+    }
+
+    /** ¿Atiende la API (2.9)? Sin la constante, de un config.php anterior, sí. */
+    public static function apiActiva(): bool
+    {
+        return !defined('JSONSQLDB_API_ACTIVA') || JSONSQLDB_API_ACTIVA === true;
     }
 
     /** ¿Se mantienen y se usan los índices de búsqueda? */

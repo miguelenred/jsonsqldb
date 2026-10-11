@@ -32,14 +32,18 @@ require __DIR__ . '/_pestanas.php';
           <?php foreach ($columnas as $c): $cn = (string)$c['columna']; ?>
             <tr>
               <td><strong><?= h($cn) ?></strong></td>
-              <td><?= h($c['tipo']) ?><?php
+              <td><?php if (($c['valores'] ?? null) !== null): ?>ENUM(<?= h(implode(', ', array_map(static fn($v) => "'$v'", $c['valores']))) ?>)<?php
+                  else: ?><?= h($c['tipo']) ?><?php
                   if ($c['longitud'] !== null) { echo '(' . (int)$c['longitud'] . ')'; }
-                  elseif ($c['escala'] !== null) { echo '(10,' . (int)$c['escala'] . ')'; } ?></td>
+                  elseif ($c['escala'] !== null) { echo '(10,' . (int)$c['escala'] . ')'; } endif;
+                  if (!empty($c['sin_signo'])) { echo ' UNSIGNED'; }
+                  if (($c['colacion'] ?? null) !== null): ?> <span class="text-body-secondary">COLLATE <?= h($c['colacion']) ?></span><?php endif; ?></td>
               <td class="text-center"><?= $c['pk'] ? '<span class="badge text-bg-primary">PK</span>' : '' ?></td>
               <td class="text-center"><?= $c['auto'] ? icono('check2') : '' ?></td>
               <td class="text-center"><?= $c['notnull'] ? icono('check2') : '' ?></td>
               <td class="text-center"><?= $c['unico'] ? icono('check2') : '' ?></td>
-              <td class="text-body-secondary"><?= $c['defecto'] === null ? '' : celda($c['defecto']) ?></td>
+              <td class="text-body-secondary"><?php if (($c['defecto_calculado'] ?? null) !== null): ?><code><?= h(defectoCalculado((string)$c['defecto_calculado'])) ?></code><?php
+                  else: ?><?= $c['defecto'] === null ? '' : celda($c['defecto']) ?><?php endif; ?></td>
               <?php if ($admin): ?>
               <td class="text-end">
                 <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal"
@@ -157,11 +161,13 @@ require __DIR__ . '/_pestanas.php';
           <?php foreach ($claves as $k): ?>
             <tr>
               <td><span class="badge text-bg-<?= $k['tipo'] === 'FOREIGN' ? 'warning' :
-                    ($k['tipo'] === 'PRIMARY' ? 'primary' : 'secondary') ?>"><?= h($k['tipo']) ?></span></td>
+                    ($k['tipo'] === 'PRIMARY' ? 'primary' : ($k['tipo'] === 'CHECK' ? 'info' : 'secondary')) ?>"><?= h($k['tipo']) ?></span></td>
               <td class="small"><?= h($k['nombre']) ?></td>
               <td class="small"><?= h($k['columnas']) ?></td>
               <td class="small">
-                <?php if ($k['tabla_destino'] !== null): ?>
+                <?php if (($k['expresion'] ?? null) !== null): ?>
+                  <code><?= h($k['expresion']) ?></code>
+                <?php elseif ($k['tabla_destino'] !== null): ?>
                   <?= h($k['tabla_destino']) ?>(<?= h($k['columnas_destino']) ?>)
                   <span class="text-body-secondary">
                     <?= t('· DEL {1} · UPD {2}', [1 => h($k['on_delete']), 2 => h($k['on_update'])]) ?></span>
@@ -184,7 +190,7 @@ require __DIR__ . '/_pestanas.php';
                     <span class="text-body-tertiary small" title="<?= h(t('Es AUTOINCREMENT: hay que recrear la tabla')) ?>">
                       <?= h(t('fija')) ?></span>
                   <?php endif; ?>
-                <?php else: ?>
+                <?php elseif ($k['nombre'] !== ''): ?>
                   <form method="post" data-confirm="<?= h(t('¿Eliminar la restricción?')) ?>">
                     <?= csrf() ?>
                     <input type="hidden" name="accion" value="borrar_restriccion">
@@ -335,7 +341,7 @@ require __DIR__ . '/_pestanas.php';
             <?php endforeach; ?>
           </select>
           <div class="form-text">
-            <?= h(t('El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN; no los rangos, ni LIKE, ni ORDER BY. Y hace algo más lenta cada escritura de la tabla.')) ?>
+            <?= h(t('El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.')) ?>
           </div>
         </div>
       </div>
@@ -359,6 +365,13 @@ require __DIR__ . '/_pestanas.php';
         <input type="hidden" name="db" value="<?= h($base) ?>">
         <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
         <input type="hidden" name="columna" value="<?= h($cn) ?>">
+        <?php if (($c['valores'] ?? null) !== null): ?>
+        <!-- La lista del ENUM, que el formulario no muestra: editar la columna no la pierde -->
+        <input type="hidden" name="valores" value="<?= h(json_encode($c['valores'], JSON_UNESCAPED_UNICODE)) ?>">
+        <?php endif; ?>
+        <!-- Y lo mismo con el UNSIGNED y el COLLATE (2.9) -->
+        <?php if (!empty($c['sin_signo'])): ?><input type="hidden" name="sin_signo" value="1"><?php endif; ?>
+        <?php if (($c['colacion'] ?? null) !== null): ?><input type="hidden" name="colacion" value="<?= h($c['colacion']) ?>"><?php endif; ?>
         <input type="hidden" name="volver" value="estructura">
         <div class="modal-header"><h5 class="modal-title"><?= t('Editar «{1}»', [1 => h($cn)]) ?></h5></div>
         <div class="modal-body">
@@ -390,7 +403,13 @@ require __DIR__ . '/_pestanas.php';
             <div class="col-12">
               <label class="form-label"><?= h(t('Por defecto')) ?></label>
               <input class="form-control form-control-sm" name="defecto"
-                     value="<?= h($c['defecto'] ?? '') ?>">
+                     value="<?= h($c['defecto_calculado'] ?? $c['defecto'] ?? '') ?>">
+              <!-- Uno que se calcula al insertar (2.8) se edita como tal y no se pierde al guardar -->
+              <div class="form-check mt-1">
+                <input class="form-check-input" type="checkbox" name="defecto_calculado" value="1"
+                       id="dc<?= h($mid) ?>" <?= ($c['defecto_calculado'] ?? null) !== null ? 'checked' : '' ?>>
+                <label class="form-check-label small" for="dc<?= h($mid) ?>"><?= h(t('Se calcula al insertar: CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIME o una expresión')) ?></label>
+              </div>
               <div class="form-text"><?= h(t('Déjalo vacío para quitar el valor por defecto.')) ?></div>
             </div>
           </div>

@@ -8,7 +8,8 @@ Optional extensions that are used **if present** (never required):
 | Extension | Used for | If missing |
 |---|---|---|
 | `apcu` | shared-memory cache; must be enabled for the SAPI in use (`apc.enable_cli=1` for scripts and cron) | on-disk cache (`.cache/`) |
-| `mbstring` | length of UTF-8 text | an equivalent built-in calculation |
+| `mbstring` | length, substrings and upper/lower case of UTF-8 text | an equivalent built-in calculation |
+| OPcache | keeping each unchanged table part compiled in shared memory, from a `.php` copy in `.cache/` (2.9) | the part comes from APCu or `.cache/` |
 
 **On PHP 8.0 a power cut can lose recent writes.** `fsync()`, the call that
 forces data from the operating system's memory onto the disk, exists in PHP only
@@ -29,7 +30,7 @@ writing a new one and renaming it over the old, and on ext4 with its default
 options (`auto_da_alloc`, `data=ordered`) the kernel detects exactly that
 pattern and writes the new file's data before the rename is committed. On
 other filesystems that do not, a power cut on 8.0 could leave a replaced file
-empty; `INTEGRITY CHECK` and the engine's `Datos ilegibles` error would
+empty; `CHECK TABLES` and the engine's `Datos ilegibles` error would
 report it, and a backup is the way back.
 
 Storage engines that overwrite data in place sometimes add a precaution on
@@ -47,17 +48,25 @@ this when they run on 8.0. See [Durability](#6-durability-atomic-files-and-the-j
 
 ## 1. Layout on disk
 
+The exact shape of each file, field by field, is in the reference
+[06-format.md](06-format.md); this section explains it.
+
 One **folder per database** inside the data root:
 
 ```
 <data_root>/
 └── mydb/                        ← one folder = one database
     ├── _database.json           database metadata
+    ├── _views.json              views: name => saved SELECT (once one has been created)
     ├── .lock                    database lock file (empty)
     ├── .users.lock              lock file of one table (empty)
     ├── .htaccess / web.config   deny access if the folder ends up in the web root
     ├── .cache/                  serialised cache (regenerable: safe to delete)
-    ├── .tx/                     journal; only exists while a write is in progress
+    ├── .turno / .users.turno    turnstiles crossed before asking for a lock (empty)
+    ├── .tx/                     journal; its files only exist while a write is in progress
+    ├── .lote/                   originals kept by a transaction (2.9); only while it runs
+    ├── .orden/                  temporary files of what does not fit in memory in a query (2.9); its files only while it runs
+    ├── .reparados/              originals of repaired files and rows set aside (2.9); only after a repair
     ├── users.meta.json          table structure
     ├── users.rev.json           revision of the table and state of its parts
     ├── users.json               data (part 1)
@@ -67,13 +76,19 @@ One **folder per database** inside the data root:
     └── orders.meta.json / orders.json
 ```
 
+Since 2.9 a table cannot be named `_database`, `_views`, `_revs` or `_base`:
+its files would be the database's own (before, `CREATE TABLE _views` was
+accepted and the views were lost).
+
 Databases created before 2.0 have a `_revs.json` with the revisions of all
 tables together and no index files; see
 [Upgrading from an earlier version](#12-upgrading-from-an-earlier-version).
 
-Allowed names: database `[A-Za-z0-9_-]{1,64}`, table/column
+Allowed names: database `[A-Za-z0-9_-]{1,64}`; table, index and trigger
 `[A-Za-z_][A-Za-z0-9_]{0,63}`. Nothing else is accepted, so there is no way to
-escape the folder with `../` or an absolute path.
+escape the folder with `../` or an absolute path. A column name (2.8) can have
+spaces or signs, from 1 to 64 characters and no control characters: it is
+never part of a file name.
 
 ### Data file (`users.json`)
 
@@ -84,10 +99,10 @@ Meant to be opened and read by a person: **one row per line**.
   "table": "users",
   "rows": [
     {"id":1,"name":"Ana","email":"ana@x.es","balance":10.56,"joined":"2026-01-15 08:30"},
-    {"id":2,"name":"Luis","email":"luis@x.es","balance":0,"joined":null}
+    {"id":2,"name":"Luis","email":"luis@x.es","balance":0.0,"joined":null}
   ],
-  "offsets": [39,122],
-  "offsets_at": 210
+  "offsets": [38,128],
+  "offsets_at": 204
 }
 ```
 
@@ -97,14 +112,156 @@ line it needs — three small reads, about 30 µs — instead of decoding the
 thousand rows of the part. The engine writes them while it writes the rows;
 files from earlier versions do not have them and are decoded whole, as before.
 
-It is valid JSON: any editor can change it and the engine will read it. If a
-hand edit breaks the JSON, the engine returns `IO: Datos ilegibles en
-users.json` rather than corrupting the table. After editing a data file by
-hand, delete `.cache/` and make a write to the table (or `REPAIR KEYS`): the
-cache and the indexes are invalidated by a revision counter that only moves
-when the engine writes, and both the indexes and the offsets refer to the
-rows by position and byte, so a row added or removed by hand puts them out of
-step until the table is next written.
+It is valid JSON: any editor can change it and the engine will read it. See
+[Editing the files by hand](#editing-the-files-by-hand-29) for what the engine
+does when someone does, and when an edit breaks the JSON.
+
+**A deleted row leaves `null` in its place (2.9).** Deleting no longer moves the
+rows behind it: the row's line becomes `null`, and nothing else in the table
+changes place. The exception is a table with triggers or with a foreign key to
+itself, which a `DELETE` loads whole and writes without the deleted rows, as
+before. In a larger table, deleting row 2 leaves:
+
+```json
+  "rows": [
+    {"id":1,"name":"Ana","email":"ana@x.es","balance":10.56,"joined":"2026-01-15 08:30"},
+    null,
+    {"id":3,"name":"Eva","email":"eva@x.es","balance":3.0,"joined":null}
+  ],
+```
+
+Every read skips these holes, `COUNT(*)` does not count them, and an `INSERT`
+still goes at the end (holes are not reused, so the insertion order stays).
+Deleting the last rows of a table leaves no holes: there is nothing behind
+them to keep in place, so the table is shortened instead, as before 2.9, and a
+table used as a queue does not pile them up.
+When holes would pass 25 % of a table, the delete that gets there rewrites the
+table without them; `VACUUM` does the same for every table that has any. Before
+2.9, deleting a row moved all the rows behind it one place, which rewrote every
+part and every index piece behind it: half a second for one row of 60,000.
+
+A table with holes cannot be read by 2.8 or earlier (they stop with an error
+on the first scan; they do not return wrong rows). To go back to an earlier
+version, run `VACUUM` first: afterwards the data files are again of the kind
+those versions read (see [Going back to an earlier version](#going-back-to-an-earlier-version)).
+
+### Editing the files by hand (2.9)
+
+The files are meant to be readable, and a person will sometimes open one and
+change it. The engine notices, keeps its answers true to the files, and
+repairs on its own what can be repaired without guessing.
+
+**An edit is seen at once.** Every cache entry of a table part, of its
+structure and of its index pieces carries the seal of the file it came from:
+its size, date and inode. The engine always writes a new file and moves it
+into place, so a different seal without a new revision means someone touched
+the file. Then the cached copy is not used: the file is read again, and if its
+content really changed (copying a file or restoring a backup with the same
+content does not count), the table is rewritten through the normal write path,
+so that its indexes, offsets and revisions match what the person wrote. A part
+read from disk whose offsets no longer match its text is treated the same way,
+which catches an edit made while the cache was empty. And a write, which does
+not keep in the cache the rows of the parts it rewrites, leaves for them a
+small entry instead: for each, the seal of the new file and a fingerprint
+(CRC-32) of its text. So a part edited after the engine wrote it is seen the
+first time it is read, even if nobody had read it before and every line kept
+its length (2.9; before, such an edit went unnoticed and the indexes went on
+answering with the old values). It costs each write, per part it rewrites, a
+CRC-32 of its text (a few microseconds) and one `stat()`, and that one entry:
+in APCu, about a microsecond; on disk, one small file (one per part, as it
+was first written, made a cascade that rewrote forty parts slower than in
+2.8.0). A cached query result
+does not look at the files again: as in 2.8, it is used until a write to one
+of its tables. Checking the seal of every file the query read cost a `stat()`
+per file on every hit (52 for a join of two tables of 20,000 and 30,000 rows),
+which made a hit slower than in 2.8.0, and twice as slow with `open_basedir`.
+The edit is seen by the next query that reads that file, which rewrites the
+table and with it retires the table's cached results.
+
+One limit, inherent to file dates having one-second resolution: an edit made
+in the same second as a write by the engine, that leaves the file the same size
+and keeps its inode, is not told apart. A person editing a file does not hit
+it; a script that rewrites a file in place right after a write could. And one
+that comes from the cache being optional: with its entry for that part gone (the
+cache emptied, or APCu short of memory), an edit that keeps the length of every
+line is not told apart either.
+
+Another limit comes from the indexes: a query answered through one (`WHERE
+city = 'Paris'` with an index on `city`) reads only the parts the index points
+to, so it does not see a value of that column edited in another part until
+some query reads that part — one that reads the whole table, or a lookup that
+lands there. Then the table is rewritten and its indexes match the files
+again. `CHECK TABLES` looks for damaged files, not for valid edits, so it does
+not do it; after editing files with a script, run a query that reads the whole
+table (`SELECT COUNT(*) FROM t WHERE col <> ''` on a column without an index).
+
+**What is repaired on its own.** When a file does not parse, the engine
+repairs it only if the repair is certain:
+
+| File | Repaired on its own |
+|---|---|
+| a data part (`users.json`, `users.part2.json`) | a missing or extra comma between rows, the bracket or brace at the end, the `offsets` list (rewritten), a row missing or with one extra closing brace, and a file reformatted by an editor that is still valid JSON |
+| the table state (`users.rev.json`) | rebuilt from the data; meanwhile the table gets a new cache generation, so no old cache entry is ever used |
+| an index piece (`users.idx.*.json`) | rebuilt from the data |
+| the structure (`users.meta.json`) | a trailing comma, or the closing brace of the file if that is all that is missing |
+| the views (`_views.json`) | the same fixes as the structure, applied each time it is read; the file is rewritten fixed by the next `CREATE VIEW` or `DROP VIEW` (no copy goes to `.reparados/`, and `CHECK TABLES` does not list it). If it cannot be repaired, the error says so and nothing writes over it (before 2.9 it was taken as empty and the next `CREATE VIEW` replaced it) |
+| any of them | the byte order mark (`EF BB BF`) an editor may put at the start |
+
+A data part missing between others (`users.part2.json` gone while
+`users.part3.json` is there) is an error that names it, and `CHECK TABLES`
+lists it; nothing can rebuild its rows, so it has to come from a copy. Before
+2.9 the table ended at the part before it, without warning.
+
+The query that found the problem uses the repaired rows in memory; when it
+ends, holding no lock, the engine takes the exclusive lock as any write does,
+keeps the original file in `.reparados/` with the date, and rewrites the table:
+one part at a time when the table does not fit comfortably in memory (2.9;
+before, the repair gathered the whole table first, and one larger than
+`memory_limit` failed with a fatal error on every read that tried to repair it).
+The repair goes to the query log as a `REPAIR` entry.
+
+**What needs a person.** A row that cannot be fixed with certainty — a quote
+deleted inside a text, a comma removed between two fields, a missing opening
+brace — is not guessed: the query fails with the file and the line, for
+example `Datos ilegibles en users.part2.json: una fila no se puede arreglar
+sola (línea 203: {"id":1200,"nombre":"N1200,"ciudad":"C3"},)`, and nothing is
+touched. Fix it by hand, or run `REPAIR TABLES`, which sets the row aside: the
+table works again without it, and the row is still in the original kept in
+`.reparados/`. A structure file cut short is never completed by guessing:
+the structure of a table cannot be inferred.
+
+```sql
+CHECK TABLES;               -- lists the damaged files of every table, changing nothing
+CHECK TABLES FROM users;    -- only that table
+REPAIR TABLES;              -- repairs them, setting aside the rows that need a person
+REPAIR TABLES FORGET 3;     -- set-aside row 3 is no longer pending (put back, or discarded)
+```
+
+`CHECK TABLES` returns one row per problem with the table, the file, the
+problem and how it would be fixed; none if all is well. `REPAIR TABLES` does
+not guess either: what it does that the automatic repair does not is take the
+doubtful rows out of the table, which is the decision a person makes by running
+it. Its result adds `apartadas`, the rows it set aside with their table, file,
+line and text, so you know exactly what to fix and put back with an `INSERT`;
+they also stay in the original kept in `.reparados/`.
+
+**Rows set aside stay pending until someone deals with them.** `REPAIR TABLES`
+records each one, with a number, in `.reparados/apartadas.json`; `CHECK TABLES`
+keeps listing them, with that number in `apartada`, until they are put back or
+discarded. To put one back, insert it fixed and forget it in the same
+transaction, so that either it goes back and stops being pending, or nothing
+happens: `$db->lote([['INSERT INTO users (…) VALUES (…)', […]], 'REPAIR TABLES
+FORGET 3'])`, or the API's `lote`. `REPAIR TABLES FORGET n` alone discards it (it
+stays in the copy in `.reparados/`). Numbers are never reused, so one kept from
+an earlier list cannot forget a different row.
+
+In the panel it is the first section of the **Integrity** tab. Each pending row
+shows how it was, an example of a correct row of its table — a real row of the
+table if it has any, made up from its columns if it is empty — and a box to fix
+it. Saving checks that it is a JSON object with columns of the table, and the
+engine checks the rest as it inserts it (types, required values, unique and
+foreign keys); if something is wrong, it says what and the row stays pending.
+`CHECK TABLES` needs read permission; `REPAIR TABLES`, write.
 
 **Parts**: past 1,000 rows (`JSONSQLDB_FILAS_POR_PARTE`) the data is spread over
 `users.json`, `users.part2.json`, … Parts that become empty are removed. Reading
@@ -114,7 +271,8 @@ every row (see [Memory](#8-memory)).
 
 ### Structure file (`users.meta.json`)
 
-Only keys with a value are written, so it stays readable:
+A column only carries the keys that have a value, so it stays readable (shown
+condensed; the engine writes one key per line):
 
 ```json
 {
@@ -123,7 +281,7 @@ Only keys with a value are written, so it stays readable:
         {"name": "id", "type": "INTEGER", "notnull": true, "pk": true, "autoincrement": true},
         {"name": "name", "type": "TEXT", "length": 50, "notnull": true},
         {"name": "email", "type": "TEXT", "length": 120, "unique": true},
-        {"name": "balance", "type": "DECIMAL", "scale": 2, "default": 0},
+        {"name": "balance", "type": "DECIMAL", "scale": 2, "default": 0.0},
         {"name": "joined", "type": "DATETIME"}
     ],
     "unique": [{"name": "uq_users_nif", "columns": ["nif"]}],
@@ -166,11 +324,12 @@ lets a write know which files it can leave alone:
 |---|---|
 | `rev` | goes up by one on every write to this table |
 | `chunk` | rows per part the table was written with |
-| `rows` | how many rows the table has (2.5) |
+| `rows` | how many places the table has (2.5): its rows, plus the holes of deleted ones (2.9) |
 | `creada` | a random number fixed at the table's first write (2.6); see below |
 | `parts` | the revision at which each part was last written (2.5) |
 | `indexes` | the revision at which each piece of each index was last written (2.6) |
 | `rangos` | the smallest and largest numeric value in each piece of each index, `[]` for an empty piece, `null` when the first indexed column is text (2.7) |
+| `huecos` | how many holes of deleted rows each part has (2.9); only there when some part has any |
 | `autoinc` | the next `AUTOINCREMENT` value (2.7). It used to live in the structure file, which an `INSERT` then had to rewrite and force to disk; here it rides on a file the write touches anyway. The structure file keeps the value it had at creation or at the last version before 2.7, and the larger of the two wins |
 
 A part or an index piece whose revision equals the one recorded here is
@@ -196,8 +355,9 @@ An index is stored in **one file per part of the table**, each holding the
 keys of the rows in that part:
 
 ```json
-{"index":"auto_id","table":"users","columns":["id"],"part":2,"rev":7,"chunk":1000,
- "keys":{"n4:1001":1000,"n4:1002":1001,"t6:Madrid":[1004,1019,1057]}}
+{"index":"ix_city","table":"users","columns":["city"],"part":2,"rev":7,"chunk":1000,
+ "filtro":"AAEA…","cubre":"texto","min":"Elche","max":"Murcia",
+ "keys":{"t5:Elche":1000,"t6:Murcia":1001,"t6:Madrid":[1004,1019,1057]}}
 ```
 
 `keys` maps a key (type, length and value of each indexed column, so composite
@@ -208,20 +368,38 @@ file with every key (and before 2.5 always with lists); they are read as they
 are and split into pieces the next time the table is written. Details in
 [Indexes](#5-indexes).
 
+`filtro` (2.9) is a Bloom filter of the piece's keys, in base64, and `cubre`,
+right after it, says which keys it covers: `"texto"`, the text keys, or
+`"todo"`, the numeric keys too, when the piece's range is wide (at least 8
+times the part size: an index on the customer of each order, where every piece
+spans the whole table and the range narrows nothing). It says, without reading
+the keys, that a key it covers is **not** in the piece (if it says it may be,
+it is a false positive about 1 % of the time, and the keys are read). A piece
+with no key to cover has `"filtro":""` and no `cubre`. When all the keys of a piece are texts, `min` and `max`
+(2.9) hold the smallest and largest value of its first column, compared as the
+`WHERE` compares two texts: a range on a text or a date reads only the pieces
+that can hold it. They all go before `keys`, so a lookup reads the first bytes
+of each piece and opens the keys of only the pieces where the value can be.
+Pieces written before 2.9 have none of them and are read whole, as before;
+they get them the next time the table rewrites them. Older versions read
+pieces with them as usual and ignore them.
+
 ---
 
 ## 2. Data types
 
 | Internal type | Aliases accepted in `CREATE TABLE` | Stored as |
 |---|---|---|
-| `INTEGER` | INT, INTEGER, TINYINT, SMALLINT, MEDIUMINT, BIGINT, BOOL, BOOLEAN | integer |
+| `INTEGER` | INT, INTEGER, TINYINT, SMALLINT, MEDIUMINT, BIGINT, BOOL, BOOLEAN; BIT and YEAR (2.9) | integer |
 | `DOUBLE` | REAL, FLOAT, DOUBLE, DOUBLE PRECISION | number |
 | `DECIMAL` | DECIMAL(p,s), NUMERIC, NUMBER, MONEY | number rounded to `s` decimals (2 by default) |
-| `TEXT` | TEXT, VARCHAR(n), NVARCHAR, CHAR, NCHAR, CLOB, STRING, BLOB | string |
+| `TEXT` | TEXT, VARCHAR(n), NVARCHAR, CHAR, NCHAR, CLOB, STRING, BLOB; TINYTEXT, MEDIUMTEXT, LONGTEXT, JSON, TINYBLOB, MEDIUMBLOB, LONGBLOB, BINARY, VARBINARY and UUID (2.9) | string |
 | `DATETIME` | DATE, DATETIME, TIMESTAMP | string `yyyy-MM-dd[ HH:mm[:ss[.fff]]]` |
 
-The aliases are the ones SQLite uses, so a `CREATE TABLE` written for SQLite is
-accepted as it is.
+The aliases are the ones SQLite uses, and since 2.9 MySQL's too, so a `CREATE
+TABLE` written for either is accepted as it is. `ENUM('a', 'b', …)` (2.9) is a
+`TEXT` that only takes those values, and `UNSIGNED` (2.9), on a numeric column,
+rejects negatives.
 
 **Dates**: the time, seconds and milliseconds are **optional** and the
 precision you wrote is kept. `T` or a space is accepted as separator on input;
@@ -245,10 +423,10 @@ then table — and that fixed order is what makes a deadlock impossible.
 
 | Operation | Database | Table |
 |---|---|---|
-| `SELECT` and other reads | shared | shared, on each table read |
-| A write to **one** table with no foreign keys or triggers | shared | exclusive |
+| `SELECT` and other reads, also each statement of a `lote` that only reads (2.9: one lock for each, released between them) | shared | shared, on each table read |
+| A write to **one** table with no foreign keys or triggers | shared | exclusive (a write by part only while it commits, see below) |
 | Cascades and triggers, when the set of tables is knowable | shared | exclusive on **every** table it can reach |
-| DDL, views, `REPAIR KEYS`, `INSERT ... SELECT` | exclusive | — |
+| DDL, views, `REPAIR KEYS`, `REPAIR TABLES` and `VACUUM` (2.9), a whole transaction (2.9), and writes that read other tables: `INSERT ... SELECT`, a subquery (2.9), an `UPDATE` or `DELETE` with other tables (2.9), also in a trigger they fire (2.9) | exclusive | — |
 
 So two writes to different tables run at the same time, and a write does not
 block reads of the other tables.
@@ -270,11 +448,21 @@ Two details make it safe:
   of both waiting for each other.
 
 It falls back to the exclusive database lock as soon as the set cannot be
-stated: a trigger whose SQL cannot be analysed, an `INSERT ... SELECT` (reads
-other tables), any structure change, or more than eight tables, where taking
+stated: a trigger whose SQL cannot be analysed, a write that reads other
+tables (`INSERT ... SELECT`, a subquery, or since 2.9 an `UPDATE` or `DELETE`
+with other tables: holding the exclusive lock of some tables, the others are
+read without a lock), a trigger it can fire that reads other tables the same
+way, or with a `SELECT … FROM` (2.9; before, only its `INSERT ... SELECT`
+counted), any structure change, or more than eight tables, where taking
 that many locks costs more than one. The decision lives in
 `Database::tablasAfectadas()` and is deliberately suspicious: when in doubt,
 the database — one lock too many costs parallelism, one too few costs data.
+
+If a lock cannot be taken — a table's lock file that cannot be opened — or
+the recovery done when a database is opened fails, the error releases every
+lock already taken (2.9; before, the process kept the shared lock of the
+database, so other writers waited for it forever, and its own later writes,
+DDL included, ran believing they held an exclusive lock they did not have).
 
 A `SELECT` on a table with a write in progress **waits for it** and then
 returns the new data. Reads take the shared lock of each table the first time
@@ -299,12 +487,20 @@ index that go with them — changed since it read them. If one did, because
 another write went to the same part in between, it discards everything without
 having renamed a thing and runs again with the whole table locked: it joins the
 queue, and neither write is lost. The data files keep their format; only the
-order of locking changes.
+order of locking changes. What other writes did meanwhile in other parts stays
+in the revision file it commits, also a part an `INSERT` added at the end (2.9;
+before, the revision file was cut to the parts this write had seen, and every
+lookup through an index became a scan until the next write), and the numeric
+range of every index piece stays in its place, also in a revision file from
+before 2.7, which has none (2.9; the one it wrote went to the first place, and
+a lookup by number could skip the piece that held it).
 
 What counts as depending only on each row: the table has no foreign keys and no
-triggers and no other table references it; the statement has no subqueries; and
-an `UPDATE` does not touch a column of the primary key or of a `UNIQUE`
-constraint, because uniqueness is a property of the whole table. Everything
+triggers and no other table references it; the statement reads no other table
+(no subqueries, no `UPDATE … FROM` or `DELETE … USING`); an `UPDATE` does not
+touch a column of the primary key or of a `UNIQUE` constraint, because
+uniqueness is a property of the whole table; and it is not a `TRUNCATE TABLE`
+(2.9), which empties the whole table. Everything
 else — `INSERT`, DDL, anything with keys or triggers — takes the table lock as
 before. `JSONSQLDB_ESCRITURA_POR_PARTES = false` turns it off.
 
@@ -322,9 +518,10 @@ the latency. The writes done drop on this machine because it has a single core:
 the readers that used to be blocked now run, and share the processor with the
 writer; on a server with more cores that competition is much smaller. Between
 writers the gain is small: two or four processes updating random rows of the
-same table do 30–31 updates a second either way here, because three of the four
-`fsync` calls of a write (revision file, manifest, directory) have to happen
-inside the commit, and the fourth is the only one that now overlaps.
+same table do 30–31 updates a second either way here, because four of the five
+`fsync` calls of a write (revision file, manifest, journal folder, database
+folder) have to happen inside the commit, and the fifth, the part's, is the
+only one that now overlaps.
 
 `tests/f7_concurrencia.php` checks it with real processes: four processes adding
 1 fifty times each to the same row must end at exactly 200 (the check that
@@ -429,6 +626,10 @@ stop.
 
 ## 4. Cache and invalidation
 
+What each cache keeps, where it lives and how to switch it is in
+[The caches, one by one](#the-caches-one-by-one); this section is about how
+they stay right.
+
 Every read of a part goes through a cache entry keyed by the table name, the
 part number and **the revision at which that part was written** (from
 `rev.json`). While nobody writes, every request reuses the cache; as soon as
@@ -436,6 +637,25 @@ someone writes, the revision of the parts they touched changes and any other
 process reads the new data even if its old cache is still there. The structure
 and each index piece have an entry of their own, keyed the same way. Entries
 that a write leaves behind are deleted (APCu and disk); they do not accumulate.
+On disk they are deleted by their exact name (2.9; listing the cache folder was
+12 % of a one-row `UPDATE`), and every 32 revisions of the table, and when it
+is dropped, all of its entries are swept: that also takes what no write leaves
+behind by name, such as an entry stored by a read that crossed a write, or a
+file half written by a process that died. While the table exists, the sweep
+keeps the entries whose key carries no revision — the row count of each part
+and, for each index, the verdict on its pieces, their filters and the bounds
+of their text keys —, because they hold the revision of every part or piece
+inside and an outdated one is never used (2.9; they were swept too, and then
+the first text lookup opened the head of every index piece again, the next
+write checked every piece again and `COUNT(*)` counted every part again).
+The fingerprints a write leaves (see [Editing the files by hand](#editing-the-files-by-hand-29))
+stay while a part it wrote is still there. What a write learns about what it leaves — that verdict, those filters and the
+fingerprint of each part it rewrites — goes to the cache only once the write is
+committed (2.9): a write by part that was discarded left its filters behind
+with a revision that the next write would give to other contents, and a lookup
+through that index could miss rows that were there. A table's results (below) are only
+looked for when it has any on disk: storing one leaves a mark, and the next
+write removes the mark and the results.
 
 ### A `JOIN` with few rows on the left looks them up
 
@@ -443,7 +663,7 @@ A `JOIN` builds a hash of the right-hand table and streams the left through
 it, which is right for two large tables and wrong for the most common `JOIN`
 on a web page: `FROM orders o JOIN customers c ON c.id = o.customer_id WHERE
 o.id = ?`, one order and its customer. Since 2.7 the conditions of the
-`WHERE` that only concern tables already in the cruce are applied before it
+`WHERE` that only concern tables already joined are applied before the join
 (for `INNER` and `LEFT`; a `RIGHT` or `FULL` join would change its result),
 and if what is left on the left is small compared with the right-hand table
 — one row for every 150 the table has, up to a thousand — and the right-hand
@@ -457,15 +677,26 @@ an index, the hash join runs as before, on the rows the `WHERE` left.
 
 Whatever the cache is, disk or APCu, reading an entry means decoding it. The
 last entries read or written are kept as they are in the PHP process (2.7) —
-sixteen index pieces, one part, a few table structures, a couple of megabytes
-at most — so a script that runs thousands of lookups, the panel, or a page
-that looks up the customer of each order in a loop does not decode the same
-piece again on every query. The key carries the revision, so an entry that
-another process has made stale is simply never asked for again; and when
+four index pieces, 64 lists of row offsets (2.9; 16 before, which a query
+touching more parts threw away on every pass), and sixteen shared by table
+structures and the other small entries (verdicts, filters, limits, row
+counts); never parts, which are large and which a lookup by key
+no longer needs — so a script that runs thousands of lookups, the panel, or a
+page that looks up the customer of each order in a loop does not decode the
+same piece again on every query. The key carries the revision, so an entry
+that another process has made stale is simply never asked for again; and when
 memory runs short this is the first thing let go. In a request that runs one
 query it changes nothing. Five thousand lookups by key on 20,000 rows: 9.9 s
 in 2.6.1, 2.7 s in 2.7.0 with random keys and 0.7 s when nearby rows are
 looked up in sequence.
+
+Since 2.9 the process also keeps each table's state (its `rev.json`, decoded)
+and its structure already normalised, for up to 32 tables. Before using them
+it checks the seal of the file (size, date and inode) with one `stat()`, and
+it only keeps a file that has not changed for 2 seconds: two writes in the same
+second can leave the same seal, and the file system reuses the inode a write
+frees. In one process, a lookup by key on 20,000 rows went from 0.183 to
+0.144 ms.
 
 ### Query results
 
@@ -477,10 +708,31 @@ millisecond the second. A write to any of those tables changes their revision
 and the cached result simply stops matching; on disk the file is deleted at
 that moment, in APCu it expires after an hour.
 
-Not cached: queries that depend on the moment (`RANDOM()`, `DATE('now')` and
-the other date functions with no argument) and results over
+The key also carries the definition of every view the query reads (2.9) and
+what the configuration changes in a result: the collation, its map and the
+engine version. Redefining a view with the same name, switching the collation
+or updating the engine is another key, so an older result is never served; the
+old file stays until the next write to its tables deletes it.
+
+Not cached: queries that depend on the moment (`RANDOM()`, `UUID()`,
+`DATE('now')` and the other date functions with no argument), results over
 `JSONSQLDB_CACHE_RESULTADOS` rows (5,000 by default; `0` turns the result
-cache off). Queries run inside a trigger never use it: they see the changes of
+cache off), and (2.9) queries that took less than 1 ms to run: a lookup by key
+costs less than storing it and is seldom repeated as it is. Storing every one
+filled the cache with results nobody asked for again; with OPcache, a lookup
+by key went from 691 to 657 µs between requests (612 µs with no result cache),
+while a repeated 9 ms query is still served in under 0.5 ms. Also not cached
+(2.9): a query that reads no table, which no write would ever delete, and on
+disk a result of more than 1 MB: before, a key that can only read could fill
+the disk with one large result per different query. In APCu there is no such
+limit: its memory has a size of its own and the oldest entries leave it.
+
+The results of the same tables go to 4,096 places at most (2.9; in APCu, 4,096
+for the whole database): before, every different query left a file until the
+next write, so a table that is only read, queried row by row, piled them up
+without end, and every write had to list them. Two queries that land on the
+same place overwrite each other; each result carries its whole key and is only
+served for it. Queries run inside a trigger never use it: they see the changes of
 the statement being run, which are not on disk yet.
 
 The revision is per table and not one shared file, because two writes to
@@ -489,14 +741,17 @@ full by both: whichever finished last erased the other's bump and left its cache
 serving stale rows.
 
 The cache steps aside when memory is tight (see [Memory](#8-memory)), and
-`INTEGRITY CHECK` and `COUNT(*)` bypass it on purpose: they need to see what is
-really in the files.
+`CHECK KEYS` and `CHECK TABLES` bypass it on purpose: they need to see what is
+really in the files. `COUNT(*)` without `WHERE` does not read the cached rows
+either: it counts the lines of each part, and since 2.9 keeps only that count in
+the cache, together with the part's revision, size and modification time; when
+any of them changes (a write, or an edit by hand) that part is counted again.
 
 ### What the on-disk cache costs
 
 Without APCu the cache lives in `.cache/` as PHP-serialised copies, and that
-is not free: it takes about twice the space of the data and index files it
-mirrors, and as many files as they have. What that means for a hosting plan,
+is not free: it takes a little more than the space of the data and index
+files it mirrors (1.1–1.2 times in the benchmark), and about as many files. What that means for a hosting plan,
 and what you can do about it, is in
 [Files, space and how to tune them](#9-files-space-and-how-to-tune-them).
 
@@ -522,8 +777,13 @@ opens one piece instead of all of them — 0.58 ms instead of 2.85 on 20,000
 rows, 0.75 ms instead of 9.3 on 100,000. A key outside every range (a new
 id being inserted) is rejected without opening any. Numbers spread at random
 over the table (an index on `age`) overlap on every piece and gain nothing,
-but lose nothing either. A lookup on a **text** column reads every piece —
-the key can be in any of them.
+but lose nothing either. On a **text** column the key can be in any piece; since
+2.9 each piece carries a filter in its header that says, without reading its
+keys, when a key cannot be there (a lookup by email: 1.65 → 1.15 ms between web
+requests), and its smallest and largest text, so a range (`>`, `<`, `BETWEEN`)
+only reads the pieces that can hold part of it. Those two values are also kept
+in the cache with the revision of their piece, made when a query reads them, so
+a range does not even open the headers of pieces that have not changed.
 
 Indexes serve reads and writes:
 
@@ -534,34 +794,58 @@ Indexes serve reads and writes:
   index on disk instead of loading the table, appends to the last part and
   rewrites only the last piece of each index.
 - An `UPDATE` or `DELETE` whose `WHERE` an index can answer reads only the parts
-  that hold the candidate rows and rewrites only those (a delete shifts every
-  row after it, so from the first deleted position on the parts are redone),
+  that hold the candidate rows and rewrites only those (since 2.9 a delete
+  leaves a hole in its place instead of moving the rows behind it),
   and only the matching index pieces.
 
-Only equalities and `IN` against literals in the top-level `AND` chain of the
-`WHERE` use an index. Ranges, `LIKE`, `ORDER BY`, aggregates, `IS NULL`,
-`NOT IN`, a top-level `OR` and anything under a `NOT` scan the table.
+Equalities and `IN` against literals in the top-level `AND` chain of the
+`WHERE` use an index, and since 2.9 also:
+
+- a range (`<`, `<=`, `>`, `>=`, `BETWEEN`) against a literal on the first
+  column of an index, when the ranges of the pieces show it will not cost more
+  than reading the table (with numbers, fewer than half the parts to open);
+- `COUNT(*)` whose `WHERE` is only comparisons on one indexed column, counted
+  in the index without reading rows;
+- `MIN(col)` and `MAX(col)` with no `WHERE` on a numeric column that is the
+  first column of an index, taken from the ranges already in `rev.json`;
+- `ORDER BY col [DESC] LIMIT n` on one table, with no `WHERE`, grouping or
+  `DISTINCT`, on a numeric indexed column (ascending needs it `NOT NULL`).
+
+`EXPLAIN SELECT …` says which of these a query used. `LIKE`, `IS NULL`,
+`NOT IN`, other aggregates and orders, a top-level `OR` and anything under a
+`NOT` scan the table.
 
 ### How an index is kept up to date
 
-Positions are not stable: a table is stored by position, so one `DELETE` moves
-every row after it. Rebuilding the index from scratch on every write was most
-of the cost of writing one row into a large table, and almost always repeated
-work. Since 2.5 the previous index is **corrected** whenever the engine can
-prove what changed:
+A table is stored by position, and the index points to positions. Rebuilding
+the index from scratch on every write was most of the cost of writing one row
+into a large table, and almost always repeated work. Since 2.5 the previous
+index is **corrected** whenever the engine can prove what changed:
 
 - rows **appended** at the end: their keys are added;
-- rows **replaced in place** (an `UPDATE` that does not move anything): the old
-  key is removed and the new one added, using the old row read from the part
-  that has not been replaced yet;
-- rows **shifted from a position on** (a `DELETE`): every entry from that
-  position is cut and the rows behind it are re-added.
+- rows **replaced in place** (an `UPDATE` that does not move anything, or since
+  2.9 a `DELETE` that leaves a hole): the old key is removed and the new one, if
+  any, added, using the old row read from the part that has not been replaced
+  yet;
+- rows **shifted from a position on**: every entry from that position is cut
+  and the rows behind it are re-added.
+
+Since 2.9 a `DELETE` leaves a hole, `null`, in the place of each deleted row,
+so nothing behind it moves (see [Data file](#data-file-usersjson)). On a table
+the statement has to load whole — one with triggers or with a foreign key to
+itself — it still writes the table without the deleted rows, and the rows
+behind the first one shift. When the holes would pass 25 % of the table, or on
+`VACUUM`, the table is rewritten without them and its indexes rebuilt.
 
 Only the pieces that hold the positions concerned are read and rewritten; the
-others keep their revision. Before trusting them, the write checks the header
-of every piece it leaves alone — index name, columns, part number and
-revision, read from the first bytes of the file — so a piece damaged or edited
-by hand is rebuilt at the next write instead of staying broken.
+others keep their revision. Before trusting them, the write checks the pieces
+it leaves alone: the revision and the size of each one as the last write left
+them are in the cache, and a piece in the same revision with the same size
+(one `stat()`) is as it was; any other has its header read — index name,
+columns, part number and revision, in the first bytes of the file — and its
+tail checked. So a piece damaged or edited by hand is rebuilt at the next write
+instead of staying broken, and a write to a table of a million rows does not
+open its 3,000 pieces (it did until 2.9: half of a one-row `UPDATE`).
 
 Any doubt — a revision file that does not say how many rows there were, a part
 size that changed, a piece of a different revision — rebuilds the index from
@@ -605,9 +889,8 @@ at the top of this document).
 
 One file is atomic, but **a set of files is not**, and almost no write touches
 just one: a table with more than `JSONSQLDB_FILAS_POR_PARTE` rows lives in
-several parts, a table with indexes rewrites each of them, every write rewrites
-`rev.json`, and an `INSERT` into a table with `AUTOINCREMENT` rewrites the
-structure file too. A crash between two renames would leave half the table new
+several parts, a table with indexes rewrites each of them, and every write
+rewrites `rev.json`. A crash between two renames would leave half the table new
 and half old — and because parts are split **by position**, that does not lose
 "some rows", it misaligns the whole table from the cut onward.
 
@@ -627,7 +910,11 @@ intact: nothing was ever renamed. If it dies after, the manifest is found the
 next time the database is opened and **the write is finished**: the
 temporaries are on disk, so redoing always completes, and it can be repeated as
 many times as it takes (a rename already done is skipped). Every intermediate
-state is exercised by `tests/f9_journal.php`, one by one.
+state is exercised by `tests/f9_journal.php`, one by one. A rename that fails
+in step 3 without a crash (on Windows, a file another program holds open)
+leaves the temporaries and the manifest where they are, and the write is
+finished the next time the database is opened (2.9; before, the temporaries
+were deleted and the database no longer opened).
 
 ```json
 {
@@ -673,9 +960,9 @@ pending journal by an earlier version recovers correctly. The pre-2.0 layout
 (copies loose in `.tx/`) is recognised too.
 
 What the journal costs, counted with `strace`: a one-row `INSERT` into a
-table with three indexes makes **four `fsync` calls** — the part, `rev.json`,
-the manifest and the directory; five when it opens a new part — down from ten
-in 2.6 and from twenty-odd in 2.4. The autoincrement counter moved from the
+table with three indexes makes **five `fsync` calls** — the part, `rev.json`,
+the manifest, the `.tx/` folder that holds it and the database folder; six
+when it opens a new part — down from ten in 2.6 and from twenty-odd in 2.4. The autoincrement counter moved from the
 structure file into `rev.json` for exactly this reason: a file the write
 touches anyway. On this benchmark machine an `fsync` takes 0.1 ms and the
 difference is invisible; on a hosting disk it takes 3–8 ms, and there the
@@ -686,14 +973,27 @@ own: one per data file plus the manifest and the directory.
 
 A process killed with `SIGKILL` runs no `finally` and can leave its temporary
 on disk; that cannot be avoided from inside. What is avoided is accumulation:
-every write sweeps the stray temporaries of its table, which it can do safely
-because it holds the table's exclusive lock, and a process holding the
-exclusive database lock sweeps them all.
+every write sweeps the stray temporaries of its table left by processes that
+no longer exist (the pid is in the name) — holding the table's lock is not
+enough, since a write by part keeps its temporaries while it waits to
+commit — and a process holding the exclusive database lock sweeps them all.
 
-What the journal does **not** cover: grouping several statements into one unit
-of work. There is no `BEGIN`/`COMMIT`: each statement is atomic on its own,
-cascades and triggers included, but two consecutive statements are not undone
-together.
+Each statement is atomic on its own, cascades and triggers included. Grouping
+several statements into one unit of work is a **transaction** (2.9:
+`$db->transaccion(fn)`, `$db->lote([...])`, the API's `lote` field, several
+statements in the panel's SQL console; see [Transactions](03-writes.md#transactions-29)).
+It holds the database's exclusive lock from start to end, so nobody sees it
+half done. Each statement writes as always, and the next one sees what it did;
+before a write first replaces or deletes a file, the original is kept in
+`.lote/` with a hard link (a copy forced to disk where links are not allowed),
+which keeps the old content without copying it, because the engine never
+changes a file in place. The originals are kept, and listed in
+`.lote/manifiesto.lote`, before the statement's own journal is written, so a
+crash between the two cannot leave a statement that the transaction does not
+know how to undo. Committing deletes `.lote/`; undoing puts the
+originals back and removes what is new. If the process dies halfway, the
+transaction is undone when the database is next opened (`tests/f3_escrituras.php`
+kills one with `SIGKILL` and checks it).
 
 `tests/f6_cortes.php` kills real processes with `SIGKILL` — mid cascade, mid
 write of a multi-part indexed table, and once per kind of operation — and
@@ -716,6 +1016,9 @@ one journalled commit: if a constraint fails on the third row of a three-row
   parts rewrites the last one. The revision file remembers the part size the
   table was written with; if `JSONSQLDB_FILAS_POR_PARTE` changed since, the
   part boundaries moved and every part is rewritten.
+- **Deleting does not move rows** (2.9): a deleted row becomes a hole in its
+  own part, so a `DELETE` rewrites the parts it deleted from and their index
+  pieces, nothing behind them (see [Data file](#data-file-usersjson)).
 - **Only the index pieces that changed**, corrected rather than rebuilt when
   possible (see [Indexes](#5-indexes)). Appending a row to a table of a hundred
   parts rewrites the last piece of each index, not the whole index.
@@ -750,8 +1053,13 @@ memory_limit  ≥  20 × (the largest table a single query has to hold in full)
 ```
 
 A query holds a table in full only when it needs every row at once: `ORDER BY`
-without `LIMIT`, the inner side of a `JOIN`, `DISTINCT`. A `WHERE` scan does
-not — rows are read one part at a time and only the survivors are kept — and
+without `LIMIT` and the inner side of a `JOIN`. Since 2.9 what does not fit —
+those two, a `GROUP BY` of many groups, a subquery, a `UNION`, window
+functions — goes to files on disk instead (in `.orden/`, as soon as half of
+`memory_limit` is in use, see [What does not fit goes to
+disk](#what-does-not-fit-goes-to-disk-29)), and `DISTINCT` keeps only the
+distinct rows, dropping a repeated one as soon as it is projected. A `WHERE` scan does not hold the
+table — rows are read one part at a time and only the survivors are kept — and
 neither does a `GROUP BY` or an aggregate (accumulated as the rows go by),
 an `ORDER BY … LIMIT n` (only the n rows in the lead are kept), or a write. If
 APCu is enabled its memory is separate and does not count against
@@ -863,18 +1171,123 @@ Some detail on how it decides, because the naive version did not work:
   really kill the process is a reallocation of the order of the array's own
   size.
 - Underneath there is a **safety net that does not depend on guessing right**:
-  the engine sets aside two megabytes at start and registers a shutdown
-  function. If PHP does abort for lack of memory, that function releases the
-  reserve and the API still returns a normal JSON error rather than an empty or
+  the engine registers a shutdown function. If PHP does abort for lack of
+  memory, that function raises `memory_limit` at that moment to two megabytes
+  above what PHP has taken, and the API still returns a normal JSON error rather than an empty or
   truncated body. Shutdown functions always run, even after a fatal error.
+  Only where the hosting does not let `memory_limit` change (`ini_set`
+  disabled, or the limit fixed by the server) are the two megabytes set aside
+  at start and released instead, as before 2.9; that was about 1 ms on every
+  request. The limit is only ever raised.
 - **What it cannot fully cover**: a file is decoded in one instruction, and the
   peak happens before anyone can look. Before opening a file the engine
   estimates from its size whether the decoded content will fit. The estimate is
   a heuristic, so this reduces the window without closing it.
 
 Data is never at risk from running out of memory: a read writes nothing, a
-write flushes at the end so it has not touched the disk yet, and the locks are
-released by the operating system when the process dies.
+write flushes at the end so it has not touched the disk yet (one too large for
+memory goes in stretches inside a transaction, which is undone when the
+database is next opened), and the locks are released by the operating system when the process dies.
+
+### What does not fit goes to disk (2.9)
+
+When what a query has to gather does not fit, it is not stopped any more:
+while it gathers in memory, as soon as half of `memory_limit` is in use,
+`Memoria` warns and the query is run again by a path that writes what it
+gathers to temporary files in the database's `.orden/` folder. An `ORDER BY`
+is sorted in files and merged; a hash `JOIN` and a `GROUP BY` are split into
+64 files by their key and done file by file; a subquery of the `FROM`, a view
+or a query of the `WITH` is written to a file and read as it is used; a
+`UNION` passes each row on as it is read; window functions keep in memory only
+the values they use, a list per expression. The usual path is not touched:
+the repetition is only paid for when it is needed, and before it the memory
+PHP kept from the first attempt is given back. The rows are the same as in
+memory, and so is their order when the query has an `ORDER BY`. The files are
+closed and deleted at the end whatever happens, also when a `LIMIT` stops the
+reading early (2.9; they were deleted while still open, which Windows does not
+allow, and stayed); one left by a process that died is deleted by the next
+query that uses the folder, after an hour. Details in
+[02-queries.md](02-queries.md#5-performance).
+
+What still has to fit: the values of a `GROUP_CONCAT` and, with `GROUP BY`,
+the distinct values of a `COUNT(DISTINCT …)` in each group (without `GROUP
+BY` they go to disk too), the rows already seen by a `DISTINCT` or a `UNION`,
+the groups of one of the 64 files, and about 16 bytes per row for each value
+a window function uses. A write of many rows goes in stretches (see
+[03-writes.md](03-writes.md)), and looks its unique keys up in the indexes on
+disk without loading the table: with the whole index in memory if it fits,
+and if not, key by key, through the filter of each index piece.
+
+### A million rows (2.9)
+
+Measured with two tables of a million rows each — `clientes` (six columns,
+`email` `UNIQUE`, an index on `ciudad`) and `pedidos` (four columns, an index
+on `cid`) — with `memory_limit = 256M`, PHP 8.3, the on-disk cache, the result
+cache off, each query in its own process; 300 MB of data and indexes. Every
+result was checked against the same data loaded in SQLite: the same rows, with
+one difference in the last digits of a sum of a million decimals (SQLite adds
+them with compensation, here they are added in order).
+Loading them, in `INSERT`s of 2,000 rows: 383 s and 55 MB for `clientes`
+(each new email is looked up in the `UNIQUE` index, see below), 61 s and
+19 MB for `pedidos`.
+
+| Query | Time · peak memory |
+|---|---|
+| Lookup by primary key | 32 ms · 3 MB |
+| The orders of one customer, by the index on `cid` (values spread over the table) | 51 ms · 5 MB (as a lookup by key once its filters are in the cache: the first one reads them from the 1,000 pieces) |
+| 50 rows of one city by its index, `LIMIT 50` | 21 ms · 4 MB |
+| Lookup by the `UNIQUE` text column | 42 ms · 5 MB (as a lookup by key once its filters are in the cache: the first one reads them from the 1,000 pieces) |
+| Ten keys with `IN (…)` | 27 ms · 3 MB |
+| `BETWEEN` on the primary key, 1,000 rows | 34 ms · 4 MB |
+| `COUNT(*)` of the table | 298 ms · 3 MB the first time; 19 ms once the count of each part is in the cache |
+| `COUNT(*)` with an equality on an index (100,000 rows) | 43 ms · 3 MB |
+| `ORDER BY id DESC LIMIT 20` | 27 ms · 4 MB |
+| `COUNT(*)` of a range, no index | 0.80 s · 4 MB |
+| `LIKE` by prefix, no index | 1.3 s · 5 MB |
+| `ORDER BY saldo DESC, id LIMIT 20`, no index | 1.7 s · 4 MB |
+| `GROUP BY ciudad` with `COUNT`, `SUM` and `AVG` (10 groups) | 2.3 s · 5 MB |
+| The million ids, through `consultarPorFilas()` (the API) | 2.9 s · 17 MB |
+| The million ids `ORDER BY saldo DESC, id` | 14 s · 164 MB, on disk |
+| `ORDER BY id LIMIT 100 OFFSET 500000` | 4.9 s · 146 MB; without the `ORDER BY`, 25 ms (the parts the `OFFSET` skips are not read) |
+| `JOIN` of the million orders with their customers, `GROUP BY` city | 19 s · 128 MB, on disk |
+| `COUNT(DISTINCT email)` | 1.9 s · 90 MB |
+| `COUNT(DISTINCT email)` and `COUNT(DISTINCT nombre)` | 8.4 s · 152 MB, on disk |
+| `GROUP BY cid` (631,796 groups) `ORDER BY` count `LIMIT 5` | 14 s · 163 MB, on disk |
+| `COUNT(*) … WHERE cid IN (SELECT id FROM clientes)` | 4.7 s · 101 MB |
+| `COUNT(*)` with a correlated `EXISTS` on the orders | 2.9 s · 5 MB |
+| `COUNT(*)` of a `UNION` of the two million emails | 6.6 s · 128 MB, on disk |
+| `ROW_NUMBER() OVER (ORDER BY saldo DESC, id)` | 33 s · 161 MB, on disk |
+| `LAG(saldo) OVER (ORDER BY id)` | 12 s · 128 MB, on disk |
+
+A query that goes to disk shows about half of `memory_limit` as its peak:
+that is where its first attempt, in memory, stopped.
+
+Writes, one after another on the same data (with `memory_limit = 256M`; the
+sums of control of both tables, the same as SQLite's after each one):
+
+| Statement | Time · peak memory |
+|---|---|
+| `CREATE TABLE … AS SELECT`, 323,268 rows | 3.1 s · 69 MB |
+| `INSERT … SELECT`, 676,732 rows | 11 s · 122 MB |
+| `UPDATE` of the million rows | 24 s · 140 MB |
+| `UPDATE` of 300,097 rows chosen by an index | 17 s · 147 MB |
+| `DELETE` of 100,140 rows chosen by an index | 8.3 s · 70 MB |
+| `DELETE` of 300,000 orders by a range of the key | 8.2 s · 39 MB |
+| `ALTER TABLE` `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN` | 3.7, 4.4 and 4.7 s · 8–9 MB |
+| `CREATE INDEX` on a number, `CREATE UNIQUE INDEX` on a text | 3.1 s · 12 MB, 4.6 s · 103 MB |
+| `VACUUM` after deleting 100,140 rows | 12 s · 24 MB |
+| `INSERT … SELECT … ON CONFLICT (id) DO UPDATE`, 179,774 rows | 13 s · 123 MB |
+| `INSERT OR IGNORE … SELECT`, 89,925 new rows, two `UNIQUE` text columns | 125 s · 111 MB |
+| `INSERT OR REPLACE … SELECT`, 44,976 rows | 71 s · 85 MB |
+| `UPDATE` of the `UNIQUE` email of 99,563 rows | 80 s · 129 MB |
+| An upsert of one row by its `UNIQUE` email | 80 ms · 10 MB |
+
+The slow ones look up many text keys in a `UNIQUE` index too big for memory:
+each key is looked for only in the index pieces whose filter allows it, about
+a millisecond per key at this size. Holding the whole index in memory, the
+`UPDATE` of the emails took 14 s, but the `INSERT OR IGNORE … SELECT` ran out
+of memory; the whole index is still used whenever it fits in what is left up
+to half of `memory_limit`.
 
 ---
 
@@ -899,22 +1312,22 @@ you create):
 | Data (`table.json`, `table.partN.json`) | *P* | the rows as readable JSON, one per line |
 | Structure and revision (`table.meta.json`, `table.rev.json`) | 2 | a few KB |
 | Index pieces (`table.idx.<name>.json`, `.partN.json`) | *P* × *I* | about 40 % of the data for a three-index table |
-| On-disk cache (`.cache/`, without APCu) | *P* + *P* × *I* + 1, plus one per cached query result | about 1.4 × the file it mirrors |
+| On-disk cache (`.cache/`, without APCu) | *P* + *P* × *I* + 2 (structure and row counts), up to three per index (its piece sizes, its filters and the bounds of its text keys, 2.9), one per write whose parts are still in place (their fingerprints, 2.9), plus one per cached query result | a little more than the file it mirrors (1.1–1.2 × in the benchmark) |
 
-On the bundled benchmark (`php tests/benchmark.php 100000`, 100,000 customers
-and 150,000 orders, three indexes on customers and one on orders, default
-settings, no APCu):
+On the bundled benchmark (`php tests/benchmark.php 100000`, 100,000 customers,
+150,000 orders and 100,000 notes, three indexes on customers and one on each
+of the others, default settings, no APCu):
 
 | | Files | Space |
 |---|---|---|
-| Data | 256 | 21 MB |
-| Indexes | 453 | 8 MB |
-| Cache | 707 | 41 MB |
-| **Total** | **1,416** | **70 MB** |
+| Data | 358 | 27.5 MB |
+| Indexes | 553 | 9.3 MB |
+| Cache | 840 | 42.0 MB |
+| **Total** | **1,751** | **78.8 MB** |
 
 The benchmark prints these three lines for whatever size you give it. For
-20,000 customers and 30,000 orders it is 56 + 93 + 147 files and
-4 + 1.4 + 8 MB. Space is not the problem: a base has to hold millions of rows
+20,000 customers, 30,000 orders and 20,000 notes it is 78 + 113 + 196 files
+and 5.4 + 1.8 + 8.5 MB. Space is not the problem: a base has to hold millions of rows
 before it fills a cheap plan, and by then this engine is the wrong tool. Files
 can be, if the account is already busy with something like a WordPress
 (30,000–60,000 files on its own).
@@ -927,38 +1340,38 @@ half the time of its JSON and a cached index piece in a third. Three values:
 
 | Value | Files and space | Speed |
 |---|---|---|
-| `true` (default) | APCu if the host has it (then the cache lives in shared memory and **costs nothing on disk**); otherwise `.cache/` on disk, the figures above | full |
-| `'apcu'` | shared memory only; `.cache/` is never written. **Without APCu this means no cache at all** | full with APCu; without it, reads decode JSON every time: a full scan of 100,000 rows goes from ~65 ms to ~100 ms, a primary key lookup from 8 ms to 13 ms |
+| `true` (default) | APCu if the host has it (then the table cache lives in shared memory and **costs nothing on disk**, except, with OPcache active, the `.php` copies of the parts and one state file per table); otherwise `.cache/` on disk, the figures above | full |
+| `'apcu'` | shared memory only; `.cache/` is never written. **Without APCu this means no cache at all** | full with APCu; without it, reads decode JSON every time: on 100,000 rows a scan with a filter goes from 116 ms to 159 ms, a `GROUP BY` from 162 ms to 233 ms and a lookup by a `UNIQUE` text from 0.7 ms to 3.2 ms; a lookup by primary key stays about the same, since it reads one line |
 | `false` | no cache | as above, without cache; only for debugging |
 
 So the first thing to check on a shared host is whether APCu is available for
-your PHP version (most control panels offer it as a tick box). With it, the
-disk question disappears: the table above becomes 709 files and 29 MB, all of
-them data and indexes.
+your PHP version (most control panels offer it as a tick box). With it, and
+without OPcache, the disk question disappears: the table above becomes 911
+files and 36.8 MB, all of them data and indexes.
 
 **2. `JSONSQLDB_FILAS_POR_PARTE` — the part size** (1,000 by default). A
 bigger part means fewer parts, and since index pieces and cache entries follow
-the parts, fewer of everything: at 5,000 rows per part the 1,416 files above
-become about 285, and the space stays the same. What it costs, measured on
-20,000 customers (296 files at 1,000 per part, 70 at 5,000), same machine,
-one run after the other:
+the parts, fewer of everything, and the space stays the same: on 20,000
+customers, 387 files at 1,000 rows per part and 99 at 5,000. What it costs,
+measured there, same machine, two runs of each one after the other (the mean):
 
 | | 1,000 rows per part | 5,000 rows per part |
 |---|---|---|
-| Lookup by primary key | 2.0 ms · 7 MB | **6.7 ms · 11 MB** — the whole part is decoded to get one row |
-| `INSERT` one row | 7.8 ms · 9 MB | 9.1 ms · 13 MB — a bigger last part and a bigger last piece of each index |
-| `UPDATE` one row by key | 10.7 ms · 10 MB | **24.6 ms · 17 MB** — one part read and rewritten, five times bigger |
-| `DELETE` one row by key | 14.1 ms · 8 MB | 12.2 ms · 9 MB |
-| Range scan, `GROUP BY`, `ORDER BY … LIMIT` | 17–20 ms · 6 MB | 17–22 ms · 9 MB — same bytes; the part in memory at any moment is five times bigger |
-| `JOIN` aggregated by city | 99 ms · 22 MB | 106 ms · 24 MB |
+| Lookup by primary key | 1.6 ms · 5 MB | 1.3 ms · 6 MB — one line of the part, read by its offset, either way |
+| `IN` of a hundred keys spread over the table | 3.5 ms · 5 MB | **46 ms · 10 MB** — with that many keys in a part, the part is decoded, and it is five times bigger |
+| `LIMIT 50` with no filter | 0.9 ms · 7 MB | 4.9 ms · 11 MB |
+| `INSERT` one row | 15 ms · 6 MB | 13 ms · 7 MB |
+| `UPDATE` one row by key | 9.7 ms · 6 MB | 11.8 ms · 8 MB — one part rewritten, five times bigger |
+| `DELETE` one row by key, with its notes in cascade | 96 ms · 16 MB | 81 ms · 17 MB |
+| Scan with a filter, `GROUP BY`, `ORDER BY … LIMIT` | 21–32 ms · 7 MB | **31–52 ms · 11 MB** |
+| `JOIN` aggregated by city | 279 ms · 19 MB | 295 ms · 22 MB |
 
-Reads by key and single-row writes get slower in proportion to the part size
-(they read and write one part, and the part is bigger); everything that reads
-the table anyway costs the same time and about 3 MB more of memory. The
+A lookup by key costs the same, since it reads one line; a single-row write
+rewrites a bigger part; and what reads many rows — scans, and lookups of many
+keys in the same part, which decode it — is slower and holds more memory. The
 engine's defaults favour speed because on most plans a few hundred files are
 nothing; if your account is near its quota, 5,000 cuts the files by four for
-a lookup that takes 5 ms instead of 2, and 10,000 is where single-row work
-starts to feel slow.
+scans 1.4 to 1.9 times slower.
 
 Changing it on an existing database is safe: tables are read with the part
 size recorded in their `rev.json`, and the first write to each table splits it
@@ -966,8 +1379,9 @@ with the new size and rebuilds its indexes, once. That first write is a full
 rewrite of the table, so do it at a quiet moment.
 
 **3. Indexes.** Each index adds *P* files and, without APCu, *P* cache files.
-An index you do not use for equality lookups (`=`, `IN`) is pure cost: ranges,
-`LIKE`, `ORDER BY` and aggregates never use one. `SHOW INDEXES FROM t` lists
+An index no query uses is pure cost: only equalities and `IN`, and since 2.9
+the ranges, counts, `MIN`/`MAX` and `ORDER BY … LIMIT` listed in section 5, use
+one; `LIKE` and anything else never does. `SHOW INDEXES FROM t` lists
 them; `DROP INDEX` removes the ones you created. The automatic ones on the
 primary key and `UNIQUE` constraints stay, because the writer uses them to
 check uniqueness without loading the table.
@@ -992,23 +1406,130 @@ fixed seed, so two runs compare the same data.
 
 ## 10. Configuration and protection
 
+### The caches, one by one
+
+The engine keeps four caches, each with its own job. None of them is needed for
+the results to be right: every entry is checked against the revision of its
+table before it is used, a write leaves the old ones unreachable, and deleting
+`.cache/` or emptying APCu or OPcache is always safe — the next read just
+rebuilds what it needs.
+
+| Cache | What it keeps | Where it lives | Setting |
+|---|---|---|---|
+| **Table cache** | each table part already decoded, its index pieces and its structure; since 2.9 also how many rows each part has, so `COUNT(*)` and `SHOW TABLES` do not read the parts, and per index the revision and size of each piece as the last write left them and all its filters together (see [Indexes](#5-indexes)) | APCu if PHP has it; otherwise `<base>/.cache/` | `JSONSQLDB_CACHE_ACTIVA`, `JSONSQLDB_CACHE_APCU` |
+| **OPcache layer** (2.9) | the table parts again, as `.php` files that OPcache keeps compiled in its shared memory; and each table's state (`rev.json`) already decoded, one `e.*.php` per table | `<base>/.cache/*.php` and the memory of OPcache | `JSONSQLDB_CACHE_OPCACHE` |
+| **Result cache** | the rows of a `SELECT` that took at least 1 ms (2.9), under its SQL, its parameters and the revision of every table and view it reads; at most 4,096 per set of tables | wherever the table cache is | `JSONSQLDB_CACHE_RESULTADOS` |
+| **Per-request memory** | the structures and index pieces decoded during the current request, so the same request does not decode them twice | the memory of that PHP request | on whenever the table cache is (with `false`, only table states and structures) |
+
+**`JSONSQLDB_CACHE_ACTIVA` is the general switch**, not only the disk one:
+
+| Value | What it means |
+|---|---|
+| `true` (default) | the table cache goes to APCu if PHP has it (and `JSONSQLDB_CACHE_APCU` is not `false`), and to `.cache/` if not; the OPcache layer and the result cache work on top of it |
+| `'apcu'` | shared memory only: nothing is ever written to `.cache/`. That leaves out the OPcache layer, which needs its files; and **without APCu this means no cache at all** |
+| `false` | no cache of any kind (table, OPcache layer or results): every read decodes the JSON. Only for debugging |
+
+**`JSONSQLDB_CACHE_APCU`** (2.9, `true` by default). If PHP has APCu, the
+table cache goes to its shared memory instead of to files. It is worth having:
+the cache takes no disk space (on disk, a little more than the data and indexes)
+and no files, all PHP processes share it, and nothing is read from the disk to
+use it. Measured here against the disk cache, with the system already holding
+the files in memory: full scans 4–5 % faster and everything else the same; on a
+host with a slow or network disk the difference is larger. It is not required:
+without APCu the engine works the same, with the cache on disk. `false` leaves
+APCu aside even if it is there.
+
+**The table's state, decoded (2.9).** Every request reads each table's
+`rev.json` to know which cache entries still hold; decoding it was the largest
+single cost at the start of a request (about 0.08 ms for a table of 60 parts).
+With OPcache or APCu, the decoded state is kept, one entry per table, together
+with the seal of the file (size, date and inode): a `stat()` tells whether it
+still holds. It is only kept once the file has not changed for 2 seconds, so two
+writes in the same second can never share a seal. Between web requests: a lookup
+by key 862 → 834 µs, a text range with `LIMIT` 813 → 719 µs. Without OPcache or
+APCu nothing changes.
+
+**`JSONSQLDB_CACHE_OPCACHE`** (2.9, `true` by default). If PHP has OPcache
+active, every table part that has not changed for 2 seconds is also written to
+`.cache/` as a `.php` file holding only its data, and OPcache keeps it compiled
+in its shared memory: loading the part then costs practically nothing, and it
+lasts from one request to the next. It is worth having — measured between web
+requests on a table of 60,000 rows: loading the whole table from the cache went
+from about 22 ms to about 0.15 ms, full scans became 33–56 % faster, and queries
+answered by an index stay the same. It does not slow writes: the `.php` is made
+when a part is read, a few per request, never when OPcache has less than a
+quarter of its memory or keys free (so it can neither fill nor restart because
+of the database), and a write only deletes the `.php` of the parts it rewrites.
+Each `.php` is written to a temporary file of its own process and renamed into
+place only once complete (2.9; two processes rebuilding the same one shared a
+temporary name, and could leave it cut short, a parse error when loading it,
+or empty).
+It works with or without APCu (with both, the parts come from OPcache and the
+rest from APCu), but not with `JSONSQLDB_CACHE_ACTIVA = 'apcu'`, because it
+needs its files. It is not required: without OPcache, or with `false`, the
+engine works exactly as before. The `.php` files contain only data written by
+PHP's own `var_export()`, under names the engine makes; `.cache/` must not be
+reachable from the web (the `.htaccess` and `web.config` that come with the
+engine deny it), and restoring a ZIP backup in the panel never writes into it.
+
+**Without OPcache** PHP compiles, in every request, every file of the engine
+that the request loads; with OPcache, once. So since 2.9 the code that only
+some statements need lives in classes of its own, which the autoloader loads
+only when one of them is used: in the storage, what only reads do
+(`StorageLectura`), writing rows (`StorageEscritura`), changing and removing
+them (`StorageCambios`), reads by a comparison on an index (`StorageRangos`),
+and the structure, transactions, recovery after a crash and repairs
+(`StorageMantenimiento`, `CatalogDdl`, `WriterDdl`, `ParserSentencias`); in
+the parser, the rest of `SELECT` (`ParserConsulta`), `INSERT`, `UPDATE` and
+`DELETE` (`ParserEscritura`), windows and `WITH RECURSIVE` (`ParserAvanzado`);
+in queries, sorting without an index (`SelectOrden`), `GROUP BY` and the
+aggregates (`SelectAgrupada`), `UNION` and `WITH` (`SelectCompuesta`), the
+hash `JOIN` (`SelectJoin`), windows and `EXPLAIN` (`SelectAvanzada`), the
+choice of an index (`IndexesBusqueda`), compiled expressions
+(`EvaluatorCompilado`), `LIKE`, `GLOB` and `REGEXP` (`EvaluatorPatrones`) and
+the functions that are not SQLite's usual ones (`FunctionsAmpliadas`); in
+writes, `UPDATE` and `DELETE` (`WriterCambios`), foreign keys
+(`WriterForaneas`), a row that clashes with a key (`WriterConflictos`) and
+the body of triggers (`WriterTriggers`); and batches, `SHOW DATABASES` and
+`EXPLAIN` (`DatabaseAvanzada`). An `INSERT` of plain values (also negative
+numbers) takes them as they are, without loading the expression evaluator
+(`Evaluator`). No kind of statement compiles as much code as with 2.8.0
+(counted without spaces or comments, which is what costs): a one-row
+`INSERT` 24 % less (423 KB of the engine against 484 KB), an `UPDATE` or a
+`DELETE` 16 % less, a lookup by key 13 % less. A whole request
+without OPcache, against 2.8.0 (median of 60): a lookup by key 10.6 against
+13.0 ms, a join 13.4 against 16.1 ms, `GROUP BY` 14.2 against 17.0 ms, a
+one-row `INSERT` 12.9 against 15.7 ms, `UPDATE` 20.0 against 23.6 ms and
+`DELETE` 15.7 against 18.1 ms. With OPcache nothing is compiled again, and
+the classes apart only add finding a few more files (about 15 µs in a lookup
+by key). `tests/f1_nucleo.php` checks what each kind of statement loads, and
+that none compiles more than with 2.8.0.
+
+**`JSONSQLDB_CACHE_RESULTADOS`** (5,000 rows by default): the largest result
+that is cached; see [Query results](#query-results) in section 4 for what goes
+into its key and what is never cached. `0` turns the result cache off on its
+own, leaving the other caches as they are.
+
 ### `config.php`
 
 | Constant | Purpose | Default |
 |---|---|---|
 | `JSONSQLDB_DATA_PATH` | root folder with one subfolder per database | `data/` |
 | `JSONSQLDB_FILAS_POR_PARTE` | rows per file before a table is split | `1000` |
-| `JSONSQLDB_CACHE_ACTIVA` | `true`: APCu or disk; `'apcu'`: shared memory only; `false`: off | `true` |
+| `JSONSQLDB_CACHE_ACTIVA` | general switch of the caches: `true`: APCu or disk; `'apcu'`: shared memory only; `false`: no cache at all (see [the caches](#the-caches-one-by-one)) | `true` |
+| `JSONSQLDB_CACHE_APCU` | use APCu for the cache if PHP has it (2.9) | `true` |
+| `JSONSQLDB_CACHE_OPCACHE` | give the table parts to OPcache if it is active (2.9) | `true` |
 | `JSONSQLDB_ESCRITURA_POR_PARTES` | `UPDATE`/`DELETE` that depend only on each row lock the table only to commit (see [Writes by part](#writes-by-part-27)) | `true` |
 | `JSONSQLDB_CACHE_RESULTADOS` | maximum rows of a `SELECT` result to cache; `0` disables the result cache | `5000` |
 | `JSONSQLDB_INDICES` | maintain and use indexes | `true` |
-| `JSONSQLDB_LOG_ACTIVO` | enable the query log | |
+| `JSONSQLDB_LOG_ACTIVO` | enable the query log | `true` |
 | `JSONSQLDB_LOG_PATH` | folder of the log files | `logs/` |
-| `JSONSQLDB_LOG_NIVEL` | `todo` / `escrituras` / `errores` | `todo` |
+| `JSONSQLDB_LOG_NIVEL` | `todo` / `escrituras` / `errores` | `escrituras` (2.9; before, `todo`) |
 | `JSONSQLDB_LOG_MAX_SQL` | maximum length of the SQL stored | `2000` |
 | `JSONSQLDB_LOG_PARAMS` | also store the values of the `?`. Default **no** | `false` |
 | `JSONSQLDB_LOG_MAX_SIZE` | maximum size per file before rotating | 5 MB |
 | `JSONSQLDB_LOG_DIAS` | days to keep the logs (0 = forever) | `90` |
+| `JSONSQLDB_API_ACTIVA` | the API answers requests (2.9) | `true` |
 | `JSONSQLDB_CONEXION_DIRECTA` | use the engine without the API | `false` |
 | `JSONSQLDB_MEMORIA_VIGILAR` | stop the query before memory runs out | `true` |
 | `JSONSQLDB_MEMORIA_MARGEN` | fraction of `memory_limit` at which to stop | `0.85` |
@@ -1021,9 +1542,11 @@ cache is per part, so there is no whole-table entry to cap).
 
 ### Direct connection to the engine
 
-By default the engine can **only** be used through the API. Any attempt to
-instantiate `Database` from elsewhere is rejected with an explicit message. To
-allow it, in `config.php`:
+By default the engine can **only** be used through the API. On a direct
+connection, the first query or transaction of a `Database` is rejected with an
+explicit message.
+The API itself can be turned off with `JSONSQLDB_API_ACTIVA = false` (2.9, see
+docs/04-api.md). To allow the direct connection, in `config.php`:
 
 ```php
 defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -1099,21 +1622,38 @@ try {
 
 ### Query log
 
+By default (2.9) it records writes and errors, not reads:
+`JSONSQLDB_LOG_NIVEL = 'escrituras'`, also with a `config.php` from an earlier
+version that does not define it (it fell back to `todo`). Writing a line for every read opens and
+appends to the log file in every request: about 0.09 ms, which between web
+requests was 16 % of a lookup by key (632 → 544 µs). Set it to `todo` to see
+reads too (as before 2.9), or `errores` for failures only. At `escrituras`,
+`SELECT`, `UNION`, `EXPLAIN`, `SHOW` and `CHECK` are left out; before 2.9 only `SELECT`
+was.
+
 The **values** of bound parameters are not stored unless you enable
 `JSONSQLDB_LOG_PARAMS`: passwords, tokens and personal data travel through
 them, and the log is kept 90 days by default. The SQL is stored with its `?`
 unsubstituted.
 
-One file per day, `logs/consultas-2026-08-19.json`, and `-1.json`, `-2.json`… when
-rotating by size. Each line is an independent JSON object:
+The line is always written (2.9): the SQL is cut at `JSONSQLDB_LOG_MAX_SQL`
+bytes without splitting a UTF-8 character, a byte that is not UTF-8 is stored
+as U+FFFD, and a value JSON cannot hold (`INF`, `NAN`) as 0. Before, a cut
+inside a character such as `ñ`, or such a byte in the SQL or the values, left
+the statement out of the log, writes included.
+
+One file per day, `logs/consultas-2026-08-19.json`, and `consultas-2026-08-19.1.json`,
+`.2.json`… when rotating by size. Each line is an independent JSON object:
 
 ```json
 {"ts":"2026-08-19 12:00:00.123","ip":"10.0.0.5","db":"mydb","op":"SELECT","rows":42,"ms":3.15,"origen":"My app","sql":"SELECT ...","error":null}
 ```
 
 - `rows` → rows **returned** by a SELECT or **affected** by INSERT/UPDATE/DELETE
-- `ip` → source IP of the request (`cli` from the console, `local` on a direct connection)
-- `origen` → label of the API key that ran the query
+- `ip` → source IP of the request through the API, or the user's in the panel; `local`
+  for a script on a direct connection
+- `origen` → label of the API key that ran the query, or `jsonSQLDBadmin (user)` for
+  the panel on a direct connection
 - `error` → `null` if it went well, or the message if it failed
 
 Line-delimited JSON rather than a single array: appending never rereads or
@@ -1156,8 +1696,11 @@ What is worth keeping separate, because it does not depend on the engine:
 | Panel session | `ADMIN_SESION_NOMBRE` | two panels on the same domain with the same session name overwrite each other's cookie |
 | Panel data | `ADMIN_DATA_PATH` | users and audit of each panel |
 
-All four default to paths inside the project folder, so two copies of the
-project in different folders come out separated without changing anything.
+Three of them default to paths inside the project folder, so two copies in
+different folders keep their data, API state and panel data apart without
+changing anything; the session name is `jsonsqldbadmin` in every copy, so two
+panels on the same domain need a different `ADMIN_SESION_NOMBRE` in one of
+them.
 
 What you **cannot** do is point two different data folders at the same files
 (through symbolic links, for instance). Locks are taken by path, so two paths to
@@ -1184,12 +1727,12 @@ machine takes to do only the unavoidable part:
 | Scan with a numeric filter | 0.6 ms per part of 1,000 rows | ~0.45 ms: decoding the part | yielding each row through the pipeline and counting it, in PHP |
 | Scan with other filters, `GROUP BY`, `ORDER BY … LIMIT` | 1.0–1.2 ms per part | ~0.45 ms | evaluating the `WHERE` and accumulating, in PHP, one row at a time |
 | Lookup of one row by a numeric key | 0.58 ms (0.75 ms on 100,000 rows) | ~0.3 ms | reading one piece of the index and three small reads of the part; the lock, the parse and the log are the rest |
-| Lookup of one row by a text key (`UNIQUE` on a text column) | 0.57 ms (1.9 ms on 100,000 rows) | same as a numeric key | every piece of the index has to be read, since a text key can be in any; since 2.7.1 they are read as text and searched for the key, not decoded. The reading grows with the table: see below |
+| Lookup of one row by a text key (`UNIQUE` on a text column) | 0.57 ms (1.9 ms on 100,000 rows) | same as a numeric key | in 2.7.1 every piece of the index had to be read, since a text key can be in any (read as text and searched for the key, not decoded), so the reading grew with the table. Since 2.9 the filter in each piece's head leaves only the one that can hold the key: see below |
 | `JOIN` of two big tables | 134 ms for 30,000 × 20,000 | ~50 ms: decoding both sides | hashing one side and matching every row of the other, in PHP |
 | `JOIN` after a selective `WHERE` (one order and its customer) | 0.46 ms | ~0.3 ms | one lookup by key per row on the left; nothing else |
 | Full `ORDER BY` | 36 ms for 20,000 rows | ~20 ms: decoding plus `asort` | building the sort keys and the result rows |
-| Write of one row | 4 `fsync` calls (5 when it opens a new part); `INSERT` 7.2 ms, `UPDATE` 6.7 ms on 20,000 rows | 4 `fsync` calls plus rewriting one part and one piece per index | an `INSERT` or `UPDATE` edits the text of the part without decoding it; what remains is checking uniqueness, the index pieces and the journal |
-| Writes to the same table from two processes | by part since 2.7 (see [Writes by part](#writes-by-part-27)); the commit, one at a time | the commit, one at a time | three of the four `fsync` calls belong to the commit, so two writers overlap only in the fourth and in their computing |
+| Write of one row | 5 `fsync` calls (6 when it opens a new part); `INSERT` 7.2 ms, `UPDATE` 6.7 ms on 20,000 rows | 5 `fsync` calls plus rewriting one part and one piece per index | an `INSERT` or `UPDATE` edits the text of the part without decoding it; what remains is checking uniqueness, the index pieces and the journal |
+| Writes to the same table from two processes | by part since 2.7 (see [Writes by part](#writes-by-part-27)); the commit, one at a time | the commit, one at a time | four of the five `fsync` calls belong to the commit, so two writers overlap only in the fourth and in their computing |
 
 Everything in the third column is the cost of PHP arrays and readable JSON.
 SQLite on the same machine does the lookup in a few microseconds and the scan
@@ -1197,15 +1740,22 @@ in a few milliseconds, because it reads binary pages into C structures and
 never builds a PHP array per row. This engine exists for the hosting where
 SQLite is not available; on that hosting, these are the numbers.
 
-What is **not** on the floor and could still move, if someone needs it:
-lookups by a text key, which read the text of every piece of the index (about
-2 ms on 100,000 rows) where a numeric key reads one. A per-piece filter saying which keys a piece cannot
-contain, or an index split by a hash of the key instead of by position, would
-cut the reads to one or two pieces — the first at the price of data that is not
-readable by eye, the second at the price of changing how indexes are stored and
-rewriting more of them on a `DELETE`. Neither is done: the first breaks a
-principle and the second is not worth it until a real workload asks for it.
-Looking rows up by their numeric id meanwhile costs 0.58 ms.
+What was **not** on the floor in 2.7.1: lookups by a text key, which read the
+text of every piece of the index (about 2 ms on 100,000 rows) where a numeric
+key reads one. 2.9 added to the head of each piece a Bloom filter of its text
+keys (`filtro`, see [Index files](#index-files-usersidxauto_idjson-usersidxauto_idpart2json-)),
+so a lookup reads the first bytes of every piece and the keys of only the one
+where the key can be. Measured against 2.8.0: by email on 60,000 rows
+1.10 → 0.58 ms, on 300,000 rows 9.1 → 4.9 ms; an `INSERT` with a unique email
+on 300,000 rows 26.5 → 17.2 ms. The filters of an index are also kept together
+in the cache, with the revision of each piece, by the first lookup that reads
+them all and by every write: with them, a lookup by email or by a spread
+number on a million rows opens one piece instead of the head of a thousand
+(from 30 ms to about 3 ms more than a lookup by key). The filter is the one part of the files that
+is not readable by eye; it lives in the index, which is rebuilt from the rows,
+never in the data. An index split by a hash of the key instead of by position
+would also cut the reads, at the price of changing how indexes are stored and
+rewriting more of them on a `DELETE`: not done.
 
 ---
 
@@ -1237,7 +1787,10 @@ always the way to get one.
 
 Replace the folder and keep your two configuration files
 (`api/jsonsqldb_api_config.php` and `jsonsqldbadmin/config.php`, both
-gitignored and not shipped).
+gitignored and not shipped), and with them whatever lives inside the folder:
+`data/`, `logs/` and `jsonsqldbadmin/datos/` when their paths are the
+defaults. The root `config.php` ships with its defaults: carry over any
+setting you changed (`JSONSQLDB_DATA_PATH`, `JSONSQLDB_CONEXION_DIRECTA`…).
 
 **The data needs no conversion.** An existing database is read as it is, and
 each table moves to the current layout on the first write it receives:
@@ -1253,10 +1806,37 @@ each table moves to the current layout on the first write it receives:
 | `rev.json` without `rangos` (pre-2.7) | lookups read every piece, as before; each piece gets its range when it is next written, and the whole index at the next full rebuild |
 | data files without `offsets` (pre-2.7) | lookups decode the part, as before; a part gets its offsets when it is next written |
 | journal folders `.tx/<scope>/` (2.5–2.6) | recognised and applied; new journals are single files `.tx/<scope>.json` |
+| index pieces without `filtro`, `min`, `max` (pre-2.9) | read whole, as before; each piece gets them when it is next written, and `VACUUM` rebuilds every index that has such a piece, without touching the data: on 20,000 customers written by 2.8.0, a lookup by a unique email 0.49 → 0.31 ms |
+| `rev.json` listing a part that is gone (2.8) | 2.8 kept the revision of a last part that a `DELETE` emptied and removed; that entry is ignored, and the next write drops it |
+| cache entries under the old keys (pre-2.9) | ignored: 2.9 uses keys of its own (`jsq2:`), since its entries carry the seal of their file. Deleting `.cache/` after upgrading frees the space |
+| API state in one `logs/api/estado.json` (pre-2.9) | spread over small files in `logs/api/estado/`; the old file's tokens are still refused while they could be valid, then it is deleted, and per-IP counters start from zero |
 
 Revision numbers **carry on from where they were** rather than restarting, so a
 cache entry from before the upgrade cannot be mistaken for a current one. The
 old `_revs.json` is left alone and stops being read.
+
+2.9 also adds to the files, on their own when they are written: `huecos` in
+`rev.json` (the holes of deleted rows per part), and `gen` in the `rev.json`
+of a table touched by a transaction that was undone, which changes its cache
+keys. Earlier versions ignore both fields.
+
+### Going back to an earlier version
+
+Not supported: a database written by a newer version is not meant to be opened
+by an older engine, and no test checks it. If you must go back from 2.9:
+
+- **Run `VACUUM` first.** 2.8 or earlier cannot read a table with holes of
+  deleted rows: they stop with an error on the first scan rather than return
+  wrong rows. `VACUUM` rewrites every table that has any without them.
+- **A `COLLATE NOCASE` or `RTRIM` column has to lose it** (`ALTER TABLE …
+  MODIFY` without it): earlier versions compare it as binary, and its indexes,
+  built with the collation, would miss rows there.
+- **`CHECK` constraints and `ENUM` columns are not enforced** by earlier
+  versions: the data reads the same, but they would let a row that breaks them
+  be written.
+- **Views and triggers are stored as their SQL**, so one written with SQL that
+  only 2.9 accepts (a window function, `UPDATE … FROM`, a new function) is an
+  error there when it runs.
 
 ### The one case to watch
 
@@ -1287,11 +1867,22 @@ ship with the project (PHP, Python, PowerShell and the panel) already are. See
 | `engine/bootstrap.php` | autoloader (the only `require` you need) |
 | `engine/JsonSqlDbError.php` | single exception, typed: CONFIG, SCHEMA, TYPE, CONSTRAINT, SYNTAX, IO, LOCK, PERMISSION, MEMORIA |
 | `engine/Types.php` | types, aliases, validation and conversion of values and dates |
-| `engine/Storage.php` | JSON files, locking, atomic writes, redo journal, parts, cache, index files |
-| `engine/Catalog.php` | tables, columns, PK/UNIQUE/FK, indexes, triggers, autoincrement, ALTER TABLE |
-| `engine/Indexes.php` | index keys, construction and correction, choice of index for a query |
+| `engine/Storage.php` | JSON files, locking, parts, cache, index files: what reads and writes share |
+| `engine/StorageLectura.php` | what only reads do: counting rows, rows by an index or by its order, the result cache (2.9) |
+| `engine/StorageEscritura.php` | writing rows: atomic writes, redo journal, parts and index pieces on disk, the cache a write leaves behind (2.9) |
+| `engine/StorageCambios.php` | changing or removing rows already written (`UPDATE`, `DELETE`), part by part (2.9) |
+| `engine/StorageMantenimiento.php` | creating, renaming and dropping tables and databases, structure changes by blocks of text, transactions, recovery after a crash, repairs (2.9) |
+| `engine/StorageRangos.php` | reads by a comparison on an index (`<`, `>`, `BETWEEN`…) that the range kept for each part cannot settle, and an index's smallest and largest value (2.9) |
+| `engine/Catalog.php` | tables, columns, PK/UNIQUE/FK, indexes, triggers, autoincrement: what queries need, and the structure changes, which it hands to `CatalogDdl` |
+| `engine/CatalogDdl.php` | `CREATE`, `ALTER` and `DROP` of tables, indexes, views and triggers, and the autoincrement (2.9) |
+| `engine/Indexes.php` | index keys, construction and correction |
+| `engine/IndexesBusqueda.php` | which conditions of a `WHERE` an index can resolve, and with which index (2.9) |
 | `engine/Memoria.php` | the watchdog that stops a query before PHP's fatal error |
-| `tests/f1_nucleo.php` | 66 core checks (leaves nothing on disk) |
+| `engine/OrdenExterno.php` | sorting on disk for an `ORDER BY` that does not fit in memory (2.9) |
+| `engine/Volcado.php` | rows in temporary files, for the rest of what does not fit in memory: `JOIN`, `GROUP BY`, subqueries, `WITH`, windows (2.9) |
+| `engine/Reparador.php` | repairs a JSON file broken by a hand edit, only where the fix is certain (2.9); used by `Storage` |
+| `engine/ConflictoPartes.php` | internal signal: a write by part found its parts changed and is retried with the table's lock; never reaches the user |
+| `tests/f1_nucleo.php` | 73 core checks (leaves nothing on disk) |
 
 Everything else in the project is built on what this document describes:
 

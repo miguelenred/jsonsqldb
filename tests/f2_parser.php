@@ -61,7 +61,7 @@ chk('control de línea en errores', function () {
     catch (JsonSqlDbError $e) { return str_contains($e->getMessage(), 'línea 3'); }
     return 'no lanzó error';
 });
-malaSintaxis('carácter no válido', 'SELECT a & b');
+malaSintaxis('carácter no válido', 'SELECT a # b');
 
 echo "\n== SELECT básico ==\n";
 chk('columnas, alias y DISTINCT', function () {
@@ -83,7 +83,22 @@ chk('SELECT sin FROM', function () {
 });
 chk('punto y coma final', fn() => Parser::analizar('SELECT 1;')['k'] === 'select');
 malaSintaxis('dos sentencias', 'SELECT 1; SELECT 2');
-malaSintaxis('sentencia no soportada', 'TRUNCATE TABLE t');
+chk('UPDATE y DELETE admiten ORDER BY, LIMIT y OFFSET, con RETURNING antes o después (2.9)', function () {
+    $a = Parser::analizar('UPDATE t SET a = 1 WHERE a > 0 ORDER BY a DESC, b LIMIT 1 OFFSET 2');
+    $b = Parser::analizar('DELETE FROM t RETURNING a ORDER BY a LIMIT 5');
+    $c = Parser::analizar('DELETE FROM t LIMIT 5 RETURNING a');
+    return count($a['order']) === 2 && $a['limit'] === 1 && $a['offset'] === 2 && $b['limit'] === 5 && $b['returning'] !== null
+        && $c['returning'] !== null && $c['order'] === [] ?: json_encode([$a, $b, $c]);
+});
+malaSintaxis('DELETE … ORDER sin BY', 'DELETE FROM t ORDER a LIMIT 1');
+malaSintaxis('LIMIT con una columna', 'SELECT a FROM t LIMIT a');
+malaSintaxis('LIMIT con decimales', 'SELECT a FROM t LIMIT 2.5');
+chk('el ; del final puede ir repetido, y LIMIT admite una expresión constante o un negativo', function () {
+    $a = Parser::analizar('SELECT a FROM t LIMIT 2 * 3 OFFSET -4;;');
+    $b = Parser::analizar('SELECT a FROM t LIMIT -1');
+    return $a['limit'] === 6 && $a['offset'] === 0 && $b['limit'] === null ?: [$a['limit'], $a['offset'], $b['limit']];
+});
+malaSintaxis('sentencia no soportada', 'PRAGMA table_info(t)');
 
 echo "\n== Precedencia de operadores ==\n";
 chk('AND antes que OR', function () {
@@ -110,6 +125,49 @@ chk('paréntesis cambian la precedencia', function () {
 chk('concatenación', function () {
     $e = Parser::analizar("SELECT nombre || ' ' || apellidos AS completo")['cols'][0]['expr'];
     return $e['op'] === '||' && $e['i']['op'] === '||';
+});
+chk('|| , -> y ->> van por encima de * / % y de + -, al mismo nivel y por la izquierda, como en SQLite (2.9: el || iba por debajo de la suma)', function () {
+    $c = static fn(string $sql): array => Parser::analizar("SELECT $sql")['cols'][0]['expr'];
+    $a = $c('1 + 2 || 3');              // 1 + (2 || 3)
+    $b = $c('2 * 3 || 4 - 1');          // (2 * (3 || 4)) - 1
+    $d = $c("'x' || j -> 'a'");         // ('x' || j) -> 'a'
+    $e = $c("j ->> 'a' || 'b'");        // (j ->> 'a') || 'b'
+    $f = $c("- j -> 'a'");              // (-j) -> 'a'
+    return $a['op'] === '+' && $a['d']['op'] === '||'
+        && $b['op'] === '-' && $b['i']['op'] === '*' && $b['i']['d']['op'] === '||'
+        && $d['nombre'] === '->' && $d['args'][0]['op'] === '||'
+        && $e['op'] === '||' && $e['i']['nombre'] === '->>'
+        && $f['nombre'] === '->' && $f['args'][0]['op'] === '-'
+        ?: json_encode([$a, $b, $d, $e, $f]);
+});
+chk('20.000 comparaciones encadenadas o anidadas (=, <, BETWEEN, IN, IS, con COLLATE) se analizan en mucho menos de un segundo, y la cadena = y 5.000 NULLIF o MIN anidados se resuelven igual (2.9: cada una recorría las anteriores; 20.000, más de un minuto)', function () {
+    // En otro proceso, con tope de tiempo: sin el arreglo, cada una tarda minutos
+    $codigo = 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . '; set_time_limit(20);
+        $cpu = static function (): float { $r = getrusage(); return $r["ru_utime.tv_sec"] + $r["ru_utime.tv_usec"] / 1e6 + $r["ru_stime.tv_sec"] + $r["ru_stime.tv_usec"] / 1e6; };
+        $n = 20000; $m = 5000;
+        $peor = [];
+        foreach (["SELECT 1" . str_repeat("=1", $n), "SELECT 1" . str_repeat("<1", $n), "SELECT 1" . str_repeat(" BETWEEN 1 AND 1", $n),
+                  "SELECT 1" . str_repeat(" IN (1)", $n), "SELECT 1" . str_repeat(" IS 1", $n), "SELECT \'a\' COLLATE NOCASE" . str_repeat("=\'a\'", $n),
+                  "SELECT 1" . str_repeat("=1", $n) . " COLLATE NOCASE", "SELECT " . str_repeat("1=(", $m) . "1" . str_repeat(")", $m),
+                  "SELECT " . str_repeat("(", $m) . "1" . str_repeat("=1)", $m), "SELECT " . str_repeat("ABS(1=", $m) . "1" . str_repeat(")", $m),
+                  "SELECT \'a\' COLLATE NOCASE, " . str_repeat("(", $m) . "1" . str_repeat("=1)", $m)] as $i => $sql) {
+            $t = $cpu();
+            $ast = JsonSQLDB\Parser::analizar($sql);
+            $peor[$i] = round($cpu() - $t, 3);
+        }
+        $t = $cpu();
+        JsonSQLDB\Evaluator::resolver(JsonSQLDB\Parser::analizar("SELECT 1" . str_repeat("=1", $n))["cols"][0]["expr"], []);
+        $peor["resolver"] = round($cpu() - $t, 3);
+        // NULLIF, MIN y MAX anidados: cada uno buscaba la colación en todo lo de dentro (2.9)
+        foreach (["nullif" => str_repeat("NULLIF(", $m) . "1" . str_repeat(", 2)", $m), "min" => str_repeat("MIN(1, ", $m) . "1" . str_repeat(")", $m)] as $k => $e) {
+            $t = $cpu();
+            JsonSQLDB\Evaluator::resolver(JsonSQLDB\Parser::analizar("SELECT $e")["cols"][0]["expr"], []);
+            $peor[$k] = round($cpu() - $t, 3);
+        }
+        echo json_encode($peor);';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $peor = json_decode($salida, true);
+    return is_array($peor) && count($peor) === 14 && max($peor) < 0.5 ?: substr($salida, 0, 300);
 });
 
 echo "\n== Predicados ==\n";
@@ -204,7 +262,10 @@ chk('subconsulta en FROM', function () {
     return $a['from'][0]['tipo'] === 'sub' && $a['from'][0]['alias'] === 't'
         && $a['from'][0]['select']['from'][0]['nombre'] === 'usuarios';
 });
-malaSintaxis('subconsulta en FROM sin alias', 'SELECT * FROM (SELECT 1)');
+chk('subconsulta en FROM sin alias: recibe uno que no se puede escribir, como en SQLite (2.9: era un error)', function () {
+    $a = Parser::analizar('SELECT * FROM (SELECT 1), (SELECT 2)');
+    return [$a['from'][0]['alias'], $a['from'][1]['alias']] === ['(subconsulta 1)', '(subconsulta 2)'] ?: json_encode(array_column($a['from'], 'alias'));
+});
 malaSintaxis('JOIN sin ON', 'SELECT * FROM a JOIN b');
 chk('FULL JOIN se analiza', function () {
     $a = Parser::analizar('SELECT * FROM a FULL JOIN b ON a.id = b.a');
@@ -255,6 +316,24 @@ chk('LIMIT offset, cantidad', function () {
     return $a['limit'] === 10 && $a['offset'] === 20;
 });
 malaSintaxis('LIMIT no numérico', 'SELECT * FROM t LIMIT x');
+chk('una subconsulta en LIMIT, OFFSET o el marco de una ventana es un error que lo dice (2.9: error de PHP; SQLite la admite en LIMIT y OFFSET, aquí no se puede ejecutar al analizar)', function () {
+    foreach (['SELECT 1 LIMIT (SELECT 1)', 'SELECT 1 LIMIT 1 OFFSET (SELECT 1)', 'SELECT 1 LIMIT (SELECT 1), 2', 'SELECT 1 LIMIT EXISTS (SELECT 1)',
+              'SELECT 1 LIMIT 1 IN (SELECT 1)', 'DELETE FROM t LIMIT (SELECT 1)', 'UPDATE t SET a = 1 LIMIT 1 OFFSET (SELECT 1)',
+              'SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN (SELECT 1) PRECEDING AND CURRENT ROW) FROM t',
+              'SELECT SUM(a) OVER (ORDER BY a ROWS (SELECT 1) PRECEDING) FROM t'] as $sql) {
+        try {
+            Parser::analizar($sql);
+            return "$sql: no lanzó error";
+        } catch (JsonSqlDbError $e) {
+            if ($e->sqlState !== 'SYNTAX' || !str_contains($e->getMessage(), 'no admite subconsultas')) { return "$sql: " . $e->getMessage(); }
+        } catch (Throwable $e) {
+            return "$sql: " . get_class($e) . ': ' . $e->getMessage();
+        }
+    }
+    // Y lo de siempre sigue valiendo, con una subconsulta en otra parte de la sentencia
+    $a = Parser::analizar('SELECT (SELECT 1) LIMIT 2 * 3 OFFSET ?', [4]);
+    return $a['limit'] === 6 && $a['offset'] === 4 && !empty($a['subconsultas']) ?: json_encode($a);
+});
 
 echo "\n== Consulta completa multilínea ==\n";
 chk('todo junto', function () {
@@ -282,6 +361,43 @@ chk('todo junto', function () {
         && count($a['order']) === 2
         && $a['limit'] === 10;
 });
+
+echo "\n== Sentencias cortadas ==\n";
+chk('una sentencia cortada en cualquier punto da un error de sintaxis, nunca uno de PHP (2.9: SELECT CAST(1 AS y CONVERT(1, leían detrás del final)', function () {
+    $sentencias = [
+        'SELECT CAST(1 AS DECIMAL(10, 2)), CONVERT(2, SIGNED INTEGER), CONVERT(3 USING utf8mb4)',
+        "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT DISTINCT a.x, COUNT(*) FILTER (WHERE b > 0) AS n FROM t AS a LEFT JOIN u USING (x) WHERE a.y NOT BETWEEN 1 AND 2 AND z IS NOT DISTINCT FROM ? GROUP BY a.x HAVING n > 1 ORDER BY 1 DESC NULLS LAST LIMIT 5 OFFSET 1",
+        "SELECT ROW_NUMBER() OVER (PARTITION BY a ORDER BY b ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE TIES), TRIM(LEADING 'x' FROM a), EXTRACT(YEAR FROM f), f + INTERVAL 1 DAY, j ->> '$.a' COLLATE NOCASE, CASE a WHEN 1 THEN 'x' ELSE 'y' END FROM t WINDOW w AS (ORDER BY a) FOR UPDATE",
+        "INSERT INTO t (a, b) VALUES (1, DEFAULT), (?, 'x') ON CONFLICT (a) DO UPDATE SET b = excluded.b WHERE b < 9 RETURNING *",
+        'INSERT OR REPLACE INTO t SELECT * FROM u',
+        "INSERT INTO t SET a = 1 ON DUPLICATE KEY UPDATE b = VALUES(b)",
+        "UPDATE t AS x SET a = a + 1 FROM u WHERE u.id = x.id RETURNING a",
+        "DELETE FROM t WHERE a IN (SELECT a FROM u) ORDER BY a LIMIT 1",
+        "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, a VARCHAR(10) NOT NULL DEFAULT 'x' COLLATE NOCASE CHECK (a <> ''), b ENUM('s', 'n'), c INT REFERENCES u (id) ON DELETE SET NULL, UNIQUE KEY k (a), FOREIGN KEY (b) REFERENCES v (b)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=5",
+        "CREATE TRIGGER IF NOT EXISTS tr BEFORE INSERT ON t FOR EACH ROW WHEN NEW.a > 0 BEGIN IF NEW.a > 5 THEN SET NEW.b = 1; ELSEIF NEW.a > 2 THEN SELECT RAISE(ABORT, 'no'); ELSE INSERT INTO u (a) VALUES (NEW.a); END IF; END",
+        "ALTER TABLE t ADD CONSTRAINT c UNIQUE (a, b)", 'SHOW CREATE TABLE t', 'EXPLAIN QUERY PLAN SELECT 1', 'REPAIR TABLES FORGET 3',
+        'CREATE UNIQUE INDEX IF NOT EXISTS i ON t (a DESC, b(10))', 'DROP INDEX IF EXISTS i ON t',
+    ];
+    set_error_handler(static function (int $no, string $texto): bool { throw new ErrorException($texto, 0, $no); });
+    try {
+        foreach ($sentencias as $s) {
+            for ($k = 0; $k <= strlen($s); $k++) {
+                try {
+                    Parser::analizar(substr($s, 0, $k), [1]);
+                } catch (JsonSqlDbError) {
+                } catch (Throwable $e) {
+                    return substr($s, 0, $k) . ' -> ' . get_class($e) . ': ' . $e->getMessage();
+                }
+            }
+        }
+    } finally {
+        restore_error_handler();
+    }
+    return true;
+});
+
+malaSintaxis('COLLATE(x), que no es una función, es un error de sintaxis (2.9: leía un segundo argumento que no había)', 'SELECT COLLATE(1) = 1');
+malaSintaxis('PLEGAR(x), del árbol interno, tampoco se puede escribir (2.9)', "SELECT PLEGAR('A', 'NOCASE')");
 
 echo "\n== Parámetros ligados ==\n";
 chk('el ? se convierte en literal', function () {

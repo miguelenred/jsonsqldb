@@ -29,6 +29,7 @@ final class Types
     private const ALIAS = [
         'INT' => self::INTEGER, 'INTEGER' => self::INTEGER, 'TINYINT' => self::INTEGER,
         'SMALLINT' => self::INTEGER, 'MEDIUMINT' => self::INTEGER, 'BIGINT' => self::INTEGER,
+        // BOOLEAN es INTEGER, como en SQLite: CAST(2 AS BOOLEAN) = 2
         'BOOL' => self::INTEGER, 'BOOLEAN' => self::INTEGER,
 
         'REAL' => self::DOUBLE, 'FLOAT' => self::DOUBLE, 'DOUBLE' => self::DOUBLE,
@@ -42,7 +43,19 @@ final class Types
         'STRING' => self::TEXT, 'BLOB' => self::TEXT,
 
         'DATE' => self::DATETIME, 'DATETIME' => self::DATETIME, 'TIMESTAMP' => self::DATETIME,
+
+        // De MySQL y MariaDB (2.9)
+        'BIT' => self::INTEGER, 'YEAR' => self::INTEGER,
+        'TINYTEXT' => self::TEXT, 'MEDIUMTEXT' => self::TEXT, 'LONGTEXT' => self::TEXT, 'JSON' => self::TEXT,
+        'TINYBLOB' => self::TEXT, 'MEDIUMBLOB' => self::TEXT, 'LONGBLOB' => self::TEXT,
+        'BINARY' => self::TEXT, 'VARBINARY' => self::TEXT, 'UUID' => self::TEXT,
     ];
+
+    /** ¿Es el nombre de un tipo? (para no confundir una columna llamada key con un índice) */
+    public static function esTipo(string $nombre): bool
+    {
+        return isset(self::ALIAS[strtoupper(trim($nombre))]);
+    }
 
     /** yyyy-MM-dd[ HH:mm[:ss[.fff]]] — separador T o espacio en la entrada */
     private const RE_FECHA = '/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/';
@@ -91,6 +104,11 @@ final class Types
         if ($valor === null) {
             return null;
         }
+        // ENUM y UNSIGNED (2.9), aparte: el camino de siempre, sin una llamada
+        // más por valor, que en un INSERT de muchas filas se notaba
+        if (isset($col['enum']) || !empty($col['unsigned'])) {
+            return self::castMarcado($valor, $col);
+        }
         if (is_array($valor) || is_object($valor)) {
             throw JsonSqlDbError::type("Valor no escalar para la columna '{$col['name']}'");
         }
@@ -109,7 +127,7 @@ final class Types
                 }
                 if (is_string($valor) && preg_match('/^([+-]?)0*(\d+)$/', trim($valor), $m)) {
                     // Se mira antes de convertir: PHP 8.5 avisa al convertir lo que no cabe
-                    if (Valor::cifrasCaben($m[2], $m[1] === '-')) return (int)trim($valor);
+                    if (Lexer::cifrasCaben($m[2], $m[1] === '-')) return (int)trim($valor);
                     throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
                 }
                 throw JsonSqlDbError::type("Valor no entero para '{$col['name']}': " . self::texto($valor));
@@ -134,6 +152,29 @@ final class Types
                 }
                 return $s;
         }
+    }
+
+    /** cast() de una columna ENUM o UNSIGNED (2.9) */
+    private static function castMarcado($valor, array $col)
+    {
+        if (isset($col['enum'])) {
+            // ENUM: uno de sus valores, sin distinguir mayúsculas, y se guarda
+            // escrito como en la lista. Con el valor entero: recortado a 40
+            // caracteres, como en el mensaje, uno más largo no entraba nunca (2.9)
+            foreach ($col['enum'] as $e) {
+                if (strcasecmp($e, (string)$valor) === 0) {
+                    return $e;
+                }
+            }
+            throw JsonSqlDbError::type("'" . self::texto($valor) . "' no es un valor permitido en '{$col['name']}': "
+                . implode(', ', array_map(static fn($e) => "'$e'", $col['enum'])));
+        }
+        $col['unsigned'] = false;
+        $v = self::cast($valor, $col);
+        if ($v < 0) {
+            throw JsonSqlDbError::type("Número negativo en una columna UNSIGNED: '{$col['name']}' = " . self::texto($v));
+        }
+        return $v;
     }
 
     /**
@@ -172,7 +213,6 @@ final class Types
         return $out;
     }
 
-    /** ¿La cadena tiene forma de fecha jsonSQLDB? (usado por funciones de fecha) */
     /**
      * CAST(expr AS tipo).
      *
@@ -186,6 +226,15 @@ final class Types
     {
         if ($v === null) {
             return null;
+        }
+        if ($tipo === 'UNSIGNED') {
+            // CAST(x AS UNSIGNED) de MySQL: un entero, y negativo es un error
+            // (MySQL le daría la vuelta: -1 sería 18446744073709551615)
+            $n = Valor::entero(Valor::aNumero($v));
+            if ($n < 0) {
+                throw JsonSqlDbError::type("CAST a UNSIGNED de un número negativo: $n");
+            }
+            return $n;
         }
         $decl = self::parse($tipo);
         $base = $decl['type'];
@@ -205,14 +254,11 @@ final class Types
             case 'TEXT':
                 return Valor::aTexto($v);
 
-            case 'BOOLEAN':
-                return Valor::verdadero($v) === true ? 1 : 0;
-
             case 'DATETIME':
                 $t = trim(Valor::aTexto($v));
                 if (!self::esFecha($t)) {
                     throw JsonSqlDbError::type(
-                        "CAST a $base: '$t' no es una fecha con formato AAAA-MM-DD"
+                        "CAST a $base: '$t' no es una fecha: se espera AAAA-MM-DD, con hora opcional HH:MM[:SS[.fff]] tras un espacio o una T"
                     );
                 }
                 return $t;
@@ -221,6 +267,7 @@ final class Types
         throw JsonSqlDbError::syntax("CAST a un tipo desconocido: '$tipo'");
     }
 
+    /** ¿La cadena tiene forma de fecha jsonSQLDB? (usado por funciones de fecha) */
     public static function esFecha(string $valor): bool
     {
         if (!preg_match(self::RE_FECHA, trim($valor), $m)) {

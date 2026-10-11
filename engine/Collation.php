@@ -73,6 +73,10 @@ final class Collation
 
     /** @var array<string,string>|null mapa completo, montado una sola vez */
     private static ?array $mapa = null;
+    /** ¿Cambia el mapa alguna letra ASCII? Si no, un texto ASCII solo se pasa a minúsculas */
+    private static ?bool $mapaAscii = null;
+    /** @var array<string, string> claves ya calculadas de textos de hasta 64 bytes (como mucho 4.096) */
+    private static array $memo = [];
 
     /** ¿Está activa la colación por idioma? */
     public static function activa(): bool
@@ -86,9 +90,26 @@ final class Collation
      */
     public static function clave(string $texto): string
     {
+        // Las de textos cortos ya calculadas (2.9): ordenar 20.000 filas por
+        // una columna con diez ciudades las calculaba 20.000 veces
+        if (isset(self::$memo[$texto])) {
+            return self::$memo[$texto];
+        }
         // Primero las variantes, que ya contemplan ambas cajas; después
-        // strtolower, que a esas alturas solo tiene que bajar ASCII.
-        return strtolower(strtr($texto, self::mapa()));
+        // strtolower, que a esas alturas solo tiene que bajar ASCII. Un texto
+        // sin bytes de fuera de ASCII no tiene nada que sustituir si el mapa
+        // no cambia ninguna letra ASCII (lo normal): strtr con un mapa grande
+        // es caro y se ahorra
+        $mapa = self::mapa();
+        self::$mapaAscii ??= array_filter(array_keys($mapa), static fn($k): bool => !preg_match('/[\x80-\xff]/', (string)$k)) !== [];
+        $clave = !self::$mapaAscii && !preg_match('/[\x80-\xff]/', $texto) ? strtolower($texto) : strtolower(strtr($texto, $mapa));
+        if (strlen($texto) <= 64) {
+            if (count(self::$memo) >= 4096) {
+                self::$memo = [];
+            }
+            self::$memo[$texto] = $clave;
+        }
+        return $clave;
     }
 
     /** @return array<string,string> */

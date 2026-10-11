@@ -26,6 +26,7 @@ use JsonSQLDB\Database;
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f18_' . getmypid();
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_DATA_PATH', $raiz);
+define('JSONSQLDB_LOG_PATH', JSONSQLDB_DATA_PATH . '/logs');
 define('ADMIN_CONEXION', 'directa');
 require dirname(__DIR__) . '/engine/bootstrap.php';
 require dirname(__DIR__) . '/jsonsqldbadmin/config.dist.php';
@@ -143,7 +144,7 @@ chk('el autonumérico sigue detrás del último y la clave única no admite repe
     $bd->consultar("INSERT INTO Clientes (Nombre, Activo) VALUES ('Zoe', 1)");
     $id = $bd->consultar("SELECT Id FROM Clientes WHERE Nombre = 'Zoe'")[0]['Id'];
     try { $bd->consultar("INSERT INTO Clientes (Nombre, Email, Activo) VALUES ('Otra', 'ana@e.es', 0)"); $rep = 'admitido'; }
-    catch (Throwable $e) { $rep = 'rechazado'; }
+    catch (Throwable) { $rep = 'rechazado'; }
     $bd->consultar("DELETE FROM Clientes WHERE Nombre = 'Zoe'");
     return $id === 4 && $rep === 'rechazado' ?: "id $id, repetido $rep";
 });

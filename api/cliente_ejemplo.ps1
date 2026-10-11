@@ -9,7 +9,7 @@
          $API_KEYS en api/jsonsqldb_api_config.php. Cada clave tiene el suyo.
 
       1. La firma lleva la base y los parámetros:
-             '+' + apiKey + '|' + base + '|' + timestamp + '|' + sql + params + '¿'
+             '+' + apiKey + '|' + base + '|' + timestamp + '|' + nonce + '|' + sql + params + '¿'
          Sin parámetros, params es cadena vacía. La base entró en la fórmula en
          la 2.0: antes se podía coger una petición firmada, cambiarle el campo
          'db' y reenviarla contra otra base.
@@ -27,6 +27,12 @@
                              -ApiKey '...' -HmacSecret '...' -Base 'pruebas'
 
         API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ?" @('Torrevieja')
+
+        # Varias sentencias como una transacción, todas o ninguna (2.9)
+        API-SQL-Lote @(
+            @{ Sql = 'UPDATE cuentas SET saldo = saldo - ? WHERE id = ?'; Parametros = @(50, 1) },
+            @{ Sql = 'UPDATE cuentas SET saldo = saldo + ? WHERE id = ?'; Parametros = @(50, 2) }
+        )
 #>
 
 # ----------------------------------------------------------------------
@@ -173,28 +179,104 @@ function API-SQL-JSON {
     $cfg = $Global:JsonSqlDb
     if (-not $PSBoundParameters.ContainsKey('Base')) { $Base = $cfg.Base }
 
-    $params    = ConvertTo-JsonSqlDbParametros -Parametros $Parametros
+    $params = ConvertTo-JsonSqlDbParametros -Parametros $Parametros
+    $datos  = Invoke-JsonSqlDbPeticion -Base $Base -Campos ([ordered]@{ sql = $Sql; params = $params }) -Firmado ($Sql + $params)
+    if ($null -eq $datos) { return $null }
+
+    # INSERT/UPDATE/DELETE/DDL devuelven {"success":true,"filas":n,"mensaje":"..."}
+    if ($datos -isnot [array] -and $datos.PSObject.Properties.Name -contains 'success') {
+        return $datos
+    }
+
+    return [System.Collections.ArrayList]@($datos)
+}
+
+function API-SQL-Lote {
+    <#
+        .SYNOPSIS
+        Varias sentencias en una transacción (2.9): todas, o ninguna si una falla.
+
+        .DESCRIPTION
+        Cada sentencia es un texto SQL o una tabla @{ Sql = '...'; Parametros = @(...) },
+        y ve lo que hicieron las anteriores. Devuelve el resultado de cada una, en
+        orden. Si algo falla, escribe el error, no se ha hecho nada y devuelve $null.
+
+        .PARAMETER Sentencias
+        Las sentencias, en orden.
+
+        .PARAMETER Base
+        Base de datos. Si no la indicas, se usa la de la configuración.
+
+        .EXAMPLE
+        API-SQL-Lote @(
+            @{ Sql = 'UPDATE cuentas SET saldo = saldo - ? WHERE id = ?'; Parametros = @(50, 1) },
+            @{ Sql = 'UPDATE cuentas SET saldo = saldo + ? WHERE id = ?'; Parametros = @(50, 2) }
+        )
+    #>
+    param (
+        [Parameter(Mandatory = $true, Position = 0)][object[]]$Sentencias,
+        [string]$Base
+    )
+
+    $cfg = $Global:JsonSqlDb
+    if (-not $PSBoundParameters.ContainsKey('Base')) { $Base = $cfg.Base }
+
+    # Una lista JSON de {"sql": "...", "params": [...]}: el texto EXACTO que se
+    # envía es el que se firma, en el lugar de sql y params
+    $piezas = foreach ($s in $Sentencias) {
+        $texto  = $s
+        $params = ''
+        if ($s -is [System.Collections.IDictionary]) {
+            $texto  = $s['Sql']
+            $params = ConvertTo-JsonSqlDbParametros -Parametros $s['Parametros']
+        }
+        if ($params -eq '') { $params = '[]' }
+        '{"sql":' + ([string]$texto | ConvertTo-Json -Compress) + ',"params":' + $params + '}'
+    }
+    $lote  = '[' + ($piezas -join ',') + ']'
+    $datos = Invoke-JsonSqlDbPeticion -Base $Base -Campos ([ordered]@{ lote = $lote }) -Firmado $lote
+    if ($null -eq $datos) { return $null }
+
+    # La coma: la lista de resultados sale entera, sin desenrollarse
+    return ,@($datos)
+}
+
+<#
+    Firma y envía una petición (uso interno de API-SQL-JSON y API-SQL-Lote):
+    $Campos son sql y params, o lote, y $Firmado lo que de ellos entra en la
+    firma. Devuelve la respuesta decodificada, o $null después de escribir el
+    error.
+#>
+function Invoke-JsonSqlDbPeticion {
+    param (
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Base,
+        [Parameter(Mandatory = $true)][System.Collections.Specialized.OrderedDictionary]$Campos,
+        [Parameter(Mandatory = $true)][string]$Firmado
+    )
+
+    $cfg       = $Global:JsonSqlDb
     $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
 
-    # Firma de jsonSQLDB: '+' apiKey '|' base '|' timestamp '|' sql params '¿'
+    # Firma de jsonSQLDB: '+' apiKey '|' base '|' timestamp '|' nonce '|' sql params '¿'
+    #
+    # El nonce, al azar en cada petición: dos consultas iguales en el mismo
+    # segundo tendrían si no el mismo token, y la API rechazaría la segunda.
+    $nonce = -join ((1..16) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     #
     # El '¿' se monta desde su código (U+00BF) a propósito: si el fichero se
     # guardara en ANSI en lugar de UTF-8, un '¿' escrito literalmente daría
     # otros bytes y el token no cuadraría con el del servidor.
     $cierre = [char]0x00BF
     $token = Get-HMACSHA256 -Key $cfg.HmacSecret `
-                            -InputString ('+' + $cfg.ApiKey + '|' + $Base + '|' + $timestamp + '|' + $Sql + $params + $cierre)
+                            -InputString ('+' + $cfg.ApiKey + '|' + $Base + '|' + $timestamp + '|' + $nonce + '|' + $Firmado + $cierre)
 
-    $campos = [ordered]@{
-        api_key   = $cfg.ApiKey
-        db        = $Base
-        sql       = $Sql
-        params    = $params
-        timestamp = $timestamp
-        token     = $token
-    }
+    $todos = [ordered]@{ api_key = $cfg.ApiKey; db = $Base }
+    foreach ($c in $Campos.GetEnumerator()) { $todos[$c.Key] = $c.Value }
+    $todos['timestamp'] = $timestamp
+    $todos['nonce']     = $nonce
+    $todos['token']     = $token
     $formBody = (
-        $campos.GetEnumerator() | ForEach-Object {
+        $todos.GetEnumerator() | ForEach-Object {
             "$($_.Key)=$([System.Web.HttpUtility]::UrlEncode([string]$_.Value))"
         }
     ) -join '&'
@@ -245,20 +327,21 @@ function API-SQL-JSON {
         return $null
     }
 
-    $datos = $jsonString | ConvertFrom-Json
+    # Una lista, tal cual: PowerShell 7 la repartiría por la tubería, y una
+    # vacía, o la de un lote con un resultado, dejaría de ser una lista
+    $datos = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('NoEnumerate')) {
+        ConvertFrom-Json -InputObject $jsonString -NoEnumerate
+    } else {
+        $jsonString | ConvertFrom-Json
+    }
 
     # La API contesta con {"error": "..."} cuando algo falla
-    if ($datos.PSObject.Properties.Name -contains 'error') {
+    if ($datos -isnot [array] -and $datos.PSObject.Properties.Name -contains 'error') {
         Write-Error "jsonSQLDB: $($datos.error)"
         return $null
     }
 
-    # INSERT/UPDATE/DELETE/DDL devuelven {"success":true,"filas":n,"mensaje":"..."}
-    if ($datos.PSObject.Properties.Name -contains 'success') {
-        return $datos
-    }
-
-    return [System.Collections.ArrayList]@($datos)
+    return ,$datos
 }
 
 # ----------------------------------------------------------------------
@@ -289,6 +372,13 @@ API-SQL-JSON "SELECT nombre FROM clientes WHERE ciudad IN ($huecos)" $ciudades
 API-SQL-JSON "INSERT INTO clientes (cod, nombre, saldo) VALUES (?, ?, ?)" @('A1', 'Ana', 10.55)
 API-SQL-JSON "UPDATE clientes SET saldo = saldo + ? WHERE id = ?" @(25.40, 7)
 API-SQL-JSON "DELETE FROM clientes WHERE id = ?" @(7)
+
+# --- Transacción: todas o ninguna ---
+
+API-SQL-Lote @(
+    @{ Sql = 'UPDATE clientes SET saldo = saldo - ? WHERE id = ?'; Parametros = @(25.40, 7) },
+    @{ Sql = 'UPDATE clientes SET saldo = saldo + ? WHERE id = ?'; Parametros = @(25.40, 8) }
+)
 
 # --- Estructura ---
 

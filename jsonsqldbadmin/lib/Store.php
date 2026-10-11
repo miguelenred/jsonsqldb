@@ -27,12 +27,18 @@ final class Store
     /** Lee un JSON. Si no existe o está corrupto, devuelve $defecto. */
     public static function leer(string $fichero, array $defecto = []): array
     {
+        return self::decodificar($fichero) ?? $defecto;
+    }
+
+    /** El contenido de un JSON; [] si no existe y null si lo que hay no es un JSON válido. */
+    private static function decodificar(string $fichero): ?array
+    {
         $f = self::ruta($fichero);
         if (!is_file($f)) {
-            return $defecto;
+            return [];
         }
         $datos = json_decode((string)@file_get_contents($f), true);
-        return is_array($datos) ? $datos : $defecto;
+        return is_array($datos) ? $datos : null;
     }
 
     /**
@@ -52,7 +58,18 @@ final class Store
         }
         try {
             flock($lock, LOCK_EX);
-            self::guardar($fichero, $cambio(self::leer($fichero)));
+            // Un fichero dañado no se pisa: con él como vacío, dar de alta un
+            // usuario habría borrado los demás
+            $antes = self::decodificar($fichero);
+            if ($antes === null) {
+                throw new RuntimeException(t('{fichero} está dañado y no se cambia; corrígelo o quítalo', ['fichero' => self::ruta($fichero)]));
+            }
+            // Si nada cambia, nada se escribe: un intento de entrar con la IP
+            // bloqueada solo mira
+            $despues = $cambio($antes);
+            if ($despues !== $antes) {
+                self::guardar($fichero, $despues);
+            }
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);

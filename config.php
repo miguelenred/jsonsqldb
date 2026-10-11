@@ -32,11 +32,29 @@ defined('JSONSQLDB_DATA_PATH') || define('JSONSQLDB_DATA_PATH', __DIR__ . '/data
 // encarece bastante las escrituras.
 defined('JSONSQLDB_FILAS_POR_PARTE') || define('JSONSQLDB_FILAS_POR_PARTE', 1000);
 
-// Caché de tablas: true = APCu si está disponible, si no en <base>/.cache;
-// 'apcu' = solo en memoria compartida, nunca en disco (para hostings con poco
-// espacio o cuota de ficheros: la caché en disco ocupa cerca del doble que los
-// datos); false = sin caché, solo para depurar. Se invalida sola al escribir.
+// Interruptor general de las cachés del motor (qué guarda cada una, en
+// docs/01-core.md, «The caches, one by one»): la de las tablas (sus partes ya
+// decodificadas, sus índices, su estructura y cuántas filas tiene cada parte),
+// la capa de OPcache y la de resultados. true = APCu si está disponible, si no
+// en <base>/.cache; 'apcu' = solo en memoria compartida, nunca en disco (para
+// hostings con poco espacio o cuota de ficheros: la caché en disco ocupa algo
+// más que los datos y los índices; sin la capa de OPcache, que necesita sus ficheros, y
+// sin APCu no hay ninguna caché); false = ninguna caché, solo para depurar.
+// Ninguna hace falta para que los resultados sean correctos: se comprueban con
+// la revisión de cada tabla, y borrar .cache es siempre seguro.
 defined('JSONSQLDB_CACHE_ACTIVA') || define('JSONSQLDB_CACHE_ACTIVA', true);
+// Si PHP tiene APCu, la caché va a su memoria compartida en vez de a ficheros:
+// no ocupa disco (la caché en disco ocupa algo más que los datos y los índices), la
+// comparten todos los procesos y no hay que leerla del disco. Vale la pena y
+// por eso se usa si está, pero no es obligatorio: sin APCu el motor funciona
+// igual, con la caché en disco. false lo deja de lado aunque esté.
+defined('JSONSQLDB_CACHE_APCU') || define('JSONSQLDB_CACHE_APCU', true);
+// Si PHP tiene OPcache activo, la caché de las partes de las tablas se le da
+// también a OPcache, que la guarda en su memoria compartida entre peticiones:
+// leer una tabla entera pasa de unos 22 ms a unos 0,15 ms. Vale la pena y por
+// eso va activado, pero no es obligatorio: sin OPcache el motor funciona igual.
+// Nunca usa más de lo que deja libre un 25 % de su memoria. false lo desactiva.
+defined('JSONSQLDB_CACHE_OPCACHE') || define('JSONSQLDB_CACHE_OPCACHE', true);
 
 // Escritura por partes: un UPDATE o DELETE que solo depende de cada fila hace
 // su trabajo con la tabla compartida y solo la bloquea entera para confirmar,
@@ -54,9 +72,9 @@ defined('JSONSQLDB_CACHE_RESULTADOS') || define('JSONSQLDB_CACHE_RESULTADOS', 50
 // ------------------------------------------------------------
 // LOG DE CONSULTAS
 // ------------------------------------------------------------
-// Registra cada consulta ejecutada: fecha, IP, base de datos, tipo de
-// operación, la SQL, los registros mostrados o afectados, el tiempo y
-// el error si lo hubo.
+// Registra las consultas (cuáles, según JSONSQLDB_LOG_NIVEL): fecha, IP, base
+// de datos, tipo de operación, quién la hizo, la SQL, los registros mostrados
+// o afectados, el tiempo y el error si lo hubo.
 defined('JSONSQLDB_LOG_ACTIVO') || define('JSONSQLDB_LOG_ACTIVO', true);
 
 // Carpeta de los ficheros de log. Se crea sola si no existe.
@@ -64,9 +82,12 @@ defined('JSONSQLDB_LOG_PATH') || define('JSONSQLDB_LOG_PATH', __DIR__ . '/logs')
 
 // Qué se registra:
 //   'todo'        todas las consultas
-//   'escrituras'  solo INSERT/UPDATE/DELETE y DDL
+//   'escrituras'  las que escriben (INSERT/UPDATE/DELETE y DDL) y las que fallan
 //   'errores'     solo las consultas que fallan
-defined('JSONSQLDB_LOG_NIVEL') || define('JSONSQLDB_LOG_NIVEL', 'todo');
+// Por defecto 'escrituras' (2.9): registrar cada lectura abre y escribe el
+// fichero del log en cada petición, unos 0,09 ms; en una búsqueda por clave,
+// un 16 % de lo que tarda. Con 'todo' se ven también las lecturas.
+defined('JSONSQLDB_LOG_NIVEL') || define('JSONSQLDB_LOG_NIVEL', 'escrituras');
 
 // Longitud máxima de la SQL guardada en el log (se trunca, no se parte).
 defined('JSONSQLDB_LOG_MAX_SQL') || define('JSONSQLDB_LOG_MAX_SQL', 2000);
@@ -93,6 +114,17 @@ defined('JSONSQLDB_LOG_MAX_SIZE') || define('JSONSQLDB_LOG_MAX_SIZE', 5 * 1024 *
 // El borrado es automático: se comprueba de vez en cuando al escribir en el log,
 // así que no hace falta ninguna tarea programada.
 defined('JSONSQLDB_LOG_DIAS') || define('JSONSQLDB_LOG_DIAS', 90);
+
+// ------------------------------------------------------------
+// API
+// ------------------------------------------------------------
+// La API (api/jsonsqldb_api.php) es la forma de usar el motor desde otras
+// aplicaciones. A false no atiende nada (2.9): cada petición recibe «La API
+// está desactivada», con HTTP 403, sin mirar su clave ni tocar ninguna base.
+// Sirve si solo usas el motor con la conexión directa, o para cerrarla un
+// tiempo. Activada por defecto. Con ella apagada, el panel tiene que ir por
+// conexión directa (ADMIN_CONEXION = 'directa' en su config.php).
+defined('JSONSQLDB_API_ACTIVA') || define('JSONSQLDB_API_ACTIVA', true);
 
 // ------------------------------------------------------------
 // CONEXIÓN DIRECTA AL MOTOR (SIN API)
@@ -152,10 +184,12 @@ defined('JSONSQLDB_MEMORIA_MARGEN') || define('JSONSQLDB_MEMORIA_MARGEN', 0.85);
 // ------------------------------------------------------------
 // ÍNDICES
 // ------------------------------------------------------------
-// Índices de búsqueda. Aceleran los SELECT que filtran por igualdad o IN sobre
-// columnas indexadas, y hacen algo más lenta cada escritura, porque una tabla
-// con índices reescribe también sus ficheros. A false no se mantienen ni se
-// usan, y los que hubiera se borran en la siguiente escritura de la tabla.
+// Índices de búsqueda. Aceleran los SELECT que filtran por igualdad, IN o un
+// rango sobre columnas indexadas (lo que usa cada caso, en docs/01-core.md,
+// «Indexes»), y los UPDATE y DELETE que encuentran sus filas por ellos; a
+// cambio, cada escritura reescribe también los trozos del índice que toca. A
+// false no se mantienen ni se usan, y los que hubiera se borran en la
+// siguiente escritura de la tabla.
 defined('JSONSQLDB_INDICES') || define('JSONSQLDB_INDICES', true);
 
 // ------------------------------------------------------------

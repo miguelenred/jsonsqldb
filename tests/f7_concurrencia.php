@@ -217,6 +217,30 @@ chk('una tabla con trigger bloquea la base', function () use ($raiz, $decide) {
 });
 chk('INSERT ... SELECT bloquea la base, porque lee de otra tabla',
     fn() => $decide('INSERT INTO libres_a (v) SELECT v FROM libres_b') === null);
+// Con el exclusivo de unas tablas, las demás se leen sin bloqueo: lo que lee
+// otra tabla tiene que coger la base entera (las subconsultas, desde la 2.9)
+$alcance = function (string $sql) use ($raiz): ?array {
+    return (new Database('conc', $raiz))->tablasAfectadas(JsonSQLDB\Parser::analizar($sql));
+};
+chk('una subconsulta en un UPDATE, un DELETE o un INSERT bloquea la base, porque lee de otra tabla', function () use ($decide, $alcance) {
+    $r = [];
+    foreach (["UPDATE libres_a SET v = 'y' WHERE id IN (SELECT id FROM libres_b)",
+              'DELETE FROM libres_a WHERE EXISTS (SELECT 1 FROM libres_b WHERE libres_b.id = libres_a.id)',
+              'INSERT INTO libres_a (v) VALUES ((SELECT MAX(v) FROM libres_b))'] as $q) {
+        $r[] = [$decide($q), $alcance($q)];
+    }
+    return $r === array_fill(0, 3, [null, null]) ?: json_encode($r);
+});
+chk('un UPDATE o un DELETE con JOIN bloquea la base (2.9)', function () use ($decide, $alcance) {
+    $r = [];
+    foreach (['UPDATE libres_a SET v = b.v FROM libres_b b WHERE b.id = libres_a.id',
+              'UPDATE libres_a a JOIN libres_b b ON b.id = a.id SET a.v = b.v',
+              'DELETE a FROM libres_a a JOIN libres_b b ON b.id = a.id',
+              'DELETE FROM libres_a USING libres_b WHERE libres_b.id = libres_a.id'] as $q) {
+        $r[] = [$decide($q), $alcance($q)];
+    }
+    return $r === array_fill(0, 4, [null, null]) ?: json_encode($r);
+});
 chk('el DDL bloquea la base',
     fn() => $decide('CREATE TABLE zz (a INTEGER)') === null
          && $decide('ALTER TABLE libres_a ADD COLUMN zz INTEGER') === null);
@@ -628,7 +652,7 @@ function enParalelo(string $dir, array $listas): array {
     $procs = [];
     foreach ($listas as $sentencias) {
         $codigo = $cabecera . 'foreach (' . var_export($sentencias, true) . ' as $s) { $bd->consultar($s); }'
-                . 'echo json_encode(JsonSQLDB\\Storage::cuentaPartes());';
+                . 'echo json_encode(JsonSQLDB\\StorageCambios::cuentaPartes());';
         $tub = [];
         $procs[] = [proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub), $tub];
     }
@@ -711,6 +735,32 @@ chk('procesos en partes distintas, con un DELETE a la vez, dejan la tabla exacta
     return array_sum(array_column($r, 0)) > 0 ?: 'no se escribió nada por partes';
 });
 
+chk('procesos en partes distintas mientras otro borra desde el final y acorta la tabla: el estado cuadra con sus partes (2.9)', function () use ($raiz) {
+    // El cuarto borra las 10 últimas filas una a una: la tabla se acorta y
+    // pierde su última parte mientras los demás escriben por partes. Con un
+    // hueco en la primera parte, el estado lleva la lista de huecos, que
+    // tiene que tener una entrada por parte, ni una más
+    $dir = $raiz . '/partes3';
+    $bd  = tablaPorPartes($dir, 5010);
+    $bd->consultar('DELETE FROM t WHERE id = 100');
+    $listas = [];
+    foreach ([10, 1200, 2400] as $base) {
+        $l = [];
+        for ($k = 0; $k < 30; $k++) { $l[] = 'UPDATE t SET v = v + 1 WHERE id = ' . ($base + $k % 10); }
+        $listas[] = $l;
+    }
+    $listas[] = array_map(static fn($k) => 'DELETE FROM t WHERE id = ' . (5010 - $k), range(0, 9));
+    $r = enParalelo($dir, $listas);
+    foreach ($r as $x) { if (isset($x['error'])) { return 'un proceso falló: ' . $x['error']; } }
+    $e = json_decode((string)file_get_contents("$dir/p/t.rev.json"), true);
+    $partes = count($e['parts']);
+    $cuadra = $e['rows'] === 5000 && $partes === 5 && count($e['huecos'] ?? []) === $partes
+        && count($e['indexes']['ix_grupo']) === $partes && count($e['rangos']['ix_grupo']) === $partes;
+    $sumas = array_map(static fn($b) => (int)$bd->consultar('SELECT SUM(v) AS s FROM t WHERE id BETWEEN ? AND ?', [$b, $b + 9])[0]['s'], [10, 1200, 2400]);
+    $resto = [(int)$bd->consultar('SELECT COUNT(*) AS n FROM t')[0]['n'], $bd->consultar('CHECK TABLES'), $bd->consultar('CHECK KEYS'),
+              $bd->consultar('SELECT id FROM t WHERE grupo = 3 ORDER BY id') === $bd->consultar('SELECT id FROM t WHERE grupo + 0 = 3 ORDER BY id')];
+    return $cuadra && $sumas === [30, 30, 30] && $resto === [4999, [], [], true] ?: json_encode([$e['rows'], $partes, $e['huecos'] ?? null, $sumas, $resto]);
+});
 chk('con una clave única, una columna única no se escribe por partes', function () use ($raiz) {
     // Dos procesos poniendo el mismo valor en una columna UNIQUE de filas de
     // partes distintas: por partes, ninguno vería al otro y los dos
@@ -728,6 +778,127 @@ chk('con una clave única, una columna única no se escribe por partes', functio
     $n = (int)$bd->consultar("SELECT COUNT(*) AS n FROM u WHERE email = 'mismo'")[0]['n'];
     $fallos = count(array_filter($r, static fn($x) => isset($x['error'])));
     return $n === 1 && $fallos === 1 ?: "quedaron $n filas con el mismo email ($fallos procesos fallaron)";
+});
+
+/**
+ * Una escritura por partes parada entre su fase compartida y su confirmación
+ * (2.9), sin depender de tiempos: un proceso hace la fase compartida de
+ * $cambio (código con $st, $defs y la tabla t de la base p), suelta el
+ * compartido de la tabla y espera; entretanto se ejecuta $otra, y después
+ * confirma. Devuelve lo que dijo al confirmar: 'confirmada' o 'conflicto'.
+ */
+function aMedias(string $dir, string $cambio, callable $otra): string {
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$st = new JsonSQLDB\\Storage(' . var_export($dir, true) . ', "p"); $defs = (new JsonSQLDB\\Catalog($st))->indicesDe("t");'
+            . 'JsonSQLDB\\StorageCambios::bloquearPartes($st, "t");' . $cambio
+            . 'Closure::bind(static fn(JsonSQLDB\\Storage $s) => flock($s->locksTabla["t"], LOCK_UN), null, JsonSQLDB\\Storage::class)($st);'
+            . 'echo "listo\n"; fgets(STDIN);'
+            . 'try { JsonSQLDB\\StorageEscritura::txConfirmar($st); echo "confirmada"; } catch (JsonSQLDB\\ConflictoPartes $e) { echo "conflicto"; }'
+            . '$st->desbloquear();';
+    $tub = [];
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub);
+    $listo = trim((string)fgets($tub[1]));
+    if ($listo === 'listo') {
+        $otra();
+    }
+    @fwrite($tub[0], "sigue\n");
+    fclose($tub[0]);
+    $dijo = trim((string)stream_get_contents($tub[1]) . stream_get_contents($tub[2]));
+    fclose($tub[1]); fclose($tub[2]);
+    proc_close($p);
+    return $listo === 'listo' ? $dijo : trim("$listo $dijo");
+}
+
+/** Las respuestas a unas sentencias sobre la base p, en un proceso nuevo (2.9) */
+function enOtroProceso(string $dir, array $sentencias): array {
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$bd = new JsonSQLDB\\Database("p", ' . var_export($dir, true) . ');'
+            . 'echo json_encode(array_map(static fn(string $s) => $bd->consultar($s), ' . var_export($sentencias, true) . '));';
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    return json_decode($salida, true) ?? [$salida];
+}
+
+/** Una tabla t de dos partes llenas, con un índice sobre una columna de texto */
+function tablaDeTextos(string $dir): Database {
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, c VARCHAR(20), n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_c ON t (c)');
+    $vals = [];
+    for ($i = 1; $i <= 2000; $i++) { $vals[] = "($i, 'v$i', $i)"; }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $vals));
+    return $bd;
+}
+
+chk('una escritura por partes que se descarta no deja en la caché los filtros de lo que no escribió: otra en la misma revisión no hace invisibles sus claves (2.9)', function () use ($raiz) {
+    // La que se descarta reescribe las dos partes; entretanto otra cambia una
+    // fila de la segunda y confirma con la misma revisión que habría tenido
+    // la primera. Antes, los filtros de la descartada (solo «AX») se quedaban
+    // en la caché con esa revisión, y una búsqueda no encontraba nada en la
+    // segunda parte. Sin los filtros guardados, como tras vaciar la caché, y
+    // cada una en su proceso, como dos peticiones: lo que un proceso ya leyó
+    // se queda en su memoria, y en el mismo escondía el fallo
+    $dir = $raiz . '/partes4';
+    tablaDeTextos($dir);
+    array_map('unlink', glob("$dir/p/.cache/*") ?: []);
+    $r = aMedias($dir, '$c = []; foreach ($st->filas("t") as $pos => $f) { $f["c"] = "AX"; $c[$pos] = $f; }'
+        . 'JsonSQLDB\\StorageCambios::modificarFilas($st, "t", $c, [], $defs);',
+        static fn() => enOtroProceso($dir, ["UPDATE t SET c = 'ZZ' WHERE id = 1500"]));
+    $vistas = enOtroProceso($dir, ["SELECT id FROM t WHERE c = 'v1600'", "SELECT id FROM t WHERE c = 'ZZ'",
+                                   "SELECT COUNT(*) AS n FROM t WHERE c IN ('v1', 'v1999')", "SELECT id FROM t WHERE c = 'AX'"]);
+    return $r === 'conflicto' && $vistas === [[['id' => 1600]], [['id' => 1500]], [['n' => 2]], []] ?: json_encode([$r, $vistas]);
+});
+chk('una escritura por partes que confirma después de que otra abra una parte nueva la deja en el estado: los índices se siguen usando (2.9)', function () use ($raiz) {
+    // Antes se cortaba el estado a las partes que vio la primera: tres
+    // ficheros y dos revisiones, y cada búsqueda por índice recorría la tabla
+    $dir = $raiz . '/partes4';
+    tablaDeTextos($dir);
+    $r = aMedias($dir, '$f = $st->filas("t")->current(); $f["c"] = "AX"; JsonSQLDB\\StorageCambios::modificarFilas($st, "t", [0 => $f], [], $defs);',
+        static fn() => (new Database('p', $dir))->consultar("INSERT INTO t VALUES (2001, 'v2001', 2001)"));
+    $e = json_decode((string)file_get_contents("$dir/p/t.rev.json"), true);
+    $bd = new Database('p', $dir);
+    $vistas = [$e['rows'], count($e['parts']), count($e['indexes']['ix_c']), count($e['rangos']['ix_c']), count($e['indexes']['auto_id']),
+               $bd->consultar("EXPLAIN SELECT id FROM t WHERE c = 'v2001'")[0]['acceso'], $bd->consultar("SELECT id FROM t WHERE c = 'v2001'"),
+               $bd->consultar("SELECT id FROM t WHERE c = 'AX'"), $bd->consultar('CHECK TABLES')];
+    return $r === 'confirmada' && $vistas === [2001, 3, 3, 3, 3, 'índice (=)', [['id' => 2001]], [['id' => 1]], []]
+        ?: json_encode([$r, $vistas], JSON_UNESCAPED_UNICODE);
+});
+
+echo "\n== La caché de OPcache entre procesos ==\n";
+chk('dos procesos que rehacen a la vez el mismo .php de la caché no lo dejan cortado ni vacío, y no dejan temporales (2.9)', function () use ($raiz) {
+    // Antes el temporal tenía un nombre fijo: uno lo renombraba mientras el
+    // otro lo estaba escribiendo, y quien cargaba el .php se encontraba un
+    // ParseError o un fichero vacío
+    $dir = $raiz . '/php';
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    $php = var_export("$dir/p1-1.php", true);
+    $motor = 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';';
+    // Con pocas filas cada proceso lo rehace cientos de veces: así se cruzan seguro
+    $escribir = $motor . '$v = []; for ($i = 0; $i < 300; $i++) { $v[] = ["id" => $i, "texto" => str_repeat("x", 20)]; }'
+        . '$f = Closure::bind(static fn(string $p, array $v) => JsonSQLDB\\Storage::volcarPhp($p, $v), null, JsonSQLDB\\Storage::class);'
+        . '$fin = microtime(true) + 1.5; while (microtime(true) < $fin) { $f(' . $php . ', $v); }';
+    $leer = '$malas = 0; $vistas = 0; $fin = microtime(true) + 1.5;'
+        . 'while (microtime(true) < $fin) { clearstatcache(); if (is_file(' . $php . ')) { $vistas++;'
+        . ' try { $x = include ' . $php . '; $malas += is_array($x) && count($x) === 300 ? 0 : 1; } catch (ParseError $e) { $malas++; } } }'
+        . 'echo "$malas/$vistas";';
+    $procs = [];
+    foreach ([$escribir, $escribir, $leer] as $codigo) {
+        $tub = [];
+        $procs[] = [proc_open([PHP_BINARY, '-d', 'opcache.enable_cli=0', '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tub), $tub];
+    }
+    $salida = '';
+    foreach ($procs as [$p, $tub]) {
+        $salida = trim((string)stream_get_contents($tub[1]) . stream_get_contents($tub[2]));
+        fclose($tub[1]); fclose($tub[2]);
+        proc_close($p);
+    }
+    $restos = array_map('basename', glob("$dir/*.tmp") ?: []);
+    borrarArbol($dir);
+    [$malas, $vistas] = explode('/', $salida . '/');
+    return $malas === '0' && (int)$vistas > 0 && $restos === [] ?: json_encode([$salida, $restos]);
 });
 
 echo "\n== Limpieza ==\n";
@@ -791,6 +962,9 @@ chk('el panel copia la base (ZIP, todo o nada) con el bloqueo del motor: cada co
     return $mal === [] && $errores === [] && $copias >= 5 && $total > 0
         ?: implode(' | ', array_merge($mal, $errores)) . " · $copias copias, $total filas";
 });
+
+// Sin dejar nada en la carpeta temporal del sistema
+borrarArbol($raiz);
 
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";

@@ -23,7 +23,7 @@ final class Audit
             if (mt_rand(1, 100) === 1) {
                 self::purgar();
             }
-        } catch (Throwable $e) {
+        } catch (Throwable) {
             // La auditoría nunca puede tumbar la operación del usuario.
         }
     }

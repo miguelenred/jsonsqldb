@@ -16,7 +16,7 @@ use JsonSQLDB\Catalog;
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
-use JsonSQLDB\Types;
+use JsonSQLDB\StorageEscritura;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f2';
 $base = 'tienda';
@@ -96,7 +96,7 @@ $filas = [];
 foreach ($usuarios as $u) {
     $filas[] = ['id'=>$u[0],'nombre'=>$u[1],'ciudad'=>$u[2],'edad'=>$u[3],'telefono'=>$u[4],'alta'=>$u[5]];
 }
-$st->guardarFilas('usuarios', $filas);
+StorageEscritura::guardarFilas($st, 'usuarios', $filas);
 
 $pedidos = [
     [1,1,120.50,'2026-01-20'],
@@ -110,7 +110,7 @@ $filas = [];
 foreach ($pedidos as $p) {
     $filas[] = ['id'=>$p[0],'usuario_id'=>$p[1],'total'=>$p[2],'fecha'=>$p[3]];
 }
-$st->guardarFilas('pedidos', $filas);
+StorageEscritura::guardarFilas($st, 'pedidos', $filas);
 $st->desbloquear();
 
 $bd = new Database($base, $raiz);
@@ -228,6 +228,8 @@ chk('agregado sobre tabla vacía', function () use ($bd) {
     return count($f) === 1 && $f[0]['n'] === 0 && $f[0]['s'] === null;
 });
 error('agregado en WHERE', 'SYNTAX', 'SELECT nombre FROM usuarios WHERE COUNT(*) > 1');
+error('GROUP BY con un número de columna que no existe', 'SYNTAX', 'SELECT nombre FROM usuarios GROUP BY 2');
+error('GROUP BY con el número de una columna de agregado', 'SYNTAX', 'SELECT nombre, COUNT(*) FROM usuarios GROUP BY 2');
 
 echo "\n== Funciones de texto ==\n";
 chk('GROUP BY con ORDER BY sin ninguna fila da un resultado vacío, no un error interno (fallaba en 2.7.3)', function () use ($bd) {
@@ -415,6 +417,10 @@ chk('subconsulta en FROM con JOIN', fn() => igual(
                       ON g.usuario_id = u.id
                     ORDER BY g.total DESC'),
     [['María',300.25],['Marta',258.09],['Ana',200.5]]
+));
+chk('subconsulta en FROM sin alias, como en SQLite (2.9: era un error)', fn() => igual(
+    $bd->consultar('SELECT ciudad, n FROM (SELECT ciudad, COUNT(*) AS n FROM usuarios GROUP BY ciudad) WHERE n > 1 ORDER BY ciudad'),
+    [['Madrid',3],['Valencia',2]]
 ));
 
 echo "\n== Orden alfabético ==\n";
@@ -667,6 +673,16 @@ chk('UNION quita duplicados', function () use ($bd) {
 chk('UNION ALL los conserva', function () use ($bd) {
     $r = array_column($bd->consultar('SELECT n FROM ua UNION ALL SELECT m FROM ub'), 'n');
     return $r === ['uno', 'dos', 'dos', 'tres'] ?: $r;
+});
+chk('UNION ALL fila a fila y en INSERT…SELECT conserva los repetidos de la primera parte (2.9)', function () use ($bd) {
+    $q = "SELECT 'x' AS n FROM ua UNION ALL SELECT m FROM ub";
+    $r = [];
+    $bd->consultarPorFilas($q, [], null, function (array $f) use (&$r) { $r[] = $f['n']; });
+    $bd->consultar('CREATE TABLE uc (n VARCHAR(10))');
+    $bd->consultar("INSERT INTO uc (n) $q");
+    $c = array_column($bd->consultar('SELECT n FROM uc'), 'n');
+    $bd->consultar('DROP TABLE uc');
+    return $r === ['x', 'x', 'dos', 'tres'] && $c === $r ?: [$r, $c];
 });
 chk('las columnas se toman de la primera parte', function () use ($bd) {
     $r = $bd->consultar('SELECT n FROM ua UNION SELECT m FROM ub');
@@ -1024,7 +1040,7 @@ chk('10.000 filas: filtro, agrupación y join', function () use ($st, $cat, $bd)
     for ($i = 1; $i <= 10000; $i++) {
         $filas[] = ['id'=>$i, 'usuario_id'=>($i % 6) + 1, 'importe'=>round($i / 7, 2)];
     }
-    $st->guardarFilas('ventas', $filas);
+    StorageEscritura::guardarFilas($st, 'ventas', $filas);
     $st->desbloquear();
 
     $t0 = microtime(true);
@@ -1046,17 +1062,228 @@ chk('10.000 filas: filtro, agrupación y join', function () use ($st, $cat, $bd)
     return $f1[0]['n'] === 6500 && count($f2) === 6 && count($f3) === 6;
 });
 
+chk('LIMIT … OFFSET sin WHERE ni ORDER BY salta las partes enteras que deja atrás, contando los huecos y una parte vacía, y da lo mismo que la tabla entera (2.9)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE salto (id INTEGER PRIMARY KEY, v TEXT)');
+    for ($k = 0; $k < 12; $k++) {
+        $v = [];
+        for ($i = 1; $i <= 1000; $i++) { $v[] = '(' . ($k * 1000 + $i) . ", 'x')"; }
+        $bd->consultar('INSERT INTO salto VALUES ' . implode(',', $v));
+    }
+    $bd->consultar('DELETE FROM salto WHERE id % 7 = 0 AND id < 5000');   // huecos repartidos, sin llegar a compactar
+    $bd->consultar('DELETE FROM salto WHERE id BETWEEN 7001 AND 8000');   // una parte entera vacía
+    $todo = array_column($bd->consultar('SELECT id FROM salto'), 'id');
+    $leidas = [];
+    foreach ([[10, 0], [10, 999], [5, 993], [50, 4290], [30, 6980], [100, 7000], [10, 9990], [3, 10998], [1000, 500], [0, 50]] as [$l, $o]) {
+        if (array_column($bd->consultar("SELECT id FROM salto LIMIT $l OFFSET $o"), 'id') !== array_slice($todo, $o, $l)) {
+            return "LIMIT $l OFFSET $o";
+        }
+        $leidas[] = (int)$bd->consultar("EXPLAIN SELECT id FROM salto LIMIT $l OFFSET $o")[0]['filas'];
+    }
+    $bd->consultar('DROP TABLE salto');
+    // Filas leídas: las de la parte en que cae el OFFSET y las que faltan hasta el LIMIT
+    return count($todo) === 10286 && max($leidas) < 2200 ?: [count($todo), $leidas];
+});
+
+echo "\n== Arreglos de la auditoría de la 2.9 (consultas) ==\n";
+
+/** Un Select de la base de pruebas que ordena y agrupa por el disco, como cuando no cabe en memoria */
+function selectEnDisco(): JsonSQLDB\Select {
+    global $raiz, $base;
+    $s = new JsonSQLDB\Select(new Catalog(new Storage($raiz, $base)));
+    $p = new ReflectionProperty(JsonSQLDB\Select::class, 'enDisco');
+    $p->setAccessible(true);
+    $p->setValue($s, true);
+    return $s;
+}
+
+chk('REGEXP no deja un manejador de errores por fila (la memoria no crece de una consulta a otra) y sus errores dicen lo mismo (2.9)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE rx (id INTEGER PRIMARY KEY, s TEXT)');
+    for ($k = 0; $k < 10; $k++) {
+        $v = [];
+        for ($i = 1; $i <= 1000; $i++) { $n = $k * 1000 + $i; $v[] = "($n, 'texto$n')"; }
+        $bd->consultar('INSERT INTO rx VALUES ' . implode(',', $v));
+    }
+    $q = "SELECT COUNT(*) AS n FROM rx WHERE s REGEXP 'o1[0-9]+5$' AND s NOT REGEXP 'a/b'";
+    $n = $bd->consultar($q)[0]['n'];
+    $esperado = count(array_filter(range(1, 10000), static fn(int $i): bool => (bool)preg_match('/o1[0-9]+5$/', "texto$i")));
+    $m0 = memory_get_usage();
+    for ($k = 1; $k <= 3; $k++) { $bd->consultar("$q AND id <> -$k"); }      // otra cada vez: que no salga de la caché de resultados
+    $crece = memory_get_usage() - $m0;
+    $bd->consultar('DROP TABLE rx');
+    $mal = '';
+    foreach (["SELECT 'x' REGEXP '('" => "Expresión regular no válida: '('",
+              "SELECT 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab' REGEXP '^(a+)+$'" => "La expresión regular '^(a+)+$' es demasiado costosa para este texto: simplifícala o acota antes las filas con un WHERE"] as $sql => $msg) {
+        try { $bd->consultar($sql); $mal .= "$sql no dio error; "; } catch (JsonSqlDbError $e) { $mal .= $e->getMessage() === $msg ? '' : $e->getMessage() . '; '; }
+    }
+    // La barra ya escapada (a\/b) es la misma barra (2.9: era una expresión no válida)
+    $barras = $bd->consultar("SELECT 'a/b' REGEXP 'a\\/b' AS a, 'a/b' REGEXP 'a/b' AS b, 'a\\/b' REGEXP 'a\\\\/b' AS c, 'x' REGEXP '[/]' AS d")[0];
+    return $n === $esperado && $crece < 262144 && $mal === '' && $barras === ['a' => 1, 'b' => 1, 'c' => 1, 'd' => 0] ?: [$n, $crece, $mal, $barras];
+});
+
+chk('Las expresiones de LIKE y GLOB ya convertidas no pasan de un tope: 300.000 patrones distintos no se quedan en memoria (2.9)', function () {
+    JsonSQLDB\EvaluatorPatrones::patronALike('calentar%', null);
+    $m0 = memory_get_usage();
+    for ($i = 0; $i < 150000; $i++) {
+        JsonSQLDB\EvaluatorPatrones::patronALike("pat%$i" . str_repeat('x', 40), null);
+        JsonSQLDB\EvaluatorPatrones::patronAGlob("pat*$i" . str_repeat('x', 40));
+    }
+    $crece = memory_get_usage() - $m0;
+    $igual = JsonSQLDB\EvaluatorPatrones::patronALike('a%b_', '\\') === JsonSQLDB\EvaluatorPatrones::patronALike('a%b_', '\\');
+    return $crece < 4 * 1048576 && $igual ?: [$crece, $igual];
+});
+
+chk('LIKE y GLOB con un texto que no es UTF-8 válido comparan byte a byte, en vez de decir que no casa (2.9)', function () use ($bd) {
+    $r = $bd->consultar("SELECT ? LIKE '%b%' AS a, ? LIKE 'a_c' AS b, ? GLOB '*b*' AS c, ? NOT LIKE '%b%' AS d, like('%b', ?) AS e",
+        ["a\xFFb", "a\xFFc", "a\xFFb", "a\xFFb", "a\xFFb"])[0];
+    return $r === ['a' => 1, 'b' => 1, 'c' => 1, 'd' => 0, 'e' => 1] ?: $r;
+});
+
+chk('Las subconsultas correlacionadas guardan como mucho 4.096 resultados entre todas, y dan lo mismo (2.9: uno por cada fila de fuera, sin tope)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE cg (id INTEGER PRIMARY KEY, k INTEGER)');
+    $bd->consultar('CREATE TABLE cp (id INTEGER PRIMARY KEY, k INTEGER, v INTEGER)');
+    for ($b = 0; $b < 5; $b++) {
+        $v = [];
+        for ($i = 1; $i <= 1000; $i++) { $n = $b * 1000 + $i; $v[] = "($n, " . ($n % 7) . ')'; }
+        $bd->consultar('INSERT INTO cg VALUES ' . implode(',', $v));
+    }
+    $bd->consultar('INSERT INTO cp VALUES (1, 0, 10), (2, 3, 30), (3, 3, 33), (4, 6, 60)');
+    $s = new JsonSQLDB\Select(new Catalog(new Storage($GLOBALS['raiz'], $GLOBALS['base'])));
+    $filas = $s->ejecutar(JsonSQLDB\Parser::analizar('SELECT id, (SELECT MAX(v) FROM cp WHERE cp.k = cg.k) AS m, (SELECT COUNT(*) FROM cp WHERE cp.k IN (cg.k, cg.k + 3)) AS c FROM cg'));
+    $p = new ReflectionProperty(JsonSQLDB\Select::class, 'subsCorr');
+    $p->setAccessible(true);
+    $guardados = array_sum(array_map('count', $p->getValue($s)));
+    $mal = 0;
+    foreach ($filas as $f) {
+        $k = $f['id'] % 7;
+        $m = ['0' => 10, '3' => 33, '6' => 60][$k] ?? null;
+        $c = ['0' => 3, '3' => 3, '6' => 1][$k] ?? 0;
+        $mal += $f['m'] !== $m || $f['c'] !== $c ? 1 : 0;
+    }
+    $bd->consultar('DROP TABLE cg');
+    $bd->consultar('DROP TABLE cp');
+    return count($filas) === 5000 && $mal === 0 && $guardados > 0 && $guardados <= 4096 ?: [count($filas), $mal, $guardados];
+});
+
+chk('ORDER BY un alias con el nombre de una columna ordena por el alias también ordenando por el disco (2.9)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE oa (id INTEGER PRIMARY KEY, saldo INTEGER)');
+    $bd->consultar('INSERT INTO oa VALUES (1, 10), (2, 30), (3, 20), (4, NULL)');
+    $q = JsonSQLDB\Parser::analizar('SELECT id, -saldo AS saldo FROM oa ORDER BY saldo DESC, id');
+    $disco = array_column(selectEnDisco()->ejecutar($q), 'id');
+    $memoria = array_column($bd->consultar('SELECT id, -saldo AS saldo FROM oa ORDER BY saldo DESC, id'), 'id');
+    $bd->consultar('DROP TABLE oa');
+    return $disco === [1, 3, 2, 4] && $memoria === $disco ?: [$disco, $memoria];
+});
+
+// Valores de todas las clases: números, textos que son números (con espacios,
+// signo, exponente) y textos que no lo son, entre ellos los que empiezan por
+// una cifra ('1a') o por lo que puede empezar un número ('-x', '.', ' ')
+$mezcla = [10, 9, 2.5, -3, 0, '10', '9', '100', ' 5 ', '1e1', '-2', '+7', '.5', '0.50', '1a', '2b', '12abc', '-x', '.', ' ', '', 'abc', 'ABC',
+           'Zeta', 'ñu', 'árbol', '+', '9z', null];
+
+chk('Valor::comparar y compararOrden son un orden total (2.9): sin vueltas entre números, textos que lo son y textos que no', function () use ($mezcla) {
+    $vals = array_values(array_filter($mezcla, static fn($v) => $v !== null));
+    foreach (['comparar', 'compararOrden'] as $f) {
+        $c = static fn($a, $b): int => JsonSQLDB\Valor::$f($a, $b);
+        foreach ($vals as $a) {
+            foreach ($vals as $b) {
+                if ($c($a, $b) !== -$c($b, $a)) { return "$f no es antisimétrica: " . json_encode([$a, $b]); }
+                foreach ($vals as $x) {
+                    if ($c($a, $b) <= 0 && $c($b, $x) <= 0 && $c($a, $x) > 0) { return "$f no es transitiva: " . json_encode([$a, $b, $x]); }
+                }
+            }
+        }
+    }
+    // Las dos clases: lo que es un número va antes que lo que no
+    return JsonSQLDB\Valor::comparar('9', '1a') === -1 && JsonSQLDB\Valor::comparar(5, '-x') === -1 && JsonSQLDB\Valor::comparar(' 5 ', 5) === 0
+        && JsonSQLDB\Valor::comparar('1a', '2b') === -1 ?: 'las clases';
+});
+
+chk('Con textos que son números y textos que no, ORDER BY (entero, con LIMIT, con varias claves, por expresión, DESC, por el disco), MIN, MAX, ventanas, UNION, DISTINCT, GROUP BY y el WHERE dan el mismo orden (2.9)', function () use ($bd, $mezcla) {
+    $bd->consultar('CREATE TABLE tot (id INTEGER PRIMARY KEY, c TEXT, n INTEGER NOT NULL)');
+    $bd->consultar('CREATE INDEX tot_n ON tot (n)');
+    $v = [];
+    foreach ($mezcla as $i => $x) {
+        $txt = $x === null ? 'NULL' : "'" . JsonSQLDB\Valor::aTexto($x) . "'";
+        $v[] = '(' . ($i + 1) . ", $txt, " . (($i * 7) % 11) . ')';
+    }
+    $bd->consultar('INSERT INTO tot VALUES ' . implode(',', $v));
+    $ref = $bd->consultar('SELECT id, c FROM tot');
+    // La referencia: NULL, luego los números por su valor, luego el resto como
+    // texto: con la colación en ORDER BY, byte a byte al comparar (MIN, MAX, <)
+    $orden = static function (bool $colacion) use ($ref): array {
+        $clave = static function ($c) use ($colacion): array {
+            if ($c === null) { return [0, 0, '', '']; }
+            return is_numeric(trim($c)) ? [1, trim($c) + 0, '', ''] : [2, 0, $colacion ? JsonSQLDB\Collation::clave($c) : '', $c];
+        };
+        usort($ref, static fn(array $a, array $b): int => $clave($a['c']) <=> $clave($b['c']) ?: $a['id'] <=> $b['id']);
+        return array_column($ref, 'id');
+    };
+    $esperado = $orden(true);
+    $exacto   = $orden(false);
+    $ids = static fn(string $q): array => array_column($bd->consultar($q), 'id');
+    $n = count($esperado);
+    $mal = [];
+    $caminos = ['SELECT id FROM tot ORDER BY c, id' => $esperado, "SELECT id FROM tot ORDER BY c || '', id" => $esperado,
+                'SELECT id FROM tot ORDER BY c DESC, id DESC' => array_reverse($esperado),
+                'SELECT id, ROW_NUMBER() OVER (ORDER BY c, id) AS r FROM tot ORDER BY r' => $esperado,
+                'SELECT id FROM (SELECT id, c FROM tot UNION ALL SELECT id, c FROM tot WHERE 0) ORDER BY c, id' => $esperado];
+    for ($k = 1; $k <= $n; $k++) {
+        $caminos["SELECT id FROM tot ORDER BY c LIMIT $k"] = array_slice($esperado, 0, $k);
+        $caminos["SELECT id FROM tot ORDER BY c, id LIMIT $k"] = array_slice($esperado, 0, $k);
+        $caminos["SELECT id FROM tot ORDER BY c || '' LIMIT $k"] = array_slice($esperado, 0, $k);
+        $caminos["SELECT id FROM tot ORDER BY c DESC, id DESC LIMIT $k"] = array_slice(array_reverse($esperado), 0, $k);
+    }
+    foreach ($caminos as $q => $e) {
+        if ($ids($q) !== $e) { $mal[] = $q; }
+    }
+    if (array_column(selectEnDisco()->ejecutar(JsonSQLDB\Parser::analizar('SELECT id FROM tot ORDER BY c, id')), 'id') !== $esperado) { $mal[] = 'por el disco'; }
+    // MIN y MAX: el primero y el último que no es NULL
+    $porId = array_column($bd->consultar('SELECT id, c FROM tot'), 'c', 'id');
+    $mm = $bd->consultar('SELECT MIN(c) AS mi, MAX(c) AS ma FROM tot')[0];
+    $noNulos = array_values(array_filter($exacto, static fn($i) => $porId[$i] !== null));
+    if (JsonSQLDB\Valor::comparar($mm['mi'], $porId[$noNulos[0]]) !== 0 || JsonSQLDB\Valor::comparar($mm['ma'], $porId[end($noNulos)]) !== 0) { $mal[] = 'MIN/MAX ' . json_encode($mm); }
+    // DISTINCT y GROUP BY ordenados: los valores distintos, en el orden del ORDER BY
+    $unicos = [];
+    foreach ($esperado as $i) { $unicos[JsonSQLDB\Valor::clave($porId[$i])] ??= $porId[$i]; }
+    $distintos = array_column($bd->consultar('SELECT DISTINCT c FROM tot ORDER BY c'), 'c');
+    $agrupados = array_column($bd->consultar('SELECT c, COUNT(*) FROM tot GROUP BY c ORDER BY c'), 'c');
+    if ($distintos !== array_values($unicos) || $agrupados !== $distintos) { $mal[] = 'DISTINCT/GROUP BY'; }
+    // El WHERE: c < x son justo los que van antes que x en el orden, y c >= x
+    // los demás; también compilado (con AND), y por el evaluador general
+    foreach ($noNulos as $pos => $i) {
+        $x = $porId[$i];
+        $antes = array_values(array_filter(array_slice($noNulos, 0, $pos), static fn($j) => JsonSQLDB\Valor::comparar($porId[$j], $x) !== 0));
+        sort($antes);
+        $resto = array_values(array_diff($noNulos, $antes));
+        sort($resto);
+        foreach (['SELECT id FROM tot WHERE c < ?' => $antes, 'SELECT id FROM tot WHERE c < ? AND id > 0' => $antes,
+                  "SELECT id FROM tot WHERE c || '' < ?" => $antes, 'SELECT id FROM tot WHERE c >= ? AND id > 0' => $resto] as $q => $e) {
+            $r = array_column($bd->consultar($q, [$x]), 'id');
+            sort($r);
+            if ($r !== $e) { $mal[] = "$q con " . json_encode($x); }
+        }
+    }
+    // Por el índice de n (ORDER BY … LIMIT y MIN/MAX sin leer la tabla) y sin él, lo mismo
+    for ($k = 1; $k <= 5; $k++) {
+        if ($ids("SELECT id FROM tot ORDER BY n DESC LIMIT $k") !== $ids("SELECT id FROM tot ORDER BY n + 0 DESC LIMIT $k")) { $mal[] = "índice LIMIT $k"; }
+    }
+    if ($bd->consultar('SELECT MIN(n) AS a, MAX(n) AS b FROM tot') !== $bd->consultar('SELECT MIN(n + 0) AS a, MAX(n + 0) AS b FROM tot')) { $mal[] = 'índice MIN/MAX'; }
+    $bd->consultar('DROP TABLE tot');
+    return $mal === [] ?: implode(' | ', array_slice($mal, 0, 8));
+});
+
 echo "\n== Log ==\n";
 chk('el log registra sql, filas e ip', function () use ($raiz, $base) {
     $dir = $raiz . '/logs';
     if (!defined('JSONSQLDB_LOG_ACTIVO')) {
         define('JSONSQLDB_LOG_ACTIVO', true);
         define('JSONSQLDB_LOG_PATH', $dir);
+        define('JSONSQLDB_LOG_NIVEL', 'todo');       // también las lecturas: por defecto, solo escrituras y errores
     }
     JsonSQLDB\Logger::contexto('prueba', '10.0.0.9');
     $bd2 = new Database($base, $raiz);
     $bd2->consultar('SELECT nombre FROM usuarios LIMIT 2');
-    try { $bd2->consultar('SELECT * FROM noexiste'); } catch (JsonSqlDbError $e) {}
+    try { $bd2->consultar('SELECT * FROM noexiste'); } catch (JsonSqlDbError) {}
 
     $fichero = $dir . '/consultas-' . date('Y-m-d') . '.json';
     if (!is_file($fichero)) { return 'no se creó el fichero de log'; }
@@ -1066,6 +1293,16 @@ chk('el log registra sql, filas e ip', function () use ($raiz, $base) {
     return $a['op'] === 'SELECT' && $a['rows'] === 2 && $a['ip'] === '10.0.0.9'
         && $a['origen'] === 'prueba' && $a['error'] === null
         && str_contains((string)$b['error'], 'SCHEMA');
+});
+chk('tras un SELECT fila a fila, el siguiente SELECT del mismo objeto registra sus filas, no las de aquel (2.9)', function () use ($raiz, $base) {
+    $bd2 = new Database($base, $raiz);
+    // Con RANDOM(), que no se guarda en la caché de resultados: de ella, las
+    // filas vendrían enteras y no una a una (ver consultarPorFilas())
+    $n   = $bd2->consultarPorFilas('SELECT nombre FROM usuarios WHERE RANDOM() IS NOT NULL LIMIT 3', [], null, static function (): void {});
+    $bd2->consultar('SELECT nombre FROM usuarios LIMIT 1');
+    $lineas = array_filter(explode("\n", (string)file_get_contents($raiz . '/logs/consultas-' . date('Y-m-d') . '.json')));
+    $u = json_decode((string)array_pop($lineas), true);
+    return $n === 3 && $u['rows'] === 1 ?: [$n, $u['rows'] ?? null];
 });
 
 echo "\n== Limpieza ==\n";

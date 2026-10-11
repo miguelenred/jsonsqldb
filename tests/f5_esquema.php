@@ -15,6 +15,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageLectura;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f5';
 $ok = 0; $ko = 0;
@@ -24,6 +25,7 @@ function chk(string $titulo, callable $fn): void {
     try {
         $r = $fn();
         if ($r === true) { $ok++; echo "  OK   $titulo\n"; }
+        elseif ($r === null) { echo "  --   $titulo (se salta: falta la extensión)\n"; }
         else { $ko++; echo "  FALLO $titulo -> " . var_export($r, true) . "\n"; }
     } catch (Throwable $e) {
         global $ko; $ko++;
@@ -78,7 +80,7 @@ chk('SHOW DATABASES', function () use ($bd) {
     sort($b);
     return $b === ['otra', 'tienda'];
 });
-chk('CREATE y DROP DATABASE por SQL', function () use ($bd, $raiz) {
+chk('CREATE y DROP DATABASE por SQL', function () use ($bd) {
     $bd->consultar('CREATE DATABASE nueva');
     $hay = fn() => in_array('nueva', array_column($bd->consultar('SHOW DATABASES'), 'base'), true);
     $creada = $hay();
@@ -190,6 +192,27 @@ chk('NULL no impide añadir la FK', function () use ($bd) {
     return count($bd->consultar('SHOW KEYS FROM notas')) === 2;
 });
 
+chk('ADD COLUMN y MODIFY guardan el CHECK y el REFERENCES de la columna, y las filas que hay los cumplen (2.9: se perdían sin avisar)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE padre (id INTEGER PRIMARY KEY)');
+    $bd->consultar('INSERT INTO padre VALUES (1)');
+    $bd->consultar('CREATE TABLE hijo (id INTEGER PRIMARY KEY)');
+    $bd->consultar('INSERT INTO hijo VALUES (1), (2)');
+    $r = [];
+    foreach (['ALTER TABLE hijo ADD COLUMN a INTEGER DEFAULT 1 CHECK (a > 5)', 'ALTER TABLE hijo ADD COLUMN b INTEGER DEFAULT 2 REFERENCES padre (id)',
+              'ALTER TABLE hijo ADD COLUMN c INTEGER DEFAULT 1 UNIQUE', 'ALTER TABLE hijo ADD COLUMN d INTEGER DEFAULT 7 CHECK (d > 5)',
+              'ALTER TABLE hijo ADD COLUMN e INTEGER DEFAULT 1 REFERENCES padre (id)', 'ALTER TABLE hijo MODIFY d INTEGER CHECK (d < 7)',
+              'ALTER TABLE hijo ADD COLUMN g INTEGER', 'ALTER TABLE hijo MODIFY g INTEGER REFERENCES padre (id)',
+              'INSERT INTO hijo (id, d) VALUES (3, 1)', 'INSERT INTO hijo (id, d, e) VALUES (3, 6, 9)', 'INSERT INTO hijo (id, d, g) VALUES (3, 6, 9)',
+              'INSERT INTO hijo (id, d, e, g) VALUES (3, 6, 1, 1)'] as $q) {
+        try { $bd->consultar($q); $r[] = 'ok'; } catch (JsonSqlDbError $e) { $r[] = $e->sqlState; }
+    }
+    $cols = array_column($bd->consultar('SHOW COLUMNS FROM hijo'), 'columna');
+    $bd->consultar('DROP TABLE hijo');
+    $bd->consultar('DROP TABLE padre');
+    return $r === ['CONSTRAINT', 'CONSTRAINT', 'CONSTRAINT', 'ok', 'ok', 'CONSTRAINT', 'ok', 'ok', 'CONSTRAINT', 'CONSTRAINT', 'CONSTRAINT', 'ok']
+        && $cols === ['id', 'd', 'e', 'g'] ?: json_encode([$r, $cols]);
+});
+
 echo "\n== Borrar una columna no deja rastro ==\n";
 chk('el autoincremento se va con su columna', function () use ($bd, $raiz) {
     $bd->consultar('CREATE TABLE rastro (id INTEGER PRIMARY KEY AUTOINCREMENT, a VARCHAR(10))');
@@ -198,7 +221,7 @@ chk('el autoincremento se va con su columna', function () use ($bd, $raiz) {
     $meta = json_decode((string)file_get_contents("$raiz/tienda/rastro.meta.json"), true);
     return !array_key_exists('autoincrement', $meta) ?: $meta['autoincrement'];
 });
-chk('la columna desaparece también de las filas', function () use ($bd, $raiz) {
+chk('la columna desaparece también de las filas', function () use ($raiz) {
     $datos = json_decode((string)file_get_contents("$raiz/tienda/rastro.json"), true);
     return !array_key_exists('id', $datos['rows'][0] ?? ['id' => 1]);
 });
@@ -687,7 +710,7 @@ chk('lo que pone SET NEW pasa las mismas comprobaciones: NOT NULL, únicos y cla
     END");
     $mal = [];
     foreach ([2 => 'NULL', 3 => 'UNIQUE'] as $id => $que) {
-        try { $bd->consultar("INSERT INTO snn VALUES ($id, 'b', 'Y$id')"); $mal[] = "$que aceptado"; } catch (JsonSQLDB\JsonSqlDbError $e) { }
+        try { $bd->consultar("INSERT INTO snn VALUES ($id, 'b', 'Y$id')"); $mal[] = "$que aceptado"; } catch (JsonSQLDB\JsonSqlDbError) { }
     }
     $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM snn')[0]['n'];
     $bd->consultar('DROP TABLE snn');
@@ -736,7 +759,7 @@ chk('SET NEW solo se admite en BEFORE INSERT y BEFORE UPDATE, y solo sobre NEW',
               "CREATE TRIGGER x2 BEFORE DELETE ON prod BEGIN SET NEW.tramo = 'x'; END",
               "CREATE TRIGGER x3 BEFORE INSERT ON prod BEGIN SET OLD.tramo = 'x'; END",
               "CREATE TRIGGER x4 BEFORE INSERT ON prod BEGIN IF NEW.id > 0 THEN SET NEW.tramo = 'x'; END"] as $sql) {
-        try { $bd->consultar($sql); $mal[] = $sql; } catch (JsonSQLDB\JsonSqlDbError $e) { }
+        try { $bd->consultar($sql); $mal[] = $sql; } catch (JsonSQLDB\JsonSqlDbError) { }
     }
     $bd->consultar('DROP TABLE prod');
     $bd->consultar('DROP TABLE avisos');
@@ -748,10 +771,16 @@ echo "\n== Caché de resultados ==\n";
 chk('una consulta repetida se sirve de la caché y una escritura la invalida', function () use ($raiz) {
     $dir = "$raiz/rc";
     @mkdir($dir, 0775, true);
+    if (is_dir("$dir/c")) { Database::borrar('c', $dir); }
     Database::crear('c', $dir);
     $bd = new Database('c', $dir);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a VARCHAR(10), n INTEGER)');
     $bd->consultar("INSERT INTO t VALUES (1,'x',5),(2,'y',7),(3,'z',9)");
+    // Relleno con n = 0, que no cambia ningún resultado de abajo: la consulta
+    // tiene que costar al menos 1 ms para que se guarde (2.9)
+    $v = [];
+    for ($i = 4; $i <= 20000; $i++) { $v[] = "($i,'r',0)"; }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
     $bd->consultar('CREATE VIEW v AS SELECT a FROM t WHERE n > 6');
     $sql = 'SELECT * FROM t WHERE n > ?';
 
@@ -786,6 +815,141 @@ chk('una consulta repetida se sirve de la caché y una escritura la invalida', f
     Database::borrar('c', $dir);
     @rmdir($dir);
     return true;
+});
+chk("'now' en cualquier función de fechas, o como parámetro, no sale de la caché de resultados (2.9: solo se miraba en DATE() y compañía)", function () use ($raiz) {
+    $dir = "$raiz/rc5";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/c")) { Database::borrar('c', $dir); }
+    Database::crear('c', $dir);
+    $bd = new Database('c', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)');
+    $v = [];
+    for ($i = 1; $i <= 20000; $i++) { $v[] = "($i, 'r')"; }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    $repetidas = [];
+    // Cada una cuesta más de 1 ms (recorre la tabla) y su resultado cambia cada microsegundo
+    foreach (["SELECT COUNT(*) AS n, DATE_FORMAT('now', '%f') AS f FROM t WHERE a LIKE '%y%'" => [],
+              "SELECT COUNT(*) AS n, TIMESTAMPDIFF(MICROSECOND, '2020-01-01', ' NOW ') AS f FROM t WHERE a LIKE '%y%'" => [],
+              "SELECT COUNT(*) AS n, DATE_FORMAT(?, '%f') AS f FROM t WHERE a LIKE '%y%'" => ['now']] as $sql => $p) {
+        $a = $bd->consultar($sql, $p);
+        usleep(2000);
+        if ($bd->consultar($sql, $p) === $a) { $repetidas[] = $sql; }
+    }
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    return $repetidas === [] ?: json_encode($repetidas);
+});
+chk('una consulta que cuesta menos de 1 ms no se guarda en la caché de resultados (2.9)', function () use ($raiz) {
+    $dir = "$raiz/rc2";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/c")) { Database::borrar('c', $dir); }
+    Database::crear('c', $dir);
+    $bd = new Database('c', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a VARCHAR(10))');
+    $bd->consultar("INSERT INTO t VALUES (1,'x'),(2,'y')");
+    // Con la máquina cargada, una vez puede costar más: basta con que alguna no se guarde
+    for ($i = 0, $n = 1; $i < 5 && $n > 0; $i++) {
+        array_map('unlink', glob("$dir/c/.cache/q.*.cache") ?: []);
+        $bd->consultar('SELECT a FROM t WHERE id = 1');
+        $n = count(glob("$dir/c/.cache/q.*.cache") ?: []);
+    }
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    return $n === 0 ?: "se guardaron $n";
+});
+chk('en disco no se guarda un resultado de más de 1 MB, ni uno que no lee ninguna tabla (2.9: una clave de lectura llenaba el disco)', function () use ($raiz) {
+    if (function_exists('apcu_enabled') && apcu_enabled()) { return true; }   // con APCu no van al disco
+    $dir = "$raiz/rc4";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/c")) { Database::borrar('c', $dir); }
+    Database::crear('c', $dir);
+    $bd = new Database('c', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)');
+    $v = [];
+    for ($i = 1; $i <= 2000; $i++) { $v[] = "($i, '" . str_repeat('x', 1000) . "')"; }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    $cuantos = static fn(): int => count(glob("$dir/c/.cache/q.*.cache") ?: []);
+    $bd->consultar('SELECT * FROM t');                                                    // unos 2 MB
+    $grande = $cuantos();
+    $bd->consultar('WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 20000) SELECT COUNT(*) AS n FROM c');
+    $sinTablas = $cuantos();
+    $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE a LIKE '%y%'");                    // cuesta, y es pequeño: este sí
+    $normal = $cuantos();
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    return [$grande, $sinTablas, $normal] === [0, 0, 1] ?: json_encode([$grande, $sinTablas, $normal]);
+});
+chk('dos resultados que caen en el mismo sitio no se confunden, y nunca hay más de 4.096 ficheros por tablas (2.9)', function () use ($raiz) {
+    $dir = "$raiz/rc3";
+    @mkdir($dir, 0775, true);
+    if (is_dir("$dir/c")) { Database::borrar('c', $dir); }
+    Database::crear('c', $dir);
+    (new Database('c', $dir))->consultar('CREATE TABLE t (x INTEGER)');
+    $st = new Storage($dir, 'c');
+    $st->bloquear(false);
+    $base = substr(StorageLectura::claveResultado($st, ['t'], 'x', []), 0, -32);
+    // Dos claves que acaban igual: van al mismo fichero
+    $k1 = $base . str_repeat('a', 29) . 'abc';
+    $k2 = $base . str_repeat('b', 29) . 'abc';
+    StorageLectura::guardarResultado($st, $k1, ['t'], [['uno' => 1]]);
+    $pisada = [StorageLectura::resultadoCacheado($st, $k1, ['t']), StorageLectura::resultadoCacheado($st, $k2, ['t'])];
+    StorageLectura::guardarResultado($st, $k2, ['t'], [['dos' => 2]]);
+    $pisada[] = StorageLectura::resultadoCacheado($st, $k1, ['t']);
+    $pisada[] = StorageLectura::resultadoCacheado($st, $k2, ['t']);
+    for ($i = 0; $i < 5000; $i++) { StorageLectura::guardarResultado($st, $base . md5((string)$i), ['t'], [['i' => $i]]); }
+    $ficheros = count(glob("$dir/c/.cache/q.*.cache") ?: []);
+    $st->desbloquear();
+    unset($st);
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    $conApcu = function_exists('apcu_enabled') && apcu_enabled();
+    return $pisada === [[['uno' => 1]], null, null, [['dos' => 2]]] && ($conApcu || ($ficheros > 0 && $ficheros <= 4096))
+        ?: json_encode([$pisada, $ficheros]);
+});
+
+chk('redefinir una vista con el mismo nombre no sirve el resultado de la vieja', function () use ($raiz) {
+    $dir = "$raiz/rv";
+    @mkdir($dir, 0775, true);
+    Database::crear('c', $dir);
+    $bd = new Database('c', $dir);
+    $bd->consultar('CREATE TABLE a (id INTEGER PRIMARY KEY, v INTEGER)');
+    $bd->consultar('INSERT INTO a VALUES (1, 10), (2, 20), (3, 30)');
+    $bd->consultar('CREATE VIEW vv AS SELECT id, v FROM a WHERE v > 5');
+    $antes = $bd->consultar('SELECT * FROM vv ORDER BY id');
+    $bd->consultar('DROP VIEW vv');
+    $bd->consultar('CREATE VIEW vv AS SELECT id, v FROM a WHERE v > 25');
+    $despues = $bd->consultar('SELECT * FROM vv ORDER BY id');
+    // Y la misma definición otra vez sí se sirve de la caché (no se pierde)
+    $bd->consultar('DROP VIEW vv');
+    $bd->consultar('CREATE VIEW vv AS SELECT id, v FROM a WHERE v > 5');
+    $otraVez = $bd->consultar('SELECT * FROM vv ORDER BY id');
+    unset($bd);
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    return count($antes) === 3 && $despues === [['id' => 3, 'v' => 30]] && $otraVez === $antes ?: json_encode($despues);
+});
+chk('cambiar la colación en la configuración no sirve resultados ordenados con la anterior', function () use ($raiz) {
+    $dir = "$raiz/rcol";
+    @mkdir($dir, 0775, true);
+    Database::crear('c', $dir);
+    $bd = new Database('c', $dir);
+    $bd->consultar('CREATE TABLE t (s TEXT)');
+    $bd->consultar("INSERT INTO t VALUES ('avila'), ('Ávila'), ('Zapata'), ('M'), ('oscar')");
+    unset($bd);
+    // Dos procesos, cada uno con su colación, sobre la misma caché en disco
+    $script = $raiz . '/colacion.php';
+    file_put_contents($script, '<?php define("JSONSQLDB_COLACION", $argv[1]); define("JSONSQLDB_CONEXION_DIRECTA", true);'
+        . ' define("JSONSQLDB_CACHE_ACTIVA", true);'
+        . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . ' echo json_encode(array_column((new JsonSQLDB\\Database("c", ' . var_export($dir, true) . '))->consultar("SELECT s FROM t ORDER BY s"), "s"), JSON_UNESCAPED_UNICODE);');
+    $correr = static fn(string $c): string => (string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($script) . ' ' . $c);
+    $general = $correr('general');
+    $binaria = $correr('binaria');
+    @unlink($script);
+    Database::borrar('c', $dir);
+    @rmdir($dir);
+    return $general === '["avila","Ávila","M","oscar","Zapata"]' && $binaria === '["M","Zapata","avila","oscar","Ávila"]'
+        ?: "$general / $binaria";
 });
 
 echo "\n== CREATE TABLE … AS SELECT ==\n";
@@ -850,12 +1014,182 @@ chk('limpieza de las tablas de CREATE TABLE … AS', function () use ($bd) {
     return true;
 });
 
+echo "\n== Claves, nombres y estructura (2.9) ==\n";
+/** Cada sentencia en una base nueva: lo que devuelve, o 'error: mensaje' */
+function enBaseNueva(string $raiz, array $sentencias): array {
+    $nombre = 'nueva' . getmypid();
+    Database::crear($nombre, $raiz);
+    $b = new Database($nombre, $raiz);
+    $r = [];
+    foreach ($sentencias as $q) {
+        try { $x = $b->consultar($q); $r[] = isset($x['success']) ? 'ok' : $x; } catch (JsonSqlDbError $e) { $r[] = 'error: ' . $e->getMessage(); }
+    }
+    Database::borrar($nombre, $raiz);
+    return $r;
+}
+chk("ADD UNIQUE, ADD PRIMARY KEY, ADD FOREIGN KEY y REPAIR KEYS comparan las claves como al escribir: '5' y '05' son la misma (2.9: REPAIR KEYS ponía a NULL una hija que sí tenía su fila)", function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE p (code TEXT PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, pcode TEXT REFERENCES p (code))',
+        "INSERT INTO p VALUES ('5')", "INSERT INTO h VALUES (1, '05')",
+        'REPAIR KEYS', 'SELECT pcode FROM h', 'CHECK KEYS',
+        'CREATE TABLE t (code TEXT, n INTEGER)', "INSERT INTO t VALUES ('5', 1), ('05', 2)",
+        'ALTER TABLE t ADD UNIQUE (code)', 'ALTER TABLE t ADD PRIMARY KEY (code)', 'ALTER TABLE t ADD UNIQUE (code, n)',
+        'CREATE TABLE h2 (id INTEGER PRIMARY KEY, pcode TEXT)', "INSERT INTO h2 VALUES (1, '5.0')",
+        'ALTER TABLE h2 ADD FOREIGN KEY (pcode) REFERENCES p (code)',
+        "INSERT INTO h2 VALUES (2, '6')",
+        'ALTER TABLE h2 DROP FOREIGN KEY fk_h2_pcode', "INSERT INTO h2 VALUES (3, '6')", 'ALTER TABLE h2 ADD FOREIGN KEY (pcode) REFERENCES p (code)',
+    ]);
+    return $r[4] === 'ok' && $r[5] === [['pcode' => '05']] && $r[6] === []
+        && $r[9] === 'error: Los datos de \'t\' repiten el valor ("05") en (code)'
+        && $r[10] === 'error: Los datos de \'t\' repiten el valor ("05") en (code)' && $r[11] === 'ok'
+        && $r[14] === 'ok' && str_starts_with((string)$r[15], 'error:') && $r[17] === 'ok'
+        && $r[18] === 'error: Los datos de \'h2\' apuntan a ("6") y no existe en \'p\'' ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('ADD COLUMN … PRIMARY KEY DEFAULT x en una tabla de dos filas o más es un error, como UNIQUE: todas tendrían la misma clave (2.9); con una clave primaria ya puesta, se suma a ella', function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE t (a TEXT)', "INSERT INTO t VALUES ('x'), ('y')",
+        'ALTER TABLE t ADD COLUMN id INTEGER PRIMARY KEY DEFAULT 0', 'SELECT * FROM t ORDER BY a',
+        'CREATE TABLE u (a TEXT PRIMARY KEY)', "INSERT INTO u VALUES ('x'), ('y')",
+        'ALTER TABLE u ADD COLUMN b INTEGER PRIMARY KEY DEFAULT 0', "INSERT INTO u VALUES ('x', 1)", "INSERT INTO u VALUES ('x', 0)",
+        'CREATE TABLE v (a TEXT)', "INSERT INTO v VALUES ('x')", 'ALTER TABLE v ADD COLUMN id INTEGER PRIMARY KEY DEFAULT 7', 'SELECT * FROM v',
+    ]);
+    return $r[2] === 'error: Los datos de \'t\' repetirían el valor 0 en (id)' && $r[3] === [['a' => 'x'], ['a' => 'y']]
+        && $r[6] === 'ok' && $r[7] === 'ok' && str_starts_with((string)$r[8], 'error: Valor duplicado')
+        && $r[11] === 'ok' && $r[12] === [['a' => 'x', 'id' => 7]] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('RENAME TO no acepta el nombre de una vista, ni deja sin su tabla a una vista o a un trigger que la usan: lo dice y no cambia nada (2.9)', function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE a (x INTEGER)', 'CREATE TABLE b (y INTEGER)', 'CREATE TABLE c (z INTEGER)', 'CREATE VIEW v AS SELECT * FROM c',
+        'ALTER TABLE a RENAME TO v',                                                         // 4
+        'CREATE TRIGGER tb AFTER INSERT ON b BEGIN INSERT INTO a VALUES (NEW.y); END',
+        'ALTER TABLE a RENAME TO a2', 'INSERT INTO b VALUES (1)', 'SELECT * FROM a',          // 6, 7, 8
+        'ALTER TABLE c RENAME TO c2', 'SELECT * FROM v',                                     // 9, 10
+        "CREATE TRIGGER tc AFTER INSERT ON c BEGIN SELECT RAISE(ABORT, 'no') WHERE NEW.z < 0; END",
+        'DROP VIEW v', 'ALTER TABLE c RENAME TO c2', 'INSERT INTO c2 VALUES (1)', 'SELECT * FROM c2', // 13: sus propios triggers no la nombran
+    ]);
+    $bien = str_contains((string)$r[4], "Ya existe una vista llamada 'v'")
+        && str_contains((string)$r[6], "el trigger 'tb' de 'b' la usa") && $r[7] === 'ok' && $r[8] === [['x' => 1]]
+        && str_contains((string)$r[9], "la vista 'v' la usa") && $r[10] === []
+        && $r[13] === 'ok' && $r[14] === 'ok' && $r[15] === [['z' => 1]];
+    return $bien ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('RENAME TO tampoco se hace si el SET NEW, el WHEN o el IF de un trigger leen la tabla (2.9)', function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE a (x INTEGER)', 'CREATE TABLE b (y INTEGER)',
+        "CREATE TRIGGER t1 BEFORE INSERT ON b BEGIN SET NEW.y = (SELECT MAX(x) FROM a); END", 'ALTER TABLE a RENAME TO a2', 'DROP TRIGGER t1',
+        "CREATE TRIGGER t2 AFTER INSERT ON b WHEN EXISTS (SELECT 1 FROM a) BEGIN SELECT 1; END", 'ALTER TABLE a RENAME TO a2', 'DROP TRIGGER t2',
+        "CREATE TRIGGER t3 AFTER INSERT ON b BEGIN IF (SELECT COUNT(*) FROM a) > 0 THEN SELECT 1; END IF; END", 'ALTER TABLE a RENAME TO a2', 'DROP TRIGGER t3',
+        'ALTER TABLE a RENAME TO a2',
+    ]);
+    return str_contains((string)$r[3], "'t1'") && str_contains((string)$r[6], "'t2'") && str_contains((string)$r[9], "'t3'") && $r[11] === 'ok'
+        ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('una clave única no puede llamarse como otra de otras columnas, tampoco como la de una UNIQUE de columna (uq_<tabla>_<columna>): una de las dos dejaba de comprobarse (2.9)', function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, x TEXT UNIQUE, y TEXT, CONSTRAINT uq_t_x UNIQUE (y))',
+        'CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT, y TEXT, CONSTRAINT u1 UNIQUE (x), CONSTRAINT U1 UNIQUE (y))',
+        'CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT UNIQUE, y TEXT)',
+        'ALTER TABLE t ADD CONSTRAINT uq_t_x UNIQUE (y)', 'ALTER TABLE t ADD CONSTRAINT PRIMARY UNIQUE (y)',
+        "INSERT INTO t VALUES (1, 'a', 'p')", "INSERT INTO t VALUES (2, 'a', 'q')",
+        // Con las mismas columnas sobra, pero no estorba: se admite como siempre
+        'CREATE TABLE s (x TEXT UNIQUE, UNIQUE (x))', "INSERT INTO s VALUES ('a')", "INSERT INTO s VALUES ('a')",
+    ]);
+    return $r[0] === "error: Ya existe una restricción llamada 'uq_t_x' en 't'" && $r[1] === "error: Ya existe una restricción llamada 'U1' en 't'"
+        && $r[3] === "error: Ya existe una restricción llamada 'uq_t_x' en 't'" && $r[4] === "error: Ya existe una restricción llamada 'PRIMARY' en 't'"
+        && str_starts_with((string)$r[6], 'error: Valor duplicado') && $r[7] === 'ok' && str_starts_with((string)$r[9], 'error: Valor duplicado')
+        ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('un valor de ENUM de más de 40 caracteres se puede guardar (2.9: se comparaba recortado y no entraba nunca)', function () use ($raiz) {
+    $largo = str_repeat('a', 30) . str_repeat('b', 20);
+    $r = enBaseNueva($raiz, [
+        "CREATE TABLE e (v ENUM('$largo', 'corto'))", "INSERT INTO e VALUES ('" . strtoupper($largo) . "')",
+        "INSERT INTO e VALUES ('" . substr($largo, 0, 45) . "')", 'SELECT v FROM e',
+    ]);
+    return $r[1] === 'ok' && str_starts_with((string)$r[2], 'error:') && $r[3] === [['v' => $largo]] ?: json_encode($r);
+});
+chk('CREATE TABLE … AS SELECT guarda cada valor con el tipo de su columna: los números de una columna de texto, como texto, y los enteros de una DOUBLE, como número decimal (2.9)', function () use ($raiz) {
+    $nombre = 'ctas' . getmypid();
+    Database::crear($nombre, $raiz);
+    $b = new Database($nombre, $raiz);
+    $b->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, n VARCHAR(5))');
+    $b->consultar("INSERT INTO t VALUES (1, 'a'), (2, NULL), (3, '7')");
+    $b->consultar("CREATE TABLE t2 AS SELECT id, n, CASE WHEN id = 1 THEN 'x' ELSE id END AS mix, CASE WHEN id = 1 THEN 1.5 ELSE id END AS d, id = 2 AS b FROM t");
+    $filas = $b->consultar('SELECT * FROM t2 ORDER BY id');
+    $tipos = array_column($b->consultar('SHOW SCHEMA t2'), 'tipo', 'columna');
+    $texto = (string)file_get_contents("$raiz/$nombre/t2.json");
+    Database::borrar($nombre, $raiz);
+    return $tipos === ['id' => 'INTEGER', 'n' => 'TEXT', 'mix' => 'TEXT', 'd' => 'DOUBLE', 'b' => 'INTEGER']
+        && $filas === [['id' => 1, 'n' => 'a', 'mix' => 'x', 'd' => 1.5, 'b' => 0], ['id' => 2, 'n' => null, 'mix' => '2', 'd' => 2.0, 'b' => 1],
+                       ['id' => 3, 'n' => '7', 'mix' => '3', 'd' => 3.0, 'b' => 0]]
+        && str_contains($texto, '"mix":"2","d":2.0') ?: json_encode([$tipos, $filas, $texto]);
+});
+chk('ADD UNIQUE mira los repetidos al construir su índice, en la misma pasada: entre partes, con un índice ya hecho sobre las mismas columnas y sin índices (2.9)', function () use ($raiz) {
+    $v = [];
+    for ($i = 1; $i <= 1200; $i++) {
+        $v[] = "($i, 'v$i')";
+    }
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE t (id INTEGER PRIMARY KEY, c TEXT)', 'INSERT INTO t VALUES ' . implode(',', $v),
+        "UPDATE t SET c = 'v7' WHERE id = 1150",               // la repetida, en otra parte
+        'ALTER TABLE t ADD UNIQUE (c)', "INSERT INTO t VALUES (2000, 'v2000')",
+        "UPDATE t SET c = 'v1150' WHERE id = 1150", 'CREATE INDEX ix_c ON t (c)', "UPDATE t SET c = 'v9' WHERE id = 10",
+        'ALTER TABLE t ADD UNIQUE (c)',                        // ya hay un índice en (c): se rehace mirando
+        "UPDATE t SET c = 'v10' WHERE id = 10", 'ALTER TABLE t ADD UNIQUE (c)', "INSERT INTO t VALUES (2001, 'v1')",
+    ]);
+    // Sin índices (JSONSQLDB_INDICES = false), por la pasada aparte
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_INDICES", false);'
+        . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . ' $d = ' . var_export($raiz, true) . '; JsonSQLDB\Database::crear("sinidx", $d); $b = new JsonSQLDB\Database("sinidx", $d);'
+        . ' $b->consultar("CREATE TABLE t (c TEXT)"); $b->consultar("INSERT INTO t VALUES (\'a\'), (\'b\'), (\'a\')");'
+        . ' try { $b->consultar("ALTER TABLE t ADD UNIQUE (c)"); echo "sin error"; } catch (Throwable $e) { echo $e->getMessage(); }'
+        . ' JsonSQLDB\Database::borrar("sinidx", $d);';
+    $sin = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $rep = static fn(string $x): string => "error: Los datos de 't' repiten el valor (\"$x\") en (c)";
+    return $r[3] === $rep('v7') && $r[4] === 'ok' && $r[8] === $rep('v9') && $r[10] === 'ok' && str_starts_with((string)$r[11], 'error: Valor duplicado')
+        && $sin === "Los datos de 't' repiten el valor (\"a\") en (c)" ?: json_encode([$r, $sin], JSON_UNESCAPED_UNICODE);
+});
+chk('CREATE TRIGGER no acepta NEW en un trigger DELETE ni OLD en uno INSERT, en el cuerpo, el WHEN, un IF o un SET NEW, como MySQL (2.9: el error salía en cada escritura)', function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE t (a INTEGER)', 'CREATE TABLE lg (v INTEGER)',
+        'CREATE TRIGGER x1 AFTER DELETE ON t BEGIN INSERT INTO lg VALUES (NEW.a); END',
+        'CREATE TRIGGER x2 AFTER INSERT ON t BEGIN INSERT INTO lg VALUES (old.a); END',
+        'CREATE TRIGGER x3 AFTER INSERT ON t WHEN OLD.a > 1 BEGIN INSERT INTO lg VALUES (1); END',
+        'CREATE TRIGGER x4 BEFORE DELETE ON t BEGIN IF NEW.a > 1 THEN SELECT 1; END IF; END',
+        'CREATE TRIGGER x5 BEFORE INSERT ON t BEGIN SET NEW.a = OLD.a + 1; END',
+        'CREATE TRIGGER x6 AFTER DELETE ON t BEGIN DELETE FROM lg WHERE v IN (SELECT a FROM t WHERE a = NEW.a); END',
+        // Los que sí valen
+        'CREATE TRIGGER b1 AFTER UPDATE ON t WHEN NEW.a > OLD.a BEGIN INSERT INTO lg VALUES (NEW.a - OLD.a); END',
+        'CREATE TRIGGER b2 AFTER DELETE ON t BEGIN INSERT INTO lg VALUES (OLD.a); END',
+        'CREATE TRIGGER b3 BEFORE INSERT ON t BEGIN SET NEW.a = NEW.a * 10; END',
+        'INSERT INTO t VALUES (1)', 'UPDATE t SET a = 15', 'DELETE FROM t', 'SELECT v FROM lg ORDER BY v', 'SHOW TRIGGERS',
+    ]);
+    $mal = [];
+    foreach ([2 => 'NEW', 3 => 'OLD', 4 => 'OLD', 5 => 'NEW', 6 => 'OLD', 7 => 'NEW'] as $i => $cual) {
+        if (!str_contains((string)$r[$i], "$cual no está disponible")) { $mal[] = $r[$i]; }
+    }
+    return $mal === [] && $r[11] === 'ok' && $r[14] === [['v' => 5], ['v' => 15]] && count($r[15]) === 3 ?: json_encode([$mal, $r], JSON_UNESCAPED_UNICODE);
+});
+
+chk('CREATE TRIGGER rechaza en su cuerpo lo que un trigger no puede hacer (DDL, SHOW, ANALYZE), también dentro de un IF (2.9: el error salía en cada escritura)', function () use ($raiz) {
+    $r = enBaseNueva($raiz, [
+        'CREATE TABLE t (a INTEGER)', 'CREATE TABLE lg (v INTEGER)',
+        'CREATE TRIGGER x1 AFTER INSERT ON t BEGIN DROP TABLE lg; END',
+        'CREATE TRIGGER x2 AFTER INSERT ON t BEGIN IF NEW.a > 1 THEN CREATE TABLE z (b INTEGER); END IF; END',
+        'CREATE TRIGGER x3 AFTER INSERT ON t BEGIN SHOW TABLES; END',
+        'CREATE TRIGGER x4 AFTER INSERT ON t BEGIN ANALYZE; END',
+        'CREATE TRIGGER b1 AFTER INSERT ON t BEGIN SELECT 1; INSERT INTO lg VALUES (NEW.a); UPDATE lg SET v = v + 1; END',
+        'INSERT INTO t VALUES (4)', 'SELECT v FROM lg', 'SHOW TRIGGERS',
+    ]);
+    $mal = array_filter(array_slice($r, 2, 4), fn($x) => !str_contains((string)$x, 'solo puede hacer INSERT, UPDATE, DELETE o SELECT'));
+    return $mal === [] && $r[6] === 'ok' && $r[8] === [['v' => 5]] && count($r[9]) === 1 ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+
 echo "\n== Limpieza ==\n";
 chk('borrar las bases de prueba', function () use ($raiz) {
     Storage::borrarBase($raiz, 'tienda');
     Storage::borrarBase($raiz, 'otra');
-    @rmdir($raiz);
-    return !is_dir("$raiz/tienda");
+    clearstatcache();
+    return @rmdir($raiz) && !is_dir($raiz) ?: 'quedan: ' . implode(',', array_diff((array)scandir($raiz), ['.', '..']));
 });
 
 echo "\n---------------------------------------\n";

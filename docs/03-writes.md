@@ -17,8 +17,11 @@ $db->consultar("INSERT INTO customers (name, email) VALUES ('Ana', 'ana@x.es')")
 
 A write to one table takes that table's **exclusive lock**; reads of other
 tables and writes to other tables carry on meanwhile. A write that can reach
-other tables (foreign keys, triggers) locks that group, and structure changes
-lock the whole database. See [01-core.md §3](01-core.md).
+other tables (foreign keys, triggers that write to them) locks that group; one
+that reads other tables (`INSERT … SELECT`, a subquery, `UPDATE … FROM` or
+`JOIN`, `DELETE … USING`, or a trigger whose statements read another table,
+2.9), structure changes and transactions lock the whole database. See
+[01-core.md §3](01-core.md#3-concurrency-two-lock-levels).
 
 ## 2. Supported statements
 
@@ -30,6 +33,10 @@ INSERT INTO customers (name, city) VALUES ('Luis', 'Madrid'), ('María', 'Valenc
 INSERT INTO customers VALUES (100, 'Marta', 'marta@x.es', 25.5, 'Alicante', '2026-05-01');
 INSERT INTO customers (name, balance, city) VALUES ('Sara', 10 * 3 + 0.5, DEFAULT);
 INSERT INTO copy (name, city) SELECT name, city FROM customers WHERE city = 'Madrid';
+-- From MySQL (2.9): one row with SET, a row with all its defaults, and IGNORE (= OR IGNORE)
+INSERT INTO customers SET name = 'Eva', city = 'Elche';
+INSERT INTO log DEFAULT VALUES;
+INSERT IGNORE INTO customers (id, name) VALUES (1, 'Ana');
 ```
 
 ### Upsert: when the row already exists (2.8)
@@ -58,7 +65,9 @@ does: types, `NOT NULL`, the other unique keys, foreign keys and the table's
 `UPDATE` triggers. `OR REPLACE` deletes the rows it collides with applying their
 foreign key actions (`ON DELETE CASCADE`…), without `DELETE` triggers, as SQLite
 does by default. Rows with `NULL` in a unique key never collide. MySQL's
-`ON DUPLICATE KEY UPDATE` and `INSERT IGNORE` are translated on import.
+`INSERT IGNORE` and `ON DUPLICATE KEY UPDATE a = VALUES(a) + 1` are accepted as
+they are (2.9): they are `OR IGNORE` and `ON CONFLICT DO UPDATE`, with
+`VALUES(col)` being the proposed value (`excluded.col`).
 
 One difference with SQLite: after a collision, SQLite uses up a number of the
 `AUTOINCREMENT` counter even when the row is ignored, so its gaps can differ
@@ -89,6 +98,57 @@ DELETE FROM orders WHERE date < '2026-01-01';
 
 Without `WHERE` they affect the whole table.
 
+As in MySQL and SQLite (2.9), they take `ORDER BY` and `LIMIT n [OFFSET m]`
+after the `WHERE`: only those rows change, in that order (which is also the
+order their triggers fire in). `RETURNING` goes before or after them. A
+negative `LIMIT` means no limit.
+
+```sql
+UPDATE queue SET taken = 1 WHERE taken = 0 ORDER BY created LIMIT 10 RETURNING id;
+DELETE FROM log ORDER BY date LIMIT 1000;
+```
+
+The table can have an alias (2.9): `UPDATE customers AS c SET … WHERE c.id = 3`.
+
+#### With other tables (2.9)
+
+The rows to change, and the values, can come from other tables, in the forms
+of SQLite and PostgreSQL and in those of MySQL:
+
+```sql
+-- SQLite and PostgreSQL
+UPDATE stock SET qty = stock.qty - o.qty FROM orders o WHERE o.ref = stock.ref AND o.day = '2026-10-08';
+DELETE FROM sessions USING users u WHERE u.id = sessions.uid AND u.blocked = 1;
+-- MySQL
+UPDATE stock s JOIN orders o ON o.ref = s.ref SET s.qty = s.qty - o.qty WHERE o.day = '2026-10-08';
+DELETE s FROM sessions s JOIN users u ON u.id = s.uid WHERE u.blocked = 1;
+DELETE FROM sessions USING sessions JOIN users u ON u.id = sessions.uid WHERE u.blocked = 1;
+```
+
+- The join is computed once, with the `SELECT` engine and the data as it was
+  before the statement, and then each row of the table is written as usual:
+  `CHECK`, `NOT NULL`, unique and foreign keys, cascades, triggers and
+  `RETURNING` (only columns of that table) work as in any `UPDATE` or `DELETE`.
+  Subqueries, views, `LEFT JOIN` and the other joins can be used.
+- If a row matches several rows of the other tables, it is changed once, with
+  the **first** match of the join. SQLite and PostgreSQL say that which one is
+  used is not defined; MySQL also uses the first.
+- **One table is written.** In `UPDATE … JOIN … SET`, it is the table of the
+  columns written with their table in front (`SET s.qty = …`); if none has it,
+  the first one. Columns of two tables in the `SET`, or `DELETE t1, t2 FROM …`,
+  are an error that says so.
+- `ORDER BY` and `LIMIT` are not accepted with other tables (neither in MySQL).
+- The tables of the `FROM` and of the `JOIN` are joined by hash on the
+  equalities between their columns, as in a `SELECT`: changing 5,000 rows of a
+  table of 20,000 from another table takes 95 ms (the same with subqueries,
+  `SET x = (SELECT …) WHERE id IN (SELECT …)`, takes 14.7 s).
+
+`TRUNCATE TABLE t` (MySQL, 2.9) deletes all the rows without firing triggers
+and puts the `AUTOINCREMENT` counter back at 1; if another table has a foreign
+key to it, it is an error (use `DELETE FROM`), while a foreign key of the table
+to itself does not stop it, as in MySQL. It does not read the rows: the table
+is written empty, together with its structure, in a single write.
+
 When no index can answer the `WHERE`, they go through the table part by part
 and keep in memory only the rows that match (2.8): an `UPDATE` of a few rows of
 a large table does not load it whole. With triggers on the table, a foreign
@@ -113,14 +173,54 @@ CREATE TABLE IF NOT EXISTS orders (
   `DEFAULT value`, `REFERENCES table(col) [ON DELETE ...] [ON UPDATE ...]`.
 - Table constraints: `PRIMARY KEY (cols)` (composite keys allowed),
   `UNIQUE (cols)`, `FOREIGN KEY (cols) REFERENCES ...`, with `CONSTRAINT name`.
+  Two unique keys of a table cannot share a name, and that includes the names
+  the keys without one get: `PRIMARY` for the primary key and
+  `uq_<table>_<columns>` for an unnamed `UNIQUE` (`uq_t_a_b` for `(a, b)`;
+  2.9; before, one of the
+  two stopped being checked). The same name on the same columns is accepted,
+  as before.
+- `CHECK (expression)` on a column or on the table, `[CONSTRAINT name] CHECK
+  (...)` (2.9): every row written by `INSERT`, `UPDATE`, `UPSERT` or a cascade
+  must not make it false; `NULL` passes, as in SQLite and MySQL. No parameters
+  or subqueries in it. A column used in a `CHECK` cannot be dropped or renamed.
+  `ALTER TABLE t ADD [CONSTRAINT name] CHECK (…)` first checks the rows already
+  there; `ALTER TABLE t DROP CHECK name` (or `DROP CONSTRAINT name`) removes it.
+- `ENUM('a', 'b', …)` (2.9, from MySQL): a text that only takes those values,
+  matched without regard to case and stored as written in the list; with
+  `NOT NULL` and no `DEFAULT`, the first one is the default. Unlike MySQL, it
+  sorts as text, not by its position in the list.
 - One `AUTOINCREMENT` per table and only on `INTEGER`.
+- An integer primary key of one column without `AUTOINCREMENT`
+  (`id INTEGER PRIMARY KEY`) numbers itself as in SQLite (2.9): an `INSERT`
+  that leaves it out or gives `NULL` gets the largest id + 1, from its index.
+  The id of a deleted row that was the largest can come back; use
+  `AUTOINCREMENT` if an id must never be reused.
 - `DEFAULT` accepts a fixed value, `CURRENT_TIMESTAMP`, `CURRENT_DATE`,
   `CURRENT_TIME` or an expression in parentheses (`DEFAULT (upper('x'))`), as in
   SQLite (2.8). The latter are worked out each time a row is inserted (and with
   `UPDATE … SET col = DEFAULT`); they cannot use columns, subqueries or
   parameters, and a column with one cannot be added to a table that has rows.
   `CURRENT_TIMESTAMP` is the date and time of the server, like `DATETIME('now')`.
-- Not supported: `CHECK`, `COLLATE`, generated columns.
+- `SHOW CREATE TABLE t` and `SHOW CREATE VIEW v` (2.9) give the statement
+  that creates them as they are now (`tabla`/`vista` and `sql`), with a
+  `CREATE INDEX` for each index that does not come from a key: run in another
+  database, it makes the same structure.
+- `COLLATE NOCASE` or `COLLATE RTRIM` in a text column (2.9): how it compares,
+  also in its `UNIQUE`, its indexes and the foreign keys that point to it
+  ([Part 2](02-queries.md)).
+- Not supported: generated columns.
+- **From a MySQL dump** (2.9) it also accepts: `UNSIGNED` (a negative value is
+  an error, as in MySQL's strict mode; `SHOW COLUMNS` says it in `sin_signo`),
+  `COMMENT '…'` and `CHARACTER SET` on a column (they change nothing: here
+  everything is UTF-8 text in JSON), `KEY` / `INDEX` and `UNIQUE KEY` inside the
+  table (an index; a unique key), the types `TINYTEXT`, `MEDIUMTEXT`,
+  `LONGTEXT`, `JSON`, `BINARY`, `VARBINARY`, the `BLOB`s and `UUID` (text), `BIT`
+  and `YEAR` (integer), and the table options `ENGINE`, `DEFAULT CHARSET`,
+  `COLLATE`, `ROW_FORMAT` and `COMMENT` (accepted, they change nothing) and
+  `AUTO_INCREMENT = n` (the first number of the counter). `ZEROFILL`,
+  `ON UPDATE CURRENT_TIMESTAMP`, `FULLTEXT` and `SPATIAL` are errors that say
+  what to do instead. `CREATE TABLE t2 LIKE t` creates the same structure,
+  empty, with its `CHECK`s and without its foreign keys, as MySQL does.
 - **Column names** can have spaces or signs, as in SQLite (2.8): from 1 to 64
   characters, no control characters. Such a name is written between double
   quotes: `"unit price"`. Table, index and trigger names are letters, digits
@@ -141,17 +241,14 @@ with `ALTER TABLE` if you need them. `IF NOT EXISTS`, `WITH` and `UNION` work.
 - Any other takes its type from its values: `INTEGER` if they are all whole
   numbers, `DOUBLE` if there are decimals, `TEXT` if they are texts, all `NULL`
   or a mix of numbers and texts. SQLite leaves such a column without a type and
-  keeps each value as it is; here a column has one type, so in that mix the
-  numbers are stored as text.
+  keeps each value as it is; here a column has one type, and each value is
+  stored converted to it: in that mix the numbers are stored as text, and the
+  whole numbers of a `DOUBLE` column as decimals (2.9; before, they were stored
+  as they came).
 - An expression without `AS` names its column as in any `SELECT`:
   `SELECT id + 1 FROM t` gives a column `"id + 1"` (SQLite calls it `id+1`, as
   it was typed). Two columns with the same name get `_2`, `_3`…
 - The whole result is in memory while it is written, as in `INSERT … SELECT`.
-- **An index on the foreign key columns of the child table** (`CREATE INDEX
-  ix_orders_customer ON orders (customer_id)`) is not created on its own, as in
-  SQLite, but it is worth creating when the child table is large: deleting or
-  changing a customer then finds its orders through the index instead of
-  loading the whole orders table (2.7.5).
 
 ### ALTER TABLE and DROP TABLE
 
@@ -161,11 +258,31 @@ ALTER TABLE customers RENAME COLUMN phone TO mobile;
 ALTER TABLE customers DROP COLUMN mobile;
 ALTER TABLE copy RENAME TO customers_copy;
 DROP TABLE IF EXISTS customers_copy;
+-- From MySQL (2.9): rename and change the type at once, indexes and foreign keys
+ALTER TABLE customers CHANGE name full_name VARCHAR(80) NOT NULL;
+ALTER TABLE customers ADD INDEX ix_city (city);
+ALTER TABLE customers DROP INDEX ix_city;
+ALTER TABLE orders DROP FOREIGN KEY fk_customer;
+DESCRIBE customers;                    -- = SHOW COLUMNS FROM customers
 ```
 
-`RENAME TO` also updates the foreign keys of other tables pointing at it. A
+`RENAME TO` also updates the foreign keys of other tables pointing at it. It
+is refused, saying which, while a view or a trigger (of any table, its own
+included) uses the table (2.9; before, they were left pointing at the old
+name and failed when used): their SQL is kept as it was written, and an alias,
+a column or a `WITH` table can have the same name, so drop them, rename the
+table and create them again with the new name. The name of a view is not
+accepted either (2.9; the table was left hidden behind the view). A
 column that is part of a composite `UNIQUE` or of a foreign key (own or
 another table's) cannot be dropped, and neither can a table that is referenced.
+
+A `CHECK` or `REFERENCES` written on the column of an `ADD COLUMN`, `MODIFY` or
+`CHANGE` goes to the table as in `CREATE TABLE` (2.9; before, they were lost
+without a word), after checking that the rows already there meet it, with the
+new column's `DEFAULT`; if any does not, the table stays as it was. `ADD COLUMN
+… UNIQUE DEFAULT x` is refused when the table has two rows or more: they would
+all get the same value; and so is `ADD COLUMN … PRIMARY KEY DEFAULT x` (2.9),
+unless the table already has a primary key, which the new column then joins.
 
 ### Triggers
 
@@ -189,9 +306,14 @@ DROP TRIGGER IF EXISTS trg_sum;
 - Timing: `BEFORE` or `AFTER`. Event: `INSERT`, `UPDATE` or `DELETE`.
 - `FOR EACH ROW` is optional (it always runs per row).
 - `WHEN` filters which rows fire it.
-- The body accepts `INSERT`, `UPDATE`, `DELETE` and `SELECT RAISE(...)`.
+- The body accepts `INSERT`, `UPDATE`, `DELETE` and `SELECT` (such as
+  `SELECT RAISE(...)`); any other statement is an error when the trigger is
+  created (2.9; before, on every write to the table).
 - `NEW.column` is available in INSERT and UPDATE; `OLD.column` in UPDATE and
-  DELETE. They are replaced by their value before the statement runs.
+  DELETE. They are replaced by their value before the statement runs. Using
+  `NEW` in a `DELETE` trigger or `OLD` in an `INSERT` one, in the body, the
+  `WHEN`, an `IF` or a `SET NEW`, is an error when the trigger is created, as in
+  MySQL (2.9; before, the error came on every write to the table).
 - `RAISE(ABORT, 'message')` cancels the whole operation: nothing is written.
 - **`IF … THEN … ELSEIF … ELSE … END IF`** inside the body, nested if needed
   (2.7.3), as in MySQL and PostgreSQL.
@@ -213,6 +335,10 @@ DROP TRIGGER IF EXISTS trg_sum;
   ```
 - A trigger sees the changes made by its own statement, even though they are
   not on disk yet.
+- An `UPDATE` or `DELETE` works on the rows it chose when it started, each as
+  the triggers and cascades of the earlier rows left it, and skips one they
+  deleted, as SQLite does (2.9; before, one they had changed was skipped too,
+  and a `DELETE` left it in the table). Its `WHERE` is not checked again.
 - Maximum nesting of 8 levels: an infinite recursion is cut with an error and
   leaves nothing written.
 - Not supported: `INSTEAD OF` and `UPDATE OF columns`.
@@ -234,14 +360,22 @@ SHOW INDEXES FROM customers;
 The `PRIMARY KEY` and the `UNIQUE`s already have theirs, created automatically,
 named `auto_<columns>`; they appear in `SHOW INDEXES` with `automatico = 1` and
 cannot be dropped on their own — they go when the constraint goes. The `auto_`
-prefix is reserved.
+prefix is reserved. Since 2.9 two keys whose index would get the same name,
+such as `UNIQUE (a, b)` and `UNIQUE (a_b)` (both `auto_a_b`), are refused:
+rename one of the columns. An index you create on exactly the columns of one
+of those keys serves the key instead, and `SHOW INDEXES` lists it in place of
+the `auto_` one, which comes back if you drop it. In a table made so before 2.9, which did not check
+`(a, b)`, the second key is checked by reading the table.
 
 A composite index is used **left to right**: one on `(city, age)` serves a
 lookup by `city`, or by `city` and `age`, but not by `age` alone.
 
-Only equalities and `IN` against literals in the top-level `AND` chain of the
-`WHERE` use an index. Ranges, `LIKE`, `ORDER BY`, aggregates, `IS NULL`,
-`NOT IN`, a top-level `OR` and anything under a `NOT` scan the table.
+Equalities and `IN` against literals in the top-level `AND` chain of the
+`WHERE` use an index; since 2.9 also ranges (`<`, `<=`, `>`, `>=`, `BETWEEN`)
+on the first column of an index, `MIN`/`MAX` of an indexed column and
+`ORDER BY col [DESC] LIMIT n` without `WHERE` ([Part 2](02-queries.md),
+Performance). `LIKE`, other aggregates, `IS NULL`, `NOT IN`, a top-level `OR`
+and anything under a `NOT` scan the table.
 
 Indexes also make writes cheaper: an `INSERT` checks uniqueness against the
 index instead of loading the table, and an `UPDATE` or `DELETE` whose `WHERE`
@@ -250,9 +384,11 @@ rows. What they cost is keeping them: a write to a table with indexes rewrites
 the ones that changed. `JSONSQLDB_INDICES` set to `false` disables them
 altogether.
 
-`CREATE UNIQUE INDEX` is rejected with a message that explains it: an index
-here only speeds up, it does not enforce uniqueness. For that there is
-`ALTER TABLE t ADD UNIQUE (...)`, which also creates its own index.
+`CREATE UNIQUE INDEX name ON t (cols)` (2.9) creates a `UNIQUE` constraint with
+that name, which enforces uniqueness and has its own index (if the rows already
+repeat a value, it is an error); `DROP INDEX name` drops it. In an index
+definition, `DESC` and a prefix length (`email(20)`) are accepted and change
+nothing.
 
 ## 3. Constraints
 
@@ -260,13 +396,38 @@ here only speeds up, it does not enforce uniqueness. For that there is
 |---|---|---|
 | Data type | INSERT and UPDATE | error `TYPE` |
 | `NOT NULL` | INSERT and UPDATE | error `CONSTRAINT` |
-| Primary key / `UNIQUE` | INSERT and UPDATE | error `CONSTRAINT` |
-| Foreign key (child side) | INSERT and UPDATE | error `CONSTRAINT` |
+| Primary key / `UNIQUE` | INSERT, UPDATE and rows changed by a cascade (2.9) | error `CONSTRAINT` |
+| Foreign key (child side) | INSERT, UPDATE and rows changed by a cascade (2.9) | error `CONSTRAINT` |
 | Foreign key (parent side) | UPDATE and DELETE of the parent | according to `ON DELETE` / `ON UPDATE` |
+| `CHECK` (2.9) | INSERT, UPDATE, upsert and cascades; `ADD CHECK` against the rows already there | error `CONSTRAINT` (`NULL` passes) |
+| `ENUM` (2.9) | INSERT and UPDATE | error `TYPE` |
 
 Foreign key actions: `NO ACTION` (default), `RESTRICT`, `CASCADE`, `SET NULL`,
 `SET DEFAULT`. Cascades propagate through several levels and fire the triggers
-of the child tables.
+of the child tables. As in SQLite, the parent row is written or deleted first
+and its cascades run after it, so the triggers of the child tables already see
+it changed, and a row they add pointing at a parent the statement has deleted
+is a foreign key error (2.9). The row an `OR REPLACE` removes is the exception:
+its cascades run first, because the new row usually brings the same key back
+(SQLite checks foreign keys when the statement ends). A child row changed by `ON UPDATE CASCADE`,
+`SET NULL` or `SET DEFAULT` goes through everything an `UPDATE` does (2.9):
+its `BEFORE` and `AFTER UPDATE` triggers, its unique keys (two children that
+would end up with the same key are an error, as in SQLite), its own foreign
+keys (a `SET DEFAULT` value that is not in the parent is an error) and the
+cascade to its own children, also when the key that changes is the one they
+point at. Before 2.9 only its types were converted.
+
+**An index on the foreign key columns of the child table** (`CREATE INDEX
+ix_orders_customer ON orders (customer_id)`) is not created on its own, as in
+SQLite, but it is worth creating when the child table is large: deleting or
+changing a customer then finds its orders through the index instead of
+loading the whole orders table (2.8); with triggers on the child table it is loaded as before.
+
+The keys are compared the same way everywhere: `ADD UNIQUE`, `ADD PRIMARY
+KEY`, `ADD FOREIGN KEY`, `MODIFY`, `DROP COLUMN` and `CHECK KEYS` / `REPAIR
+KEYS` use the equality of writes, where `'5'`, `'05'` and `5` are the same key
+(2.9; before, they compared them as typed, so `REPAIR KEYS` could set to
+`NULL` a child whose parent the engine itself finds).
 
 If any column of the key is `NULL`, neither uniqueness nor the foreign key is
 checked (same rule as standard SQL).
@@ -278,6 +439,20 @@ accumulated in memory and flushed to the JSON files at the end. If a constraint
 fails on the third row of a three-row `INSERT`, none is written. Same with
 triggers: if a `RAISE(ABORT)` fires at the deepest level of a cascade, nothing
 is left half done.
+
+**A statement whose changes do not fit in memory is written in stretches**
+(2.9). When the memory in use passes about half of `memory_limit`, it writes
+what it has and goes on; outside a transaction it is first run again inside
+one, before writing anything, so that it is still all or nothing. An `INSERT …
+SELECT` from other tables takes their rows as they come out, in batches of up
+to 8,192 rows or 8 MB (a sixteenth of `memory_limit` if that is less), without
+gathering them all, and an upsert (`ON CONFLICT`, `INSERT OR IGNORE`, `INSERT
+OR REPLACE`, `REPLACE`) does not load the table any more: it looks each key up
+in the index on disk — through the whole index in memory if it fits in what is
+left up to half of `memory_limit`, and if not, key by key in the index pieces
+whose filter allows it. With a million rows and 256 MB, an `UPDATE` of every
+row takes 24 s and 140 MB; in 2.8.0, one of 100,140 rows spread over the table
+ran out of memory.
 
 Files are written with a temporary, `fsync()` and `rename`, so a `.json` cannot
 be left half written even if the power goes. And because a write almost never
@@ -294,7 +469,7 @@ What a write reads and rewrites, since 2.5:
 |---|---|---|
 | `INSERT` (no triggers, unique constraints indexed) | the last part and the unique indexes | the last part (plus new parts), the last piece of each index, `rev.json` |
 | `UPDATE ... WHERE key = ?` (no triggers) | the parts of the candidate rows | those parts, the matching pieces of the indexes whose columns changed, `rev.json` |
-| `DELETE ... WHERE key = ?` (no triggers) | the parts from the first deleted row on | those parts, the index pieces from that part on, `rev.json` |
+| `DELETE ... WHERE key = ?` (no triggers) | the parts of the candidate rows | those parts, with a hole in place of each deleted row (2.9), the index pieces of those rows, `rev.json` |
 | `UPDATE`/`DELETE` with a `WHERE` no index answers (no triggers, unique constraints indexed; 2.8) | every part, one at a time, keeping only the rows that match | the parts that changed, the index pieces that changed, `rev.json` |
 | anything else (triggers, self-referencing key, unique constraint without index, `UPDATE`/`DELETE` without `WHERE`) | the whole table | the parts that changed, the index pieces that changed, `rev.json` |
 
@@ -307,49 +482,113 @@ on-disk cache): a one-row `INSERT` 9 ms and 9 MB, an `UPDATE` by key 11 ms and
 30 ms / 23 MB and 50 ms / 22 MB. The cost of a write no longer grows with the
 size of the table nor with the size of its indexes; what remains is checking
 uniqueness, which for a numeric key looks at the pieces whose range can hold
-it (a new id is rejected as unique without opening any) and for a text key
-at every piece.
+it (a new id is rejected as unique without opening any) and for a text key,
+since 2.9, at the keys of the one piece whose filter allows it (pieces written
+before 2.9 have no filter and are read whole). Since 2.9 a `DELETE` leaves a
+hole instead of moving the rows behind it: on 60,000 rows with six indexes,
+deleting rows at five places took 443, 615, 26, 221 and 199 ms in 2.8.0 and
+42, 24, 28, 20 and 20 ms in 2.9.
 
 An `INSERT` appends its rows to the text of the last part and an `UPDATE`
 replaces the lines of the rows it changes, without decoding or re-encoding the
 rest of the part (2.7.1); the file ends up byte for byte as if written whole. An
 `UPDATE` or `DELETE` that depends only on each row does its work with the
 table's shared lock and locks the table only to commit ("writes by part", see
-[01-core.md](01-core.md#writes-by-part-27)). Measured on 20,000 rows, mean of
-three runs: `INSERT` 7.2 ms, `UPDATE` by key 6.7 ms, `DELETE` by key 11.1 ms.
+[01-core.md](01-core.md#writes-by-part-27)). Measured with `php tests/benchmark.php`
+on 20,000 rows in 2.7.1 (one core, on-disk cache, mean of three runs): `INSERT`
+7.2 ms, `UPDATE` by key 6.7 ms, `DELETE` by key 11.1 ms.
 
-On a real disk the cost is the `fsync` calls, not the encoding: five per
-write in 2.7 (the part, `rev.json`, the structure when the autoincrement
-counter moves, the manifest and the directory), down from ten in 2.6. Index
-pieces are written without one, since they can be rebuilt from the rows if a
-crash loses them. With an `fsync` of 3 ms, typical of a shared host, a one-row
-`INSERT` takes about 34 ms; see [01-core.md](01-core.md#several-files-the-redo-journal).
+On a real disk the cost is the `fsync` calls, not the encoding: four per write
+since 2.7 (the part, `rev.json`, the manifest and the directory; five when it
+opens a new part), down from ten in 2.6. Index pieces are written without one,
+since they can be rebuilt from the rows if a crash loses them. With an `fsync`
+of 3 ms, typical of a shared host, a one-row `INSERT` takes about 28 ms; see
+[01-core.md](01-core.md#several-files-the-redo-journal).
 
 The comparison to keep in mind: one `INSERT` with 2,000 `VALUES` costs about
 the same as one `INSERT` with one row. Batch them.
+
+### Transactions (2.9)
+
+Several statements that must happen together, or not at all, go in a
+transaction. With the direct connection:
+
+```php
+$db->transaccion(function (Database $db) {
+    $db->consultar('UPDATE accounts SET balance = balance - 100 WHERE id = 1');
+    $db->consultar('UPDATE accounts SET balance = balance + 100 WHERE id = 2');
+});
+```
+
+Everything the function does to the database happens, or nothing does. Inside,
+each statement sees what the previous ones did; other processes see nothing
+until it ends. An exception that leaves the function undoes it all, and the
+exception goes on. A statement that fails inside leaves nothing of its own: if
+the function catches its error, the rest goes on and is committed. `$db->lote([...])` does the same with
+a list of statements (each a string, or `[sql, params]`) and returns one
+result per statement. A `BEGIN` (or `START TRANSACTION`) as its first statement
+and a `COMMIT` (or `END`) as its last are taken and do nothing more; a
+`ROLLBACK` as its last runs the list and undoes all of it. Anywhere else, and
+as a statement of their own, they are an error that says why.
+
+The API takes a list as the `lote` field ([04-api.md](04-api.md)), and the
+panel's SQL console runs several statements separated by `;` as one
+transaction.
+
+- **It locks the whole database** from start to end, which is what keeps
+  others from seeing it half done. Keep it short: reads and writes of every
+  other process wait for it. A `lote` that only reads (2.9) does not: each of
+  its statements takes the shared lock and releases it, as a single `SELECT`,
+  others read at the same time, and nothing is written to undo. Between two of
+  its statements another process may write, so they do not all see the same
+  data.
+- **Transactions never span requests.** There is no `BEGIN` in one call and
+  `COMMIT` in the next: a client that hangs in between would leave the database
+  locked.
+- **If the process dies halfway**, the transaction is undone when the database
+  is next opened. How it is kept is in
+  [01-core.md §6](01-core.md#several-files-the-redo-journal). If a file cannot
+  be put in its place half-way through a statement (on Windows, one another
+  program holds open), the transaction can only be undone: it takes no more
+  writes, and it is undone when the function returns, with an error.
+- **`REPAIR TABLES FORGET n` takes effect when it is committed**, so a
+  transaction undone leaves the row pending. `REPAIR TABLES` itself is refused
+  inside one: what it sets aside is recorded outside the transaction.
+- **They do not nest**: `transaccion()` inside another is an error.
+- A single statement works exactly as before: it is already atomic on its own.
 
 ## 5. Files of this part
 
 | File | Responsibility |
 |---|---|
 | `engine/Show.php` | executes the SHOW statements |
-| `engine/Indexes.php` | index keys, construction and correction, choice of index for a query |
-| `engine/Writer.php` | INSERT, UPDATE, DELETE, DDL, constraints and triggers |
+| `engine/Indexes.php` | index keys, construction and correction |
+| `engine/IndexesBusqueda.php` | which conditions of a `WHERE` an index can resolve, and with which index (2.9) |
+| `engine/Writer.php` | `INSERT` and what every write shares: constraints, the foreign keys of the new row, triggers |
+| `engine/WriterCambios.php` | `UPDATE` and `DELETE` (2.9) |
+| `engine/WriterForaneas.php` | foreign keys: that the parent row exists, and the `ON DELETE` and `ON UPDATE` actions (2.9) |
+| `engine/WriterConflictos.php` | `OR REPLACE`, `OR IGNORE`, `REPLACE INTO`, `ON CONFLICT … DO UPDATE` and `ON DUPLICATE KEY UPDATE` (2.9) |
+| `engine/WriterTriggers.php` | the body of triggers: `WHEN`, their statements, `IF` blocks and `SET NEW` (2.9) |
+| `engine/SentenciaGrande.php` | a write that does not fit in memory and is run again inside a transaction, in stretches (2.9) |
+| `engine/WriterDdl.php` | the statements that are not `INSERT`, `UPDATE` or `DELETE`: `CREATE TABLE` (also `AS SELECT`), `DROP TABLE`, `ALTER TABLE`, indexes, views, triggers, `REPAIR` and `VACUUM` (2.9) |
 | `engine/Integrity.php` | CHECK KEYS and REPAIR KEYS |
-| `engine/Parser.php` | extended with DML, DDL, triggers and `RAISE` |
+| `engine/ParserEscritura.php` | `INSERT`, `UPDATE`, `DELETE` and the `SET NEW` of triggers; extends `Parser` (2.9) |
+| `engine/ParserSentencias.php` | DDL, triggers and `RAISE`, `SHOW`, `CHECK`, `REPAIR`, `EXPLAIN` and the rest; extends `ParserEscritura` (2.9) |
 | `engine/Database.php` | decides the lock scope of each statement |
-| `tests/f3_escrituras.php` | 68 checks |
-| `tests/f5_esquema.php` | 105 checks, `CREATE TABLE … AS SELECT` among them |
+| `tests/f3_escrituras.php` | 110 checks, transactions among them |
+| `tests/f5_esquema.php` | 122 checks, `CREATE TABLE … AS SELECT` among them |
 
 ## 6. Tests
 
 ```
-php tests/f1_nucleo.php       → OK: 66
-php tests/f2_parser.php       → OK: 72
-php tests/f2_select.php       → OK: 151
-php tests/f3_escrituras.php   → OK: 68
-php tests/f8_indices.php      → OK: 65
-php tests/f10_indices_incrementales.php → OK: 18
+php tests/f1_nucleo.php       → OK: 73
+php tests/f2_parser.php       → OK: 83
+php tests/f2_select.php       → OK: 164
+php tests/f3_escrituras.php   → OK: 110
+php tests/f5_esquema.php      → OK: 122
+php tests/f8_indices.php      → OK: 81
+php tests/f10_indices_incrementales.php → OK: 21
+php tests/f21_compatibilidad.php → OK: 96
 ```
 
 ---
@@ -367,10 +606,16 @@ They return rows like a `SELECT`, and **read** permission is enough:
 | `SHOW DATABASES` | `base` |
 | `SHOW TABLES` | `tabla`, `columnas`, `filas`, `creada` |
 | `SHOW VIEWS` | `vista`, `sql`, `creada` |
-| `SHOW SCHEMA t` (or `SHOW COLUMNS FROM t`) | `columna`, `tipo`, `longitud`, `escala`, `pk`, `auto`, `notnull`, `unico`, `defecto` |
-| `SHOW KEYS FROM t` | `tipo` (`PRIMARY`/`UNIQUE`/`FOREIGN`), `nombre`, `columnas`, `tabla_destino`, `columnas_destino`, `on_delete`, `on_update` |
-| `SHOW INDEXES FROM t` | `indice`, `columnas`, `automatico` |
+| `SHOW SCHEMA t` (or `SHOW COLUMNS FROM t`) | `columna`, `tipo`, `longitud`, `escala`, `pk`, `auto`, `notnull`, `unico`, `defecto`, `defecto_calculado` (2.8), `sin_signo` (2.9), `valores` (2.9: an `ENUM`'s list, or `null`), `colacion` (2.9: `NOCASE`, `RTRIM` or `null`) |
+| `SHOW CREATE TABLE t` / `SHOW CREATE VIEW v` (2.9) | `tabla` or `vista`, `sql` |
+| `SHOW KEYS FROM t` | `tipo` (`PRIMARY`/`UNIQUE`/`FOREIGN`/`CHECK`), `nombre`, `columnas`, `tabla_destino`, `columnas_destino`, `on_delete`, `on_update`, `expresion` (2.9: a `CHECK`'s expression; `nombre` is empty for an unnamed one) |
+| `SHOW INDEXES [FROM t]` | `indice`, `tabla`, `columnas`, `automatico` |
 | `SHOW TRIGGERS [FROM t]` | `nombre`, `tabla`, `timing`, `evento`, `cuando`, `sql` |
+
+In `SHOW KEYS` and `SHOW INDEXES`, `columnas` and `columnas_destino` list the
+columns separated by commas; a name with a comma or a double quote in it goes
+between double quotes, with its quotes doubled, as in CSV (2.9; before, it
+could not be told apart from two columns, and an export split it in two).
 
 ### Modifying an existing column
 
@@ -379,9 +624,10 @@ ALTER TABLE customers MODIFY COLUMN balance DECIMAL(10,2) NOT NULL DEFAULT 0;
 ALTER TABLE customers MODIFY COLUMN code VARCHAR(20) UNIQUE;
 ```
 
-`MODIFY COLUMN` (or `CHANGE COLUMN`, or `ALTER COLUMN`) changes the type,
-length, decimals, `NOT NULL`, `UNIQUE` and `DEFAULT` of an existing column. The
-data is converted to the new type.
+`MODIFY COLUMN` changes the type, length, decimals, `NOT NULL`, `UNIQUE` and
+`DEFAULT` of an existing column, and MySQL's `CHANGE [COLUMN] old new type …`
+(2.9) does the same and renames it at once. The data is converted to the new
+type. `ALTER COLUMN` (PostgreSQL's and SQL Server's form) is not accepted.
 
 Before saving anything the current data is checked against the change: if a
 value cannot be converted, if a null remains in a column that becomes
@@ -434,9 +680,10 @@ there are no problems, it returns zero rows.
 deletes rows**: if the column is `NOT NULL` or part of the primary key, it
 reports and leaves it, because what to do with that data is your decision.
 
-An important detail: the check **reads from disk, bypassing the cache**. The
-cache is invalidated by a revision counter that only moves when the engine
-writes, so a hand edit would stay hidden if it were read from the cache.
+The check **reads from disk**. Orphan keys almost always come from a hand
+edit; since 2.9 the engine notices those on its own and keeps its answers true
+to the files, and `CHECK TABLES` / `REPAIR TABLES` deal with files a hand edit
+broke (see [Editing the files by hand](01-core.md#editing-the-files-by-hand-29)).
 
 From the panel it is in the **Integrity** tab, with the list of problems and a
 button to fix them. `CHECK` works with read permission; `REPAIR` needs write.

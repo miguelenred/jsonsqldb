@@ -1,15 +1,11 @@
 <?php
 $columnas = Api::sql($base, 'SHOW SCHEMA ' . cita($tabla));
-$claves   = Api::sql($base, 'SHOW KEYS FROM ' . cita($tabla));
 $admin    = Auth::esAdmin();
 
-// Columnas de la clave primaria: sin ellas no se puede editar ni borrar una fila
-$pk = [];
-foreach ($claves as $k) {
-    if ($k['tipo'] === 'PRIMARY') {
-        $pk = array_filter(explode(',', (string)$k['columnas']));
-    }
-}
+// Columnas de la clave primaria: sin ellas no se puede editar ni borrar una
+// fila. De cada columna, y no de la lista de SHOW KEYS separada por comas, que
+// partía en dos un nombre con una coma (2.9)
+$pk = array_column(array_filter($columnas, static fn(array $c): bool => (int)$c['pk'] === 1), 'columna');
 
 // Filtro: busca el texto en todas las columnas a la vez
 $filtro = get('q');
@@ -51,7 +47,7 @@ require __DIR__ . '/_pestanas.php';
     <?= t('<strong>{1}</strong> fila(s){2} · página {3} de {4}', [1 => number_format($total, 0, ',', '.'), 2 => $filtro === '' ? '' : ' filtradas', 3 => $pagina, 4 => $paginas]) ?>
   </span>
   <div class="toolbar-actions">
-    <?php foreach (['csv' => ['CSV', 'filetype-csv'], 'sql' => ['INSERT', 'filetype-sql']] as $f => $b): ?>
+    <?php foreach (Auth::esAdmin() ? ['csv' => ['CSV', 'filetype-csv'], 'sql' => ['INSERT', 'filetype-sql'], 'json' => ['JSON', 'filetype-json']] + (class_exists('ZipArchive') ? ['xlsx' => ['Excel', 'filetype-xlsx']] : []) : [] as $f => $b): ?>
       <form method="post">
         <?= csrf() ?>
         <input type="hidden" name="accion" value="exportar">
@@ -120,7 +116,7 @@ require __DIR__ . '/_pestanas.php';
                 <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
                 <input type="hidden" name="volver" value="datos">
                 <?php foreach ($pk as $c): ?>
-                  <input type="hidden" name="pk[<?= h($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
+                  <input type="hidden" name="pk[<?= campo($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
                 <?php endforeach; ?>
                 <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
               </form>
@@ -176,12 +172,19 @@ require __DIR__ . '/_pestanas.php';
                   <span class="badge text-bg-light border" title="<?= h(t('No admite nulos')) ?>"><?= h(t('obligatorio')) ?></span>
                 <?php endif; ?>
               </label>
-              <input type="hidden" name="tipo[<?= h($cn) ?>]" value="<?= h($c['tipo']) ?>">
-              <?php if ($auto): ?><input type="hidden" name="auto[<?= h($cn) ?>]" value="1"><?php endif; ?>
-              <?php if ($noNulo): ?><input type="hidden" name="nn[<?= h($cn) ?>]" value="1"><?php endif; ?>
+              <input type="hidden" name="tipo[<?= campo($cn) ?>]" value="<?= h($c['tipo']) ?>">
+              <?php if ($auto): ?><input type="hidden" name="auto[<?= campo($cn) ?>]" value="1"><?php endif; ?>
+              <?php if ($noNulo): ?><input type="hidden" name="nn[<?= campo($cn) ?>]" value="1"><?php endif; ?>
               <div class="input-group input-group-sm">
-                <input class="form-control" id="<?= h($id) ?>" name="valor[<?= h($cn) ?>]"
+                <?php if (strpbrk((string)$val, "\r\n") !== false): ?>
+                  <?php // Con saltos de línea, un área de texto (2.9): el campo de una línea los quitaba al guardar.
+                        // El navegador manda cada salto como \r\n: lf dice que eran \n, y se vuelven a dejar así ?>
+                  <textarea class="form-control" id="<?= h($id) ?>" name="valor[<?= campo($cn) ?>]" rows="3"><?= "\n" . h((string)$val) ?></textarea>
+                  <?php if (strpos((string)$val, "\r") === false): ?><input type="hidden" name="lf[<?= campo($cn) ?>]" value="1"><?php endif; ?>
+                <?php else: ?>
+                <input class="form-control" id="<?= h($id) ?>" name="valor[<?= campo($cn) ?>]"
                        value="<?= h($val ?? '') ?>"<?= $auto ? ' placeholder="' . h(t('(automático)')) . '" readonly' : '' ?>>
+                <?php endif; ?>
                 <?php if ($auto): ?>
                   <span class="input-group-text text-body-tertiary"><?= h(t('lo pone la base')) ?></span>
                 <?php elseif ($noNulo): ?>
@@ -189,7 +192,7 @@ require __DIR__ . '/_pestanas.php';
                 <?php else: ?>
                   <div class="input-group-text">
                     <input class="form-check-input mt-0 me-1" type="checkbox"
-                           name="nulo[<?= h($cn) ?>]" value="1" id="n<?= h($id) ?>"
+                           name="nulo[<?= campo($cn) ?>]" value="1" id="n<?= h($id) ?>"
                            <?= $val === null && $valores !== null ? 'checked' : '' ?>>
                     <label class="form-check-label" for="n<?= h($id) ?>">NULL</label>
                   </div>
@@ -235,7 +238,7 @@ require __DIR__ . '/_pestanas.php';
       <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
       <input type="hidden" name="volver" value="datos">
       <?php foreach ($pk as $c): ?>
-        <input type="hidden" name="pk[<?= h($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
+        <input type="hidden" name="pk[<?= campo($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
       <?php endforeach; ?>
       <div class="modal-header"><h5 class="modal-title"><?= h(t('Editar fila')) ?></h5></div>
       <div class="modal-body"><?php $campos($columnas, $f, (string)$i); ?></div>

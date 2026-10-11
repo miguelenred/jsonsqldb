@@ -9,6 +9,1795 @@ Given that the only supported way in is the HTTP API, the public surface for
 versioning purposes is: the API request and response format, the SQL dialect, the
 configuration constants, and the on-disk format of `data/`.
 
+## [2.9.0] - 2026-10-11
+
+Transactions, window functions, `WITH RECURSIVE`, `COLLATE NOCASE` columns,
+`CHECK` and `ENUM`, `UPDATE` and `DELETE` with other tables, files that a hand
+edit broke repaired on their own when it is safe, deletes that no longer move
+the rows behind them, OPcache used for the table cache, the common SQL of
+SQLite and MySQL/MariaDB, JSON and Excel in the panel, the fixes of two
+external audits, a million rows with the same results (what does not fit in
+memory goes to disk), upserts that no longer load the table, and faster reads
+and writes than 2.8.0, also without OPcache (see Checked). Existing data is
+read as it is; index pieces written by 2.9 carry up to four more fields before
+their keys (a filter of their keys, which keys it covers, and their smallest
+and largest text value), which older versions read and ignore.
+A deleted row now leaves a hole that 2.8 and earlier cannot read: run `VACUUM`
+before going back to one (see Changed). The cache starts over (see Changed).
+
+### Added
+
+- **The API can be turned off**: `JSONSQLDB_API_ACTIVA` in `config.php`, `true`
+  by default, as `JSONSQLDB_CONEXION_DIRECTA` is `false`. Off, every request
+  gets HTTP 403 and `La API está desactivada` before its key is looked at, and
+  nothing is logged or written. The panel then goes by direct connection. A
+  `config.php` without the constant keeps the API on.
+- **Window functions**, all of SQLite's and checked against it, 460
+  combinations of function and window: `ROW_NUMBER`, `RANK`, `DENSE_RANK`,
+  `PERCENT_RANK`, `CUME_DIST`, `NTILE`, `LAG`, `LEAD`, `FIRST_VALUE`,
+  `LAST_VALUE`, `NTH_VALUE` and every aggregate with `OVER`; `PARTITION BY`,
+  `ORDER BY` with `NULLS FIRST`/`LAST`, frames `ROWS`, `RANGE` (also with a
+  distance) and `GROUPS` with `EXCLUDE`, named windows (`WINDOW w AS …`, `OVER
+  w`, `OVER (w …)`), with `GROUP BY` (`SUM(SUM(x)) OVER ()`) and in the `ORDER
+  BY`. Without `ORDER BY` the rows come out in the order of the first window,
+  as in SQLite. A running sum or a ranking per partition over 20,000 rows:
+  about 100 ms. What SQLite rejects, or a window function outside the columns
+  and the `ORDER BY` of a `SELECT`, is an error that says so. The panel
+  exports them to MySQL, PostgreSQL and SQL Server, and leaves commented what
+  one of them lacks (`GROUPS`, `EXCLUDE`, `FILTER`, `NTH_VALUE` in SQL Server,
+  Access altogether).
+- **`FILTER (WHERE …)` after an aggregate**, as in SQLite and PostgreSQL:
+  `COUNT(*) FILTER (WHERE paid = 1)`, also with `GROUP BY`, in `HAVING` and in
+  a window.
+
+- **`WITH RECURSIVE`**, as in SQLite (with or without the word `RECURSIVE`):
+  initial parts, then recursive ones, with `UNION` or `UNION ALL`, `LIMIT` and
+  `OFFSET`. Computed in batches, as PostgreSQL and MySQL do: each round gives
+  the recursive parts all the new rows of the previous one; without `ORDER
+  BY` the order can differ from SQLite's, never the rows. No limit of rounds,
+  as in SQLite. What would give something else in batches (an aggregate,
+  `DISTINCT`, the query on the `NULL` side of an outer join, naming it twice)
+  or `ORDER BY` inside is an error that says so. 10,000 rounds: 109 ms. The
+  panel exports it to MySQL and PostgreSQL with `RECURSIVE`, to SQL Server
+  without it and with a note about its limit of 100 levels; with `LIMIT`, or
+  `UNION` in SQL Server, or in Access, it stays commented with the reason.
+- **A list of column names in a `WITH`** (`WITH t(a, b) AS (…)`), and a `WITH`
+  inside a subquery (`x IN (WITH … SELECT …)`, `(WITH … SELECT …)`).
+
+- **`COLLATE NOCASE` and `COLLATE RTRIM` in a text column**, as in SQLite and
+  checked against it: the value is kept as written, and the column compares
+  with its collation in `=`, `<`…, `IN`, `BETWEEN`, `CASE`, `ORDER BY`,
+  `GROUP BY`, `DISTINCT`, `MIN`/`MAX`, windows, `NULLIF` and `MIN`/`MAX` of
+  several values, and in its `UNIQUE`, primary key, indexes and the foreign
+  keys that point to it. SQLite's rules decide which collation a comparison
+  uses (written `COLLATE` first, also inside an expression; then the column on
+  the left, then the one on the right; `CAST` keeps the column; in `x IN
+  (SELECT y …)`, `y`'s), and views, subqueries, `WITH` queries and the columns
+  of a `UNION`, `INTERSECT` or `EXCEPT` keep it. A `JOIN` on such columns goes
+  by hash or by an index with the same collation (20,000 by 10,000 rows:
+  60 ms). `ALTER TABLE … MODIFY` adds or changes it, rebuilding the indexes,
+  and is refused if a `UNIQUE` would have repeated values or a foreign key
+  would lose its row; `SHOW CREATE TABLE` and `SHOW COLUMNS` (`colacion`) give
+  it. The panel shows it in the structure and keeps it when a column is edited
+  (and `UNSIGNED` too, which it lost); its importer turns MySQL's `…_ci`, SQL
+  Server's `…_CI_…` and PostgreSQL's `citext` into `NOCASE` with a notice —in
+  MySQL also the table's or its character set's, which is what a text column
+  without its own has there—, and
+  its dumps write the closest one in each system: `utf8mb4_general_ci` in
+  MySQL, `CITEXT` in PostgreSQL, `Latin1_General_100_CI_AS` in SQL Server.
+  A `COLLATE` written in a view or a trigger is exported too.
+
+- **`UPDATE` and `DELETE` with other tables**, in the forms of SQLite and
+  PostgreSQL (`UPDATE t SET … FROM s …`, `DELETE FROM t USING s …`) and in
+  those of MySQL (`UPDATE t JOIN s ON … SET t.c = …`, `DELETE t FROM t JOIN s …`,
+  `DELETE FROM t USING t JOIN s …`). The join is computed once with the
+  `SELECT` engine and the data as it was before the statement, then each row
+  is written by its position, with its `CHECK`, keys, cascades, triggers and
+  `RETURNING` as in any other `UPDATE` or `DELETE`. A row that matches several
+  takes the first match. One table is written; two in the `SET`, or `DELETE
+  t1, t2`, and `ORDER BY` or `LIMIT` with other tables, are an error that says
+  so. 5,000 rows of 20,000 changed from another table: 95 ms, against 14.7 s
+  with the subqueries it used to take. Checked against SQLite, also in the
+  random writes of `f19`. `UPDATE` and `DELETE` also take an alias for their
+  table (`UPDATE t AS a SET … WHERE a.c = 1`).
+
+- **`CHECK` constraints.** On a column or on the table, with or without a
+  name, also on a column added or changed with `ALTER TABLE … ADD`, `MODIFY`
+  or `CHANGE` (checked first against the rows already there): every row an
+  `INSERT`, `UPDATE`, `UPSERT` or cascade writes must not make them false
+  (`NULL` passes, as in SQLite and MySQL). Checked against SQLite statement by
+  statement. A column a `CHECK` uses cannot be dropped or renamed. Tables
+  without one do not change on disk.
+- **Importing keeps `CHECK` and `ENUM`.** A dump's `CHECK` constraints (on a
+  column, on the table, or added with `ALTER TABLE`) arrive and are enforced,
+  PostgreSQL's `::type` conversions removed; one that uses something this
+  engine does not have is dropped and the summary says so, as before. `ENUM`
+  keeps its list of values; `SET` is still text. Tested with the real MySQL and
+  PostgreSQL dumps in `tests/volcados/`.
+- **Exporting carries `CHECK` and `ENUM` to every system.** MySQL gets `ENUM`
+  as such; SQLite, PostgreSQL and SQL Server get the column's text type and a
+  `CHECK (col IN (…))`. A `CHECK` is written in each system's SQL (its quoting,
+  `<>`, `CHAR_LENGTH` in MySQL, `LEN` in SQL Server, `COALESCE`); one that would
+  not mean the same there (`||` in MySQL or SQL Server, an unknown function),
+  and any in Access, goes as a note above the table, to add by hand. The SQLite
+  dump is loaded in SQLite in the tests and enforces them.
+- **`SHOW COLUMNS` has `valores` and `SHOW KEYS` lists `CHECK`s.** `valores` is
+  an `ENUM`'s list (or `null`); each `CHECK` is a row of `tipo` `CHECK` with
+  its `expresion` (a new field, `null` in the other rows). The panel's
+  Structure tab shows both, and editing an `ENUM` column there keeps its list.
+- **`ENUM('a', 'b', …)`, from MySQL.** A text that only takes its values,
+  matched without regard to case and stored as written in the list; with `NOT
+  NULL` and no `DEFAULT`, the first one. It sorts as text, not by position.
+- **`EXPLAIN SELECT …`** (also `EXPLAIN ANALYZE` and `EXPLAIN QUERY PLAN`).
+  The index is chosen while reading, from the data, so `EXPLAIN` runs the query
+  (without the result cache, without keeping its rows) and tells how each table
+  was read: by which index and how (`=`, `IN`, range, in order), a count or a
+  smallest and largest taken without reading rows, a scan, or a `JOIN` looking
+  each row up in an index, with the rows each read gave. A read-only key can use
+  it, and also `SHOW CREATE TABLE`. Normal queries are not slower (measured).
+- **`ALTER TABLE … ADD [CONSTRAINT name] CHECK (…)` and `DROP CHECK name`.**
+  As in MySQL, adding one first checks the rows already there, and leaves the
+  table as it was if any breaks it. `DROP CONSTRAINT name` removes it too.
+- **`SHOW CREATE TABLE` and `SHOW CREATE VIEW`.** The statement that creates
+  the table or view as it is, with its keys, defaults, `CHECK`s, `ENUM`s and
+  indexes; run in another database it makes the same structure (tested both
+  ways).
+- **An integer primary key numbers itself, as in SQLite.** With one integer
+  column as primary key and no `AUTOINCREMENT` (`id INTEGER PRIMARY KEY`, the
+  most common SQLite table), an `INSERT` that leaves it out or gives `NULL`
+  gets the largest id + 1, taken from its index without reading the table; it
+  used to be an error. Several rows in one `INSERT` get consecutive ids, and an
+  explicit larger id in between moves the next one past it. As in SQLite, the
+  id of a deleted row that was the largest can come back; `AUTOINCREMENT` never
+  reuses one. Since `INT` and `BIGINT` are stored as `INTEGER`, `INT PRIMARY
+  KEY` numbers itself too (SQLite would store a `NULL` key, MySQL would refuse
+  it). Checked against SQLite step by step.
+- **More of SQLite and MySQL, second round.** Functions: `glob()`, `like()`,
+  `likelihood`, `likely`, `unlikely`, `octet_length`, `bit_length`, `quote`,
+  `soundex`, `unhex`, `randomblob`, `zeroblob`, the trigonometric ones,
+  `degrees`, `radians`, `cot`, `bin`, `oct`, `conv`, `bit_count`,
+  `find_in_set`, `insert`, `strcmp`, `md5`, `sha1`, `sha2`, `crc32`,
+  `to_base64`, `from_base64`, `uuid`, `utc_date`, `utc_time`,
+  `utc_timestamp`, `timestamp`, `to_days`, `makedate`, `period_diff`,
+  `sec_to_time`, `time_to_sec`, `timediff`, `time_format`, `week`,
+  `yearweek`, `weekofyear`, and `json`, `json_valid`, `json_array`,
+  `json_object`, `json_type`, `json_array_length`, `json_length`,
+  `json_keys`, `json_unquote`, `json_contains`, `json_set`, `json_insert`,
+  `json_replace`, `json_remove`, with the operators `->` and `->>` (also
+  `col -> 'a'` and `col -> 2` for `$.a` and `$[2]`, as in SQLite). Aggregates:
+  `string_agg`, `json_group_array`/`json_arrayagg`,
+  `json_group_object`/`json_objectagg`, `any_value`, `std`, `stddev`,
+  `stddev_pop`, `stddev_samp`, `variance`, `var_pop`, `var_samp`, `bit_and`,
+  `bit_or`, `bit_xor`. `x [NOT] GLOB pattern`. Checked one by one: the SQLite
+  ones give what SQLite 3.45 gives (45 of 45), the MySQL ones what the MySQL
+  manual says (55 of 55); `WEEK`, `YEARWEEK` and `TO_DAYS` follow MySQL's own
+  calculation, all eight week modes included. Where the two clash, `TIMEDIFF`
+  is MySQL's (`'01:00:00'`, with microseconds when there are any).
+  `RANDOMBLOB` and `ZEROBLOB` give bytes, which are fine inside an expression
+  (`HEX(RANDOMBLOB(16))`) but not in a table: storing them as they are is
+  always an error, seen in the statement, so it does not depend on whether
+  some random bytes happen to be valid text. Not taken, on purpose: `LOG(x)`
+  with one argument (base 10 in SQLite, natural in MySQL), MySQL's compact
+  dates like `'950501'` (a Julian day in SQLite), `PRAGMA`, and the system
+  tables (`sqlite_master`, `information_schema`).
+- **Statements that do nothing here no longer fail.** `ANALYZE [TABLE] [t]` (the planner keeps no
+  statistics), `USE` of the same database (another one is an error: each
+  connection and each API request goes to one), and `SELECT … FOR UPDATE`,
+  `FOR SHARE [OF t] [NOWAIT | SKIP LOCKED]` and `LOCK IN SHARE MODE` (every
+  read already sees a whole state).
+- **`VACUUM`** rewrites, without them, the tables that have holes of deleted
+  rows (see Changed), and rebuilds the indexes that have a piece written by
+  2.8 or earlier, without touching the data, so that a lookup by a text key
+  reads only the piece that can hold it: on 20,000 customers written by 2.8.0,
+  by a unique email 0.49 → 0.31 ms, after a `VACUUM` of 0.3 s. A second
+  `VACUUM` touches nothing. `VACUUM INTO` is an error that says how to make a
+  copy.
+- **`BEGIN` and `COMMIT` in a batch.** `BEGIN` (or `START TRANSACTION`) as the
+  first statement of a batch and `COMMIT` (or `END`) as the last are taken
+  and do nothing more, since the batch is already a transaction; `ROLLBACK` as
+  the last runs the batch and undoes all of it. Anywhere else, and as a
+  statement of its own, they are an error that explains why: transactions
+  never span requests.
+- **Transactions.** With the direct connection, `$db->transaccion(function
+  ($db) { … })`: everything the function does to the database happens, or
+  nothing does; inside, each statement sees what the previous ones did, and
+  other processes see nothing until it ends. An exception that leaves the
+  function undoes it all; a statement that fails inside leaves nothing of its
+  own, and the rest goes on if the function catches its error. If a file
+  cannot be put in its place half-way through a statement, the transaction can
+  only be undone: it takes no more writes, and it is undone when the function
+  returns. `REPAIR TABLES FORGET n` takes effect when the transaction is
+  committed, so one undone leaves the row pending; `REPAIR TABLES` itself
+  cannot run in a transaction, since what it sets aside is recorded outside
+  it. `$db->lote([...])` runs a list of statements the same way, and the API
+  takes it as the new `lote` field (signed in place of `sql` and `params`),
+  returning one result per statement; the three example clients send it with
+  `lote()` (PHP and Python) and `API-SQL-Lote` (PowerShell). In the panel's
+  SQL console, several statements separated by `;` run as one transaction. If
+  the process dies halfway, the transaction is undone when the database is
+  next opened. A single statement works exactly as before. Transactions never
+  span requests: a client that hangs could otherwise leave tables locked.
+- **Files edited or broken by hand.** Each cached table part, structure and
+  index piece carries the seal of its file (size, date, inode): an edit by
+  hand is seen by the next query that reads the file instead of staying hidden
+  behind the cache, and a valid edit gets the table rewritten so that its
+  indexes and offsets match it, which also retires its cached query results. A
+  JSON broken by an extra or missing comma, bracket or brace between rows, a
+  table state or an index piece, or a structure with a trailing comma, is
+  repaired on its own when it is read, keeping the original in `.reparados/`;
+  so are `_views.json` and the byte order mark an editor may put at the start
+  of a file. A row that cannot be fixed without guessing makes the query fail
+  with the file and the line, and nothing is touched, until it is fixed by
+  hand or `REPAIR TABLES` sets it aside (it stays in the original kept in
+  `.reparados/`, and the result of `REPAIR TABLES` lists it with its file,
+  line and text under `apartadas`). `COUNT(*)` counts a row followed by extra
+  commas as reading it does. Every part a write puts in place leaves in the
+  cache its seal and a CRC-32 of its text (one small entry per write, with
+  those of all the parts it puts in place), so an edit that keeps the length
+  of every line is seen too, by the first query that reads that part, even if
+  it had never been read before. A table that does not fit in memory is
+  repaired part by part. A row set aside stays pending, with a number that is
+  never reused, until it is put back fixed or discarded with the new `REPAIR
+  TABLES FORGET n`; in the panel each one has an editor with a real row of its
+  table as an example (a made-up one if the table is empty), and saving it is
+  checked by the panel and by the engine as it inserts it, together with the
+  `FORGET` in one transaction. `CHECK TABLES [FROM t]` lists what is damaged;
+  in the panel, the **Integrity** tab.
+- **OPcache for the table cache.** If PHP has OPcache active, each table part
+  that has not changed for two seconds is also kept as a `.php` file holding
+  only its data, which OPcache keeps compiled in shared memory between
+  requests. Measured between web requests on 60,000 rows: loading the whole
+  table from the cache from about 22 ms to about 0.15 ms, full scans 33–56 %
+  faster, queries by index the same. Writes only delete the `.php` of the parts
+  they rewrite. Nothing more is given to OPcache once less than a quarter of
+  its memory or keys is free, so it can neither fill nor restart because of
+  the database. On by default; `JSONSQLDB_CACHE_OPCACHE = false` turns it off. Restoring a ZIP
+  in the panel never writes into `.cache/`.
+- **`JSONSQLDB_CACHE_APCU`**: APCu was already used when present; `false` now
+  leaves it aside and keeps the cache on disk.
+- **The common SQL of SQLite and MySQL/MariaDB.** Functions: `UCASE`/`LCASE`,
+  `CHAR_LENGTH`, `MID`, `LEFT`, `RIGHT`, `LPAD`, `RPAD`, `REVERSE`, `REPEAT`,
+  `SPACE`, `CONCAT_WS`, `LOCATE`, `SUBSTRING_INDEX`, `CHAR`, `UNICODE`, `ASCII`,
+  `HEX`, `FIELD`, `ELT`, `CEIL`, `FLOOR`, `TRUNC`, `TRUNCATE(x, d)`, `SIGN`,
+  `MOD`, `POW`, `SQRT`, `EXP`, `LN`, `LOG10`, `LOG2`, `LOG(base, x)`, `PI`,
+  `GREATEST`, `LEAST`, `RAND`, `TOTAL`, `GROUP_CONCAT … SEPARATOR`, `NOW`,
+  `CURDATE`, `CURTIME`, `SYSDATE`, `UTC_DATE`, `UTC_TIME` and `UTC_TIMESTAMP`
+  (with or without parentheses), `YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`,
+  `SECOND`, `DAYOFWEEK`, `WEEKDAY`, `DAYOFYEAR`, `QUARTER`, `DAYNAME`,
+  `MONTHNAME`, `LAST_DAY`, `DATEDIFF`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`,
+  `DATE_FORMAT`, `STR_TO_DATE`, `DATE_ADD`/`DATE_SUB`/`ADDDATE`/`SUBDATE`,
+  `TIMESTAMPDIFF`, `TIMESTAMPADD`, `+ INTERVAL n unit`, `JULIANDAY`,
+  `UNIXEPOCH`, `IF`, `IIF`, `ISNULL`, `TYPEOF`, `json_extract`, `FORMAT` and
+  `PRINTF`. Syntax: `INSERT IGNORE`, `INSERT … SET`, `INSERT … DEFAULT VALUES`,
+  `ON DUPLICATE KEY UPDATE … VALUES(col)`, `UPDATE`/`DELETE … ORDER BY … LIMIT`,
+  `TRUNCATE TABLE`, `DESCRIBE`, `CREATE TABLE t2 LIKE t` (with its `CHECK`s, as
+  in MySQL), `ALTER TABLE CHANGE`,
+  `ADD`/`DROP INDEX`, `KEY` and `UNIQUE KEY` inside `CREATE TABLE`, table
+  options (`ENGINE`, `CHARSET`, `COLLATE`, `ROW_FORMAT`, `COMMENT` accepted;
+  `AUTO_INCREMENT = n` applied), the types `BIT`, `YEAR`, `TINYTEXT`,
+  `MEDIUMTEXT`, `LONGTEXT`, `JSON`, blobs and `UUID`, `UNSIGNED` (rejects
+  negatives), `JOIN … USING`, `NATURAL JOIN`, `NULLS FIRST`/`LAST`, `LIMIT ALL`,
+  `==`, `<=>`, `IS [NOT] DISTINCT FROM`, `& | ~ << >>`, `DIV`, `MOD`, `XOR`,
+  `TRIM(LEADING … FROM …)`, `POSITION(a IN b)`, `SUBSTRING(x FROM i FOR n)`,
+  `EXTRACT`, `CONVERT`, `CAST(… AS SIGNED/UNSIGNED)` and `COLLATE NOCASE`,
+  `RTRIM` and `BINARY` in expressions. `CREATE UNIQUE INDEX` now creates a
+  `UNIQUE` constraint. `LOG(x)` with one argument, `HEX(number)`,
+  `LAST_INSERT_ID()` and `CHANGES()` give an error that says what to use
+  instead (`LN`/`LOG10`, `RETURNING`). A query that gives `'now'` to any date
+  function, written in it or as a parameter, is not kept in the result cache.
+- **Panel: JSON and Excel.** A table or a query exported to JSON or `.xlsx`
+  (numbers and dates with their type, rows spread over several sheets when they
+  do not fit, a warning for cut texts; Excel only with the `zip` extension);
+  JSON imported into a table; the whole database exported and imported as one
+  JSON document; a window with import examples using the columns of the chosen
+  table and templates to download in CSV, Excel and JSON.
+- **Panel: SQL Server.** `herramientas/sqlserver-to-jsonsqldb.ps1` exports a SQL
+  Server database (every schema, tables, keys, indexes, data, views and
+  triggers) and imports a dump back into SQL Server in one transaction; it is
+  offered from the import screen and the dumps guide.
+- **A subquery in the `FROM` without an alias**, as in SQLite and PostgreSQL:
+  `SELECT COUNT(*) FROM (SELECT DISTINCT ciudad FROM clientes)`. 2.8.0
+  answered «Una subconsulta en FROM necesita alias». Its columns are named
+  without a table in front.
+
+### Security
+
+- **API: an IPv6 client could get around the request limit and the block
+  after failed attempts** (also in 2.8.0) by changing address on every
+  request, since a provider gives each customer a /64 network, 2^64
+  addresses. An IPv6 address now counts by its /64 for both; the request log
+  and `IPS_PERMITIDAS` still use the whole address, and `::ffff:1.2.3.4`
+  counts as `1.2.3.4`.
+- **A repeated request could lock an IP out for 24 hours** (audit H2): two
+  identical statements in the same second gave the same signature and the
+  second was taken as a replay. The signature now carries a random `nonce`;
+  the panel and the three example clients (PHP, Python, PowerShell) send it, and
+  a signature without one is still accepted.
+- **Panel: only administrators export and dump** (audit H8), as documented.
+- **Panel: the read-only role could slip a write behind a `SELECT`** once the
+  console accepted several statements; each statement is checked.
+- **Panel: a key or secret saved from the Configuration page could end up as
+  PHP code in `config.php`** (also in 2.8.0). Each value was found with a
+  regular expression that stopped at the first `);`: one that carried it,
+  saved a second time, left the rest outside the text. And the setup wizard
+  lost a `$1` in a key, taken for a back-reference. Both now find the value
+  by PHP's own tokens. Only an administrator can save there. Found in the
+  security review of 2.9, like the five below.
+- **Panel: anyone could fill the disk through the audit trail** (also in
+  2.8.0): every failed sign-in wrote the user name it carried, whatever its
+  size, also without the form's token or from an IP already locked out. Only
+  real attempts are written now, which the lockout limits, with the name cut
+  to 64 characters.
+- **Panel: a ZIP restored over a database replaced its `.htaccess` and
+  `web.config`** (also in 2.8.0), the files that deny the folder to the
+  browser: a ZIP made for it could leave the folder downloadable. They are no
+  longer taken from the ZIP; the database keeps its own, or gets the engine's.
+- **Panel: restoring a ZIP, and the copy an import made, did not check the
+  API key's databases** (also in 2.8.0). With a panel key limited to some
+  databases, a ZIP could overwrite another one, and an import into another
+  one that failed put back its copy. Both now ask the API first, as the ZIP
+  export already did; an import no longer copies the database (see the entry on
+  all-or-nothing imports below).
+- **Panel: signing in took less time for a user that does not exist** (also
+  in 2.8.0): that check used a cost of 10, the real ones `ADMIN_BCRYPT_COSTE`
+  (11), and the difference told which names exist (74 / 131 ms).
+- **Functions that build a text have a ceiling.** `ZEROBLOB`, `RANDOMBLOB`,
+  `LPAD`, `RPAD` and the width or precision of `PRINTF` (new in 2.9), like
+  `REPEAT`, refuse a result of more than 16 MB with an error that says so,
+  instead of running a request out of memory. And a key limited to some
+  databases cannot put `SHOW DATABASES` in a `lote`, where its result could
+  not be filtered and showed them all.
+
+From the security review at the end of 2.9, each with a test that fails
+without its fix:
+
+- **Panel: a ZIP restored over a database could make the engine delete or
+  replace files of its folder** (also in 2.8.0), its `.htaccess` and
+  `web.config` among them. Files under `.tx/` or `.lote/` were restored, and
+  on opening the database the engine took them for a write cut short and
+  carried them out. A ZIP now restores only the files of the tables and of
+  the database, and `.reparados/`; and a journal or a transaction that the
+  engine reads on opening can only put back, rename or delete files of the
+  database's tables, never anything else of its folder.
+- **SQL dumps: what goes commented could run in the other engine** (also in
+  2.8.0). A `CHECK`, a default, or a view or trigger that the other engine
+  does not accept goes in the dump as a `--` comment, with the reason; a line
+  break inside it, or a lone carriage return, left what followed outside the
+  comment, and loading the dump into MySQL, PostgreSQL or SQL Server ran it.
+  Every line of a comment now starts with `--`.
+- **Panel: signing in cleared the failed attempts of the whole IP** (also in
+  2.8.0), so anyone with an account could keep guessing the password of
+  another, signing in with their own every few tries, without ever being
+  locked out. It now clears only those of the user who signs in. And each
+  attempt is counted before its password is checked, under the lock: attempts
+  at the same time all passed the check, and went past the limit. Failed
+  attempts now expire `ADMIN_LOGIN_BLOQUEO_MIN` minutes after the last one;
+  they never did, and a few typing mistakes a month ended in a lockout. A
+  name that no user can have (3 to 32 letters, digits and `. _ - @`) is
+  answered like a wrong password, in the same time, and counts against the IP
+  under one short key, so names of any size never reach the attempts file
+  that every sign-in reads.
+- **API: a captured request could be sent again** when the client's clock
+  ran more than a minute ahead (also in 2.8.0): its token was forgotten one
+  window after it arrived, while it was valid until one window after its own
+  time. It is now kept until then.
+- **API: an unknown key was told apart from a wrong signature** (also in
+  2.8.0), against what docs/04-api.md says: whoever had an old or leaked key
+  could learn whether it still existed without its secret. Both now answer
+  `Token inválido`, after the same checks.
+- **API: a key that can only read could fill the disk through the result
+  cache** (also in 2.8.0): every different query that took 1 ms or more left
+  its whole result in a file (32 MB each in the test), and those that read no
+  table were never deleted. On disk, a result of more than 1 MB is no longer
+  kept, nor one that reads no table.
+- **API: a key that can only read could hold the database for everyone** for
+  up to the request's time limit, with a `lote` of heavy reads: a `lote`
+  always took the exclusive lock. One that only reads now runs each statement
+  with the shared lock, as a single `SELECT` does, and writes nothing to disk to
+  be undone. The lock is released between statements: held for the whole
+  `lote`, it deadlocked with an `INSERT` that checks a foreign key.
+- **Behind a trusted proxy, the client chose its own IP** (also in 2.8.0):
+  with `CONFIAR_EN_PROXY` or `ADMIN_CONFIAR_EN_PROXY` on, the API and the panel
+  took the first IP of `X-Forwarded-For`, which the client writes, and a
+  proxy only adds the real one after it: a client could get past
+  `IPS_PERMITIDAS` and the lockout, or lock out another's IP. They take the
+  last one now, the one the proxy adds.
+- **Panel: changing your own password did not ask for the current one**
+  (also in 2.8.0): a session left open for a moment was enough to take the
+  account. It asks for it now, with the lockout of signing in.
+- **Panel: the PHP version and full server paths showed before signing in**
+  (also in 2.8.0): the sign-in page showed the exact PHP version, and the
+  setup wizard, which anyone sees until it is finished, the absolute paths of
+  its files and of the engine (in the direct connection's field) and its
+  errors. The wizard now shows them from the project folder, and only PHP's
+  major and minor version.
+- **The PHP example client's shortcut stopped checking the certificate of
+  any server** (also in 2.8.0): `JsonSqlDbCliente::pruebas()` accepted a
+  self-signed certificate without saying so. It does that only on
+  `localhost` now.
+- **Panel: the setup wizard made the server request the address in the
+  `Host` header** (also in 2.8.0). Its check that `data/` cannot be
+  downloaded, which anyone can open before installation, requested
+  `<scheme>://<Host>/data/web.config` with the `Host` the client sent and
+  without checking the certificate: a request from the server to any machine
+  and port of its network (`Host: 10.0.0.5:6379`). It now uses only
+  `ADMIN_API_URL` as written in the configuration, checks the certificate as
+  the calls to the API do (`ADMIN_SSL_CA`, `ADMIN_SSL_AUTOFIRMADO`), and while
+  that URL is empty says the check has not been made.
+- **Panel: a link could change the language saved for a signed-in user** (also
+  in 2.8.0): `?idioma=en` by GET saved it in `usuarios.json`, so a link or an
+  image on another page could change it. The selector's links now carry a
+  token derived from the session's; without it, the choice changes only the
+  session.
+- **A statement with bytes that are not valid UTF-8 could leave no trace in
+  the logs** (also in 2.8.0): the query log, and the API's request log,
+  dropped the whole line when it could not be encoded, also for a write
+  (`INSERT … -- \xff`), and the query log cut a long SQL in the middle of a
+  letter (`ñ`), with the same result. Lines are now always written, with
+  U+FFFD in place of what is not UTF-8, and the SQL is cut between letters.
+- **A write whose triggers read other tables now locks the whole database**
+  (also in 2.8.0): subqueries, `UPDATE … FROM`, `DELETE … USING` and
+  `SELECT … FROM` in a trigger's statements were not counted, and those tables
+  were read without a lock while another process could be writing them.
+
+### Changed
+
+- **The storage layer's methods that only some statements use take the
+  storage as their first argument, in classes of their own** (see Faster):
+  `$st->leerFilas($t)` is now `StorageEscritura::leerFilas($st, $t)`, and the
+  same for the other methods that write rows; changing and removing rows
+  already written is in `StorageCambios`, what only reads do
+  (`contarFilas()`, the result cache…) in `StorageLectura`, and structure
+  changes, transactions and repairs in `StorageMantenimiento`. It only
+  concerns code that uses `Storage` directly; what the documentation shows of
+  it (`Storage::crearBase()`, `bloquear()`, `desbloquear()` and `Catalog`'s
+  methods) works as before. The internal methods of `Parser`, `Select`,
+  `Evaluator`, `Functions`, `Indexes`, `Writer` and `Database` that only some
+  statements use moved the same way; `Database::lote()` and
+  `Database::consultarGlobal()` work as before.
+- **The query log records writes and errors by default.** `JSONSQLDB_LOG_NIVEL`
+  now defaults to `escrituras`, also with a `config.php` written before that
+  does not define it: logging every read opened and appended to the
+  log file in every request, about 0.09 ms, 16 % of a lookup by key between web
+  requests (632 → 544 µs). `todo` brings reads back. At `escrituras`, `UNION`,
+  `SHOW` and `CHECK` are now left out too, not only `SELECT`, as the setting
+  always said.
+- **Panel: `ADMIN_TIMEOUT` defaults to 300 s** (60 before), with the import
+  fixes listed under Fixed. A `config.php` written before keeps its value.
+- **The result cache keeps only what is worth keeping, and has a ceiling.** A
+  query that took less than 1 ms is not stored (with OPcache, a lookup by key
+  went from 691 to 657 µs between requests, against 612 µs with no result
+  cache), and the results of the same tables go to 4,096 places at most
+  (4,096 in all in APCu). Before, every different query left a file until the
+  next write to its tables, so a table that is only read, queried row by row,
+  piled them up without end and every write had to list them. A repeated
+  expensive query is still served from the cache (9 ms → under 0.5 ms).
+- **Deleting a row leaves a hole instead of moving the rows behind it.** The
+  deleted row's line becomes `null` in its part, and the table's revision file
+  counts the holes per part (`huecos`). Reads skip them, also if that file is
+  lost, `COUNT(*)` does not count them, and `INSERT` still goes at the end, so
+  the insertion order stays. Deleting the last rows leaves no holes: there are
+  no rows behind them to keep in place, so the table is shortened as before,
+  and a table used as a queue (rows added at the end and deleted soon after)
+  does not pile them up.
+  When holes would pass 25 % of a table, the delete that gets there rewrites it
+  without them, and `VACUUM` now does that for every table that has any. A
+  table with triggers or with a foreign key to itself, which a `DELETE` loads
+  whole, is still written without the deleted rows. The
+  files stay one row per line and readable; but a table with holes cannot be
+  read by 2.8 or earlier, which stop with an error on the first scan (they do
+  not return wrong rows): run `VACUUM` before going back to one.
+- **The memory safety net no longer sets 2 MB aside in every request.** When
+  PHP runs out of memory, the room to answer comes from raising
+  `memory_limit` at that moment, by what the 2 MB gave; only if the hosting
+  does not let `memory_limit` change (`ini_set` disabled, or the limit fixed by
+  the server) are the 2 MB set aside as before. The limit is only ever raised,
+  and only when it is short: the function runs at the end of every request,
+  and lowering it would leave the shutdown functions after it without memory.
+- **The cache starts over with 2.9.** Its entries carry the seal of their file,
+  so 2.9 uses keys of its own (`jsq2:`) and ignores those of earlier versions,
+  and an earlier version ignores those of 2.9. Deleting `.cache/` after
+  upgrading frees the space taken by the old ones.
+- **A table touched by a transaction that was undone gets a `gen` field in its
+  `rev.json`**, which changes all its cache keys: after the undo its revisions
+  count numbers already used inside, and no entry of what was undone can ever
+  be served, also from APCu. Earlier versions ignore the field.
+- **A damaged `rev.json` no longer restarts the revisions in silence**, which
+  could serve stale rows from the cache: it is rebuilt from the data.
+- **`||` binds as in SQLite: tighter than `* / %` and `+ -`**, with `->` and
+  `->>` at its level. It sat below `+ -`, as in PostgreSQL: `1 + 2 || 3` gave
+  `'33'` where SQLite gives 24, and `2 * 3 || 4` gave `'64'` (SQLite 68).
+  Checked against SQLite on a broad set of mixed expressions. **Views,
+  triggers, `CHECK` and `DEFAULT` stored by an earlier version are parsed with
+  the new precedence**: one that mixes `||` with arithmetic without parentheses
+  (`'A' || n + 1`) now means `('A' || n) + 1`; write `'A' || (n + 1)` where the
+  old meaning is wanted. Importing keeps the meaning of the source: in a
+  PostgreSQL view or trigger the arithmetic side of `||` gets parentheses, a
+  SQL Server `+` that joins texts becomes `(a || b)`, and in a MySQL trigger
+  `||` is `OR` unless the dump's `sql_mode` has `PIPES_AS_CONCAT` (before, it
+  was always taken as joining texts). Exporting already wrote every operation
+  in parentheses.
+- **Comparing and sorting follow one total order: numbers and texts that are
+  numbers first, by value, then the other texts.** A text that is a number and
+  one that is not compared as texts, and so did a number and a text, so the
+  order went round in a circle (`'9' < '10' < '1a' < '9'`) and `ORDER BY`,
+  `ORDER BY … LIMIT`, `MIN` and `MAX` could disagree on the same column: with
+  `'10'`, `'9'`, `'1a'`, `'5'`, `'2b'`, `'100'`, `'3'`, `ORDER BY` gave
+  `9, 10, 1a, 2b, 3, 5, 100` and `MIN` `'3'`. Now `ORDER BY` gives
+  `3, 5, 9, 10, 100, 1a, 2b`, and `WHERE`, `BETWEEN`, `MIN`/`MAX`,
+  `GREATEST`/`LEAST`, windows and the sort read from an index or done on disk
+  all agree. Equality does not change (`'12abc' = 12` is still false), and
+  between two texts that are not numbers `ORDER BY` still uses the configured
+  collation.
+
+### Fixed
+
+- **Panel with the direct connection: a sorted export of a large table
+  stopped halfway** (found by the variant of `f20_memoria` with
+  `--directa`): it asked for the rows in batches with `LIMIT … OFFSET …`, each
+  one running the whole query again in the panel's own process, and with
+  32 MB a sorted export of 120,000 rows ended after 12,500 with PHP's memory
+  error. With the direct connection the query now runs once and its rows go,
+  as the engine gives them, to a temporary file that the export reads. And a
+  sort that asks PHP for its memory in one go (`asort`, `array_multisort`)
+  first checks that it fits in what PHP can still ask for; if not, the query
+  goes to disk, or ends with the memory error instead of PHP's fatal.
+- **An `UPDATE` or `DELETE` that touches many parts held all of them in
+  memory** (also in 2.8.0): the new text of every part it changed was kept
+  until the end and then written. Updating 100,140 rows spread over a table of
+  a million (all its parts) ran out of 256 MB with PHP's fatal error; each
+  part is now written as it is made and let go: 10.1 s and 141 MB.
+- **APCu filled up and emptied itself over and over** (also in 2.8.0). The
+  engine stored in it every part it read, and APCu, when full, empties
+  entirely (with `apc.ttl = 0`, its default): scanning a table larger than its
+  memory filled it and wiped it on every scan, taking with it what other tables
+  and applications kept there, and with a million rows and the default 32 MB a
+  scan took 2.5 times what it takes without a cache. As with OPcache, nothing
+  more is stored when less than 25 % of it is free; that scan now takes what
+  it takes without a cache.
+- **API: a statement with a space or a line break at either end was always
+  refused** (also in 2.8.0): the API checked the signature of the statement
+  without them, while every client signs what it sends, so it answered
+  `Token inválido` and counted a failed attempt; ten of them locked the IP
+  out for a day. The statement is now signed as it arrives, as `params` and
+  `lote` already were.
+- **Panel: in the Data tab, a column with `]` or `,` in its name made editing
+  and deleting act on other rows** (also in 2.8.0): the name went into the
+  form field as it was, and PHP cuts it at the first `]`; and the key columns
+  were read from a list separated by commas. Deleting one row could delete
+  others. The fields now carry the name in hexadecimal, and the key columns
+  come from each column.
+- **Panel: a CSV with an unclosed quote, or a ZIP with a huge file, ran PHP
+  out of memory** (also in 2.8.0): the rest of the CSV was read into one field,
+  and each file of the ZIP whole. Both now stop first with an error that says
+  which line (counting the blank ones) or file, as a statement of a dump
+  already did. The ZIP and its files are copied to disk in pieces, so together
+  they can be larger than PHP's memory; only the files checked before
+  restoring are read whole (each `.json` of the database, which the engine
+  splits in parts of `JSONSQLDB_FILAS_POR_PARTE` rows, and
+  `.reparados/apartadas.json`), and each can take up to a third of the free
+  memory.
+- **Panel: the time zone changed from one request to another** (also in
+  2.8.0): the audit trail and the scheduled backups used `php.ini`'s, except
+  in the requests that loaded the engine, whose `config.php` sets its own, and
+  one day's audit ended up in two files (the panel's tests failed between
+  midnight UTC and midnight in Madrid). With the engine on the same machine,
+  the panel now takes its time zone from the start; if `open_basedir` keeps it
+  from reading the engine's `config.php`, it keeps `php.ini`'s, without a
+  warning.
+- **Panel: restoring a ZIP that dies half-way left the database empty** (also
+  in 2.8.0): when PHP stopped on its time or memory limit, the copy taken
+  before was not put back, and the next restore deleted it. It is put back
+  when the process ends, and the restore has no time limit, as the other
+  imports. A database with `-` in its name, or starting with a digit, can now
+  be restored from its ZIP, and one with rows set aside by `REPAIR TABLES`
+  too: its `.reparados/apartadas.json` made the ZIP be refused.
+- **The panel could not write views and triggers with numbers when the
+  database goes through the API** (also in 2.8.0): with the engine not loaded,
+  the panel loaded a list of the engine's classes by hand to use its parser,
+  and the list lacked one the parser uses for any number in the SQL, so an
+  export to MySQL, PostgreSQL, SQL Server or Access left those views and
+  triggers untranslated ("Class Valor not found"), and the console wrapped
+  every paged query in a subquery. It now loads the engine's autoloader, which
+  brings exactly what is used.
+- **The disk cache could give the rows of one part for another** (also in
+  2.8.0 and earlier): the file name of a cached part joined its number and its
+  revision with nothing between them, so part 1 at revision 13 and part 11 at
+  revision 3 were the same file, `…p113.cache`, and the same for the pieces of
+  an index. It takes a table of 11 parts or more (over 10,000 rows with the
+  default part size) and PHP without APCu (2.8.0 does not use the disk cache
+  when APCu is there). Reproduced on 2.8.0 with 110 rows in parts of 10: after
+  ten updates of row 1, `SUM` gave twice its value, `MAX(id)` gave 100, and the
+  rows of part 11 were missing. The name now has a `-` between the two, and
+  every cache entry also carries the seal of its file. Anyone on 2.8.0 without
+  APCu and with such tables can set `JSONSQLDB_CACHE_ACTIVA` to `false` in
+  `config.php` until upgrading; deleting `.cache/` alone does not stop it
+  happening again.
+- **After changing `JSONSQLDB_FILAS_POR_PARTE` with data already written, a
+  `CREATE INDEX` or a `CREATE TRIGGER` deleted rows** (also in 2.8.0): a
+  statement that only changes the structure kept the parts as they were and
+  deleted those past the number the new size gives. The table is now rewritten
+  with the new size first; the same for `ALTER TABLE … ADD CHECK` and `VACUUM`.
+- **A table named `manifiesto` could undo the writes of the others** (also in
+  2.8.0): the journal of a write to it that died half-way is
+  `.tx/manifiesto.json`, the name of the journal before 2.0, and opening the
+  database took it for one, moving every journal pending into it. The old one
+  is now told apart by its content, and a transaction keeps its own list as
+  `.lote/manifiesto.lote`.
+- **A file that could not be put in its place left the database unable to
+  open** (also in 2.8.0): when a rename failed half-way through a write of
+  several files (on Windows, a file another program holds open), the temporary
+  files were deleted while the journal stayed, and opening the database then
+  failed with «Falta el temporal». They are kept now, and the write is finished
+  the next time the database is opened, as after a crash.
+- **`ALTER TABLE … ADD COLUMN … REFERENCES` lost the foreign key** (also in
+  2.8.0): the column was added without it and without a word. It is kept now,
+  as in `CREATE TABLE`, after checking that the rows already there point to
+  existing rows; and `ADD COLUMN … UNIQUE DEFAULT x` is refused when the table
+  has two rows or more, which would repeat it.
+- **A trigger that changed a row its own `UPDATE` or `DELETE` had still to
+  reach left that row out** (also in 2.8.0): `UPDATE t SET v = v + 1` with a
+  trigger that touched the next row skipped that row, and a `DELETE` left it
+  in the table, with a PHP warning. As in SQLite, the rows chosen at the start
+  are all processed, each as the triggers and cascades of the earlier ones left
+  it, and one already deleted is skipped. Checked against SQLite in eight
+  cases on a table of three parts.
+- **`STRFTIME('%s', date)` took the date in PHP's time zone** (also in 2.8.0):
+  with `config.php`'s `Europe/Madrid`, `STRFTIME('%s', '2026-03-01 10:00:00')`
+  gave an hour less than SQLite and than `UNIXEPOCH()` of the same date. `%s`
+  is now what `UNIXEPOCH()` gives: the date taken as UTC, and with `'now'` the
+  current moment.
+- **API: a query that ran out of `TIME_LIMIT` got an empty answer** (also in
+  2.8.0), and was not logged. It now gets an HTTP 500 with a JSON error, as one
+  that runs out of memory already did, and both go to the request log. A
+  request that fails after its signature is checked is logged with its key's
+  label and its operation, which were left empty.
+- **A column with a comma in its name broke the exports of its keys and
+  indexes** (also in 2.8.0): `SHOW KEYS` and `SHOW INDEXES` list the columns
+  separated by commas, and the panel split such a name in two, so the dump
+  failed to load (`"a,b"` became `"a"` and `"b"`). Such a name now goes between
+  double quotes, as in CSV, and the panel reads it so. Two unique keys whose
+  lists only differ in where the commas are (`("x y,z")` and `("x y", z)`)
+  were also taken for one: such a table is refused, as one with `(a, b)` and
+  `(a_b)`.
+- **A `_views.json` with an extra comma lost all the views** (also in 2.8.0):
+  it was taken as empty, the views stopped existing, and the next `CREATE VIEW`
+  wrote over it. It is repaired now as a table's structure; if it cannot be
+  repaired safely, it is an error that says so, and nothing writes over it.
+- **A table named `_database` or `_views` wrote over the database's own
+  files** (also in 2.8.0): `CREATE TABLE _views (…)` was accepted and the
+  views were gone. `_database`, `_views`, `_revs` and `_base` are now reserved.
+- **A missing part in the middle of a table shortened it in silence** (also in
+  2.8.0): with the second of three parts deleted, the table had the rows of the
+  first one only. Reading it is now an error that names the missing file, and
+  `CHECK TABLES` lists it. A last part that 2.8 removed when a `DELETE`
+  emptied it, but whose revision it left listed in `rev.json`, is not taken
+  for a missing one: the parts the table's rows fill are what counts.
+- **`UNIQUE (a, b)` was not enforced in a table that also had `UNIQUE (a_b)`**
+  (also in 2.8.0): both got the same automatic index file, `auto_a_b`, and a
+  repeated pair went in. Such a table can no longer be created (the error asks
+  to rename a column); one created before still has its uniqueness checked,
+  by reading the table.
+- **Panel: a view exported to PostgreSQL sorted `NULL` on the other side.**
+  Here, as in SQLite, MySQL and SQL Server, `NULL` goes first in `ASC` and last
+  in `DESC`; PostgreSQL does the opposite unless told. Its `ORDER BY` (and that
+  of a window) now carries `NULLS FIRST` or `NULLS LAST`.
+
+- **`ALTER TABLE … MODIFY` of a column in a composite primary key was refused
+  when that column alone had repeated values** (also in 2.8.0): with
+  `PRIMARY KEY (a, b)` and the rows `(1, 'x')` and `(2, 'x')`, changing `b`
+  said it had repeated values. Each `UNIQUE` and primary key the column is in is
+  now checked as a whole, with the new values.
+
+- **Panel: editing a column lost its `UNSIGNED`.** The form does not show it,
+  and saving rewrote the column without it. It is kept now, like an `ENUM`'s
+  list.
+
+- **Panel: editing a column lost a `DEFAULT` worked out when inserting**
+  (since 2.8.0): `CURRENT_TIMESTAMP` or an expression did not appear in the
+  form, and saving left the column without a default. The structure now shows
+  it, and the form brings it with a box «Worked out when inserting» ticked,
+  which also lets one be set; without the box, what is written is a fixed
+  value, so a text such as `(none)` stays a text.
+
+- **Two queries of a `WITH` that named each other used up all the memory**
+  (also in 2.8.0): `WITH a AS (SELECT * FROM b), b AS (SELECT * FROM a)` ended
+  in PHP's fatal memory error. It is now an error that says so. And the name of
+  a query of the `WITH` is now case-insensitive, like a table's: `WITH Cnt AS
+  (…) SELECT * FROM cnt` said the table `cnt` did not exist.
+
+- **Panel: exporting a trigger to MySQL, PostgreSQL or SQL Server dropped what
+  its statements could not carry** (the upsert since 2.8.0): `INSERT OR
+  IGNORE`, `OR REPLACE` or `ON CONFLICT` came out as a plain `INSERT`, and an
+  `UPDATE` or `DELETE` with `ORDER BY` or `LIMIT` lost them, so the trigger did
+  something else there. Those, `RETURNING`, and an `UPDATE` or `DELETE` with an
+  alias or other tables, now leave the trigger commented with the reason, as
+  anything else that has no translation.
+
+- **A write with a subquery read the other table without a lock** (also in
+  2.8.0): `UPDATE t … WHERE id IN (SELECT … FROM s)`, a `DELETE` with `EXISTS`,
+  or an `INSERT` with a subquery in `VALUES`, on a table with no foreign keys
+  or triggers, locked only `t`, and with that lock the other tables are read
+  without taking theirs: another process could be writing `s` at that moment
+  and the subquery could see some of its parts new and some old. Like `INSERT
+  … SELECT`, they now take the database lock.
+
+- **A `JOIN … ON` between an integer and a decimal or a numeric text returned
+  no rows** (also in 2.8.0): `ON a.int_col = b.double_col` with 1 and 1.0, or
+  `ON a.int_col = b.text_col` with 1 and `'1'`, while the same `=` in the
+  `WHERE` matched them, as SQLite does. The hash of the join told the types
+  apart; it now matches what `=` matches. A join by index already did.
+- **`DISTINCT`, `GROUP BY`, `UNION`, `INTERSECT`, `EXCEPT` and `COUNT(DISTINCT
+  …)` took 1 and 1.0 as two values, and 0.3 and 0.30000000000000004 as one**
+  (also in 2.8.0): `SELECT f FROM a INTERSECT SELECT i FROM b` gave nothing
+  with 1.0 and 1, and a decimal was told apart by its first 14 digits. Now as
+  in SQLite: 1 and 1.0 are one value, every decimal is exact, and 1 and `'1'`
+  are still two.
+
+- **An index piece with no keys was taken for a damaged one.** It was written
+  as `"keys":[]`, and the check every write makes on the pieces it does not
+  rewrite expects them to end in `}}`; the index was then not trusted, and the
+  next `INSERT` loaded the whole table to check its unique keys. It happened to
+  the first rows inserted into an empty table, and with 2.9 to a part whose
+  rows have all been deleted. Pieces with no keys are written as `{}` now.
+- **The result cache served the result of a view that had been redefined.**
+  After `DROP VIEW v` and `CREATE VIEW v AS …` with another definition, a query
+  on `v` already in the cache kept returning the old rows, also from other
+  processes, until something was written to its tables. The key of a cached
+  result now carries the definition of every view the query reads. It also
+  carries the collation, its map and the engine version: switching
+  `JSONSQLDB_COLACION` or updating the engine served results sorted or computed
+  with the old rules. Reported by the audit (H1, H7).
+- **`GROUP BY 1` grouped by the constant 1**: all the rows in one group and a
+  single row of result, with no warning. A number now means that output
+  column, as in `ORDER BY`, SQLite, MySQL and PostgreSQL; a number out of range,
+  or the number of an aggregate column, is an error. Reported by the audit (H2).
+- **Panel: a valid CSV could not be imported** when a column name had a comma
+  between quotes, or when a tab-separated file had a comma in its header: the
+  separator was the one that appeared most in the first line, counting also
+  the ones between quotes. It is now the one of `,` `;` and tab that gives the
+  same number of fields, more than one, in the first five lines. Reported by
+  the audit (H3).
+- **`LIMIT` and `;` as in SQLite**: `LIMIT 1 + 1` and any constant expression,
+  `LIMIT -1` as no limit, a negative `OFFSET` as 0, and a final `;` repeated
+  (`SELECT 1;;`) were rejected with «Only one statement per query». Reported
+  by the audit (H6). `UPDATE` or `DELETE` with `ORDER BY` or `LIMIT`, which
+  SQLite only takes when compiled with a special option, is accepted as in
+  MySQL (see Added).
+- `CAST(x AS BOOLEAN)` had a branch that never ran: `BOOLEAN` is `INTEGER`, as
+  in SQLite, and the branch is gone (H4). The error of `CAST(… AS DATETIME)`
+  said the format was `YYYY-MM-DD` when a time is also accepted (H5).
+
+- **Panel: batches of 200 rows with the direct connection.** To work out how
+  many rows fit in memory, the panel measured the memory before and after
+  asking for a sample, and the first time that included loading the whole
+  engine: batches came out at the minimum, 200 rows, and exporting 120,000
+  rows took 600 requests. It now measures a copy of the sample (found while
+  testing the sort on disk).
+
+- **Panel: exporting a query that ends in a comment asked for everything at
+  once.** The batches add `LIMIT … OFFSET …` at the end of the query; after a
+  `-- comment` the `LIMIT` was part of the comment, the first request brought
+  the whole result, and with 120,000 rows and 32 MB nothing was exported. It
+  now goes on a line of its own. Found in the code audit of 2.9.
+- **Panel: the ZIP copy carried the engine's cache** (`.cache/`, which can be
+  large), the temporary files of a sort on disk (`.orden/`) and the turn files
+  of each table (`.<table>.turno`). They are rebuilt on their own and are left
+  out. Found in the code audit of 2.9.
+
+- **Panel: a scheduled daily or weekly backup was made twice when the clock
+  went back.** To find the previous day, 86,400 seconds were subtracted, and
+  the day of the change to winter time has 25 hours: in Europe/Madrid, a backup
+  at 01:00 or 02:00 also ran at midnight the day after, one at 03:00 the same
+  day at midnight. Days are now counted in the calendar. Simulated every 15
+  minutes across both changes of 2026: one backup per day and per week. Found
+  in the code audit of 2.9.
+- **Hostings with `open_basedir`.** The ZIP copy and an Excel file with `#` in
+  its name failed when the system's temporary folder is not allowed: their
+  temporary file now goes to the panel's data folder if it cannot go there.
+  And every write printed a warning (`is_dir(): open_basedir restriction`)
+  while looking in `/proc` for dead processes, which on a server showing
+  errors ended up inside the response; it is now silent. And the panel, with
+  the engine's path empty (the usual case, the engine next to it), looked for
+  `/engine` at the root of the disk: the same warning, in the middle of the
+  answer to an upload in pieces (which broke it), of an import from the import
+  folder or of a backup asked for by the browser. An empty path is no longer
+  looked at. Found in the code audit of 2.9.
+- **Panel: signing out with an expired form was a fatal error.** A `POST` to
+  sign out without a valid token did not close the session, which is right,
+  but showed PHP's fatal error page; it now says «The form has expired» and goes back
+  to the start page. Found in the code audit of 2.9.
+
+- **Panel: exporting and importing big databases**, reported by a second
+  external audit. A dump probes each table before starting, so an unreadable
+  table is reported before the download begins instead of in the middle of
+  the file; blocks are measured in bytes; a dump cut short ends with
+  `INCOMPLETE_DUMP_DO_NOT_IMPORT;`, a line no engine accepts, so importing it
+  stops there with an error. A query with no rows says so instead of
+  downloading a broken file. Import batches are
+  measured in bytes and split in two when the API says one is too big; an SQL
+  file is read in bounded chunks and PostgreSQL's `COPY` in 1 MB batches; a
+  fatal error during an import is undone too (see the next entry). A form larger than
+  `post_max_size` is explained. `ADMIN_TIMEOUT` is 300 s. A ZIP that cannot be
+  restored says which folder is missing. The apostrophe that guards against
+  spreadsheet formulas is removed when a CSV is imported, exactly one, and a
+  text that already starts with apostrophes before a formula character gets
+  one more on export, so every value comes back the same (`'-5` stays `'-5`). A file name without
+  an extension keeps its date stamp. Uploads without `crypto.subtle` get their
+  id from the file.
+- **Panel: an all-or-nothing import that failed also undid what others had
+  written meanwhile** (since 2.7.3). With the panel on the same machine as the
+  engine, the import copied the whole database and, on failure, put the copy
+  back: a row another request inserted during the import was lost. It now runs
+  in one transaction of the engine, which the panel loads for it also when it
+  goes through the API: on failure, or after a fatal error of PHP, only what
+  the import did is undone; the database is no longer copied (that needed as
+  much free disk again as it took); and while it runs the database is locked,
+  so others wait instead of writing into it or seeing it half imported.
+- **Panel: works without `mbstring`**, as the engine already did; the CI runs
+  the panel's tests without it.
+- **Panel: dumps from other engines**, reported by an external review of import
+  and export. The encoding is decided per literal, not per statement (a `BLOB`
+  in one row of a multi-row `INSERT` no longer garbles the text of the others);
+  any PostgreSQL schema is recognised, not only `public`, and two tables with
+  the same name in two schemas are reported; a `NUL` inside a text is written
+  as each engine needs, or removed with a warning; MySQL gets `TEXT`,
+  `MEDIUMTEXT` or `LONGTEXT` by size in bytes and long `VARCHAR`s become text
+  until a row fits in 65,535 bytes; `ON DELETE SET DEFAULT` is written as MySQL
+  and Access accept it, with a note; PostgreSQL materialized views become views
+  and partitioned tables keep their rows in the parent; SQLite virtual tables
+  (FTS) are skipped with their auxiliary tables; a data-only dump into an empty
+  database explains that the tables have to exist; each skipped object is
+  reported by its kind.
+- **Panel: a mysqldump imported through the API stopped at its first big
+  `INSERT`** (also in 2.8.0). mysqldump writes `INSERT`s of many rows, up to
+  1 MB, and the importer only joined and sized one-row `INSERT`s: one of more
+  than 200,000 bytes was refused by the API («Petición demasiado grande»). An
+  `INSERT` of several rows is now sent in batches of its rows that fit, also
+  the 200-row ones made from a PostgreSQL `COPY`; with the direct connection
+  nothing changes. Found in the review of the documentation of 2.9.
+- **Panel: a CSV export did not come back the same when a text had a
+  backslash before a quote** (also in 2.8.0): it was written with `\` as the
+  escape character, which leaves that quote without doubling it, and neither
+  the import nor Excel read it like that. Quotes are now only doubled, as the
+  CSV standard says.
+- **Panel: the headers of the MySQL, PostgreSQL and SQL Server dumps said that
+  views and triggers go commented out**; they have gone translated since
+  2.7.3. Only those that cannot be written there are commented, with the
+  reason.
+- **`ALTER TABLE … CHANGE` in one step** (the second part read the structure
+  left by the first), and **`TRUNCATE` resets the autoincrement** to 1.
+- **Counting the rows of a part with huge rows no longer loads them**: three
+  rows of 12 MB stopped a `SHOW TABLES` with 32 MB.
+- **A `SELECT` run after a row-by-row `SELECT` on the same `Database` object
+  logged the rows of the first one**: the count of rows passed to the callback
+  was kept until the next row-by-row query. It is cleared when that query
+  ends.
+- **Panel: a damaged `usuarios.json` (or any other file of the panel) was
+  read as empty and overwritten by the next change** — adding a user would
+  have dropped the others. A change to a file that exists but is not valid
+  JSON now stops with a message that names the file, and leaves it as it is.
+  Reading it still shows it as empty, as before.
+- **Panel: a chunked upload that cannot open its target closes the chunk it
+  received** before reporting the error.
+- **A cascade reaches every level, and a child row changed by one goes through
+  everything an `UPDATE` does** (also in 2.8.0). `ON UPDATE CASCADE` changed
+  the children but not the grandchildren (`UPDATE p SET id = 5` left
+  `g2.pid = 1` behind a child whose key is also a foreign key); the children's
+  `BEFORE`/`AFTER UPDATE` triggers did not fire, and their `UNIQUE` and foreign
+  keys were not checked: an `ON UPDATE SET DEFAULT` could leave two rows with
+  the same unique key, and an `ON DELETE SET DEFAULT` point at a parent that
+  does not exist. All of that now happens as in SQLite, and a duplicate or a
+  missing parent is an error.
+- **The parent row is written or deleted before its cascades run**, as in
+  SQLite (also in 2.8.0): the triggers of the children deleted in cascade
+  still saw it, so `AFTER DELETE ON h … INSERT INTO alog (pid) VALUES
+  (OLD.pid)` left rows in `alog` pointing at deleted parents; now that is a
+  foreign key error. `OR REPLACE` keeps the old order: the new row usually
+  brings the key back, and SQLite accepts that.
+- **`ADD UNIQUE`, `ADD PRIMARY KEY`, `ADD FOREIGN KEY`, `MODIFY`, `DROP
+  COLUMN` and `CHECK`/`REPAIR KEYS` compare keys as writes do** (also in
+  2.8.0). There `'5'` and `'05'` were different keys: `REPAIR KEYS` set to
+  `NULL` a child whose parent the engine itself finds, `ADD UNIQUE` accepted
+  `'5'` and `'05'`, and `ADD FOREIGN KEY` refused data the engine accepts.
+  Their messages now show the values, not the internal key.
+- **`ALTER TABLE … ADD COLUMN id INTEGER PRIMARY KEY DEFAULT 0` on a table with
+  two or more rows is refused**, like `UNIQUE` (also in 2.8.0): every row got
+  the same primary key.
+- **`ALTER TABLE … RENAME TO`** (also in 2.8.0) accepted the name of a view,
+  which then hid the table, and left the views and triggers that use the table
+  pointing at the old name (`La tabla 'a' no existe` on the next write). Both
+  are refused now, naming the view or trigger to drop and create again.
+- **A unique key could share its name with another one** (also in 2.8.0):
+  `CONSTRAINT uq_t_x UNIQUE (y)` next to `x TEXT UNIQUE`, in `CREATE TABLE` or
+  `ADD CONSTRAINT`, made one of the two stop being checked. It is refused.
+- **`CREATE TRIGGER` refuses `NEW` in a `DELETE` trigger and `OLD` in an
+  `INSERT` one**, as MySQL does, and a statement a trigger cannot run (a
+  `DROP TABLE`, a `SHOW`…) in its body (also in 2.8.0): the error came on every
+  write to the table instead.
+- **A write by parts that committed after an `INSERT` had opened a new part cut
+  the table's state to the parts it had seen** (also in 2.8.0): three data
+  files and two revisions, so every lookup by any index became a scan until
+  the next write, which then rebuilt them all. It now cuts only what it
+  removed itself, and each piece's range goes in its own place.
+- **A lock that could not be taken left the database's shared lock held** (also
+  in 2.8.0): with a table lock file that could not be opened, or a recovery
+  that failed, other writers waited forever and the same process's later
+  writes, DDL included, ran without a real exclusive lock. The error now
+  releases every lock.
+- **`ORDER BY` an `AS` alias named like a column sorted by the column** (also
+  in 2.8.0): `SELECT -saldo AS saldo … ORDER BY saldo` came out the wrong way
+  round. The alias wins on every path, as in SQLite, MySQL and PostgreSQL;
+  `t.saldo` and `saldo + 0` are still the column.
+- **`LIKE` with many `%` over a long text said "no match" without warning**
+  (also in 2.8.0): PCRE gave up and that was taken as a no. It now gives
+  SQLite's answer, and if it still cannot decide, an error.
+- **`LIMIT 9223372036854775807 OFFSET n`**, what ORMs send for "no limit",
+  ended in a PHP error (also in 2.8.0). It returns the rows.
+- **`TRIM(x, chars)` removed bytes, not characters** (also in 2.8.0):
+  `TRIM('áxá', 'ñ')` left a text that is not valid UTF-8, and `'a..c'` was a
+  range. It now removes characters, as SQLite does.
+- **`STRFTIME('%W')` gave the ISO week** (also in 2.8.0). It is now SQLite's,
+  where week 01 starts on the first Monday of the year.
+- **Smaller query fixes** (also in 2.8.0): `15 BETWEEN NULL AND 10` is 0, not
+  `NULL`; `'a/b' REGEXP 'a\/b'` is valid; the `ORDER BY` of a `UNION` does not
+  tell case apart in column names; `'+0.5 seconds'` and other fractions in date
+  modifiers apply to the millisecond (it added a whole second).
+- **Panel: a form field sent as a list gives a clean error** (also in 2.8.0):
+  `sql[]=x` or `base[]=shop` went through as the text `Array`, with a PHP
+  warning, and a backup was scheduled for a database called `Array`.
+- **Panel: a password with the null character is refused with its own
+  message** (also in 2.8.0): bcrypt cannot take it, and the setup wizard ended
+  in an untranslated PHP error after writing `config.php`.
+- **No PHP 8.5 deprecation notices**: `curl_close()` and
+  `$http_response_header`, deprecated in 8.5, are no longer used, in the panel
+  or in the PHP example client.
+- **Panel: a trigger with `IF … END IF` can be imported again from the panel's
+  own dumps** (also in 2.8.0): the `END` of `END IF` closed it, so the SQL and
+  JSON dumps failed with «Falta el END del trigger», and the SQL console split
+  it in two.
+- **Panel: MySQL dumps with `DEFAULT '0000-00-00'` import** (also in 2.8.0):
+  WordPress tables and any MySQL before 5.7 stopped at `CREATE TABLE` with
+  «Fecha inexistente». The default is dropped and the column takes `NULL`, as
+  its rows with that date already did, with a warning.
+- **Panel: indexes with `COLLATE`, `NULLS LAST` or a PostgreSQL operator
+  class import, and an index on an expression no longer stops the import**
+  (also in 2.8.0): `CREATE INDEX ix ON t(lower(nombre))` failed with «Índice
+  sobre columna inexistente 'lower'». The extra words are left out, and an
+  index on an expression is skipped with a warning.
+- **Panel: a string `'('`, `')'`, `','` or `';'` in a view or a trigger being
+  imported is a string** (also in 2.8.0): `concat(a, ' (', b, ')')` was cut
+  short and a plpgsql trigger with `'log (' || NEW.id || ')'` was skipped.
+- **Panel: dates with a time zone in `INSERT`s import** (also in 2.8.0): SQL
+  Server's `datetimeoffset` and `pg_dump --inserts`' `timestamptz` were
+  refused; the zone was only removed in `COPY`. It is removed now in columns of
+  those types, with the usual warning.
+- **Panel: `CHAR(n)` as a column type stays a type when importing** (also in
+  2.8.0): `code char(10)` arrived as `TEXT`, and `CAST(x AS CHAR(10))` skipped
+  its view. Only `char(10)` used as a function becomes its character.
+- **Panel: consecutive `INSERT`s are joined only when nothing follows their
+  row** (also in 2.8.0): two `INSERT … ON CONFLICT DO NOTHING;` in a row,
+  `RETURNING`, or phpMyAdmin's `ON DUPLICATE KEY UPDATE` on each row, became
+  invalid SQL.
+- **Panel: MySQL dumps put the default of a `MEDIUMTEXT` or `LONGTEXT` in
+  parentheses** (also in 2.8.0): MySQL 8 refused `nota MEDIUMTEXT DEFAULT 'x'`
+  (error 1101), and the whole file with it.
+- **Panel: SQL Server dumps comment out a `BEFORE DELETE` or `UPDATE` trigger
+  on a table with a cascading foreign key, with the reason** (also in 2.8.0):
+  SQL Server refuses that `INSTEAD OF` trigger (error 2113), and with
+  `XACT_ABORT` nothing loaded. The header now says SQL Server 2017, which its
+  `STRING_AGG`, `TRANSLATE` and `TRIM(x FROM y)` need.
+- **Panel: date arithmetic in PostgreSQL views** (also in 2.8.0):
+  `CURRENT_DATE - f::date` was subtracted as text and gave another number,
+  silently. `date - date` now gives the days between them and `date ± n` a
+  date; what gives an interval skips the view with the reason.
+- **Panel: two more constructs of the panel's own dumps import back** (also in
+  2.8.0): SQL Server's `N'a' + NCHAR(0) + N'b'` («Función no soportada:
+  NCHAR()») and MySQL's `INTERVAL +2 HOUR`.
+- **Panel: an Excel date and time at midnight keeps its time when imported**
+  (also in 2.8.0): the cell's number format decides now, not the value.
+- **Panel: smaller import fixes** (also in 2.8.0): "(n veces)" and the CSV
+  field-count error are translated; a name starting with a digit no longer
+  becomes 65 characters long; warnings of the first pass of PostgreSQL and SQL
+  Server dumps are no longer counted twice.
+
+### Faster
+
+- **A write to a large table no longer checks every index piece by hand.**
+  Each write made sure that the pieces of every index it was not touching
+  were sound by reading the head and the tail of each file: 3,000 opens on a
+  table of a million rows with three indexes, half of a one-row `UPDATE`
+  (95 ms). The revision and size of each piece as the last write left them
+  now go to the cache, and a piece in the same revision and with the same size
+  needs one `stat()`; the rest are read as before, and a damaged piece is still
+  found and the index rebuilt. The pieces a write reads in order to rewrite
+  them no longer go to the cache either (a tenth of a `DELETE` of many rows).
+  On a million rows, against the code before this change: a one-row `UPDATE`
+  95 → 53 ms, `INSERT` 98 → 56 ms, `DELETE` 78 → 60 ms.
+- **The filters of an index are kept together in the cache.** A lookup by a
+  text key opened the head of every piece of the index to read its filter:
+  1,000 opens on a million rows, 30 ms. The first lookup that reads them all,
+  and a write when enough of them have changed, store them in one entry with
+  the revision of each piece; with it a lookup opens only the piece where the
+  key can be: by email on a million rows, from 30 ms to about 3 ms more than a
+  lookup by key. And the filter now covers the numeric keys too in the pieces
+  whose range spans at least 8 times the part size (an index on the customer
+  of each order: every piece spans the whole table and the range narrows
+  nothing), which `"cubre":"todo"` says (`"texto"` otherwise): the orders of
+  one customer, from 42 ms to about 3 ms more than a lookup by key. Pieces
+  with narrow ranges (a primary key) keep the range and no filter, as before.
+  A write stores the filters, and the verdict of the previous entry, only once
+  it is committed: one discarded halfway leaves nothing behind. The cache
+  sweep every 32 revisions keeps them.
+- **`LIMIT … OFFSET` without `WHERE` or `ORDER BY` skips the parts the
+  `OFFSET` leaves behind**, counting the holes of deleted rows the state
+  records for each part; it decoded them all: `LIMIT 100 OFFSET 500000` on a
+  million rows 596 → 13 ms (the whole process).
+- **A `LIMIT` with a `WHERE` that an index covers entirely stops at the
+  index.** `WHERE ciudad = 'Elche' LIMIT 50` on a million rows (100,000 of
+  them in that city) read the 100,000 positions, found them too many and
+  scanned the table: 71 ms. The index pieces go in the order of the table, so
+  the first positions found are the first rows: it now stops at the piece
+  that completes the `LIMIT`, 14 ms. Only when every condition of the `WHERE`
+  is an equality on the index's columns; with any other condition the
+  `WHERE` filters after, as before.
+- **The temporary files of a sort or a partition on disk are written and read
+  in blocks of 64 KB**, not one `fwrite()` and two `fread()` per row, the
+  keys of an `ORDER BY` that are a column are taken from the row instead of
+  evaluated, and the merge compares two numbers directly. On a million rows:
+  `ORDER BY saldo DESC` of the whole table 15.2 → 12.3 s, `GROUP BY` of
+  631,796 groups 16.8 → 13.7 s, the join of the million orders with their
+  customers 20.4 → 16.9 s, the `UNION` of two million emails 7.1 → 6.6 s.
+- **Upserts no longer load the table.** `INSERT … ON CONFLICT`, `INSERT OR
+  IGNORE`, `INSERT OR REPLACE` and `REPLACE` look each key up in the indexes
+  on disk and write only the rows they add or change, as an `INSERT` or an
+  `UPDATE` does; 2.8.0 read the whole table into memory first. A numeric key
+  is looked for only in the index piece whose range holds it (by bisection
+  when the pieces go in order, as with a key that grows), and a text key in
+  the whole index in memory if it fits in what is left up to half of
+  `memory_limit`, else in a map of 64-bit fingerprints of its keys (each hit
+  confirmed in its piece), and else key by key in the pieces whose filter
+  allows it. On 40,000 rows (parts of 1,000, 128 MB), median against 2.8.0:
+  `ON CONFLICT` of two rows 603 → 43 ms, `REPLACE` of one row 732 → 41 ms,
+  `INSERT OR IGNORE` of one row 208 → 17 ms, `INSERT OR IGNORE … SELECT` of
+  40,000 rows 1,164 → 953 ms, and `INSERT OR REPLACE … SELECT` of 40,000 rows,
+  which 2.8.0 stopped with the memory error, 1.6 s; `INSERT … SELECT … ON
+  CONFLICT (id) DO UPDATE` of 40,000 rows, the same (minimum 1,705 / 1,694 ms).
+  With a million rows, see `docs/01-core.md`.
+
+- **Writes of many rows:** the positions of an index that change are replaced
+  in place in its piece, the index pieces of the parts a write rewrites are
+  rebuilt while each part is written, in one pass, and a `DELETE` that
+  compacts the table moves the lines of each part as text, without decoding
+  them. An `UPDATE` of the 40,000 rows, 1,634 → 1,022 ms against 2.8.0; with a
+  million rows and 256 MB, 24 s and 140 MB. A write that does not fit in
+  memory is written in stretches, inside a transaction (see Less memory).
+
+- **A correlated `EXISTS` runs as a semi-join.** When the subquery looks
+  outside only through one equality (`EXISTS (SELECT 1 FROM p WHERE p.cid =
+  c.id AND p.total > 999)`), the values of `p.cid` that pass the rest are taken
+  once and each outer row only checks whether its own is among them, as with
+  `IN`; before, the subquery ran once for every outer row. 60,000 rows against
+  60,000: more than a minute in 2.8.0, 0.35 s now; a million against a
+  million, 2.9 s. A subquery on more than one table or on a view, with
+  `GROUP BY`, `LIMIT`, `OFFSET`, an aggregate or a window function, or whose
+  equality has a collation, runs as before (`EXISTS (SELECT COUNT(*) …)` is
+  always true). `EXPLAIN` shows it.
+
+- **Tables separated by commas are joined by hash.** `FROM a, b WHERE b.x =
+  a.y` paired every row of `a` with every row of `b` and then filtered; the
+  equalities of the `WHERE` between a table of the list and the ones before it
+  now also go to its `ON`, as in `JOIN … ON`. 20,000 by 10,000 rows: 76 s →
+  40 ms (`JOIN … ON` takes 46 ms). Only between columns written with their
+  table, and not when there is a `RIGHT` or `FULL JOIN`. The same 3,200 queries
+  at random give the same rows as before.
+
+- **Deleting one row no longer depends on how many rows are behind it.** It
+  used to move them all one place and rewrite every part and index piece behind
+  the deleted row. On 60,000 rows with six indexes, deleting rows at five
+  places: 443, 615, 26, 221 and 199 ms before; 42, 24, 28, 20 and 20 ms now.
+- **A range on a text index no longer opens the header of each index piece.**
+  The smallest and largest text of each piece, which decide which pieces a
+  range has to read, are kept in the cache with the revision of their piece,
+  made when a query reads them; a piece rewritten since is read again, so they
+  never hide a row, and writes do nothing extra. Between web requests with
+  OPcache: `WHERE email > 'u' LIMIT 1` 456 → 374 µs, a range of dates 38.5 →
+  34.8 ms; in-process, a narrow range of dates 2.3 → 1.4 ms. Without APCu or
+  OPcache it stays the same.
+- **Each table's state is kept decoded with OPcache or APCu.** Reading and
+  decoding `rev.json` was the largest single cost at the start of every request;
+  it is now kept with the seal of the file, and a `stat()` tells whether it still
+  holds (only once the file has not changed for 2 seconds). Between web
+  requests: a lookup by key 862 → 834 µs, a text range with `LIMIT` 813 → 719 µs.
+- **Without OPcache, a request compiles only the code it uses.** PHP without
+  OPcache compiles, in every request, every file the request loads, and the
+  engine had grown with this version: a lookup by key loaded 749 KB of code,
+  against 503 KB in 2.8.0, and a whole request took 15.5 ms against 11.1. The
+  code that only some statements need now lives in classes of its own, which
+  the autoloader loads only when one of them is used. In the storage: what
+  only reads do (`StorageLectura`), writing rows (`StorageEscritura`),
+  changing and removing them (`StorageCambios`), reads by a comparison on an
+  index (`StorageRangos`), and the structure, transactions, recovery after a
+  crash and repairs (`StorageMantenimiento`, with `CatalogDdl`, `WriterDdl`
+  and `ParserSentencias`). In the parser: the rest of `SELECT`
+  (`ParserConsulta`), `INSERT`, `UPDATE` and `DELETE` (`ParserEscritura`),
+  windows and `WITH RECURSIVE` (`ParserAvanzado`). In queries: sorting
+  without an index (`SelectOrden`), `GROUP BY` and the aggregates
+  (`SelectAgrupada`), `UNION` and `WITH` (`SelectCompuesta`), the hash `JOIN`
+  (`SelectJoin`), windows and `EXPLAIN` (`SelectAvanzada`), the choice of an
+  index (`IndexesBusqueda`), compiled expressions (`EvaluatorCompilado`),
+  `LIKE`, `GLOB` and `REGEXP` (`EvaluatorPatrones`), and the functions that
+  are not SQLite's usual ones (`FunctionsAmpliadas`). In writes: `UPDATE` and
+  `DELETE` (`WriterCambios`), foreign keys (`WriterForaneas`), a row that
+  clashes with a key (`WriterConflictos`) and the body of triggers
+  (`WriterTriggers`). And batches, `SHOW DATABASES` and `EXPLAIN`
+  (`DatabaseAvanzada`). An `INSERT` of plain values (also negative numbers)
+  takes them as they are, without loading the expression evaluator. What a
+  request compiles, against 2.8.0 (pieces of code without spaces or comments,
+  which is what costs): a one-row `INSERT` −24 % (423 KB of the engine
+  against 484 KB), `UPDATE` and `DELETE` −16 %, a lookup by key −13 %, a
+  function −12 %, `ORDER BY` and `UNION` −9 %, `GROUP BY` −7 %, a subquery
+  −4 % and `INSERT … SELECT` −3 %; none compiles more. A whole request
+  without OPcache, against 2.8.0 (loading the engine and one statement, in
+  PHP's own web server, time inside the server, median of 60): a lookup by
+  key 10.6 against 13.0 ms, a join 13.4 against 16.1, a range by key 10.8
+  against 13.6, `GROUP BY` 14.2 against 17.0, `ORDER BY` 15.0 against 16.8, a
+  subquery 16.8 against 17.3, `UNION` 12.3 against 14.5, `UPPER()` 11.4
+  against 13.5, `LEFT JOIN` 13.6 against 15.4, a one-row `INSERT` 12.9 against
+  15.7, `DELETE` 15.7 against 18.1, `UPDATE` 20.0 against 23.6, an upsert 15.8
+  against 34.4 and `INSERT … SELECT` 28.3 against 38.3 ms. With OPcache
+  nothing is compiled again, and the classes apart only add finding a few
+  more files: about 15 µs in a lookup by key, which takes 0.61 ms against
+  1.55 in 2.8.0 (median of 300). `Catalog` keeps all its methods, which hand
+  the structure changes to `CatalogDdl`, and `Storage::crearBase()` and
+  `borrarBase()` stay where they were.
+- **`COUNT(*)` of an equality by index counts without gathering the rows.**
+  With a value in many rows (a city), the positions of each index piece were
+  decoded, gathered without repeats and sorted only to count them; now the
+  commas of each list are counted in the text of the piece. One row has one
+  key in each index, so nothing is counted twice. `SELECT COUNT(*) … WHERE
+  ciudad = 'Elche'` on 20,000 rows: 0.54 → 0.26 ms, also with the data written
+  by 2.8.0.
+- **The last table states and structures stay in the process.** A script, the
+  panel or an API batch that runs many queries read and decoded each table's
+  `rev.json` and normalised its structure again in every query. Now they are
+  kept for the next query, up to 32 tables, checked with one `stat()` of the
+  file (size, date and inode) and only once it has not changed for 2 seconds.
+  In one process, on 20,000 rows: a lookup by key 0.183 → 0.144 ms, one order
+  and its customer by `JOIN` 0.328 → 0.257 ms.
+- **A numeric key is looked for where its value falls in the index piece.** A
+  lookup searches the text of each index piece without decoding it, from the
+  start; a numeric key now starts where its value falls within the range of
+  the piece (already in `rev.json`), backwards first and then forwards. In a
+  piece whose keys go in order, as with a primary key that grows, it is found
+  almost at once instead of going through half the piece on average; with the
+  keys in any order it costs on average the same as before. And the seal of
+  each part read is only taken when the result cache needs it. In one process,
+  on 20,000 rows: `id IN` ten keys at the end of their pieces 0.426 → 0.342 ms,
+  an `IN` of 100 spread keys 1.83 → 1.47 ms, 20 orders with their customers by
+  `LEFT JOIN` 1.55 → 1.43 ms; a key in the middle of its piece, the same
+  (0.147 / 0.154 ms).
+- **64 lists of row offsets kept in the process, not 16.** A query touching
+  more parts than that threw them all away on every pass. In one process, an
+  `IN` of 100 keys spread over 20 parts: 3.33 → 1.45 ms. 64 lists of parts of
+  1,000 rows take 256 KB.
+- **The memory net costs less per row.** Reading a table called the memory
+  check once per row; the loops now count the rows themselves and call it only
+  when it is due, as often as before. And the evaluation context of a row is
+  only built when a column or the order needs it. On 20,000 rows: `SELECT id,
+  nombre` 17.5 → 14.0 ms, a `LIKE` 16.4 → 15.1 ms, a `GROUP BY` 19.2 →
+  18.5 ms, the `UNION` of two ranges 1.33 → 1.24 ms.
+- **A write deletes the cache entries it leaves behind by their name.** It
+  listed the cache folder twice, for the table's entries and for its results:
+  12 % of a one-row `UPDATE`, and more with more files. Now the stale entries
+  are deleted by their exact names, and the results only when the table has
+  some (storing one leaves a mark); every 32 revisions, and on `DROP TABLE`,
+  the table's entries are swept as before, for what no write leaves behind by
+  name. One-row `UPDATE` on 20,000 rows: 3.88 → 3.45 ms; with 2,000 results of
+  other tables in the folder, 5.82 → 3.55 ms.
+- **About 1 ms less in every request.** Setting the memory net's 2 MB aside
+  cost about 0.7 ms per request, and touching that memory more; without it
+  (see Changed), between web requests and with everything else the same:
+  `SELECT * FROM a WHERE id = 30000` 1906 → 879 µs, `SELECT COUNT(*)` 1752 →
+  655 µs (median of 200 requests).
+- **Reading SQL is faster than in 2.8.0 again.** 2.9 added precedence levels
+  (`XOR`, the bit operators), which made parsing about a third slower. The
+  lexer now takes runs of spaces, names and digits at once and goes from quote
+  to quote in strings, and each precedence level looks at the next token
+  directly. Against 2.8.0, minimum of nine rounds: a `SELECT` with a `JOIN`
+  61–64 → 58–65 µs, a two-row `INSERT` 36 → 30–33 µs, an `INSERT` with a
+  1 KB text 63–67 → 11 µs. The new lexer gives exactly the same tokens as
+  the previous one on 200,000 random statements.
+- **An `UPDATE` no longer rewrites the last piece of every index.** When the
+  table did not fill its last part, every write rebuilt the last piece of each
+  index as if rows had been added at the end. Now the end is only rebuilt when
+  rows are added there or move. A one-row `UPDATE` on 60,001 rows with six
+  indexes writes one index piece instead of seven: 13.4 → 6.6 ms in the same
+  run (the times of `fsync` vary a lot on the test machine; the pieces
+  written do not).
+- **A write no longer lists the database folder.** Every write searched the
+  folder for the table's index files, although its state already names them;
+  now the folder is only searched when the state does not say (a table from
+  before 2.5) or an index is being dropped, which also needs its files. On a
+  table with six indexes in 60 parts (433 files in the folder), that search
+  cost 216 µs per write, and more the bigger the database.
+- **Knowing how many parts a table has costs two checks, not one per part.**
+  The table's state already says it; the engine checks only that the last part
+  is there and the next is not, and counts them one by one as before if that
+  does not hold. A lookup by key on 60 parts: 0.257 → 0.225 ms, against 2.8.0.
+- **`MIN` and `MAX` from the index.** `SELECT MIN(col), MAX(col) FROM t` with
+  no `WHERE`, on a numeric column that is the first column of an index (the
+  primary key is), comes from the range of each index piece already kept in
+  the table's revision file, without reading a row. On 60,000 rows, median of
+  five runs against 2.8.0: `MIN(saldo), MAX(saldo)` with an index 136.1 →
+  7.0 ms, `MAX(id)` 105.5 → 6.9 ms; a column without an index, unchanged
+  (110.5 / 113.9 ms, noise). Reported by the performance review (L4).
+
+- **Ranges by index on texts and dates, and on spread numbers; `COUNT(*)` of
+  a range without reading the table.** A `<`, `<=`, `>`, `>=`, `BETWEEN` or
+  `=` against a literal on the first column of an index, when the numeric
+  range of each piece is not enough, now looks for the matching positions in
+  the index pieces and reads only their parts. It only starts when it will not
+  cost more than reading the table: with numbers, an estimate from the range
+  of each piece (already in the revision file) must leave fewer than half the
+  parts to open; with texts and dates, each piece written by 2.9 carries in
+  its head the smallest and largest value (`min`, `max`, before `keys`), and
+  only the pieces whose range overlaps are read (if they are more than half,
+  or the first and the last fall wholly inside, it reads the table as 2.8
+  did). A `COUNT(*)` whose `WHERE` is only comparisons on one indexed column,
+  not only equalities, counts in the index. The comparison is the `WHERE`'s
+  own (`Valor::comparar`), exact; with a text bound every key must be a text
+  and with a number every key a number, or it falls back to reading the table.
+  On 60,000 rows, median of 3 × 10 runs in one process against 2.8.0: `SELECT
+  *` of one day 65.6 → 2.7 ms, `COUNT(*)` of a month 66.3 → 5.0 ms, `COUNT(*) …
+  edad BETWEEN 30 AND 40` 33.6 → 5.1 ms, `id BETWEEN 20000 AND 20500` 2.1 →
+  1.7 ms; ranges over most of the table and spread numbers (`saldo > 995`),
+  the same as 2.8 (within ±5 %, the noise of the machine). Pieces written
+  before 2.9 have no `min`/`max`: those queries go as in 2.8. Reported by the
+  performance review (L3).
+
+- **Lookups by a text key read one index piece, not all of them.** Each piece
+  of an index now carries a Bloom filter of its text keys (`filtro`, before
+  `keys`): a lookup by an email, or the `UNIQUE` check of an `INSERT`, reads
+  the head of each piece and the keys of only the one where the key can be
+  (about 1 % false positives). Text keys have no numeric range, so before
+  every piece was read whole: 3.7 MB per `INSERT` with 100,000 rows. A value
+  present in every piece (a city) is detected after two pieces and the rest
+  are read whole at once, as in 2.8, and small pieces are always read at once.
+  Measured against 2.8.0: lookup by email on 60,000 rows 1.10 → 0.58 ms
+  (median of 3 × 10 runs in one process), on 300,000 rows 9.1 → 4.9 ms (median
+  of five fresh runs); `INSERT` with a unique email on 300,000 rows 26.5 →
+  17.2 ms; a city (`COUNT(*) … ciudad = 'Elche'`) 2.1 / 2.1 ms. Pieces written
+  before 2.9 have no filter and are read as in 2.8 (1.24 / 1.23 ms). A first
+  version kept the filters in a file per index, rewritten whole on every write
+  (500 KB per `INSERT` on 300,000 rows): discarded. Reported by the
+  performance review (E2).
+
+- **`ORDER BY col [DESC] LIMIT n` from the index.** With one table, no
+  `WHERE`, grouping or `DISTINCT`, and one order key that is a numeric column
+  with an index, the index pieces are read best end first (their ranges are
+  already in the revision file) and the reading stops when the next piece
+  cannot beat the n-th value; then only the rows that can make the result are
+  read, ties included, and sorted and cut as always. Ascending order needs a
+  `NOT NULL` column, because `NULL`s come first and are not in the index. On
+  60,000 rows, median of five runs against 2.8.0: `ORDER BY id DESC LIMIT 20`
+  117.7 → 2.9 ms, `ORDER BY saldo DESC LIMIT 20` 87.5 → 17.8 ms, `LIMIT 100
+  OFFSET 400` 101.5 → 63.7 ms; a column without an index, the same (87.4 /
+  89.9 ms, noise). In one process, `ORDER BY id DESC LIMIT 20` 63.2 → 0.7 ms.
+  Reported by the performance review (L2).
+
+- **The API state is spread over small files.** Anti-replay tokens, per-IP
+  counters and failures and per-key counters go in up to 256 files per kind
+  under `logs/api/estado/`, by the md5 of the token, IP or key: a request
+  rewrites only the two or three that are its own, small, instead of one
+  `estado.json` holding the whole installation's traffic. Per request, against
+  2.8.0: with 100 requests in the window 0.23 / 0.26 ms (one file more to
+  open), with 1,000 0.63 → 0.25 ms, with 5,000 2.44 → 0.25 ms. The tokens of
+  the old `estado.json` are still refused for the minutes they could be valid,
+  then it is deleted; per-IP counters start again from zero after updating.
+  Reported by the performance review (A1).
+
+- **`ORDER BY` that does not fit in memory is sorted on disk.** The usual
+  in-memory sort is not touched: while it gathers the table, `Memoria` warns
+  as soon as half of `memory_limit` is in use, and only then the query is run
+  again another way: rows are gathered with their sort keys, what was gathered
+  is sorted (natively, as in memory, unless a key mixes types) and written to
+  a temporary file in the database's `.orden/` folder each time the memory in
+  use passes half of `memory_limit` (at least 2 MB each), and at the end the
+  files are merged row by row, in exactly the in-memory order, ties included.
+  `ORDER BY saldo DESC, id` of the million ids of a table with 256 MB takes
+  14 s and 164 MB; measured before release with the reserved memory as the
+  trigger, which PHP never gives back, it wrote 389 files and took 174 s. Through
+  `consultarPorFilas()` (the API) the rows go out as they are merged. The same
+  for an `ORDER BY … LIMIT` with a large `OFFSET`. Temporary files are closed
+  and deleted at the end whatever happens, also when a `LIMIT` stops reading
+  (Windows does not delete an open file); one left by a dead process is deleted by the
+  next sort after an hour. On 40,000 rows with `memory_limit = 24M` it
+  answers, where 2.8.0 stopped with the memory error, and the panel now
+  exports a whole table sorted by any column with 32 MB. Sorts that fit run
+  as in 2.8 (`ORDER BY saldo DESC`, 20,000 rows: 23.6 / 24.0 ms). Reported by
+  the performance review (M1).
+
+- **`COUNT(*)` and `SHOW TABLES` without reading the parts.** The number of
+  rows of each part is kept in the cache with the size and date of its file,
+  and recounted only for a part whose file changed; a file changed in the same
+  second it is counted is not trusted. On 60,000 rows, from about 7 ms to
+  0.26 ms and from about 9 ms to 0.31 ms.
+- **Sorting and grouping texts:** the collation key of a text without accents
+  is no longer computed through the whole collation map, and the keys of short
+  texts are remembered; `ORDER BY` on a text column up to 44 % faster.
+- **`IN (SELECT …)` compiled** like the rest of the `WHERE`: `IN` 17 % and
+  `NOT IN` 30 % faster.
+- **`JOIN`:** the column names with their alias are built once per query, not
+  once per row and column: 10–13 % faster.
+- **`ORDER BY` a number with `LIMIT`:** the comparison of each row with the
+  worst one kept is done in place when both are numbers, without going through
+  the general comparator: the 10 smallest of 200,000 rows, 196 → 165 ms
+  (−16 %), the same rows. From the review of the release candidate.
+- **`ALTER TABLE … ADD UNIQUE` checks the keys while it builds the index.**
+  Comparing the keys as the index does (see Fixed) read and keyed the whole
+  table once to look for repeats and again to build the index, and it took 11
+  to 15 % longer than 2.8.0; now one pass does both, part by part, and the
+  repeat it reports is the same row as before (the first in the table's
+  order). On 40,000 rows, CPU time, median of nine: 147 against 171 ms in
+  2.8.0 (−14 %).
+
+### Less memory
+
+- **What does not fit in memory goes to disk: `JOIN`, `GROUP BY`, subqueries
+  of the `FROM`, views, `WITH`, `UNION` and window functions**, as `ORDER BY`
+  does (see Faster). The usual path is untouched; only when half of
+  `memory_limit` is in use is the query run again writing what it gathers to
+  temporary files in `.orden/` (new `engine/Volcado.php`): a hash `JOIN`
+  (`INNER` or `LEFT` with equalities in the `ON`) splits both sides into 64
+  files by its key and joins them file by file; a `GROUP BY` splits the rows
+  into 64 files by their group; a subquery of the `FROM`, a view or a query of
+  the `WITH` goes to a file as its rows come out and is read as it is used; a
+  `UNION` or `UNION ALL` without `ORDER BY` passes each row on as it is read
+  instead of gathering every part; window functions keep in memory only the
+  values they use, a list per expression, and sort in pieces that fit. Same
+  rows, and the same order when there is `ORDER BY`. With 24 MB on 60,000 +
+  60,000 rows each of them answers as with memory to spare, where 2.8.0
+  stopped with the memory error; with a million rows and 256 MB, a `JOIN` of a
+  million orders with a million customers grouped by city takes 19 s and
+  128 MB, a `GROUP BY` of 631,796 groups 14 s and `ROW_NUMBER()` over the
+  million 33 s. When even this does not fit, the usual memory error, and not
+  PHP's fatal: before running it again, the memory PHP kept from the first
+  attempt is given back (`gc_mem_caches()`). Temporary files are deleted at the
+  end whatever happens; one left by a dead process, after an hour.
+- **A write that does not fit in memory is written in stretches.** When the
+  memory in use passes about half of `memory_limit`, the statement writes what
+  it has so far and goes on; outside a transaction it is first run again
+  inside one, before writing anything, so that it is still all or nothing
+  (new `engine/SentenciaGrande.php`). An `INSERT … SELECT` from other tables
+  takes their rows as they come out, in batches of up to 8,192 rows or 8 MB
+  (a sixteenth of `memory_limit` if that is less), without gathering them
+  all. With a million rows and 256 MB, an `UPDATE` of 300,097 rows takes 17 s
+  and 147 MB, and of all of them 24 s and 140 MB.
+- **`IN (SELECT …)` takes the values as the rows come out**, without gathering
+  the rows of the subquery first; also in an `UPDATE` or `DELETE`.
+- **`COUNT(DISTINCT …)` and the other aggregates with `DISTINCT` keep each
+  value once as it arrives**, and `COUNT` without the value, instead of
+  gathering every value and removing the repeated ones at the end, which held
+  them up to three times. Without `GROUP BY`, when they do not fit they go to
+  disk too: each value to one of 64 files by its key, and the distinct ones of
+  each file are added up. `COUNT(DISTINCT email)` of a million customers,
+  183 → 90 MB; `COUNT(DISTINCT email)` and `COUNT(DISTINCT nombre)` together
+  reached 245 MB of 256, a step away from PHP's fatal error, and now take
+  8.4 s and 152 MB. `GROUP_CONCAT(DISTINCT … ORDER BY …)` still gathers its
+  values.
+- **`DISTINCT` drops a repeated row as soon as it is projected**, instead of
+  gathering the whole table and every projected row and removing the repeated
+  ones at the end. On 60,000 rows, median of five runs against 2.8.0:
+  `SELECT DISTINCT ciudad` 45.9 → 5.5 MB (in one process 74.4 → 49.7 ms),
+  `SELECT DISTINCT ciudad, edad … ORDER BY edad` 103.9 → 62.6 ms. Found while
+  measuring the review's proposal of loading only
+  the columns a query uses (M1): that one was measured and left out, because
+  the engine already keeps only the output columns and `GROUP BY` already
+  streams (5.5 MB), so it would only add a copy of every row.
+- **`REGEXP` no longer leaves an error handler behind for every row** (also in
+  2.8.0): 20,000 rows kept 8 MB until the end of the request.
+- **The converted `LIKE` and `GLOB` patterns are kept up to 4,096 or 1 MB**
+  (also in 2.8.0, without a limit): `LIKE '%' || b.texto || '%'` over 300,000
+  rows kept 70 MB.
+- **Correlated subqueries keep at most 4,096 results between them**, and let
+  them go when memory runs short or the query goes to disk (also in 2.8.0): a
+  scalar subquery over a million rows kept a result for each.
+
+### Checked: what is faster and what is not, against 2.8.0
+
+18 queries covering each change (lookups by key, unique text and index, `IN`
+lists, ranges, `LIKE`, `GROUP BY`, `DISTINCT`, `ORDER BY`, `JOIN`, `LEFT
+JOIN`, a subquery, `UNION`, `UPDATE`, `INSERT` and `DELETE`) on 20,000
+customers and 30,000 orders, with the data written by 2.9 and by 2.8.0: each
+engine in its own process after two warm-up runs, the two alternated five
+times and the best time of each kept, and the closest ones measured again in
+eight more rounds, and those still close in ten or twelve more. With the
+data written by 2.9, none is slower: a lookup by key −15 %, by a unique text
+−60 to −65 % (its filters come from the cache), by a key and an index −4 to
+−14 %, ten keys by `IN` −20 to −26 %, a hundred −62 %, an equality on an
+index −51 to −52 %, a range −2 to −8 %, `LIKE` −6 to −26 %, `GROUP BY` the
+same to −5 %, `DISTINCT` −22 %, an `ORDER BY` of two columns −38 %, a join
+−19 %, a `LEFT JOIN` −14 %, a join with `GROUP BY` −12 %, a subquery −15 %,
+the `UNION` −4 to −9 %, a one-row `UPDATE` −26 % and an `INSERT` with its
+`DELETE` −34 %; the first 50 rows of a table, the same (between −7 % and +3
+%). With the data written by 2.8.0, the same, except the lookup by a unique
+text, which is as in 2.8 (between −1 % and +5 %), because its index pieces
+have no filter until the table rewrites them, or until `VACUUM` rebuilds
+them. A result served from the result cache, 0.13 against 0.15 ms (a join of
+the two tables, median of 200).
+
+A whole request (loading the engine and one statement, in PHP's own web
+server, time inside the server, without the result cache) with OPcache, as on
+almost every web server, median of 300: a lookup by key 0.61 against 1.55 ms,
+a join 0.88 against 1.81, a range by key 0.50 against 1.75, `GROUP BY` 0.73
+against 2.06, a subquery 1.41 against 3.60, `LEFT JOIN` 4.35 against 5.90, a
+one-row `INSERT` 3.67 against 5.11, `UPDATE` 4.47 against 5.95, `DELETE` 3.77
+against 5.69, and an upsert 4.79 against 24.32 ms. Without OPcache, every one
+is faster too (see Faster).
+
+Writes, on 40,000 rows with a unique text and a foreign key with cascades,
+each engine on its own copy of the data it wrote, CPU time, median of nine
+(and of fifteen for the closest): a one-row `INSERT` −36 %, `UPDATE` −2 to
+−3 %, `DELETE` −96 %, an `UPDATE` of 10,000 rows the same to −7 % and of a
+unique column −10 %, a `DELETE` of 10,000 −13 %, upserts of 2,000 rows −45 to
+−62 %, cascades −4 to −32 %, `CHECK KEYS` −31 %, `CREATE INDEX` −15 %, `ADD
+UNIQUE` −14 %, `INSERT`s of 10,000 rows −5 to −8 %. With 128 MB, median of six
+(wall clock): an `UPDATE` of every row 0.73 against 1.04 s, an upsert of
+40,000 rows by `ON CONFLICT (id)` from a `SELECT` 1.27 against 1.29 s, `INSERT
+OR IGNORE … SELECT` 0.64 against 0.66 s, `INSERT … SELECT` the same (0.76 s),
+and `INSERT OR REPLACE … SELECT` 1.07 s, where 2.8.0 ran out of memory; of one
+row among them, an upsert 19 against 301 ms, `REPLACE` 20 against 395 ms, a
+`DELETE` 20 against 262 ms, and an `INSERT` or an `UPDATE` the same (13 against
+14 ms, 19 against 19 ms, median of twenty); a `DELETE` of many rows, from a
+tenth to a third of the table, 268 to 316 against 363 to 376 ms.
+
+All of it measured on the final code: what counts is each pair, taken at the
+same time.
+
+### Tests
+
+- `f21_compatibilidad`: columns with `COLLATE NOCASE` and `RTRIM` against
+  SQLite, 100 queries (comparisons, `IN` with a list and a subquery, `BETWEEN`,
+  `CASE`, `ORDER BY`, `GROUP BY`, `DISTINCT`, `MIN`/`MAX`, windows, joins,
+  `UNION`, `INTERSECT`, `EXCEPT`, views, subqueries and `WITH` that inherit it,
+  recursion, `NULLIF`, `CAST` and a written `COLLATE` inside an expression); 29
+  writes with `UNIQUE`, primary key, foreign keys with cascades, upserts and
+  `UPDATE`/`DELETE` by index or by parts, and what the indexes find after
+  each; `ORDER BY` with `LIMIT`, `MIN`/`MAX` and `COUNT` read from a collated
+  index; which index a `JOIN` may use, and a hash join of 20,000 by 10,000
+  rows in under 2 s; and `ALTER TABLE`, `CHECK KEYS` and `SHOW`.
+  `f14_volcados`: the dumps of each system with their collation, loaded into
+  SQLite and imported back, and what the importer does with MySQL (also the
+  table's or its character set's), PostgreSQL and SQL Server collations.
+  `f5_admin`: editing a column keeps `COLLATE`, `UNSIGNED` and a `DEFAULT`
+  worked out when inserting. 57 mutations of the code, each caught by one of
+  these tests.
+
+- `f21_compatibilidad`: the 23 window functions (with `FILTER`) in 20 kinds of
+  window against SQLite, with the same rows in the same order; with `GROUP BY`
+  and `HAVING`, named windows, in the `ORDER BY`, with `DISTINCT` and `LIMIT`,
+  in subqueries and in the order of the first window; `FILTER` in plain
+  aggregates; the 22 errors; and 20,000 rows in under 3 s (it fails if running
+  sums go through the frame on every row). `f16_vistas_triggers`: how window
+  functions are exported to each system, and `NULLS FIRST`/`LAST` in
+  PostgreSQL. Each fails without its code.
+
+- `f21_compatibilidad`: 22 recursive queries against SQLite (counting, `LIMIT`
+  and `OFFSET`, `UNION` cutting cycles, trees, paths, several parts, named
+  columns, without `RECURSIVE`, inside a subquery, correlated, in a view) and
+  the 11 errors. `f16_vistas_triggers`: how a recursive view is exported to
+  each system. Each fails without its code.
+
+- `f16_vistas_triggers`: a trigger with an upsert, other tables, an alias,
+  `ORDER BY` or `LIMIT` is not translated to MySQL, PostgreSQL or SQL Server,
+  and says why (it fails without the fix).
+
+- `f21_compatibilidad`: `UPDATE … FROM`, `UPDATE … JOIN`, `DELETE … USING` and
+  `DELETE … JOIN` against SQLite (or what means the same there): aliases,
+  subqueries, several tables, `LEFT` and `RIGHT JOIN`, several matches, a
+  self-join, `CHECK`, `UNIQUE`, `DEFAULT`, `RETURNING`, cascades, triggers and
+  a trigger that runs an `UPDATE … FROM`; on a table with holes of deleted rows,
+  by index and with the table on the right of the `JOIN`; the errors. Each
+  part fails without its code. `f19_escrituras_contra_sqlite`: the random
+  writes include the four forms. `f7_concurrencia`: a subquery or a join in a
+  write takes the database lock (it fails without the fix).
+
+- `f21_compatibilidad`: `JOIN … ON` between integer, decimal and numeric text
+  gives what SQLite and the same `=` in the `WHERE` give; `FROM a, b WHERE
+  b.k = a.k` gives what `JOIN … ON` gives, on 3,000 by 3,000 rows in under a
+  second; `DISTINCT`, `GROUP BY`, `UNION`, `INTERSECT`, `EXCEPT` and
+  `COUNT(DISTINCT …)` with 1, 1.0, 0.3 and 0.30000000000000004 as SQLite;
+  `EXPLAIN` counts the rows a join by index reads when it has to go through
+  the table (each fails without its fix).
+
+- `f8_indices`: four `ORDER BY` (ties, `NULL`s, collation, an expression, a
+  large `OFFSET`, `SELECT *`) on 40,000 rows run with `memory_limit = 24M` give
+  exactly what they give with 1 GB, sorted in at most 8 temporary files (19
+  with the reserved memory as the trigger) that are gone at the end; without
+  sorting on disk the 24 MB run dies.
+- `f20_memoria`: a whole table sorted by a column exported with 32 MB, with the
+  API and with the direct connection (2.8.0 stopped with the memory error); a
+  query ending in a comment exported whole (it fails without the fix).
+- `f5_admin`: the ZIP copy has no `.cache/`, `.orden/` or `.turno` files.
+- `f4_api`, `f7_concurrencia` and `f8_indices` delete their folder in the
+  system's temporary folder when they end, as the others already did.
+- `f5_admin` and `f20_memoria` take `--open-basedir`: the panel and the API run
+  as on a hosting that limits PHP to the project and its data, without the
+  system's temporary folder, with uploads in a folder of their own and PHP
+  warnings shown in the answers. The CI runs them so (`f20` with the API and
+  with the direct connection). The first run found the two `open_basedir`
+  warnings above. `f5_admin`: signing out without a token says so, with no
+  fatal error.
+- `f20_memoria`: the dates of a scheduled backup across the change to winter
+  time in Europe/Madrid (they fail with 2.8.0's arithmetic); with
+  `open_basedir` and without the system's temporary folder, the temporary file
+  goes to the panel's data folder, a sort on disk works and a write prints no
+  warning (it fails without the fix).
+- `f4_api`: 2,000 requests spread over more than 200 token files, none with
+  more than a few dozen; a token from the old `estado.json` refused, and the
+  file deleted once it can hold no valid token. The helper that runs the
+  limits in another process now cleans the `estado/` folder between checks.
+- `f8_indices`: `SELECT DISTINCT` on a table of 30,000 rows run with
+  `memory_limit = 16M`; it fails with 2.8.0's code.
+- `f8_indices`: `ORDER BY … LIMIT` on integer, double and `NOT NULL` columns
+  with many ties, `NULL`s and `OFFSET`, through 8 rounds of writes, equal to
+  sorting the whole table; it fails if a piece holding a tie is skipped.
+- `f8_indices`: text keys found after 12 rounds of inserts, updates and
+  deletes, `UNIQUE` kept, and only the piece of the row read (with the keys of
+  every piece whose filter rules the row out broken, the lookup still
+  answers; without the filter it fails); pieces without a filter, as 2.8
+  writes them, still read right. `f3_escrituras` compares index pieces without
+  `filtro`, `min` and `max`, a summary of the keys.
+- `f8_indices`: `COUNT(*)` and `SELECT *` with 30 ranges, `BETWEEN` and
+  equalities on dates, texts, texts that look like numbers, integers and
+  doubles, against the same `WHERE` with the columns wrapped in a `CASE` (no
+  index); it fails if a strict `<` is taken as `<=`, if keys of the other type
+  are compared, or if a piece is skipped by a wrong `min`/`max`.
+- `f8_indices`: `MIN`/`MAX` of integer, double and decimal columns with
+  `NULL`s, after 30 rounds of inserts, deletes of the maximum and minimum and
+  updates, equal to reading the table; with the data files made unreadable the
+  answer still comes (it does not read them); an empty table gives `NULL`.
+- `f5_esquema`: a redefined view, and the collation changed between two
+  processes sharing the cache on disk; both fail without the fix.
+- `f12_contra_sqlite`: `GROUP BY 1`, `GROUP BY 1, 2`, `GROUP BY 1 HAVING`, and
+  `LIMIT` with an expression, negative, with a negative `OFFSET` and `;;`,
+  against SQLite. `f2_select` and `f2_parser`: the new errors.
+- `f5_admin`: CSV files separated by comma, semicolon and tab, with a comma in
+  a column name, and with one column.
+
+- `f3_escrituras`: transactions committed and undone (also a `CREATE TABLE`
+  and a `DELETE`), a batch that fails at its second statement, a transaction
+  inside another, and a process killed with `-9` halfway: other processes see
+  nothing while it lasts, and opening the database undoes it. After an undo
+  with APCu, no cached structure of what was undone is served (it fails
+  without the table generation). The OPcache layer: stable parts loaded from
+  OPcache with the same rows, a rewritten part loses its `.php`, and
+  `JSONSQLDB_CACHE_OPCACHE = false` makes none. `JSONSQLDB_CACHE_APCU = false`
+  keeps the cache on disk. A cached row count is never wrong after a hand edit,
+  also in the same second and with the same size (it fails without that rule).
+- `f23_reparar` (new): every safe repair, a damaged `rev.json`, structure and
+  index piece, an edit by hand seen through the cache, the cached query
+  results of the table retired by the query that sees it, an edit made with
+  the cache empty, an identical copy of the files that rewrites nothing, a
+  doubtful row that fails with its line and changes nothing, `CHECK TABLES`
+  and `REPAIR TABLES`. Each protection was removed in turn to check that its
+  test fails; run also with APCu, OPcache and both.
+- `f4_api`: a `lote` with permissions and signature; `f5_admin`: several
+  statements in the console as one transaction, the read-only role unable to
+  slip a write behind a `SELECT`, a damaged file shown and repaired from the
+  Integrity tab, a ZIP that brings `.cache/` writes nothing there.
+- `f24_versiones_anteriores` (new): each of the 27 published versions, from
+  1.0.0 to 2.8.0, taken from its git tag, builds a database with its own engine
+  and settings, and the current engine must read it as that version did, write
+  to it, carry its autoincrement on and keep its constraints, trigger, indexes
+  and keys consistent; each also leaves a table exactly at the limit of a part
+  after deleting, and `VACUUM` must leave every index piece with its filter and
+  the data the same. All 27 pass; with the reader of the pre-2.6 index files
+  broken on purpose, those of 2.0 to 2.5 fail, and counting the parts by the
+  list in `rev.json` alone, 2.8.0 fails.
+- `f21_compatibilidad` (new): the SQLite and MySQL functions and syntax, most
+  against SQLite. `f22_sqlserver` (new): the PowerShell script, and its dump
+  imported with its view, trigger, cascade, unique key and defaults working.
+- `f14_volcados`: one check per fix of the import and export review; a CSV
+  exported and imported back with a backslash before a quote, a separator and
+  a line break; a Latin-1 MySQL dump with a text of 250 KB next to one in
+  UTF-8; the Excel *Warnings* sheet; and the engine's APCu entries emptied
+  when a database is put back; a ZIP that brings its own `.htaccess`.
+  `f5_admin`: a mysqldump `INSERT` of 600 KB imported through the API; a
+  sign-in without token, and a user name of 5,000 characters, in the audit
+  trail. `f11_asistente`: keys with `);`, `;`, `$1` and quotes written to
+  `config.php`, twice. `f4_api`: `SHOW DATABASES` in a `lote` with a limited
+  key. `f21_compatibilidad`: the 16 MB ceiling of each function.
+- From the review of the format on disk: `f1_nucleo`, part 1 at revision 13
+  next to part 11 at revision 3 in the disk cache; `f3_escrituras`, the
+  reserved table names; `f8_indices`, `UNIQUE (a, b)` with `UNIQUE (a_b)`, and
+  such a table made as before 2.9; `f23_reparar`, holes with `rev.json` lost,
+  a part with holes repaired, «Å» (its UTF-8 holds the byte 0x85) in a part
+  repaired, a byte order mark, `_views.json` with an extra comma and cut short,
+  a missing part in the middle, and the `rev.json` 2.8 left listing a last
+  part that a `DELETE` removed. Each fails with its fix removed. `f8_indices`:
+  `VACUUM` rebuilds the index pieces without a filter and not the parts, and a
+  second one touches nothing.
+- `f4_api`: the three example clients run a `lote` against the API served by
+  HTTP (PowerShell with `pwsh`, Python with `python3`, each skipped if missing),
+  and one that fails leaves nothing; a wrong signature of the `lote` in each,
+  or a PowerShell list that comes back unrolled, makes it fail.
+- `f14_volcados`: a failed all-or-nothing import while another process writes
+  to the database (the other waits, and its row stays), which fails with the
+  copy of before; and an import killed by PHP's time limit, undone on the next
+  use of the database. `f5_admin`: the imports that must go through the API
+  ask for a panel without the engine at hand.
+- `f3_escrituras`: deleting the last rows shortens the table, also with older
+  holes before them and from one part to the one before, a queue does not
+  pile up holes, and a last part written before 2.7 is shortened too;
+  `f7_concurrencia`: writers by parts while another deletes from the end and
+  shortens the table. Removing any step of the shortening makes `f3` fail.
+- `f3_escrituras` and `f5_esquema` check that they leave nothing in the
+  temporary folder (two checks left folders there), and `f5_admin`,
+  `f11_asistente` and `f20_memoria` no longer leave their test web servers
+  running: they stopped the shell that started each one, not the server.
+- CI: the panel's tests also without `mbstring` and cURL, APCu available so the
+  tests that use it run, the whole history checked out so `f24` finds the tags,
+  and `f21`, `f23` and `f24` added (`f21` was not run there).
+- `f1_nucleo`: thirteen kinds of statement (lookups, a join, `COUNT(*)`, a
+  range, a function, `GROUP BY`, `ORDER BY`, `UNION`, `WITH`, `INSERT`,
+  `UPDATE` and `DELETE`) load none of the classes kept apart that they do not
+  use, and none compiles as much code as 2.8.0 did with it on the same
+  database (pieces of code, without spaces or comments); and a `CREATE TABLE`
+  loads its own. It fails if a class is loaded where it does not belong, or if
+  a statement compiles more. `f8_indices`: `COUNT(*)`
+  of equalities by index on lists, single keys, `IN` and deleted rows, the
+  same as counting the rows. `f16_vistas_triggers`: the panel's SQL writer in
+  a process without the engine loaded, as with the database through the API.
+- `f3_escrituras`: in one process, the state and structure kept from a query
+  are not used after another process changes the table, nor the state of a
+  table written in the same second; up to revision 31 each write leaves in the
+  disk cache only the entries of the current revisions (and one put there as a
+  read crossing a write would), revision 32 sweeps that one, and `DROP TABLE`
+  leaves nothing, also the state kept for OPcache. `f8_indices`: every key of
+  tables with the keys in order, out of order, with gaps, repeated, negative
+  and with decimals, found by index as by reading the table, also with a key
+  whose text holds another key. Each fails with its change removed.
+
+- From the security review at the end of 2.9, each failing with its fix
+  removed: `f3_escrituras`, a `lote` that only reads does not stop another
+  process; `f4_api`, the last IP of `X-Forwarded-For`, an unknown key answered
+  as a wrong signature, a statement with spaces at its ends, a token from a
+  clock ahead kept until it expires, the PHP client's shortcut; `f5_admin`,
+  a ZIP with `.tx/`, `.lote/` and another folder (and `.reparados/` kept),
+  sign-in attempts at the same time and from another account, the Data tab
+  with `]` and `,` in column names, a database with `-` restored, the current
+  password, the panel's proxy IP and time zone; `f5_esquema`, results of more
+  than 1 MB or with no table; `f9_journal`, a journal and a transaction not
+  written by the engine; `f11_asistente`, no PHP version or full paths before
+  signing in; `f14_volcados`, line breaks and a lone `\r` in what a dump
+  comments, a CSV with an unclosed quote and a ZIP file larger than memory.
+- From the last review before the release, each failing with its fix removed:
+  `f3_escrituras`, a read-only `lote` and an `INSERT` with a foreign key do
+  not wait for each other, the original of a file that cannot be saved undoes
+  the transaction without leaving the statement's journal, a statement that
+  fails inside a transaction leaves nothing open, and a file that cannot be
+  put in its place is finished when the database is opened (in a
+  transaction, it is undone whole); `f9_journal`, `CREATE INDEX`, a trigger,
+  a `CHECK` and `VACUUM` with the part size changed lose no rows, and a table
+  called `manifiesto`; `f23_reparar`, `COUNT(*)` with extra commas, whole or
+  in chunks, and `REPAIR TABLES FORGET` inside a transaction; `f5_esquema`,
+  `'now'` in any date function or as a parameter kept out of the result
+  cache, and `ADD COLUMN` and `MODIFY` keeping the column's `CHECK` and
+  `REFERENCES`; `f12_contra_sqlite`, eight triggers that change or delete rows
+  the same statement is about to touch, against SQLite; `f21_compatibilidad`,
+  `STRFTIME('%s')` with PHP in `Europe/Madrid`, `UTC_DATE`, `UTC_TIME` and
+  `UTC_TIMESTAMP` without parentheses, and `CREATE TABLE … LIKE` with its
+  `CHECK`; `f4_api`, a query that passes `TIME_LIMIT` answered in JSON and
+  logged with its key and operation; `f5_admin`, failed sign-ins that expire,
+  `open_basedir` limited to the panel and text with line breaks edited in a
+  text area; `f14_volcados`, a column with a comma in its name in keys,
+  indexes and dumps, and a ZIP with an 18 MB part and a 100 MB original in
+  `.reparados/` restored within 96 MB of memory.
+- From the test with a million rows, each failing with its fix removed:
+  `f3_escrituras`, an `UPDATE` of one row in each of 40 parts of 400 KB with
+  16 MB of memory, and two scans of a table larger than a 4 MB APCu that
+  never empty it; `f8_indices`, the number of temporary files of a sort on
+  disk. And `f4_api`: with `JSONSQLDB_API_ACTIVA = false`, a well-signed
+  `INSERT` is refused, not run and not logged.
+- From the tests with a million rows too, each failing with its change
+  removed: `f8_indices`, a `JOIN`, a `LEFT JOIN`, a `GROUP BY`, subqueries of
+  the `FROM` with `DISTINCT`, `UNION` and `UNION ALL`, a `UNION`, `IN`,
+  `EXISTS`, `WITH`, two window functions and `COUNT(DISTINCT …)` on 60,000 +
+  60,000 rows give with 24 MB what they give with memory to spare, without
+  leaving temporary files, and two that may not fit even on disk end, if so,
+  with the memory error, never with PHP's fatal; `f3_escrituras`, an `UPDATE`, an
+  `INSERT … SELECT`, an upsert and a `DELETE` of 16 MB of rows with 16 MB of
+  memory, and an `INSERT OR IGNORE … SELECT` into a table with two unique text
+  columns that gives the same with 16, 32 and 256 MB, and an `INSERT … SELECT`
+  into an empty table that sees a repeated key of its source, also after
+  writing a stretch; `f19`, upserts at
+  random against SQLite on tables of many parts, without loading the table;
+  `f2_select`, a `UNION ALL` passed row by row and in an `INSERT … SELECT`
+  keeps the repeated rows of its first part (the first version of the
+  streaming dropped them), a subquery of the `FROM` without an alias, and a
+  `LIMIT … OFFSET` that skips whole parts gives the rows of the whole table,
+  with holes and an empty part; `f8_indices`, a `LIMIT` with a `WHERE` that an
+  index covers gives the same rows, in the same order, as scanning, with
+  `IN`, `OFFSET`, two columns and a condition the index does not cover, and
+  stops reading pieces once it has them;
+  `f2_parser`, the same in the parser; `f12_contra_sqlite`, eleven `EXISTS`
+  against SQLite; `f21_compatibilidad`, a correlated `EXISTS` resolved once,
+  with what `EXPLAIN` says; `f4_api`, IPv6 addresses counted by their /64.
+- From the code audit of the release candidate, each check failing with its
+  fix removed (checked one by one): `f1_nucleo`, a lock that cannot be taken
+  releases the database's, the log keeps a line cut inside a letter or with
+  bytes that are not UTF-8, and its default level; `f2_parser`, 20,000 chained
+  comparisons and 5,000 nested `NULLIF` or `MIN` parsed and resolved in well
+  under a second, every prefix of the test statements (about 100,000) ending
+  in a syntax error, `||` binding as in SQLite, and subqueries refused where
+  the value is worked out before reading; `f2_select` and
+  `f21_compatibilidad`, against SQLite where it applies: `NATURAL JOIN` and
+  `USING` with the columns named, `ORDER BY` an alias named like a column on
+  every path, `EXISTS` with an aggregate, `OFFSET` or a window, `LIKE` with
+  many `%` and with texts that are not UTF-8, `~` compiled, `COLLATE` inside
+  an aggregate, extreme values that ended in PHP errors, `TRIM` by characters,
+  `DATE_ADD` milliseconds, `STRFTIME('%W')` every day from 2020 to 2031,
+  `GLOB` brackets, `BETWEEN` with `NULL`, `STRCMP`, `PRINTF('%,d')`, the total
+  order on every path, `REGEXP` without handlers left behind, and the caps of
+  the pattern and correlated-subquery caches; `f3_escrituras`, `f5_esquema`
+  and `f19_escrituras_contra_sqlite`, cascades of two levels at random against
+  SQLite, cascaded rows with their triggers, unique and foreign keys, the
+  parent row gone before its cascades, upserts whose triggers write, `TRUNCATE`
+  with a foreign key to itself, keys in `ALTER`/`CHECK`/`REPAIR KEYS`,
+  `RENAME TO`, unique-key names, `ENUM` values over 40 characters, `CREATE
+  TABLE … AS SELECT` types and `NEW`/`OLD` in `CREATE TRIGGER`; `f7_concurrencia`,
+  a write by parts discarded by a conflict leaves no filters behind (in
+  separate processes: in one, the process's own memory hid the fault), one
+  that commits after another opened a part, and two processes rebuilding the
+  same OPcache file; `f8_indices`, numbers spread over the table covered by
+  the filter (`"cubre":"todo"`), the cache sweep keeping the filters, and a
+  sort on disk cut by a `LIMIT` closing its files first; `f10`, a state from
+  before 2.7; `f23_reparar`, a hand edit that keeps every line's length, also
+  of a part whose fingerprint has been through a sweep, the cached results
+  retired by the query that sees an edit, and a repair larger than the
+  memory; `f21_compatibilidad`, `STR_TO_DATE` with `%f`; `f5_esquema`, a
+  statement a trigger cannot run refused when it is created, and `ADD UNIQUE`
+  finding a repeat while it builds its index, across two parts, with an index
+  already on the same columns and with indexes off; `f4_api`, parameters out
+  of range and
+  errors with bytes that are not UTF-8; `f5_admin` and `f11_asistente`, a huge
+  user name at sign-in, the wizard and the `Host` header, the language token,
+  fields sent as lists, the null character in a password and a damaged panel
+  file; `f14_volcados`, `f16` and `f17`, every import and export fix, with a
+  real PostgreSQL where there is one. `f14_volcados` no longer needs
+  `mbstring` nor a fixed wait in its concurrency test; `f3_escrituras` and
+  `f5_esquema` skip, instead of failing, the checks that need APCu, OPcache or
+  SQLite when they are missing.
+
+### Documentation
+
+- New `docs/06-format.md`: reference of the files on disk, field by field,
+  with what happens when each one is missing, the values by type, the index
+  keys and filter, the journal, transactions and repairs, and how to read or
+  change the files from outside.
+- `docs/01-core.md`: column names may have spaces or signs (since 2.8; it
+  still gave the old rule), and the example data file has the offsets the
+  engine writes. What stays in the process said sixteen index pieces and one
+  part, which 2.8 already changed to four pieces and no parts.
+  `docs/01-core.md` and `docs/02-queries.md` no longer say that a `DELETE`
+  rewrites index pieces without their filter: since the holes, a `DELETE` does
+  not move rows.
+- `docs/01-core.md`: what does not fit in memory and goes to disk, what still
+  has to fit, and a million rows: every query and write measured, with its
+  time and memory. `docs/02-queries.md`: the subquery without an alias, the
+  `EXISTS` semi-join and what goes to disk. `docs/03-writes.md`: writes in
+  stretches and upserts without loading the table. `docs/04-api.md`: IPv6 by
+  its /64. The `.orden/` folder holds more than the temporary files of a sort
+  (`01-core`, `05-admin`, `06-format`), and the README says what a million
+  rows costs instead of «not millions».
+- `docs/02-queries.md` said that a text compared with a number takes its
+  leading number (`'12abc'` is 12); it does not: `'12abc' = 12` is false, and
+  only arithmetic and `CAST` take it. It now has the full operator precedence
+  and the total order. Every document was checked against the code before the
+  release.
+
 ## [2.8.0] - 2026-10-03
 
 Three things every application needs and the engine did not have — knowing the
@@ -82,7 +1871,7 @@ changes in the on-disk format of existing data.
   `ORDER BY` needs the engine to sort the whole result in its own memory (with
   the direct connection, the same memory as the panel); if it does not fit, the
   panel says so before the download starts or in the last line of the file, so
-  it is never taken as complete. And through the API each batch is a request of
+  it is never taken as complete. (2.9 sorts on disk when it does not fit.) And through the API each batch is a request of
   its own: for a consistent copy of a database being written to, use the ZIP.
 - **Importing files larger than PHP's upload limit.** The browser cuts the file
   into pieces smaller than `upload_max_filesize` and `post_max_size` and sends
@@ -3074,6 +4863,9 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[2.9.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.9.0
+[2.8.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.8.0
+[2.7.4]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.4
 [2.7.3]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.3
 [2.7.2]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.2
 [2.7.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.1

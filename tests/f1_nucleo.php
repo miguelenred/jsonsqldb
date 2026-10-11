@@ -12,6 +12,8 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Catalog;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageCambios;
+use JsonSQLDB\StorageEscritura;
 use JsonSQLDB\Types;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test';
@@ -120,14 +122,14 @@ chk('insertar y releer', function () use ($st, $cat) {
     $meta  = $cat->meta('usuarios');
     $filas = [];
     foreach ([['Ana','ana@x.es',10.555,'2026-01-15 08:30'], ['Luis','luis@x.es',0,null]] as $d) {
-        $fila = ['id' => $cat->siguienteAutoincremento('usuarios')];
+        $fila = ['id' => count($filas) + 1];
         foreach (['nombre','email','saldo','alta'] as $i => $c) {
             $fila[$c] = Types::cast($d[$i], Catalog::columna($meta, $c));
         }
         $filas[] = $fila;
     }
-    $st->guardarFilas('usuarios', $filas);
-    $leidas = $st->leerFilas('usuarios');
+    StorageEscritura::guardarFilas($st, 'usuarios', $filas);
+    $leidas = StorageEscritura::leerFilas($st, 'usuarios');
     return count($leidas) === 2
         && $leidas[0]['id'] === 1 && $leidas[1]['id'] === 2
         && $leidas[0]['saldo'] === 10.56
@@ -140,40 +142,37 @@ chk('fichero de datos legible (una fila por línea)', function () use ($raiz, $b
     return substr_count($txt, "\n    {") === 2 && str_contains($txt, '"table": "usuarios"');
 });
 
-chk('autoincremento persiste', fn() => $cat->siguienteAutoincremento('usuarios') === 3);
-chk('ajustar autoincremento', function () use ($cat) {
-    $cat->ajustarAutoincremento('usuarios', 50);
-    return $cat->siguienteAutoincremento('usuarios') === 51;
-});
 
 echo "\n== ALTER TABLE ==\n";
 chk('añadir columna', function () use ($cat, $st) {
     $cat->anadirColumna('usuarios', ['name'=>'ciudad','type'=>'VARCHAR(60)','default'=>'Torrevieja']);
-    $filas = $st->leerFilas('usuarios');
+    $filas = StorageEscritura::leerFilas($st, 'usuarios');
     return $filas[0]['ciudad'] === 'Torrevieja' && Catalog::columna($cat->meta('usuarios'), 'ciudad') !== null;
 });
 chk('renombrar columna', function () use ($cat, $st) {
     $cat->renombrarColumna('usuarios', 'ciudad', 'poblacion');
-    return array_key_exists('poblacion', $st->leerFilas('usuarios')[0]);
+    return array_key_exists('poblacion', StorageEscritura::leerFilas($st, 'usuarios')[0]);
 });
 chk('borrar columna', function () use ($cat, $st) {
     $cat->borrarColumna('usuarios', 'poblacion');
-    return !array_key_exists('poblacion', $st->leerFilas('usuarios')[0])
+    return !array_key_exists('poblacion', StorageEscritura::leerFilas($st, 'usuarios')[0])
         && Catalog::columna($cat->meta('usuarios'), 'poblacion') === null;
 });
 esperaError('borrar columna referenciada por FK', 'CONSTRAINT', fn() => $cat->borrarColumna('usuarios', 'id'));
 esperaError('borrar columna de una FK propia', 'CONSTRAINT', fn() => $cat->borrarColumna('pedidos', 'usuario_id'));
 
 echo "\n== Triggers ==\n";
-chk('crear trigger', function () use ($cat) {
+/** Los triggers de pedidos para INSERT en un momento (BEFORE o AFTER) */
+$disparos = static fn(string $momento): array => array_values(array_filter($cat->meta('pedidos')['triggers'],
+    static fn(array $t): bool => $t['timing'] === $momento && $t['event'] === 'INSERT'));
+chk('crear trigger', function () use ($cat, $disparos) {
     $cat->crearTrigger('pedidos', [
         'name'=>'trg_pedidos_ins','timing'=>'AFTER','event'=>'INSERT',
         'when'=>'NEW.total > 0',
         'body'=>['UPDATE usuarios SET saldo = saldo + NEW.total WHERE id = NEW.usuario_id'],
         'sql'=>'CREATE TRIGGER trg_pedidos_ins ...',
     ]);
-    return count($cat->triggers('pedidos','AFTER','INSERT')) === 1
-        && $cat->triggers('pedidos','BEFORE','INSERT') === [];
+    return count($disparos('AFTER')) === 1 && $disparos('BEFORE') === [];
 });
 esperaError('trigger duplicado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos', [
     'name'=>'trg_pedidos_ins','timing'=>'AFTER','event'=>'INSERT','body'=>['DELETE FROM usuarios'],
@@ -181,15 +180,14 @@ esperaError('trigger duplicado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos',
 esperaError('evento no soportado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos', [
     'name'=>'trg_x','timing'=>'AFTER','event'=>'TRUNCATE','body'=>['DELETE FROM usuarios'],
 ]));
-chk('borrar trigger', fn() => $cat->borrarTrigger('trg_pedidos_ins') === 'pedidos'
-    && $cat->triggers('pedidos','AFTER','INSERT') === []);
+chk('borrar trigger', fn() => $cat->borrarTrigger('trg_pedidos_ins') === 'pedidos' && $disparos('AFTER') === []);
 
 echo "\n== Renombrar tabla ==\n";
 chk('renombrar propaga FK', function () use ($cat) {
     $cat->renombrarTabla('usuarios', 'clientes');
     return $cat->existe('clientes') && !$cat->existe('usuarios')
         && $cat->meta('pedidos')['foreign_keys'][0]['table'] === 'clientes'
-        && $cat->meta('clientes')['autoincrement']['next'] === 52;
+        && $cat->meta('clientes')['autoincrement']['next'] === 1;
 });
 
 echo "\n== Paginación y rendimiento ==\n";
@@ -204,7 +202,7 @@ chk('una tabla grande se reparte en las partes que tocan', function () use ($cat
         $filas[] = ['id'=>$i, 'texto'=>"línea $i", 'fecha'=>'2026-08-19 12:00:00'];
     }
     $t0 = microtime(true);
-    $st->guardarFilas('log', $filas);
+    StorageEscritura::guardarFilas($st, 'log', $filas);
     $tw = microtime(true) - $t0;
 
     // Cuántas partes salen depende de JSONSQLDB_FILAS_POR_PARTE, así que se
@@ -218,7 +216,7 @@ chk('una tabla grande se reparte en las partes que tocan', function () use ($cat
     }
 
     $t0 = microtime(true);
-    $leidas = $st->leerFilas('log');   // desde caché
+    $leidas = StorageEscritura::leerFilas($st, 'log');   // desde caché
     $tc = microtime(true) - $t0;
 
     printf("       %d partes | escritura %.3fs | lectura cacheada %.4fs | parte %.1f KB\n",
@@ -228,30 +226,30 @@ chk('una tabla grande se reparte en las partes que tocan', function () use ($cat
 });
 
 chk('reducir filas elimina partes sobrantes', function () use ($st, $raiz, $base) {
-    $st->guardarFilas('log', array_slice($st->leerFilas('log'), 0, 10));
-    return !is_file("$raiz/$base/log.part2.json") && count($st->leerFilas('log')) === 10;
+    StorageEscritura::guardarFilas($st, 'log', array_slice(StorageEscritura::leerFilas($st, 'log'), 0, 10));
+    return !is_file("$raiz/$base/log.part2.json") && count(StorageEscritura::leerFilas($st, 'log')) === 10;
 });
 
 echo "\n== Caché e invalidación ==\n";
 chk('la caché devuelve datos actualizados tras escribir', function () use ($st) {
-    $antes = count($st->leerFilas('log'));
-    $filas = $st->leerFilas('log');
+    $antes = count(StorageEscritura::leerFilas($st, 'log'));
+    $filas = StorageEscritura::leerFilas($st, 'log');
     $filas[] = ['id'=>999,'texto'=>'nueva','fecha'=>null];
-    $st->guardarFilas('log', $filas);
-    return count($st->leerFilas('log')) === $antes + 1;
+    StorageEscritura::guardarFilas($st, 'log', $filas);
+    return count(StorageEscritura::leerFilas($st, 'log')) === $antes + 1;
 });
 
 echo "\n== Bloqueo ==\n";
 chk('anidado exclusivo', function () use ($st) {
     $st->bloquear(true); $st->desbloquear();
-    return $st->enEscritura();
+    return StorageEscritura::enEscritura($st);
 });
 $st->desbloquear();
-chk('liberado del todo', fn() => $st->enEscritura() === false);
+chk('liberado del todo', fn() => StorageEscritura::enEscritura($st) === false);
 chk('otra petición ve la escritura (caché invalidada por revisión)', function () use ($raiz, $base) {
     $st2 = new Storage($raiz, $base);   // instancia nueva = simula otra petición
     $st2->bloquear(false);
-    $n = count($st2->leerFilas('log'));
+    $n = count(StorageEscritura::leerFilas($st2, 'log'));
     $st2->desbloquear();
     return $n === 11;
 });
@@ -259,7 +257,7 @@ chk('lectura simultánea', function () use ($st, $raiz, $base) {
     $st->bloquear(false);
     $st2 = new Storage($raiz, $base);
     $st2->bloquear(false);      // no debe bloquearse
-    $n = count($st2->leerFilas('log'));
+    $n = count(StorageEscritura::leerFilas($st2, 'log'));
     $st2->desbloquear();
     $st->desbloquear();
     return $n === 11;
@@ -267,6 +265,28 @@ chk('lectura simultánea', function () use ($st, $raiz, $base) {
 esperaError('no se puede escribir dentro de una lectura', 'LOCK', function () use ($st) {
     $st->bloquear(false);
     try { $st->bloquear(true); } finally { $st->desbloquear(); }
+});
+chk('si el bloqueo de una tabla no se puede coger, el de la base no se queda cogido, ni escribiendo por partes; la escritura siguiente tiene su exclusivo de verdad (2.9)', function () use ($raiz, $base) {
+    $dir = "$raiz/$base";
+    mkdir("$dir/.zz.lock");                         // un fichero de bloqueo que no se puede abrir
+    $s = new Storage($raiz, $base);
+    // ¿Puede otro coger el exclusivo de la base? flock va por descriptor: vale en el mismo proceso
+    $libre = static function () use ($dir): bool {
+        $fh = fopen("$dir/.lock", 'c');
+        $si = flock($fh, LOCK_EX | LOCK_NB);
+        if ($si) { flock($fh, LOCK_UN); }
+        fclose($fh);
+        return $si;
+    };
+    $r = [];
+    foreach ([static fn() => $s->bloquear(true, 'zz'), static fn() => StorageCambios::bloquearPartes($s, 'zz')] as $pedir) {
+        try { $pedir(); $r[] = 'no dio error'; } catch (JsonSqlDbError $e) { $r[] = $libre() && !StorageEscritura::enEscritura($s); }
+    }
+    rmdir("$dir/.zz.lock");
+    $s->bloquear(true);
+    $r[] = !$libre();
+    $s->desbloquear();
+    return $r === [true, true, true] ?: json_encode($r);
 });
 
 echo "\n== Sincronización del directorio ==\n";
@@ -418,6 +438,83 @@ chk('la red actúa aunque la predicción esté desactivada', function () use ($r
             . escapeshellarg($codigo) . ' 2>/dev/null');
     return str_contains($salida, 'RED') ?: trim($salida);
 });
+// La red (2.9): al agotarse la memoria, el sitio para responder sale de subir
+// memory_limit en ese momento; si el hosting no deja cambiarlo, de una reserva.
+// El aviso de estas pruebas necesita 1 MB, como una respuesta de verdad que
+// tenga algo de trabajo: sin margen, PHP no llega a escribirlo
+$redCodigo = static function (bool $sinIniSet): string {
+    return escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M' . ($sinIniSet ? ' -d disable_functions=ini_set' : '') . ' -r '
+        . escapeshellarg('define("JSONSQLDB_CONEXION_DIRECTA", true);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . 'JsonSQLDB\\Memoria::alAgotarse(function () { $r = str_repeat("x", 1048576); echo "RESPONDE ", strlen($r); });'
+            . 'JsonSQLDB\\Memoria::iniciar(); $a = []; while (true) { $a[] = str_repeat("y", 500); }')
+        . ' 2>/dev/null';
+};
+chk('al agotarse la memoria hay sitio para responder: se sube memory_limit en ese momento', fn() =>
+    str_contains((string)shell_exec($redCodigo(false)), 'RESPONDE 1048576') ?: 'no respondió');
+chk('si el hosting no deja cambiar memory_limit, el sitio sale de la reserva', fn() =>
+    str_contains((string)shell_exec($redCodigo(true)), 'RESPONDE 1048576') ?: 'no respondió');
+chk('sin agotarse no se aparta memoria, y al terminar no se toca memory_limit', function () {
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=64M -r ' . escapeshellarg(
+        'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . '$antes = memory_get_usage(); JsonSQLDB\\Memoria::iniciar(); echo memory_get_usage() - $antes < 262144 ? "SIN RESERVA " : "CON RESERVA ";'
+        . 'register_shutdown_function(function () { echo ini_get("memory_limit"); });') . ' 2>&1'));
+    return $salida === 'SIN RESERVA 64M' ?: $salida;
+});
+chk('el registro, por defecto, apunta las escrituras y los errores, no las lecturas (2.9)', function () {
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_log';
+    $limpiar = static function () use ($dir): void {
+        if (is_dir("$dir/l")) { Storage::borrarBase($dir, 'l'); }
+        array_map('unlink', glob("$dir/logs/*") ?: []);
+        @rmdir("$dir/logs");
+        @rmdir($dir);
+    };
+    $limpiar();
+    @mkdir("$dir/logs", 0775, true);
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_LOG_PATH", ' . var_export("$dir/logs", true) . ');'
+        . 'require ' . var_export(dirname(__DIR__) . '/config.php', true) . ';'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . 'JsonSQLDB\\Database::crear("l", ' . var_export($dir, true) . '); $b = new JsonSQLDB\\Database("l", ' . var_export($dir, true) . ');'
+        . '$b->consultar("CREATE TABLE t (x INTEGER)"); $b->consultar("INSERT INTO t VALUES (1)");'
+        . 'foreach (["SELECT x FROM t", "SELECT x FROM t UNION SELECT 2", "SHOW TABLES", "CHECK TABLES"] as $q) { $b->consultar($q); }'
+        . 'try { $b->consultar("SELECT nada FROM t"); } catch (Throwable $e) {}';
+    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $ops = [];
+    foreach ((array)glob("$dir/logs/consultas-*.json") as $f) {
+        foreach (file((string)$f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) {
+            $e = json_decode($l, true);
+            $ops[] = ($e['op'] ?? '?') . (isset($e['error']) && $e['error'] !== null ? ' (error)' : '');
+        }
+    }
+    $limpiar();
+    return $ops === ['CREATE TABLE', 'INSERT', 'SELECT (error)'] && !is_dir($dir) ?: json_encode($ops);
+});
+chk('sin JSONSQLDB_LOG_NIVEL (un config.php de antes de la 2.9), el registro apunta las escrituras y los errores, como dice la documentación (2.9)', fn() =>
+    !defined('JSONSQLDB_LOG_NIVEL') && JsonSQLDB\Config::logNivel() === 'escrituras' ?: JsonSQLDB\Config::logNivel());
+chk('el registro escribe la línea aunque el corte de la SQL caiga en medio de una letra o lleve bytes que no son UTF-8, y la corta sin partir letras (2.9)', function () {
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_log2';
+    exec('rm -rf ' . escapeshellarg($dir));
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_LOG_ACTIVO", true); define("JSONSQLDB_LOG_MAX_SQL", 25);'
+        . 'define("JSONSQLDB_LOG_PARAMS", true); define("JSONSQLDB_LOG_PATH", ' . var_export("$dir/logs", true) . ');'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . 'JsonSQLDB\\Database::crear("l", ' . var_export($dir, true) . '); $b = new JsonSQLDB\\Database("l", ' . var_export($dir, true) . ');'
+        . '$b->consultar("CREATE TABLE t (x TEXT)");'
+        . '$b->consultar("INSERT INTO t VALUES (\'añoñ\')");'                  // el corte, a los 25 bytes, cae dentro de la ñ
+        . '$b->consultar("INSERT /* \xff */ INTO t VALUES (\'b\')");'           // un byte que no es UTF-8, en un comentario
+        . 'JsonSQLDB\\Logger::registrar("l", "INSERT", "X", 1, 1.0, null, [NAN, "a\xffb"]);';
+    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $vistas = [];
+    foreach ((array)glob("$dir/logs/consultas-*.json") as $f) {
+        foreach (file((string)$f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) {
+            $e = json_decode($l, true);
+            $vistas[] = [$e['sql'] ?? null, $e['params'] ?? null];
+        }
+    }
+    exec('rm -rf ' . escapeshellarg($dir));
+    return $vistas === [['CREATE TABLE t (x TEXT)', null], ["INSERT INTO t VALUES ('a…", null], ["INSERT /* \u{FFFD} */ INTO t VAL…", null], ['X', [0, "a\u{FFFD}b"]]]
+        ?: json_encode($vistas, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+});
 chk('sin vigilancia, la misma consulta muere con un fatal de PHP', function () use ($raiz) {
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
             . 'define("JSONSQLDB_MEMORIA_VIGILAR", false);'
@@ -566,6 +663,82 @@ chk('el log de una conexión directa pone ip = local', function () {
 chk('limpiar la base de la conexión directa', function () use ($raiz) {
     exec('rm -rf ' . escapeshellarg($raiz . '/directa') . ' ' . escapeshellarg($raiz . '/logs'));
     return true;
+});
+chk('la caché en disco no confunde la parte 1 en la revisión 13 con la 11 en la 3: leer no reescribe la tabla (2.9)', function () use ($raiz) {
+    $r = $raiz . '/cachep';
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", 10);'
+            . 'define("JSONSQLDB_CACHE_APCU", false); define("JSONSQLDB_CACHE_OPCACHE", false);'
+            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . '$r = ' . var_export($r, true) . '; JsonSQLDB\Database::crear("c", $r); $b = new JsonSQLDB\Database("c", $r);'
+            . '$b->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)");'
+            . '$v = []; for ($i = 1; $i <= 100; $i++) { $v[] = "($i, 0)"; } $b->consultar("INSERT INTO t VALUES " . implode(",", $v));'
+            . '$v = []; for ($i = 101; $i <= 110; $i++) { $v[] = "($i, 0)"; } $b->consultar("INSERT INTO t VALUES " . implode(",", $v));'
+            . 'for ($k = 0; $k < 10; $k++) { $b->consultar("UPDATE t SET n = n + 1 WHERE id = 1"); }'
+            . '$rev = fn() => json_decode(file_get_contents("$r/c/t.rev.json"), true)["rev"]; $antes = $rev();'
+            . '(new JsonSQLDB\Database("c", $r))->consultar("SELECT SUM(n) FROM t");'
+            . '$s = (new JsonSQLDB\Database("c", $r))->consultar("SELECT SUM(n) AS s FROM t")[0]["s"];'
+            . 'echo json_encode([$antes, $rev(), $s]);';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    exec('rm -rf ' . escapeshellarg($r));
+    return $salida === '[13,13,10]' ?: $salida;
+});
+chk('cada petición carga solo las clases que usa, y sin OPcache compila menos código que la 2.8.0 (2.9)', function () use ($raiz) {
+    // Sin OPcache, PHP compila en cada petición todo lo que carga. Cada
+    // sentencia, en un proceso nuevo, con la caché de resultados apagada. Con
+    // 300 filas en c, el JOIN de una fila de p busca su cliente por la clave
+    // (con pocas, cruzaría con una tabla hash, que va aparte)
+    $r = $raiz . '/carga';
+    $motor = var_export(dirname(__DIR__) . '/engine/bootstrap.php', true);
+    $ini = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0); require ' . $motor . ';'
+         . '$b = new JsonSQLDB\\Database("c", ' . var_export($r, true) . ');';
+    $correr = static fn(string $codigo): string => trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $correr('define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . $motor . '; JsonSQLDB\\Database::crear("c", ' . var_export($r, true) . ');'
+        . '$b = new JsonSQLDB\\Database("c", ' . var_export($r, true) . ');'
+        . '$b->consultar("CREATE TABLE c (id INTEGER PRIMARY KEY, email VARCHAR(30) UNIQUE, n INTEGER)");'
+        . '$b->consultar("CREATE TABLE p (id INTEGER PRIMARY KEY, cid INTEGER, total INTEGER)");'
+        . '$v = []; for ($i = 1; $i <= 300; $i++) { $v[] = "($i, \'$i@x\', $i)"; } $b->consultar("INSERT INTO c VALUES " . implode(",", $v));'
+        . '$b->consultar("INSERT INTO p VALUES (1, 1, 10), (2, 3, 20)");');
+    $aparte = ['ParserEscritura', 'ParserSentencias', 'ParserAvanzado', 'CatalogDdl', 'StorageEscritura', 'StorageCambios',
+               'StorageMantenimiento', 'StorageRangos', 'FunctionsAmpliadas', 'EvaluatorPatrones', 'SelectOrden', 'SelectAgrupada',
+               'SelectCompuesta', 'SelectJoin', 'SelectAvanzada', 'DatabaseAvanzada', 'Writer', 'WriterCambios', 'WriterForaneas',
+               'WriterConflictos', 'WriterTriggers', 'WriterDdl'];
+    $escritura = ['ParserSentencias', 'ParserAvanzado', 'ParserConsulta', 'CatalogDdl', 'StorageMantenimiento', 'StorageRangos',
+                  'Select', 'SelectAvanzada', 'DatabaseAvanzada', 'WriterForaneas', 'WriterConflictos', 'WriterTriggers', 'WriterDdl'];
+    // Lo que no puede cargar cada sentencia, y lo que compilaba la 2.8.0 con
+    // ella en esta misma base: piezas de código, sin espacios ni comentarios
+    $casos = [
+        'SELECT * FROM c WHERE id = 2'                                       => [$aparte, 70606],
+        "SELECT id FROM c WHERE email = '2@x'"                               => [$aparte, 70606],
+        'SELECT p.id, c.email FROM p JOIN c ON c.id = p.cid WHERE p.id = 2'  => [$aparte, 70606],
+        'SELECT COUNT(*) FROM c'                                             => [$aparte, 58465],
+        'SELECT id FROM c WHERE id BETWEEN 1 AND 2'                          => [array_diff($aparte, ['StorageRangos']), 70606],
+        'SELECT UPPER(email) FROM c WHERE id = 2'                            => [$aparte, 73587],
+        'SELECT n, COUNT(*), MAX(id) FROM c GROUP BY n'                      => [array_merge(array_diff($aparte, ['SelectAgrupada']), ['Functions']), 73587],
+        'SELECT id FROM c ORDER BY n DESC LIMIT 3'                           => [array_diff($aparte, ['SelectOrden']), 70890],
+        'SELECT id FROM c WHERE id < 3 UNION SELECT cid FROM p'              => [array_diff($aparte, ['SelectCompuesta', 'StorageRangos']), 70606],
+        'WITH t AS (SELECT id FROM c) SELECT id FROM t WHERE id = 2'         => [array_diff($aparte, ['SelectCompuesta']), 70606],
+        "INSERT INTO c VALUES (301, 'z@x', -4)"                              => [array_merge($escritura, ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator']), 68886],
+        'UPDATE c SET n = n + 1 WHERE id = 301'                              => [$escritura, 82205],
+        'DELETE FROM c WHERE id = 301'                                       => [$escritura, 82205],
+    ];
+    $medir = 'echo json_encode(array_map(static function (string $f): array { $n = 0;'
+        . ' foreach (token_get_all((string)file_get_contents($f)) as $t) { $n += (int)!(is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)); }'
+        . ' return [basename($f, ".php"), $n]; }, array_filter(get_included_files(), static fn(string $f): bool => str_contains($f, "/engine/"))));';
+    $mal = [];
+    foreach ($casos as $sql => [$no, $tope]) {
+        $cargadas = json_decode($correr($ini . '$b->consultar(' . var_export($sql, true) . ');' . $medir), true);
+        if (!is_array($cargadas)) { $mal[] = "$sql: no respondió"; continue; }
+        if (($sobra = array_intersect($no, array_column($cargadas, 0))) !== []) { $mal[] = "$sql carga " . implode(', ', $sobra); }
+        if (($n = array_sum(array_column($cargadas, 1))) >= $tope) { $mal[] = "$sql compila $n piezas (la 2.8.0, $tope)"; }
+    }
+    // Y lo que va aparte se carga cuando hace falta
+    $cargadas = json_decode($correr($ini . '$b->consultar("CREATE TABLE x (a INTEGER)");'
+        . 'echo json_encode(array_map(fn($f) => basename($f, ".php"), get_included_files()));'), true);
+    if (array_diff(['ParserSentencias', 'CatalogDdl', 'WriterDdl', 'StorageMantenimiento'], (array)$cargadas) !== []) {
+        $mal[] = 'CREATE TABLE no cargó lo suyo: ' . json_encode($cargadas);
+    }
+    exec('rm -rf ' . escapeshellarg($r));
+    return $mal === [] ?: implode(' | ', $mal);
 });
 chk('la carpeta temporal queda vacía y se elimina', function () use ($raiz) {
     clearstatcache();

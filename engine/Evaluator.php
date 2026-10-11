@@ -15,19 +15,21 @@ namespace JsonSQLDB;
  * Contexto de evaluación:
  *   ['fila' => array, 'agregados' => ?array de resultados por agid, 'sub' => callable(AST): filas]
  *
+ * Las expresiones compiladas en clausuras están en EvaluatorCompilado, y LIKE,
+ * GLOB y REGEXP en EvaluatorPatrones.
+ *
  * https://miguelenred.es/jsonsqldb
  */
-final class Evaluator
+class Evaluator
 {
+    /** Las funciones de agregación (ver SelectAgrupada::agregado()) */
+    private const AGREGADOS = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'GROUP_CONCAT', 'TOTAL',
+        'ANY_VALUE', 'JSON_GROUP_ARRAY', 'JSON_ARRAYAGG', 'JSON_GROUP_OBJECT', 'JSON_OBJECTAGG', 'STD', 'STDDEV',
+        'STDDEV_POP', 'STDDEV_SAMP', 'VARIANCE', 'VAR_POP', 'VAR_SAMP', 'BIT_AND', 'BIT_OR', 'BIT_XOR'];
+
     /** Identificador único por subconsulta, para poder cachear su resultado */
     private static int $sid = 0;
 
-    /**
-     * Fija la clave real de cada referencia a columna.
-     *
-     * @param array $mapa  'alias.col' => 'alias.col' y 'col' => 'alias.col' | false si es ambigua
-     * @param array $alias nombres de salida del SELECT admitidos (ORDER BY / GROUP BY por alias)
-     */
     /**
      * Se pone a true cuando una columna se resuelve contra la consulta exterior.
      * Es lo que permite saber si una subconsulta está correlacionada y, por
@@ -35,9 +37,33 @@ final class Evaluator
      */
     public static bool $correlacionada = false;
 
+    /**
+     * Fija la clave real de cada referencia a columna.
+     *
+     * @param array $mapa  'alias.col' => 'alias.col' y 'col' => 'alias.col' | false si es ambigua;
+     *                     "\0c:alias.col" => la colación de esa columna, si la tiene (2.9)
+     * @param array $alias nombres de salida del SELECT admitidos (ORDER BY / GROUP BY por alias)
+     */
     public static function resolver(array $n, array $mapa, array $alias = [], array $externo = []): array
     {
+        $n = self::resolverNodo($n, $mapa, $alias, $externo);
+        // Con su colación escrita ya calculada (ver Parser::colacionEscrita()),
+        // como las comparaciones desde el analizador (2.9): NULLIF, MIN, MAX…
+        // la buscan en cada argumento, y anidados se recorría cada vez todo lo
+        // de dentro. 2.000 NULLIF anidados, 2 s; así, cada nodo solo mira sus
+        // hijos, que ya la tienen
+        if (!isset($n['escrita']) && in_array($n['k'], ['fn', 'bin', 'un', 'case', 'cast', 'in', 'between', 'like', 'regexp', 'null'], true)) {
+            $n['escrita'] = Parser::colacionEscrita($n) ?? '';
+        }
+        return $n;
+    }
+
+    /** Ver resolver() */
+    private static function resolverNodo(array $n, array $mapa, array $alias, array $externo): array
+    {
         switch ($n['k']) {
+            case 'intervalo':
+                throw JsonSqlDbError::syntax('INTERVAL solo vale sumado o restado a una fecha (fecha + INTERVAL 1 DAY) o dentro de DATE_ADD y DATE_SUB');
             case 'col':
                 $buscado = $n['tabla'] === null
                     ? strtolower($n['nombre'])
@@ -48,6 +74,9 @@ final class Evaluator
                         throw JsonSqlDbError::schema("La columna '{$n['nombre']}' es ambigua: indica la tabla");
                     }
                     $n['clave'] = $mapa[$buscado];
+                    if (isset($mapa["\0c:" . $n['clave']])) {
+                        $n['colacion'] = $mapa["\0c:" . $n['clave']];    // COLLATE de la columna (2.9)
+                    }
                     return $n;
                 }
                 if ($n['tabla'] === null && isset($alias[$buscado])) {
@@ -59,6 +88,9 @@ final class Evaluator
                 if (isset($externo[$buscado]) && $externo[$buscado] !== false) {
                     $n['externa']       = true;
                     $n['claveExterna']  = $externo[$buscado];
+                    if (isset($externo["\0c:" . $n['claveExterna']])) {
+                        $n['colacion'] = $externo["\0c:" . $n['claveExterna']];
+                    }
                     self::$correlacionada = true;
                     return $n;
                 }
@@ -68,6 +100,9 @@ final class Evaluator
             case 'bin':
                 $n['i'] = self::resolver($n['i'], $mapa, $alias, $externo);
                 $n['d'] = self::resolver($n['d'], $mapa, $alias, $externo);
+                if (isset(self::COMPARACIONES[$n['op']]) && ($c = self::colacionDe($n['i'], $n['d'])) !== null) {
+                    [$n['i'], $n['d']] = [self::plegada($n['i'], $c), self::plegada($n['d'], $c)];
+                }
                 return $n;
 
             case 'un':
@@ -81,6 +116,43 @@ final class Evaluator
                 foreach ($n['orden'] ?? [] as $i => $o) {
                     $n['orden'][$i]['expr'] = self::resolver($o['expr'], $mapa, $alias, $externo);
                 }
+                if (isset($n['filtro'])) {
+                    $n['filtro'] = self::resolver($n['filtro'], $mapa, $alias, $externo);
+                }
+                // TRIM, LTRIM y RTRIM con un conjunto que puede tener caracteres
+                // de más de un byte o '..' van con '*', carácter a carácter (ver
+                // Functions::escalar()). Uno escrito se mira aquí, una vez: el
+                // de siempre, en ASCII, sigue el camino de siempre (2.9)
+                if (isset($n['args'][1], self::RECORTES[$n['nombre']])
+                    && ($n['args'][1]['k'] !== 'lit' || preg_match(Functions::POR_CARACTERES, Valor::aTexto($n['args'][1]['v'])))) {
+                    $n['nombre'] .= '*';
+                }
+                // NULLIF, y MIN y MAX de varios valores, comparan con la
+                // colación del primer argumento que la tiene, como en SQLite (2.9)
+                if (isset(self::COMPARAN[$n['nombre']]) && count($n['args']) > ($n['nombre'] === 'NULLIF' ? 0 : 1)) {
+                    $c = null;
+                    foreach ($n['args'] as $a) {
+                        $c ??= self::colacionSalida($a);
+                    }
+                    if ($c !== null && $c !== 'BINARY') {
+                        $n['colacion'] = $c;
+                    }
+                }
+                return $n;
+
+            case 'ventana':                       // f(…) OVER (…), 2.9: sin los alias de la salida
+                foreach ($n['args'] as $i => $a) {
+                    $n['args'][$i] = self::resolver($a, $mapa, [], $externo);
+                }
+                if ($n['filtro'] !== null) {
+                    $n['filtro'] = self::resolver($n['filtro'], $mapa, [], $externo);
+                }
+                foreach ($n['def']['particion'] as $i => $e) {
+                    $n['def']['particion'][$i] = self::conColacion(self::resolver($e, $mapa, [], $externo));
+                }
+                foreach ($n['def']['orden'] as $i => $o) {
+                    $n['def']['orden'][$i]['expr'] = self::conColacion(self::resolver($o['expr'], $mapa, [], $externo));
+                }
                 return $n;
 
             case 'case':
@@ -93,6 +165,22 @@ final class Evaluator
                 if ($n['else'] !== null) {
                     $n['else'] = self::resolver($n['else'], $mapa, $alias, $externo);
                 }
+                // CASE col WHEN …: con la colación de la columna, como col = …,
+                // o la escrita con COLLATE, que aquí no aplica el analizador
+                if ($n['base'] !== null) {
+                    $ops = [$n['base'], ...array_column($n['when'], 0)];
+                    $c   = null;
+                    foreach ($ops as $o) {
+                        $c ??= Parser::colacionEscrita($o);
+                    }
+                    $c = $c === 'BINARY' ? null : ($c ?? self::colacionDe(...$ops));
+                    if ($c !== null) {
+                        $n['base'] = self::plegada($n['base'], $c);
+                        foreach ($n['when'] as $i => [$cond]) {
+                            $n['when'][$i][0] = self::plegada($cond, $c);
+                        }
+                    }
+                }
                 return $n;
 
             case 'in':
@@ -100,6 +188,22 @@ final class Evaluator
                 if ($n['lista'] !== null) {
                     foreach ($n['lista'] as $i => $a) {
                         $n['lista'][$i] = self::resolver($a, $mapa, $alias, $externo);
+                    }
+                }
+                // x IN (…) con la colación de x si es una columna (2.9). Con una
+                // subconsulta, si x no la decide (ni es una columna ni lleva
+                // COLLATE), la de lo que devuelve, como en SQLite: eso se sabe
+                // al ejecutarla, y es entonces cuando se pliega (ver in())
+                if ($n['lista'] !== null) {
+                    if (($c = self::colacionDe($n['e'])) !== null) {
+                        $n['e'] = self::plegada($n['e'], $c);
+                        $n['lista'] = array_map(static fn(array $a): array => self::plegada($a, $c), $n['lista']);
+                    }
+                } else {
+                    $c = self::colacionSalida($n['e']) ?? true;
+                    unset($n['colacionIn']);
+                    if ($c !== 'BINARY') {
+                        $n['colacionIn'] = $c;
                     }
                 }
                 if ($n['select'] !== null && !isset($n['sid'])) {
@@ -113,7 +217,7 @@ final class Evaluator
                         if (($a['k'] ?? '') !== 'lit') { return $n; }
                         $valores[] = $a['v'];
                     }
-                    $n['conjunto'] = Indexes::conjunto($valores);
+                    $n['conjunto'] = IndexesBusqueda::conjunto($valores);
                 }
                 return $n;                       // la subconsulta se resuelve al ejecutarse
 
@@ -121,6 +225,9 @@ final class Evaluator
                 $n['e']   = self::resolver($n['e'], $mapa, $alias, $externo);
                 $n['min'] = self::resolver($n['min'], $mapa, $alias, $externo);
                 $n['max'] = self::resolver($n['max'], $mapa, $alias, $externo);
+                if (($c = self::colacionDe($n['e'], $n['min'], $n['max'])) !== null) {
+                    [$n['e'], $n['min'], $n['max']] = [self::plegada($n['e'], $c), self::plegada($n['min'], $c), self::plegada($n['max'], $c)];
+                }
                 return $n;
 
             case 'like':
@@ -151,6 +258,81 @@ final class Evaluator
         return $n;                                // 'lit' no necesita resolución
     }
 
+    /** Los operadores que comparan con la colación de una columna (2.9) */
+    private const COMPARACIONES = ['=' => true, '<>' => true, '<' => true, '<=' => true, '>' => true, '>=' => true, '<=>' => true];
+    /** Las funciones que quitan caracteres de los extremos (ver resolver()) */
+    private const RECORTES = ['TRIM' => true, 'LTRIM' => true, 'RTRIM' => true];
+    /** Las funciones que comparan sus argumentos con su colación, como en SQLite (2.9) */
+    private const COMPARAN = ['NULLIF' => true, 'MIN' => true, 'MAX' => true, 'GREATEST' => true, 'LEAST' => true];
+
+    /**
+     * La colación con la que se compara (2.9), como en SQLite: la escrita
+     * con COLLATE (que ya aplica el analizador: entonces aquí nada); si no,
+     * la de la columna de la izquierda —aunque sea la binaria— y, si a la
+     * izquierda no hay una columna, la de la derecha. Null: la binaria.
+     */
+    private static function colacionDe(array ...$operandos): ?string
+    {
+        foreach ($operandos as $o) {
+            if (Parser::colacionEscrita($o) !== null) {
+                return null;
+            }
+        }
+        foreach ($operandos as $o) {
+            if (($col = self::columnaDe($o)) !== null) {
+                return $col['colacion'] ?? null;
+            }
+        }
+        return null;
+    }
+
+    /** La columna que es la expresión, aunque vaya dentro de un CAST (como en SQLite), o null */
+    private static function columnaDe(array $n): ?array
+    {
+        while (($n['k'] ?? '') === 'cast') {
+            $n = $n['e'];
+        }
+        return ($n['k'] ?? '') === 'col' ? $n : null;
+    }
+
+    /**
+     * La colación de una expresión como la ve SQLite (2.9), la que hereda una
+     * columna de una vista o una subconsulta: la escrita con COLLATE; si no,
+     * la de la columna que es (BINARY si no tiene); null si no es ninguna de
+     * las dos cosas.
+     */
+    public static function colacionSalida(array $n): ?string
+    {
+        if (($c = Parser::colacionEscrita($n)) !== null) {
+            return $c;
+        }
+        $col = self::columnaDe($n);
+        return $col === null ? null : ($col['colacion'] ?? 'BINARY');
+    }
+
+    /** La expresión con lo que se compara en esa colación; un literal, ya plegado */
+    private static function plegada(array $n, string $colacion): array
+    {
+        if ($n['k'] === 'lit') {
+            return ['k' => 'lit', 'v' => Functions::plegar($n['v'], $colacion)];
+        }
+        return ['k' => 'fn', 'nombre' => 'PLEGAR', 'args' => [$n, ['k' => 'lit', 'v' => $colacion]], 'star' => false, 'distinct' => false];
+    }
+
+    /**
+     * Para ORDER BY, GROUP BY y PARTITION BY (2.9): plegada, si tiene
+     * colación (ver colacionSalida()) y no la ha plegado ya el analizador; lo
+     * demás, igual.
+     */
+    public static function conColacion(array $n): array
+    {
+        if (($n['k'] ?? '') === 'fn' && $n['nombre'] === 'PLEGAR') {
+            return $n;
+        }
+        $c = self::colacionSalida($n);
+        return $c === null || $c === 'BINARY' ? $n : self::plegada($n, $c);
+    }
+
     /** ¿La expresión contiene alguna función de agregación? */
     public static function tieneAgregado(array $n): bool
     {
@@ -166,91 +348,14 @@ final class Evaluator
     }
 
     /** MIN/MAX son de agregación con 1 argumento y escalares con 2 o más. */
-    private static function esAgregado(array $n): bool
+    public static function esAgregado(array $n): bool
     {
-        if (!in_array($n['nombre'], Functions::AGREGADOS, true)) {
+        if (!in_array($n['nombre'], self::AGREGADOS, true)) {
             return false;
         }
         // GROUP_CONCAT admite un segundo argumento con el separador
         $maximo = $n['nombre'] === 'GROUP_CONCAT' ? 2 : 1;
         return $n['star'] || (count($n['args']) >= 1 && count($n['args']) <= $maximo);
-    }
-
-    /**
-     * Sustituye cada función de agregación del árbol por una referencia a un
-     * acumulador —`agid`—, y devuelve en $defs qué acumula cada uno. Así una
-     * consulta agrupada no guarda las filas de cada grupo: las recorre una vez
-     * alimentando los acumuladores, y las expresiones de salida se evalúan
-     * después contra sus resultados (ver Select::agrupar). El mismo agregado
-     * escrito dos veces comparte acumulador.
-     *
-     * @param array<string,array> $defs por firma: ['nombre', 'arg', 'star', 'distinct', 'sep']
-     */
-    public static function marcarAgregados(array $n, array &$defs): array
-    {
-        if ($n['k'] === 'fn' && self::esAgregado($n)) {
-            $firma = md5(serialize($n));
-            $defs[$firma] ??= [
-                'nombre'   => $n['nombre'],
-                'star'     => $n['star'],
-                'arg'      => $n['star'] ? null : $n['args'][0],
-                'distinct' => $n['distinct'],
-                'sep'      => $n['args'][1] ?? null,
-                'orden'    => $n['orden'] ?? null,
-            ];
-            $n['agid'] = $firma;
-            return $n;
-        }
-        switch ($n['k']) {
-            case 'bin':
-                $n['i'] = self::marcarAgregados($n['i'], $defs);
-                $n['d'] = self::marcarAgregados($n['d'], $defs);
-                break;
-            case 'un':
-            case 'null':
-            case 'cast':
-                $n['e'] = self::marcarAgregados($n['e'], $defs);
-                break;
-            case 'fn':
-                foreach ($n['args'] as $i => $a) {
-                    $n['args'][$i] = self::marcarAgregados($a, $defs);
-                }
-                break;
-            case 'between':
-                $n['e']   = self::marcarAgregados($n['e'], $defs);
-                $n['min'] = self::marcarAgregados($n['min'], $defs);
-                $n['max'] = self::marcarAgregados($n['max'], $defs);
-                break;
-            case 'like':
-                $n['e']      = self::marcarAgregados($n['e'], $defs);
-                $n['patron'] = self::marcarAgregados($n['patron'], $defs);
-                if ($n['escape'] !== null) {
-                    $n['escape'] = self::marcarAgregados($n['escape'], $defs);
-                }
-                break;
-            case 'regexp':
-                $n['e']      = self::marcarAgregados($n['e'], $defs);
-                $n['patron'] = self::marcarAgregados($n['patron'], $defs);
-                break;
-            case 'in':
-                $n['e'] = self::marcarAgregados($n['e'], $defs);
-                foreach ($n['lista'] ?? [] as $i => $e) {
-                    $n['lista'][$i] = self::marcarAgregados($e, $defs);
-                }
-                break;
-            case 'case':
-                if ($n['base'] !== null) {
-                    $n['base'] = self::marcarAgregados($n['base'], $defs);
-                }
-                foreach ($n['when'] as $i => [$c, $r]) {
-                    $n['when'][$i] = [self::marcarAgregados($c, $defs), self::marcarAgregados($r, $defs)];
-                }
-                if ($n['else'] !== null) {
-                    $n['else'] = self::marcarAgregados($n['else'], $defs);
-                }
-                break;
-        }
-        return $n;
     }
 
     /** @return array<int,array> subexpresiones directas (sin entrar en subconsultas) */
@@ -260,7 +365,8 @@ final class Evaluator
             case 'bin':     return [$n['i'], $n['d']];
             case 'un':
             case 'null':    return [$n['e']];
-            case 'fn':      return array_merge($n['args'], array_column($n['orden'] ?? [], 'expr'));
+            case 'fn':      return array_merge($n['args'], array_column($n['orden'] ?? [], 'expr'), isset($n['filtro']) ? [$n['filtro']] : []);
+            case 'ventana': return array_merge($n['args'], $n['filtro'] === null ? [] : [$n['filtro']], $n['def']['particion'], array_column($n['def']['orden'], 'expr'));
             case 'between': return [$n['e'], $n['min'], $n['max']];
             case 'like':    return $n['escape'] === null ? [$n['e'], $n['patron']] : [$n['e'], $n['patron'], $n['escape']];
             case 'regexp':  return [$n['e'], $n['patron']];
@@ -293,7 +399,9 @@ final class Evaluator
                 if (isset($n['clave'])) {
                     return $ctx['fila'][$n['clave']] ?? null;
                 }
-                return $ctx['fila'][$n['alias']] ?? null;
+                // Un alias de la salida (ORDER BY), de la fila ya proyectada (2.9:
+                // iba junto a la de origen, y una columna con su nombre lo tapaba)
+                return $ctx['salida'][$n['alias']] ?? null;
 
             case 'bin':
                 return self::binaria($n, $ctx);
@@ -304,6 +412,9 @@ final class Evaluator
                     return $v === null ? null : ($v ? 0 : 1);
                 }
                 $v = self::evaluar($n['e'], $ctx);
+                if ($n['op'] === '~') {
+                    return $v === null ? null : ~Valor::entero(Valor::aNumero($v));
+                }
                 return $v === null ? null : -Valor::aNumero($v);
 
             case 'fn':
@@ -326,19 +437,22 @@ final class Evaluator
                 return ($v === null) !== $n['not'] ? 1 : 0;
 
             case 'between':
+                // x >= a AND x <= b, con la lógica de tres valores (2.9: con un
+                // extremo NULL era NULL aunque el otro ya lo dejara fuera, y
+                // 15 BETWEEN NULL AND 10 es 0, como en SQLite)
                 $v = self::evaluar($n['e'], $ctx);
                 if ($v === null) { return null; }
                 $a = Valor::comparar($v, self::evaluar($n['min'], $ctx));
+                if ($a !== null && $a < 0) { return $n['not'] ? 1 : 0; }
                 $b = Valor::comparar($v, self::evaluar($n['max'], $ctx));
-                if ($a === null || $b === null) { return null; }
-                $dentro = ($a >= 0 && $b <= 0);
-                return ($dentro !== $n['not']) ? 1 : 0;
+                if ($b !== null && $b > 0) { return $n['not'] ? 1 : 0; }
+                return $a === null || $b === null ? null : ($n['not'] ? 0 : 1);
 
             case 'like':
-                return self::like($n, $ctx);
+                return EvaluatorPatrones::like($n, $ctx);
 
             case 'regexp':
-                return self::regexp($n, $ctx);
+                return EvaluatorPatrones::regexp($n, $ctx);
 
             case 'cast':
                 return Types::convertirCast(self::evaluar($n['e'], $ctx), $n['tipo']);
@@ -350,8 +464,9 @@ final class Evaluator
                 throw JsonSqlDbError::constraint($n['mensaje'] ?? 'Operación abortada por un trigger');
 
             case 'exists':
-                // No hace falta el valor: basta con saber si hay alguna fila
-                return ($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []) === [] ? 0 : 1;
+                // No hace falta el valor: basta con saber si hay alguna fila (y
+                // Select puede saberlo sin ejecutarla, ver SelectJoin::semiJoin())
+                return ($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? [], true) === [] ? 0 : 1;
 
             case 'sub':
                 $filas = ($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []);
@@ -360,285 +475,15 @@ final class Evaluator
                 }
                 $primera = reset($filas);
                 return reset($primera);
+
+            case 'ventana':                       // ya calculada (ver SelectAvanzada::ventanas())
+                if (!isset($n['i'], $ctx['ventanas'])) {
+                    throw JsonSqlDbError::syntax("{$n['nombre']}() OVER solo puede ir en las columnas de un SELECT o en su ORDER BY");
+                }
+                return $ctx['ventanas'][$n['i']];
         }
 
         throw JsonSqlDbError::syntax("Expresión no evaluable: {$n['k']}");
-    }
-
-    /**
-     * Compila una expresión en una función PHP que la evalúa sobre una fila,
-     * con el mismo resultado que evaluar(). Recorrer el árbol con evaluar()
-     * cuesta un switch y varias llamadas por nodo y fila; compilada, cada
-     * nodo es una llamada a una clausura ya especializada. En un WHERE sobre
-     * cien mil filas es varias veces más rápido.
-     *
-     * Devuelve null si algún nodo no se compila (funciones, subconsultas,
-     * columnas de la consulta exterior...): entonces se evalúa como siempre.
-     *
-     * @return (\Closure(array): mixed)|null
-     */
-    public static function compilar(array $n): ?\Closure
-    {
-        switch ($n['k']) {
-            case 'lit':
-                $v = $n['v'];
-                return static fn(array $f) => $v;
-
-            case 'col':
-                if (isset($n['externa']) || !isset($n['clave'])) {
-                    return null;
-                }
-                $c = $n['clave'];
-                return static fn(array $f) => $f[$c] ?? null;
-
-            case 'bin':
-                return self::compilarBinaria($n);
-
-            case 'in':
-                // IN con una lista de literales, ya preparada como conjunto en
-                // resolver(): lo mismo que in(), sin pasar por evaluar() en
-                // cada fila. Con una subconsulta, por el camino general
-                if (($n['select'] ?? null) !== null || !isset($n['conjunto'])) {
-                    return null;
-                }
-                $e = self::compilar($n['e']);
-                if ($e === null) {
-                    return null;
-                }
-                [$conjunto, $dudosos, $hayNulo] = $n['conjunto'];
-                $no = (bool)$n['not'];
-                return static function (array $f) use ($e, $conjunto, $dudosos, $hayNulo, $no) {
-                    if ($conjunto === [] && $dudosos === [] && !$hayNulo) {
-                        return $no ? 1 : 0;
-                    }
-                    $v = $e($f);
-                    if ($v === null) {
-                        return null;
-                    }
-                    $candidatos = $dudosos;
-                    if (Indexes::claveFiable($v)) {
-                        $clave = Indexes::clave([$v]);
-                        if ($clave !== null && isset($conjunto[$clave])) {
-                            $candidatos = $dudosos === [] ? $conjunto[$clave] : array_merge($conjunto[$clave], $dudosos);
-                        }
-                    } else {
-                        foreach ($conjunto as $grupo) {
-                            $candidatos = array_merge($candidatos, $grupo);
-                        }
-                    }
-                    foreach ($candidatos as $x) {
-                        if (Valor::comparar($v, $x) === 0) {
-                            return $no ? 0 : 1;
-                        }
-                    }
-                    return $hayNulo ? null : ($no ? 1 : 0);
-                };
-
-            case 'un':
-                $e = self::compilar($n['e']);
-                if ($e === null) {
-                    return null;
-                }
-                if ($n['op'] === 'NOT') {
-                    return static function (array $f) use ($e) {
-                        $v = Valor::verdadero($e($f));
-                        return $v === null ? null : ($v ? 0 : 1);
-                    };
-                }
-                return static function (array $f) use ($e) {
-                    $v = $e($f);
-                    return $v === null ? null : -Valor::aNumero($v);
-                };
-
-            case 'null':
-                $e = self::compilar($n['e']);
-                if ($e === null) {
-                    return null;
-                }
-                $not = $n['not'];
-                return static fn(array $f) => ($e($f) === null) !== $not ? 1 : 0;
-
-            case 'between':
-                $e   = self::compilar($n['e']);
-                $min = self::compilar($n['min']);
-                $max = self::compilar($n['max']);
-                if ($e === null || $min === null || $max === null) {
-                    return null;
-                }
-                $not = $n['not'];
-                return static function (array $f) use ($e, $min, $max, $not) {
-                    $v = $e($f);
-                    if ($v === null) { return null; }
-                    $a = Valor::comparar($v, $min($f));
-                    $b = Valor::comparar($v, $max($f));
-                    if ($a === null || $b === null) { return null; }
-                    return (($a >= 0 && $b <= 0) !== $not) ? 1 : 0;
-                };
-
-            case 'like':
-                // Solo con patrón (y escape) literales: la expresión regular se
-                // calcula una vez, no una por fila
-                $e = self::compilar($n['e']);
-                if ($e === null || $n['patron']['k'] !== 'lit' || $n['patron']['v'] === null
-                    || ($n['escape'] !== null && $n['escape']['k'] !== 'lit')) {
-                    return null;
-                }
-                $escape = $n['escape'] === null ? null : Valor::aTexto($n['escape']['v']);
-                $regex  = self::patronALike(Valor::aTexto($n['patron']['v']), $escape);
-                $not    = $n['not'];
-                return static function (array $f) use ($e, $regex, $not) {
-                    $v = $e($f);
-                    if ($v === null) { return null; }
-                    return ((bool)preg_match($regex, Valor::aTexto($v)) !== $not) ? 1 : 0;
-                };
-        }
-        return null;
-    }
-
-    private static function compilarBinaria(array $n): ?\Closure
-    {
-        $directa = self::compararConLiteral($n);
-        if ($directa !== null) {
-            return $directa;
-        }
-        $i = self::compilar($n['i']);
-        $d = self::compilar($n['d']);
-        if ($i === null || $d === null) {
-            return null;
-        }
-        switch ($n['op']) {
-            case 'AND':
-                // Una comparación devuelve 0, 1 o NULL: esos se miran sin
-                // llamar a Valor::verdadero()
-                return static function (array $f) use ($i, $d) {
-                    $a = $i($f);
-                    $a = $a === 0 ? false : ($a === 1 ? true : Valor::verdadero($a));
-                    if ($a === false) { return 0; }
-                    $b = $d($f);
-                    $b = $b === 0 ? false : ($b === 1 ? true : Valor::verdadero($b));
-                    if ($b === false) { return 0; }
-                    return ($a === null || $b === null) ? null : 1;
-                };
-            case 'OR':
-                return static function (array $f) use ($i, $d) {
-                    $a = Valor::verdadero($i($f));
-                    if ($a === true) { return 1; }
-                    $b = Valor::verdadero($d($f));
-                    if ($b === true) { return 1; }
-                    return ($a === null || $b === null) ? null : 0;
-                };
-            case '=':
-                return static function (array $f) use ($i, $d) {
-                    $c = Valor::comparar($i($f), $d($f));
-                    return $c === null ? null : ($c === 0 ? 1 : 0);
-                };
-            case '<>':
-                return static function (array $f) use ($i, $d) {
-                    $c = Valor::comparar($i($f), $d($f));
-                    return $c === null ? null : ($c !== 0 ? 1 : 0);
-                };
-            case '<':
-                return static function (array $f) use ($i, $d) {
-                    $c = Valor::comparar($i($f), $d($f));
-                    return $c === null ? null : ($c < 0 ? 1 : 0);
-                };
-            case '<=':
-                return static function (array $f) use ($i, $d) {
-                    $c = Valor::comparar($i($f), $d($f));
-                    return $c === null ? null : ($c <= 0 ? 1 : 0);
-                };
-            case '>':
-                return static function (array $f) use ($i, $d) {
-                    $c = Valor::comparar($i($f), $d($f));
-                    return $c === null ? null : ($c > 0 ? 1 : 0);
-                };
-            case '>=':
-                return static function (array $f) use ($i, $d) {
-                    $c = Valor::comparar($i($f), $d($f));
-                    return $c === null ? null : ($c >= 0 ? 1 : 0);
-                };
-            case '||':
-                return static function (array $f) use ($i, $d) {
-                    $a = $i($f);
-                    $b = $d($f);
-                    return ($a === null || $b === null) ? null : Valor::aTexto($a) . Valor::aTexto($b);
-                };
-            case '+':
-            case '-':
-            case '*':
-            case '/':
-            case '%':
-                $op = $n['op'];
-                return static function (array $f) use ($i, $d, $op) {
-                    $a = $i($f);
-                    $b = $d($f);
-                    if ($a === null || $b === null) { return null; }
-                    $x = Valor::aNumero($a);
-                    $y = Valor::aNumero($b);
-                    switch ($op) {
-                        case '+': return $x + $y;
-                        case '-': return $x - $y;
-                        case '*': return $x * $y;
-                        case '/': return $y == 0 ? null : $x / $y;
-                    }
-                    $di = Valor::entero($y);
-                    return $di === 0 ? null : Valor::entero($x) % $di;
-                };
-        }
-        return null;
-    }
-
-    /**
-     * columna OP literal (o literal OP columna), que es casi todo WHERE: la
-     * columna se lee de la fila y el literal va dentro de la función, sin una
-     * llamada para cada lado, y con dos números o con un texto que no es un
-     * número se compara directamente. Es el mismo resultado que
-     * Valor::comparar(), que es quien decide en cualquier otro caso. Null si
-     * no es esa forma.
-     */
-    private static function compararConLiteral(array $n): ?\Closure
-    {
-        $invertido = ['=' => '=', '<>' => '<>', '<' => '>', '<=' => '>=', '>' => '<', '>=' => '<='];
-        $op = $n['op'];
-        if (!isset($invertido[$op])) {
-            return null;
-        }
-        [$col, $lit] = [$n['i'], $n['d']];
-        if ($col['k'] === 'lit' && $lit['k'] === 'col') {
-            [$col, $lit, $op] = [$lit, $col, $invertido[$op]];
-        }
-        if ($col['k'] !== 'col' || isset($col['externa']) || !isset($col['clave']) || $lit['k'] !== 'lit' || $lit['v'] === null) {
-            return null;
-        }
-        $c = $col['clave'];
-        $v = $lit['v'];
-        $numero = is_int($v) || is_float($v);
-        // Un texto que no es un número se compara con otro texto byte a byte
-        $texto  = is_string($v) && !is_numeric($v) && !is_numeric(trim($v));
-        return static function (array $f) use ($c, $v, $op, $numero, $texto) {
-            $x = $f[$c] ?? null;
-            if ($x === null) {
-                return null;
-            }
-            if ($numero && (is_int($x) || is_float($x))) {
-                $r = $x <=> $v;
-            } elseif ($texto && is_string($x)) {
-                $r = strcmp($x, $v) <=> 0;
-            } else {
-                $r = Valor::comparar($x, $v);
-                if ($r === null) {
-                    return null;
-                }
-            }
-            switch ($op) {
-                case '=':  return $r === 0 ? 1 : 0;
-                case '<>': return $r !== 0 ? 1 : 0;
-                case '<':  return $r < 0 ? 1 : 0;
-                case '<=': return $r <= 0 ? 1 : 0;
-                case '>':  return $r > 0 ? 1 : 0;
-                default:   return $r >= 0 ? 1 : 0;
-            }
-        };
     }
 
     private static function binaria(array $n, array $ctx)
@@ -679,6 +524,21 @@ final class Evaluator
             }
         }
 
+        // Detrás de las comparaciones, que son las de casi cada fila (2.9):
+        // a <=> b (MySQL), a IS b (SQLite): igual, con NULL como un valor más
+        if ($op === '<=>') {
+            if ($i === null || $d === null) {
+                return $i === null && $d === null ? 1 : 0;
+            }
+            return Valor::comparar($i, $d) === 0 ? 1 : 0;
+        }
+        if ($op === 'XOR') {
+            $a = Valor::verdadero($i);
+            $b = Valor::verdadero($d);
+            return $a === null || $b === null ? null : ($a !== $b ? 1 : 0);
+        }
+
+
         if ($i === null || $d === null) {
             return null;
         }
@@ -695,6 +555,15 @@ final class Evaluator
                 // se vuelve 0 y provocaba un DivisionByZeroError de PHP.
                 $di = Valor::entero($y);
                 return $di === 0 ? null : Valor::entero($x) % $di;
+            case 'DIV':
+                // División entera de MySQL: sin decimales, hacia el cero
+                if ($y == 0) { return null; }
+                $q = $x / $y;
+                return Valor::entero($q < 0 ? ceil($q) : floor($q));
+            case '&':  return Valor::entero($x) & Valor::entero($y);
+            case '|':  return Valor::entero($x) | Valor::entero($y);
+            case '<<': return Valor::entero($y) >= 64 || Valor::entero($y) <= -64 ? 0 : (Valor::entero($y) >= 0 ? Valor::entero($x) << Valor::entero($y) : Valor::entero($x) >> -Valor::entero($y));
+            case '>>': return Valor::entero($y) >= 64 || Valor::entero($y) <= -64 ? (Valor::entero($x) < 0 ? -1 : 0) : (Valor::entero($y) >= 0 ? Valor::entero($x) >> Valor::entero($y) : Valor::entero($x) << -Valor::entero($y));
         }
 
         throw JsonSqlDbError::syntax("Operador no soportado: $op");
@@ -703,7 +572,7 @@ final class Evaluator
     private static function funcion(array $n, array $ctx)
     {
         if (isset($n['agid']) && isset($ctx['agregados'])) {
-            return $ctx['agregados'][$n['agid']];   // ya acumulado (ver marcarAgregados)
+            return $ctx['agregados'][$n['agid']];   // ya acumulado (ver SelectAgrupada::marcarAgregados())
         }
         if (self::esAgregado($n)) {
             throw JsonSqlDbError::syntax("{$n['nombre']}() solo puede usarse en el SELECT, HAVING u ORDER BY");
@@ -716,87 +585,8 @@ final class Evaluator
         foreach ($n['args'] as $a) {
             $args[] = self::evaluar($a, $ctx);
         }
-        return Functions::escalar($n['nombre'], $args);
-    }
-
-    /**
-     * x REGEXP patron  (RLIKE es un alias, como en MySQL)
-     *
-     * El patrón lo escribe quien consulta, así que se valida antes de usarlo y
-     * se controla el desbordamiento del motor de expresiones regulares: una
-     * expresión mal construida sobre un texto largo puede tardar una eternidad,
-     * y es preferible un error claro a un proceso colgado.
-     */
-    private static function regexp(array $n, array $ctx)
-    {
-        $v = self::evaluar($n['e'], $ctx);
-        $p = self::evaluar($n['patron'], $ctx);
-        if ($v === null || $p === null) {
-            return null;
-        }
-
-        $patron = Valor::aTexto($p);
-        $regex  = '/' . str_replace('/', '\\/', $patron) . '/u';
-
-        $anterior = set_error_handler(static fn(): bool => true);   // silencia el aviso de PCRE
-        $r = preg_match($regex, Valor::aTexto($v));
-        set_error_handler($anterior);
-
-        if ($r === false) {
-            $error = preg_last_error();
-            if ($error === PREG_BACKTRACK_LIMIT_ERROR || $error === PREG_RECURSION_LIMIT_ERROR) {
-                throw JsonSqlDbError::syntax(
-                    "La expresión regular '$patron' es demasiado costosa para este texto: "
-                    . 'simplifícala o acota antes las filas con un WHERE'
-                );
-            }
-            throw JsonSqlDbError::syntax("Expresión regular no válida: '$patron'");
-        }
-
-        return (($r === 1) !== $n['not']) ? 1 : 0;
-    }
-
-    private static function like(array $n, array $ctx)
-    {
-        $v = self::evaluar($n['e'], $ctx);
-        $p = self::evaluar($n['patron'], $ctx);
-        if ($v === null || $p === null) {
-            return null;
-        }
-        $escape = $n['escape'] === null ? null : Valor::aTexto(self::evaluar($n['escape'], $ctx));
-        $regex  = self::patronALike(Valor::aTexto($p), $escape);
-        $coincide = (bool)preg_match($regex, Valor::aTexto($v));
-        return ($coincide !== $n['not']) ? 1 : 0;
-    }
-
-    /** Convierte el patrón LIKE en expresión regular. % = varios, _ = uno. */
-    private static function patronALike(string $patron, ?string $escape): string
-    {
-        static $memo = [];
-        $clave = $patron . "\0" . ($escape ?? '');
-        if (isset($memo[$clave])) {
-            return $memo[$clave];
-        }
-
-        $esc = ($escape !== null && $escape !== '') ? $escape[0] : null;
-        $out = '';
-        $n   = strlen($patron);
-        for ($i = 0; $i < $n; $i++) {
-            $c = $patron[$i];
-            if ($esc !== null && $c === $esc && $i + 1 < $n) {
-                $out .= preg_quote($patron[++$i], '/');
-                continue;
-            }
-            if ($c === '%')      { $out .= '.*'; }
-            elseif ($c === '_')  { $out .= '.'; }
-            else                 { $out .= preg_quote($c, '/'); }
-        }
-
-        $regex = '/^' . $out . '$/isu';
-        if (@preg_match($regex, '') === false) {
-            $regex = '/^' . $out . '$/is';       // texto no UTF-8 válido
-        }
-        return $memo[$clave] = $regex;
+        return isset($n['colacion']) ? Functions::conColacion($n['nombre'], $args, $n['colacion'])
+                                     : Functions::escalar($n['nombre'], $args);
     }
 
     /**
@@ -825,46 +615,24 @@ final class Evaluator
         // subconsulta cuyo resultado no depende de la fila
         $preparado = $n['conjunto'] ?? null;
         if ($preparado === null && $n['select'] !== null && isset($ctx['conjunto'])) {
-            $preparado = ($ctx['conjunto'])($n['select'], $n['sid'], $ctx['fila'] ?? []);
+            $preparado = ($ctx['conjunto'])($n['select'], $n['sid'], $ctx['fila'] ?? [], $n['colacionIn'] ?? null);
         }
 
         if ($preparado !== null) {
-            [$conjunto, $dudosos, $hayNulo] = $preparado;
-            if ($conjunto === [] && $dudosos === [] && !$hayNulo) {
-                return $n['not'] ? 1 : 0;        // NOT IN () siempre cierto
-            }
-            if ($v === null) {
-                return null;
-            }
-            $candidatos = $dudosos;
-            if (Indexes::claveFiable($v)) {
-                $clave = Indexes::clave([$v]);
-                if ($clave !== null && isset($conjunto[$clave])) {
-                    // Sin dudosos —lo normal— se usa el grupo tal cual, sin
-                    // copiarlo: esto se ejecuta una vez por fila
-                    $candidatos = $dudosos === []
-                        ? $conjunto[$clave]
-                        : array_merge($conjunto[$clave], $dudosos);
-                }
-            } else {
-                // Valor fuera del rango en que la clave es de fiar: se compara
-                // contra todo, que es lo que se hacía siempre
-                foreach ($conjunto as $grupo) {
-                    $candidatos = array_merge($candidatos, $grupo);
-                }
-            }
-            foreach ($candidatos as $x) {
-                if (Valor::comparar($v, $x) === 0) {
-                    return $n['not'] ? 0 : 1;
-                }
-            }
-            return $hayNulo ? null : ($n['not'] ? 1 : 0);
+            // Con la colación de la subconsulta (2.9), el valor también plegado
+            return self::enConjunto(isset($preparado[3]) ? Functions::plegar($v, $preparado[3]) : $v, $preparado, (bool)$n['not']);
         }
 
         $valores = [];
         if ($n['select'] !== null) {
+            // Sin conjunto preparado, solo la colación de x; la de la
+            // subconsulta, que se sabe al ejecutarla, no llega aquí
+            $c = is_string($n['colacionIn'] ?? null) ? $n['colacionIn'] : null;
             foreach (($ctx['sub'])($n['select'], $n['sid'], $ctx['fila'] ?? []) as $fila) {
-                $valores[] = reset($fila);
+                $valores[] = $c === null ? reset($fila) : Functions::plegar(reset($fila), $c);
+            }
+            if ($c !== null) {
+                $v = Functions::plegar($v, $c);
             }
         } else {
             foreach ($n['lista'] as $e) {
@@ -887,5 +655,44 @@ final class Evaluator
             }
         }
         return $hayNulo ? null : ($n['not'] ? 1 : 0);
+    }
+
+    /**
+     * ¿Está $v en un conjunto preparado [grupos por clave, dudosos, hay NULL]?
+     * Con la lógica de tres valores del SQL: 1, 0 o NULL. Lo usan in() y la
+     * versión compilada de IN.
+     */
+    public static function enConjunto($v, array $preparado, bool $no)
+    {
+        [$conjunto, $dudosos, $hayNulo] = $preparado;
+        if ($conjunto === [] && $dudosos === [] && !$hayNulo) {
+            return $no ? 1 : 0;                      // NOT IN () siempre cierto
+        }
+        if ($v === null) {
+            return null;
+        }
+        $candidatos = $dudosos;
+        if (IndexesBusqueda::claveFiable($v)) {
+            $clave = Indexes::clave([$v]);
+            if ($clave !== null && isset($conjunto[$clave])) {
+                // Un valor solo, o la lista de los que comparten clave (ver
+                // IndexesBusqueda::conjunto()); sin dudosos —lo normal— tal cual,
+                // sin copiarla: esto se ejecuta una vez por fila
+                $grupo      = $conjunto[$clave];
+                $candidatos = is_array($grupo) ? ($dudosos === [] ? $grupo : array_merge($grupo, $dudosos)) : [$grupo, ...$dudosos];
+            }
+        } else {
+            // Valor fuera del rango en que la clave es de fiar: se compara
+            // contra todo, que es lo que se hacía siempre
+            foreach ($conjunto as $grupo) {
+                $candidatos = array_merge($candidatos, (array)$grupo);
+            }
+        }
+        foreach ($candidatos as $x) {
+            if (Valor::comparar($v, $x) === 0) {
+                return $no ? 0 : 1;
+            }
+        }
+        return $hayNulo ? null : ($no ? 1 : 0);
     }
 }

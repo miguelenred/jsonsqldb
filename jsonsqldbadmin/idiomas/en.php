@@ -45,8 +45,6 @@ return [
         => '<strong>Direct</strong> if the panel and the data are on the same server: there are no keys to configure and every query saves an HTTP request.',
     '<strong>La carpeta de datos se puede descargar desde fuera.</strong> {1}.'
         => '<strong>The data folder can be downloaded from outside.</strong> {1}.',
-    '<strong>Qué comprueba:</strong> que toda fila con una clave foránea apunte a una fila que existe en su tabla destino. Las filas con <code>NULL</code> en esas columnas no cuentan, igual que en la comprobación normal del motor. <br> <strong>Lee del disco</strong>, saltándose la caché a propósito: la caché solo se invalida cuando escribe el motor, así que una edición a mano seguiría oculta si no fuera así. <br> Desde SQL: <code>CHECK KEYS</code> para comprobar y <code>REPAIR KEYS</code> para corregir, con <code>FROM tabla</code> opcional para limitarlo a una tabla.'
-        => '<strong>What it checks:</strong> that every row with a foreign key points to a row that exists in its target table. Rows with <code>NULL</code> in those columns do not count, as in the engine\'s normal check. <br> <strong>It reads from disk</strong>, skipping the cache on purpose: the cache is only invalidated when the engine writes, so a manual edit would otherwise stay hidden. <br> From SQL: <code>CHECK KEYS</code> to check and <code>REPAIR KEYS</code> to fix, with an optional <code>FROM tabla</code> to limit it to one table.',
     '<strong>Se recomienda PHP 8.1 o posterior: PHP {1} no puede forzar los datos al disco.</strong> Al escribir, el sistema operativo guarda los datos en memoria y los pasa al disco un poco después. La función <code>fsync()</code>, que obliga a grabarlos en el momento, existe en PHP solo desde la 8.1, y en 8.0 no hay forma fiable de hacer lo mismo sin extensiones. Por eso, con 8.0, jsonSQLDB no pierde nada si el proceso muere a mitad de una escritura, pero ante un <strong>corte de luz o un fallo del sistema operativo</strong> se pueden perder las escrituras que aún no estaban en disco —en Linux con la configuración por defecto, aproximadamente los últimos 30 segundos—, aunque se hubieran dado por hechas. Las tablas no se dañan en ext4 con sus opciones por defecto. Si tu hosting ofrece PHP 8.1 o posterior, cámbialo; la explicación completa está en el README del proyecto.'
         => '<strong>PHP 8.1 or later is recommended: PHP {1} cannot force the data to disk.</strong> When writing, the operating system keeps the data in memory and moves it to disk a little later. The <code>fsync()</code> function, which forces it to be written at once, exists in PHP only since 8.1, and in 8.0 there is no reliable way to do the same without extensions. So, with 8.0, jsonSQLDB loses nothing if the process dies in the middle of a write, but after a <strong>power cut or an operating system failure</strong> the writes that were not on disk yet can be lost —on Linux with the default settings, roughly the last 30 seconds—, even if they had been reported as done. Tables are not damaged on ext4 with its default options. If your hosting offers PHP 8.1 or later, switch to it; the full explanation is in the project\'s README.',
     '<strong>Se sustituye todo el contenido actual de la base.</strong> Antes de escribir nada se aparta una copia de lo que hay, y si la restauración falla a medias se deja como estaba.'
@@ -123,8 +121,6 @@ return [
         => 'Delete «{1}»',
     'Buscar'
         => 'Search',
-    'COLLATE y CHARACTER SET quitados de las columnas'
-        => 'COLLATE and CHARACTER SET removed from the columns',
     'CREATE DATABASE saltado: se importa en la base elegida'
         => 'CREATE DATABASE skipped: the import goes into the chosen database',
     'Cada punto duplica el tiempo de comprobar una contraseña.'
@@ -171,8 +167,6 @@ return [
         => 'Unique key added.',
     'Claves'
         => 'Keys',
-    'Claves foráneas de {1} que apuntan a filas que no existen'
-        => 'Foreign keys in {1} that point to rows that do not exist',
     'Claves foráneas que no pueden ir en su CREATE TABLE: forman un ciclo entre tablas, o una fila se apunta a sí misma.'
         => 'Foreign keys that cannot go in their CREATE TABLE: they form a cycle between tables, or a row points to itself.',
     'Columna'
@@ -315,8 +309,10 @@ return [
         => 'Days the audit log is kept',
     'Dónde se guardan los usuarios y el nombre de la cookie de sesión solo se cambian a mano en <code>config.php</code>. Para volver al asistente, borra ese fichero.'
         => 'Where the users are stored and the session cookie name can only be changed by hand in <code>config.php</code>. To go back to the wizard, delete that file.',
-    'ENUM y SET importados como TEXT: aquí no se limitan los valores'
-        => 'ENUM and SET imported as TEXT: the values are not restricted here',
+    'SET importado como TEXT: aquí no se limitan los valores'
+        => 'SET imported as TEXT: the values are not restricted here',
+    'Restricciones CHECK que usan algo que aquí no existe: quitadas'
+        => 'CHECK constraints that use something that does not exist here: removed',
     'Editar fila'
         => 'Edit row',
     'Editar «{1}»'
@@ -347,8 +343,8 @@ return [
         => 'The file is not a valid ZIP or it is damaged.',
     'El motor no responde: {error}'
         => 'The engine is not responding: {error}',
-    'El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN; no los rangos, ni LIKE, ni ORDER BY. Y hace algo más lenta cada escritura de la tabla.'
-        => 'Order matters: an index on (a, b) helps to search by a, or by a and b, but not by b alone. It speeds up equalities and IN; not ranges, LIKE or ORDER BY. And it makes every write to the table a little slower.',
+    'El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.'
+        => 'Order matters: an index on (a, b) helps to search by a, or by a and b, but not by b alone. It speeds up equalities and IN, ranges (<, >, BETWEEN) and COUNT(*) on its first column, and on a numeric column MIN, MAX and ORDER BY … LIMIT; not LIKE, IS NULL or an OR. And it makes every write to the table a little slower.',
     'El panel carga el motor y le habla sin HTTP'
         => 'The panel loads the engine and talks to it without HTTP',
     'El panel carga el motor y le habla sin HTTP. Para cuando el panel y los datos están en el mismo servidor.'
@@ -373,8 +369,8 @@ return [
         => 'jsonSQLDB is not in that folder: it must contain engine/ and config.php.',
     'En la base de datos {1}'
         => 'In the database {1}',
-    'Enteros como BIGINT (los de PHP son de 64 bits), texto en utf8mb4_bin (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos, y así una clave única sigue admitiendo lo mismo). Las vistas y los triggers van comentados al final: su SQL es el de jsonSQLDB y hay que revisarlo antes de crearlos.'
-        => 'Integers as BIGINT (PHP\'s are 64-bit), text in utf8mb4_bin (jsonSQLDB\'s comparisons tell capitals and accents apart, and this way a unique key still accepts the same values). Views and triggers are commented out at the end: their SQL is jsonSQLDB\'s and has to be reviewed before creating them.',
+    'Enteros como BIGINT (los de PHP son de 64 bits), texto en utf8mb4_bin (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos, y así una clave única sigue admitiendo lo mismo), y en utf8mb4_general_ci el de las columnas COLLATE NOCASE. Las vistas y los triggers van al final, traducidos al SQL de MySQL; el que no se puede escribir allí va comentado, con el motivo.'
+        => 'Integers as BIGINT (PHP\'s are 64-bit), text in utf8mb4_bin (jsonSQLDB\'s comparisons tell capitals and accents apart, and this way a unique key still accepts the same values), and in utf8mb4_general_ci for COLLATE NOCASE columns. Views and triggers go at the end, translated to MySQL\'s SQL; one that cannot be written there is commented out, with the reason.',
     'Entrar'
         => 'Sign in',
     'Error desconocido'
@@ -521,6 +517,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'The query returned no rows',
     'La contraseña necesita al menos 10 caracteres'
         => 'The password needs at least 10 characters',
+    'La contraseña no puede llevar el carácter nulo'
+        => 'The password cannot contain the null character',
     'La copia en ZIP necesita que el panel y el motor estén en la misma máquina, porque lee los ficheros directamente del disco. La API está en {api} y el panel se está sirviendo desde {panel}. Usa el volcado en SQL, que va por la API y funciona entre máquinas distintas.'
         => 'The ZIP copy needs the panel and the engine on the same machine, because it reads the files straight from disk. The API is on {api} and the panel is being served from {panel}. Use the SQL dump, which goes through the API and works between different machines.',
     'La extensión zip de PHP no está activada. Actívala en php.ini (extension=zip) o restaura desde un volcado en SQL.'
@@ -529,8 +527,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'The config.dist.php template has no {constante}: it is incomplete.',
     'La primera línea tiene que traer los nombres de las columnas.'
         => 'The first line must carry the column names.',
-    'La primera línea, con los nombres de las columnas. El separador (coma, punto y coma o tabulador) se deduce solo, y un campo vacío es <code>NULL</code>. Se inserta en lotes de 200 filas; sin transacciones, como arriba.'
-        => 'The first line, with the column names. The separator (comma, semicolon or tab) is detected on its own, and an empty field is <code>NULL</code>. Rows are inserted in batches of 200; without transactions, as above.',
     'La que contiene <code>engine/</code> y <code>config.php</code>. Vacía = la que está junto al panel.'
         => 'The one that contains <code>engine/</code> and <code>config.php</code>. Empty = the one next to the panel.',
     'La restauración falló y se ha dejado la base como estaba. {error}'
@@ -633,6 +629,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'The API could not be called ({url}): {error}',
     'No se pudo serializar {fichero}'
         => '{fichero} could not be serialised',
+    '{fichero} está dañado y no se cambia; corrígelo o quítalo'
+        => '{fichero} is damaged and is left as it is; fix it or remove it',
     'No se puede crear la carpeta \'{dir}\'.'
         => 'The folder \'{dir}\' cannot be created.',
     'No se puede crear la carpeta de datos del panel: {dir}'
@@ -671,6 +669,10 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'New unique key',
     'Nueva contraseña'
         => 'New password',
+    'Contraseña actual'
+        => 'Current password',
+    'La contraseña actual no es correcta.'
+        => 'The current password is not correct.',
     'Nueva tabla'
         => 'New table',
     'Nueva vista'
@@ -699,8 +701,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'For MySQL 8 and MariaDB 10.3 or later: {orden}',
     'Para PostgreSQL 10 o posterior: {orden}'
         => 'For PostgreSQL 10 or later: {orden}',
-    'Para SQL Server 2016 o posterior: {orden}, o ábrelo en SQL Server Management Studio. Todo va en una transacción.'
-        => 'For SQL Server 2016 or later: {orden}, or open it in SQL Server Management Studio. Everything goes in one transaction.',
+    'Para SQL Server 2017 o posterior: {orden}, o ábrelo en SQL Server Management Studio. Todo va en una transacción.'
+        => 'For SQL Server 2017 or later: {orden}, or open it in SQL Server Management Studio. Everything goes in one transaction.',
     'Para borrar la base hay que escribir su nombre exacto.'
         => 'To delete the database you have to type its exact name.',
     'Para cambiarla después, borra <code>config.php</code> y vuelve a abrir el panel.'
@@ -753,8 +755,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Restore from a ZIP copy',
     'Restaurar «{1}» desde un ZIP'
         => 'Restore «{1}» from a ZIP',
-    'Restricciones CHECK quitadas: aquí no existen'
-        => 'CHECK constraints removed: they do not exist here',
     'Restricción'
         => 'Constraint',
     'Restricción \'{nombre}\' eliminada.'
@@ -769,6 +769,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'SELECT * FROM my_table WHERE ...',
     'SQL Server (Generar scripts)'
         => 'SQL Server (Generate Scripts)',
+    'SQL Server no admite un trigger INSTEAD OF {evento} (el BEFORE {evento} de aquí) en \'{tabla}\', que tiene la clave foránea \'{clave}\' con ON {evento} {accion}'
+        => 'SQL Server does not allow an INSTEAD OF {evento} trigger (this BEFORE {evento} one) on \'{tabla}\', which has the foreign key \'{clave}\' with ON {evento} {accion}',
     'SQL: MySQL / MariaDB'
         => 'SQL: MySQL / MariaDB',
     'SQL: PostgreSQL'
@@ -787,12 +789,12 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => '<strong>All the tables and all the data</strong> of this database are deleted. It cannot be undone.',
     'Se carga en jsonSQLDB (Importar un volcado SQL, en la página de la base) y en SQLite: {orden}'
         => 'Loads into jsonSQLDB (Import an SQL dump, on the database\'s page) and into SQLite: {orden}',
-    'Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: no hay transacciones.'
-        => '{n} row(s) were loaded; the problem is in line {linea} or in the {lote} before it: {error}. What was loaded is already in: there are no transactions.',
+    'Se cargaron {n} fila(s); el problema está en la línea {linea} o en las {lote} anteriores: {error}. Lo cargado ya está dentro: la importación no va en una transacción.'
+        => '{n} row(s) were loaded; the problem is in line {linea} or in the {lote} before it: {error}. What was loaded is already in: the import does not run in a transaction.',
     'Se cargaron {n} filas'
         => '{n} rows were loaded',
-    'Se ejecutaron {n} sentencia(s) y paró cerca de la línea {linea}: {error}. Lo anterior ya está hecho: no hay transacciones.'
-        => '{n} statement(s) ran and it stopped near line {linea}: {error}. What came before is already done: there are no transactions.',
+    'Se ejecutaron {n} sentencia(s) y paró cerca de la línea {linea}: {error}. Lo anterior ya está hecho: la importación no va en una transacción.'
+        => '{n} statement(s) ran and it stopped near line {linea}: {error}. What came before is already done: the import does not run in a transaction.',
     'Se pierde la estructura y las {1} fila(s) que contiene. No se puede deshacer.'
         => 'The structure and the {1} row(s) it holds are lost. It cannot be undone.',
     'Se pierden los datos de esta columna en todas las filas.'
@@ -853,8 +855,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Its HMAC secret',
     'TIME importado como TEXT'
         => 'TIME imported as TEXT',
-    'TIMESTAMP de SQL Server (rowversion) importado como TEXT'
-        => 'SQL Server TIMESTAMP (rowversion) imported as TEXT',
+    'TIMESTAMP y ROWVERSION de SQL Server importados como TEXT que admite NULL: sus valores los pone SQL Server'
+        => 'SQL Server TIMESTAMP and ROWVERSION imported as TEXT that accepts NULL: SQL Server sets their values',
     'Tabla'
         => 'Table',
     'Tabla \'{nombre}\' creada.'
@@ -877,16 +879,16 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Tab',
     'Tema claro u oscuro'
         => 'Light or dark theme',
-    'Texto como NVARCHAR con cotejamiento binario (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos), enteros como BIGINT, fechas como DATETIME2(3), autoincremento como IDENTITY. Una clave foránea de una tabla hacia sí misma va sin ON DELETE/ON UPDATE: SQL Server no admite acciones en cadena que puedan formar un ciclo. Las vistas y los triggers van comentados.'
-        => 'Text as NVARCHAR with a binary collation (jsonSQLDB\'s comparisons tell capitals and accents apart), integers as BIGINT, dates as DATETIME2(3), autoincrement as IDENTITY. A foreign key from a table to itself goes without ON DELETE/ON UPDATE: SQL Server does not accept cascading actions that could form a cycle. Views and triggers are commented out.',
+    'Texto como NVARCHAR con cotejamiento binario (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos), o Latin1_General_100_CI_AS en las columnas COLLATE NOCASE, enteros como BIGINT, fechas como DATETIME2(3), autoincremento como IDENTITY. Una clave foránea de una tabla hacia sí misma va sin ON DELETE/ON UPDATE: SQL Server no admite acciones en cadena que puedan formar un ciclo. Las vistas y los triggers van al final, traducidos; el que no se puede escribir allí va comentado, con el motivo.'
+        => 'Text as NVARCHAR with a binary collation (jsonSQLDB\'s comparisons tell capitals and accents apart), or Latin1_General_100_CI_AS for COLLATE NOCASE columns, integers as BIGINT, dates as DATETIME2(3), autoincrement as IDENTITY. A foreign key from a table to itself goes without ON DELETE/ON UPDATE: SQL Server does not accept cascading actions that could form a cycle. Views and triggers go at the end, translated; one that cannot be written there is commented out, with the reason.',
     'Tiempo máximo de una llamada a la API (s)'
         => 'Maximum time of an API call (s)',
     'Tiene que quedar al menos un administrador'
         => 'At least one administrator has to remain',
     'Tiene que ser un <code>SELECT</code>. Puede llevar <code>JOIN</code>, <code>GROUP BY</code>, subconsultas y hasta otras vistas.'
         => 'It must be a <code>SELECT</code>. It can have <code>JOIN</code>, <code>GROUP BY</code>, subqueries and even other views.',
-    'Tiene que ser una copia generada por este panel. Solo se restauran los ficheros <code>.json</code>; cualquier otra cosa que venga dentro se ignora, y si el ZIP trae rutas que salgan de la carpeta de destino se rechaza entero sin tocar nada.'
-        => 'It must be a copy made by this panel. Only the <code>.json</code> files are restored; anything else inside is ignored, and if the ZIP has paths that leave the target folder it is rejected whole without touching anything.',
+    'Tiene que ser una copia generada por este panel. Se restauran los ficheros <code>.json</code> de la base y, de <code>.reparados/</code>, los originales de lo reparado y las filas apartadas; cualquier otra cosa que venga dentro se ignora. Si el ZIP trae rutas que salgan de la carpeta de destino, o un fichero que no cabe en la memoria de PHP, se rechaza entero sin tocar nada.'
+        => 'It must be a copy made by this panel. The database\'s <code>.json</code> files are restored and, from <code>.reparados/</code>, the originals of what was repaired and the rows set aside; anything else inside is ignored. If the ZIP has paths that leave the target folder, or a file that does not fit in PHP\'s memory, it is rejected whole without touching anything.',
     'Tipo'
         => 'Type',
     'Tipo {base} importado como TEXT'
@@ -895,8 +897,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Type {nombre} imported as TEXT',
     'Todavía no hay ninguna base de datos.'
         => 'There is no database yet.',
-    'Todo va en una transacción: o se carga entero o no se carga nada. Enteros como BIGINT, fechas como TIMESTAMP(3), autoincremento como IDENTITY. Las vistas y los triggers van comentados al final.'
-        => 'Everything goes in one transaction: it either loads whole or nothing loads. Integers as BIGINT, dates as TIMESTAMP(3), autoincrement as IDENTITY. Views and triggers are commented out at the end.',
+    'Todo va en una transacción: o se carga entero o no se carga nada. Enteros como BIGINT, fechas como TIMESTAMP(3), autoincremento como IDENTITY. Las vistas y los triggers van al final, traducidos (cada trigger con su función); el que no se puede escribir allí va comentado, con el motivo.'
+        => 'Everything goes in one transaction: it either loads whole or nothing loads. Integers as BIGINT, dates as TIMESTAMP(3), autoincrement as IDENTITY. Views and triggers go at the end, translated (each trigger with its function); one that cannot be written there is commented out, with the reason.',
     'Trigger \'{nombre}\' borrado.'
         => 'Trigger \'{nombre}\' deleted.',
     'Trigger \'{nombre}\' creado.'
@@ -917,8 +919,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'One or more statements separated by <code>;</code>. Inside you can use <code>NEW.columna</code> (the incoming value, in INSERT and UPDATE), <code>OLD.columna</code> (the previous one, in UPDATE and DELETE), <code>RAISE(ABORT, \'mensaje\')</code> to cancel the operation with an error, <code>IF … THEN … ELSE … END IF</code>, and in a BEFORE INSERT or BEFORE UPDATE <code>SET NEW.columna = …</code> to change the row before it is saved.',
     'Una por línea; también rangos como 192.168.1.0/24. Tu IP ahora: <code>{1}</code>. Una lista sin ella no se acepta.'
         => 'One per line; ranges like 192.168.1.0/24 too. Your IP now: <code>{1}</code>. A list without it is not accepted.',
-    'Una sentencia por ejecución. Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>.'
-        => 'One statement per run. Several lines and <code>--</code> and <code>/* */</code> comments are allowed.',
     'Una vista tiene que ser un SELECT.'
         => 'A view must be a SELECT.',
     'Usuario'
@@ -945,6 +945,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Orphan value',
     'Valores por defecto calculados quitados: aquí valen los literales y la fecha u hora actual (CURRENT_TIMESTAMP, NOW()…)'
         => 'Computed default values dropped: here only literals and the current date or time (CURRENT_TIMESTAMP, NOW()…) are accepted',
+    'Valores por defecto «0000-00-00» de MySQL quitados, y sus columnas admiten NULL: esa fecha aquí no existe, y las filas que la traen la guardan como NULL'
+        => 'MySQL «0000-00-00» default values dropped, and their columns accept NULL: that date does not exist here, and the rows that carry it store it as NULL',
     'Versión'
         => 'Version',
     'Vista'
@@ -1001,8 +1003,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'jsonSQLDBadmin is installed',
     'jsonSQLDBadmin{1} · PHP puro, sin dependencias externas ·'
         => 'jsonSQLDBadmin{1} · plain PHP, no external dependencies ·',
-    'jsonSQLDBadmin{1} · PHP {2} ·'
-        => 'jsonSQLDBadmin{1} · PHP {2} ·',
     'jsonSQLDBadmin{1} · {2} · PHP {3}'
         => 'jsonSQLDBadmin{1} · {2} · PHP {3}',
     'lectura — ver datos y lanzar SELECT/SHOW'
@@ -1031,6 +1031,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'protected ({url} answers {codigo})',
     'siempre'
         => 'forever',
+    'sin comprobar hasta que la URL de la API (ADMIN_API_URL) esté en la configuración. Comprueba a mano que data/web.config no se puede descargar'
+        => 'not checked until the API URL (ADMIN_API_URL) is in the configuration. Check by hand that data/web.config cannot be downloaded',
     'sin conexión'
         => 'no connection',
     'sin configurar'
@@ -1043,6 +1045,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'no nulls',
     'sí, poniendo NULL'
         => 'yes, setting NULL',
+    'tiene {n} campo(s) y la cabecera {cabecera}.'
+        => 'has {n} field(s) and the header {cabecera}.',
     'tú'
         => 'you',
     'usuario, acción, tabla…'
@@ -1081,8 +1085,10 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => '{1} event(s) · kept for {2}',
     '{1} volcado en SQL: estructura y datos, legible y reejecutable.'
         => '{1} SQL dump: structure and data, readable and re-runnable.',
-    '{1}PHP {2} ·'
-        => '{1}PHP {2} ·',
+    '{a} {op} {b}: con fechas, aquí solo se traduce date - date (los días entre las dos) y date ± días'
+        => '{a} {op} {b}: with dates, only date - date (the days between them) and date ± days are translated here',
+    '{aviso} ({n} veces)'
+        => '{aviso} ({n} times)',
     '{n} días'
         => '{n} days',
     '{n} fila(s)'
@@ -1117,6 +1123,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Remove the primary key?',
     '¿Qué conexión elegir?'
         => 'Which connection to choose?',
+    '¿Sustituir el contenido de {1}?'
+        => 'Replace the content of {1}?',
     'Índice \'{nombre}\' borrado.'
         => 'Index \'{nombre}\' deleted.',
     'Índice \'{nombre}\' creado.'
@@ -1127,6 +1135,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'FULLTEXT and SPATIAL indexes removed: they do not exist here',
     'Índices parciales (WHERE) creados sobre toda la tabla'
         => 'Partial indexes (WHERE) created over the whole table',
+    'Índices sobre expresiones (lower(nombre)…): no se crean; si eran únicos, aquí no se comprueba esa unicidad'
+        => 'Indexes on expressions (lower(nombre)…): not created; if they were unique, that uniqueness is not checked here',
     'Último acceso'
         => 'Last access',
     'Única'
@@ -1147,6 +1157,20 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Access has no triggers: neither its SQL nor OLEDB can create them. The data macros of an .accdb are made by hand in Access.',
     'SQL Server: sin clave primaria en \'{tabla}\' no se puede saber qué fila de deleted corresponde a cada una de inserted'
         => 'SQL Server: without a primary key in \'{tabla}\' there is no way to tell which row of deleted belongs to each row of inserted',
+    'Un INSERT con OR IGNORE, OR REPLACE u ON CONFLICT, o un UPDATE o DELETE con alias, otras tablas, ORDER BY o LIMIT, o cualquiera con RETURNING, no se traduce dentro de un trigger: hay que escribirlo a mano'
+        => 'An INSERT with OR IGNORE, OR REPLACE or ON CONFLICT, an UPDATE or DELETE with an alias, other tables, ORDER BY or LIMIT, or any of them with RETURNING, is not translated inside a trigger: it has to be written by hand',
+    'SQL Server corta la recursión a los 100 niveles: si hacen falta más, OPTION (MAXRECURSION 0) en la consulta que use la vista'
+        => 'SQL Server stops recursion at 100 levels: if more are needed, OPTION (MAXRECURSION 0) in the query that uses the view',
+    'Access no tiene WITH: una consulta del WITH con lista de columnas o que se nombra a sí misma no se puede escribir'
+        => 'Access has no WITH: a query of the WITH with a list of columns or that names itself cannot be written',
+    'LIMIT en una consulta del WITH que se nombra a sí misma no tiene traducción'
+        => 'LIMIT in a query of the WITH that names itself has no translation',
+    'SQL Server solo admite UNION ALL en una consulta recursiva del WITH'
+        => 'SQL Server only accepts UNION ALL in a recursive query of the WITH',
+    'Access no tiene funciones de ventana (OVER)'
+        => 'Access has no window functions (OVER)',
+    '{motor} no tiene {que} en una función de ventana'
+        => '{motor} has no {que} in a window function',
     'Un trigger solo puede hacer INSERT, UPDATE, DELETE o SELECT'
         => 'A trigger can only do INSERT, UPDATE, DELETE or SELECT',
     'Access no tiene {op}'
@@ -1283,8 +1307,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Microsoft Access (PowerShell script)',
     'Ahora se deduce en cada petición de la cabecera Host, que manda el navegador: guarda la configuración para dejarla escrita.'
         => 'Right now it is worked out on every request from the Host header, which the browser sends: save the configuration to have it written down.',
-    'Sentencias que no estaban en UTF-8, leídas como Latin-1 / Windows-1252 ({n}): si eran datos binarios, vuelca con --hex-blob'
-        => 'Statements that were not in UTF-8, read as Latin-1 / Windows-1252 ({n}): if they were binary data, dump with --hex-blob',
     'Campos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252: {n}.'
         => 'Fields that were not in UTF-8, read as Latin-1 / Windows-1252: {n}.',
     'Paró cerca de la línea {linea}: {error}. No se ha cambiado nada: la base ha vuelto a como estaba antes de importar.'
@@ -1299,18 +1321,16 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'MySQL «0000-00-00» dates imported as NULL: they do not exist here',
     'DECIMAL de más de 15 cifras: aquí se guarda como número de coma flotante, con unas 15 cifras exactas'
         => 'DECIMAL of more than 15 digits: here it is stored as a floating-point number, with about 15 exact digits',
-    'ERROR: el volcado está incompleto: {error}'
-        => 'ERROR: the dump is incomplete: {error}',
     'No se pudo devolver la base a como estaba: la copia de antes está en {copia}.'
         => 'The database could not be put back as it was: the copy from before is in {copia}.',
-    'Lo que paró la importación: {error}'
-        => 'What stopped the import: {error}',
     'El usuario \'{usuario}\' ya existe'
         => 'The user \'{usuario}\' already exists',
     'La extensión zip de PHP no está activada, así que no se puede generar el ZIP. Actívala en php.ini (extension=zip) o usa el volcado en SQL.'
         => 'PHP\'s zip extension is not enabled, so the ZIP cannot be made. Enable it in php.ini (extension=zip) or use the SQL dump.',
     'No se pudo crear el fichero temporal del ZIP.'
         => 'The ZIP\'s temporary file could not be created.',
+    'No se pudo crear un fichero temporal para la exportación.'
+        => 'A temporary file for the export could not be created.',
     'No se pudo abrir el ZIP temporal para escribir.'
         => 'The temporary ZIP could not be opened for writing.',
     'No se pudo cerrar el ZIP temporal.'
@@ -1359,8 +1379,6 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'From pgAdmin: Backup → Format: Plain.',
     'Las vistas y los triggers se traducen, con la función plpgsql de cada trigger. Un trigger de varios eventos (INSERT OR UPDATE) pasa a ser uno por evento.'
         => 'Views and triggers are translated, with each trigger\'s plpgsql function. A trigger for several events (INSERT OR UPDATE) becomes one per event.',
-    'Con SQL Server Management Studio:'
-        => 'With SQL Server Management Studio:',
     'Botón derecho sobre la base → Tareas → Generar scripts…'
         => 'Right-click the database → Tasks → Generate Scripts…',
     'Elige las tablas, o la base entera.'
@@ -1405,8 +1423,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Access compares text without case, also with <code>=</code>; here <code>=</code> does tell capitals apart.',
     '<strong>No llegan</strong> los adjuntos ni los objetos OLE (datos binarios), las consultas de acción, de referencias cruzadas o con parámetros, ni las consultas ocultas de formularios e informes. El script las nombra al terminar.'
         => '<strong>What does not come along:</strong> attachments and OLE objects (binary data), action, crosstab or parameter queries, and the hidden queries of forms and reports. The script names them when it finishes.',
-    'En ninguno llegan igual: las restricciones <code>CHECK</code>, los valores por defecto calculados que no son la fecha u hora actual (esos sí llegan: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), las listas <code>ENUM</code>, la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.'
-        => 'Not the same in any of them: <code>CHECK</code> constraints, computed default values other than the current date or time (those do arrive: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), <code>ENUM</code> value lists, the time zone of dates and binary data that is not text (kept in hexadecimal). A name that is not valid here is changed (<code>Order Details</code> → <code>Order_Details</code>). If the dump contains <code>DROP TABLE</code>, the table with the same name is replaced: when in doubt, import into a new database.',
+    'En ninguno llegan igual: los valores por defecto calculados que no son la fecha u hora actual (esos sí llegan: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), una restricción <code>CHECK</code> que usa algo que aquí no existe (las demás llegan, y las listas <code>ENUM</code> de MySQL también; un tipo enumerado de PostgreSQL llega como texto), la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.'
+        => 'Not the same in any of them: computed default values other than the current date or time (those do arrive: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), a <code>CHECK</code> constraint that uses something this engine does not have (the others arrive, and so do MySQL\'s <code>ENUM</code> lists; a PostgreSQL enumerated type arrives as text), the time zone of dates and binary data that is not text (kept in hexadecimal). A name that is not valid here is changed (<code>Order Details</code> → <code>Order_Details</code>). If the dump contains <code>DROP TABLE</code>, the table with the same name is replaced: when in doubt, import into a new database.',
     'El volcado del panel, o uno de SQLite, MySQL / MariaDB, PostgreSQL, SQL Server o Microsoft Access, con sus vistas y sus triggers. Se traducen al SQL de aquí, y al terminar se dice qué no ha llegado igual. Si el volcado trae <code>DROP TABLE</code>, las tablas con el mismo nombre se sustituyen.'
         => 'The panel\'s own dump, or one from SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft Access, with its views and triggers. They are translated to the SQL used here, and at the end it says what did not arrive the same. If the dump contains <code>DROP TABLE</code>, the tables with the same name are replaced.',
     'Con el panel en la misma máquina que el motor es <strong>todo o nada</strong>: si algo falla, la base queda como estaba. Si no, lo anterior al fallo queda hecho y se dice dónde paró.'
@@ -1535,14 +1553,216 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'On Windows, with the <strong>Task Scheduler</strong>:',
     '<strong>Sin cron</strong>, las hace el panel: cuando alguien lo abre y hay una pendiente, el navegador la pide aparte sin esperar la respuesta. Así una copia puede llegar tarde si nadie entra. Se guardan en la carpeta <code>copias/</code> de los datos del panel, en la que PHP tiene que poder escribir.'
         => '<strong>Without cron</strong>, the panel makes them: when someone opens it and one is due, the browser requests it separately without waiting for the answer. So a backup can be late if nobody logs in. They are kept in the <code>copias/</code> folder of the panel\'s data, where PHP must be able to write.',
-    'Cargar un CSV o un Excel en una tabla'
-        => 'Load a CSV or an Excel file into a table',
-    'O la primera hoja de un <strong>Excel (.xlsx)</strong>: la primera fila, con los nombres de las columnas; las celdas con formato de fecha llegan como fecha.'
-        => 'Or the first sheet of an <strong>Excel (.xlsx)</strong> file: the first row, with the column names; cells with a date format arrive as dates.',
-    'Necesita las extensiones zip y xml de PHP.'
-        => 'Needs the PHP zip and xml extensions.',
-    'Cargar Excel'
-        => 'Load Excel',
     'Para cargar un Excel hay que activar las extensiones zip y xml de PHP (extension=zip en php.ini).'
         => 'To load an Excel file, enable the PHP zip and xml extensions (extension=zip in php.ini).',
+
+    // 2.9: exportaciones que no pueden salir enteras
+    'La consulta no ha devuelto ninguna fila: no hay nada que exportar'
+        => 'The query returned no rows: there is nothing to export',
+    'No se puede volcar la base: estas tablas no se pueden leer y el volcado quedaría incompleto. {detalle}'
+        => 'The database cannot be dumped: these tables cannot be read and the dump would be incomplete. {detalle}',
+    'Lo enviado ocupa {n} KB y el servidor solo acepta {m} KB por petición (post_max_size de PHP): no se ha hecho nada. Envía menos de una vez, o sube ese límite.'
+        => 'What was sent takes {n} KB and the server only accepts {m} KB per request (PHP\'s post_max_size): nothing was done. Send less at once, or raise that limit.',
+    'La sentencia que empieza en la línea {linea} ocupa más de {mb} MB y no cabe en la memoria de PHP (memory_limit = {limite}). Sube ese límite, o pártela en varias.'
+        => 'The statement that starts on line {linea} takes more than {mb} MB and does not fit in PHP\'s memory (memory_limit = {limite}). Raise that limit, or split it.',
+    'No se ha cambiado nada: lo que llegó a importar se deshace solo la próxima vez que se usa la base.'
+        => 'Nothing has changed: what was imported is undone on its own the next time the database is used.',
+    'La importación se ha parado: {error}'
+        => 'The import stopped: {error}',
+    // 2.9: JSON y Excel
+    'Exportar a Excel necesita la extensión zip de PHP.'
+        => 'Exporting to Excel needs the PHP zip extension.',
+    'No se pudo crear el fichero de Excel.'
+        => 'The Excel file could not be created.',
+    'Avisos'
+        => 'Warnings',
+    'Hoja {n}'
+        => 'Sheet {n}',
+    'Hoja'
+        => 'Sheet',
+    'Fila'
+        => 'Row',
+    'Caracteres que tenía'
+        => 'Characters it had',
+    'Aviso'
+        => 'Warning',
+    'Excel admite 32.767 caracteres por celda: el texto está cortado'
+        => 'Excel takes 32,767 characters per cell: the text is cut',
+    '{n} caracter(es) de control que Excel no admite se han quitado'
+        => '{n} control character(s) that Excel does not accept were removed',
+    'El JSON tiene que ser una lista de objetos, una por fila: [{"columna": valor, …}, …].'
+        => 'The JSON must be a list of objects, one per row: [{"column": value, …}, …].',
+    'El JSON no trae ninguna fila: tiene que ser una lista de objetos, [{"columna": valor, …}, …].'
+        => 'The JSON has no rows: it must be a list of objects, [{"column": value, …}, …].',
+    'la fila {n} trae la columna «{col}», que no está en la primera'
+        => 'row {n} has the column «{col}», which is not in the first one',
+    'Detrás de la lista hay algo más: el fichero tiene que ser solo la lista de filas.'
+        => 'There is something after the list: the file must be only the list of rows.',
+    'la fila {n} no es un objeto {"columna": valor, …}'
+        => 'row {n} is not an object {"column": value, …}',
+    'JSON mal formado cerca del byte {pos}: se esperaba el nombre de una clave'
+        => 'Malformed JSON near byte {pos}: a key name was expected',
+    'JSON mal formado cerca del byte {pos}: {error}'
+        => 'Malformed JSON near byte {pos}: {error}',
+    'El JSON se acaba antes de tiempo.'
+        => 'The JSON ends too early.',
+    'Un valor del JSON, cerca del byte {pos}, ocupa más de {mb} MB y no cabe en la memoria de PHP.'
+        => 'A JSON value near byte {pos} takes more than {mb} MB and does not fit in PHP\'s memory.',
+    'La línea {linea} del CSV ocupa más de {mb} MB y no cabe en la memoria de PHP: quizá tiene una comilla sin cerrar.'
+        => 'Line {linea} of the CSV takes more than {mb} MB and does not fit in PHP\'s memory: it may have an unclosed quote.',
+    '\'{fichero}\' ocupa más de {mb} MB y no cabe en la memoria de PHP (memory_limit = {limite}). No se ha tocado nada.'
+        => '\'{fichero}\' takes more than {mb} MB and does not fit in PHP\'s memory (memory_limit = {limite}). Nothing was changed.',
+    'JSON mal formado cerca del byte {pos}: se esperaba «{esperado}» y hay «{visto}»'
+        => 'Malformed JSON near byte {pos}: «{esperado}» was expected and there is «{visto}»',
+    'el final'
+        => 'the end',
+    // 2.9: importar JSON y plantillas
+    'plantilla'
+        => 'template',
+    'Cargar un CSV, un Excel o un JSON en una tabla'
+        => 'Load a CSV, an Excel or a JSON file into a table',
+    'La primera fila (en JSON, cada objeto) trae los nombres de las columnas. Se inserta en lotes; con la carpeta de la base a mano, todo o nada.'
+        => 'The first row (in JSON, each object) has the column names. It is inserted in batches; with the database folder at hand, all or nothing.',
+    'Cómo tiene que ser el fichero, con plantillas:'
+        => 'What the file must look like, with templates:',
+    'Ver ejemplos'
+        => 'See examples',
+    'Cómo cargar datos en «{1}»'
+        => 'How to load data into «{1}»',
+    'La primera línea, con los nombres de las columnas. El separador (coma, punto y coma o tabulador) se deduce solo; un campo con el separador, comillas o un salto de línea va entre comillas dobles, y una comilla dentro se escribe doble. Un campo vacío es <code>NULL</code>. En UTF-8 o en Windows-1252.'
+        => 'The first line, with the column names. The separator (comma, semicolon or tab) is detected; a field with the separator, quotes or a line break goes between double quotes, and a quote inside is written twice. An empty field is <code>NULL</code>. In UTF-8 or in Windows-1252.',
+    'Descargar la plantilla CSV'
+        => 'Download the CSV template',
+    'La primera hoja: en la primera fila, los nombres de las columnas. Las celdas con formato de fecha llegan como fecha, y una celda vacía es <code>NULL</code>.'
+        => 'The first sheet: in the first row, the column names. Cells with a date format arrive as dates, and an empty cell is <code>NULL</code>.',
+    'Descargar la plantilla Excel'
+        => 'Download the Excel template',
+    'Una lista de objetos, uno por fila, con los nombres de las columnas como claves. Las columnas son las del primer objeto: a una fila que no trae alguna se le pone <code>NULL</code>. <code>null</code> es <code>NULL</code>, <code>true</code> y <code>false</code> son 1 y 0, y una lista o un objeto se guarda como texto JSON.'
+        => 'A list of objects, one per row, with the column names as keys. The columns are those of the first object: a row without one of them gets <code>NULL</code>. <code>null</code> is <code>NULL</code>, <code>true</code> and <code>false</code> are 1 and 0, and a list or an object is stored as JSON text.',
+    'Descargar la plantilla JSON'
+        => 'Download the JSON template',
+    // 2.9: la base en JSON
+    'JSON: jsonSQLDB'
+        => 'JSON: jsonSQLDB',
+    'JSON de jsonSQLDB'
+        => 'jsonSQLDB JSON',
+    'El fichero no es un volcado JSON de jsonSQLDB: tiene que ser un objeto con "estructura", "tablas" y "despues".'
+        => 'The file is not a jsonSQLDB JSON dump: it must be an object with "estructura", "tablas" and "despues".',
+    'Volcado JSON mal formado: "{clave}" tiene que ser un texto con SQL, y "estructura" ir antes que "tablas" y "despues".'
+        => 'Malformed JSON dump: "{clave}" must be a text with SQL, and "estructura" must come before "tablas" and "despues".',
+    'Tabla {tabla}: {error}'
+        => 'Table {tabla}: {error}',
+    'Detrás del volcado hay algo más.'
+        => 'There is something after the dump.',
+    '{t} tabla(s) y {f} fila(s) cargadas (volcado JSON de jsonSQLDB).'
+        => '{t} table(s) and {f} row(s) loaded (jsonSQLDB JSON dump).',
+    // 2.9: script de SQL Server
+    'O con SQL Server Management Studio:'
+        => 'Or with SQL Server Management Studio:',
+    'Con el script de PowerShell <code>sqlserver-to-jsonsqldb.ps1</code>, que <a href="{1}">se descarga aquí</a> (necesita <strong>Windows</strong>, sin instalar nada): pide el servidor, enseña la lista de bases y vuelca la elegida, con todos sus esquemas (las tablas que no son de <code>dbo</code> llegan como <code>esquema_tabla</code>). También carga en SQL Server lo que exportes como «SQL: SQL Server», en una base que ya exista o en una nueva, todo en una transacción y sin tocar tablas que ya existan.'
+        => 'With the PowerShell script <code>sqlserver-to-jsonsqldb.ps1</code>, <a href="{1}">downloaded here</a> (needs <strong>Windows</strong>, with nothing to install): it asks for the server, lists its databases and dumps the chosen one, with all its schemas (tables outside <code>dbo</code> arrive as <code>schema_table</code>). It also loads into SQL Server what you export as «SQL: SQL Server», into an existing database or a new one, all in one transaction and without touching tables that already exist.',
+    '<strong>SQL Server</strong>: <a href="{1}">descarga el script de PowerShell</a> (necesita <strong>Windows</strong>, sin instalar nada). Vuelca una base del servidor a un fichero que se importa aquí, y carga en SQL Server lo que exportes como «SQL: SQL Server».'
+        => '<strong>SQL Server</strong>: <a href="{1}">download the PowerShell script</a> (needs <strong>Windows</strong>, with nothing to install). It dumps a database of the server to a file that is imported here, and loads into SQL Server what you export as «SQL: SQL Server».',
+    // 2.9: informe de importar y exportar
+    'AVISO: {n} carácter(es) NUL (\\0) quitados de los textos: este motor no los admite dentro de un texto'
+        => 'WARNING: {n} NUL character(s) (\\0) removed from the texts: this engine does not accept them inside a text',
+    'Access no lo tiene; la relación queda sin esa acción'
+        => 'Access does not have it; the relationship stays without that action',
+    'MySQL (InnoDB) no lo tiene; queda NO ACTION, y borrar o cambiar la fila padre dará error'
+        => 'MySQL (InnoDB) does not have it; it stays NO ACTION, and deleting or changing the parent row will give an error',
+    'El volcado no trae la estructura de las tablas (CREATE TABLE): tienen que existir ya, o vuelca también la estructura'
+        => 'The dump does not bring the structure of the tables (CREATE TABLE): they must exist already, or dump the structure too',
+    'Textos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252 ({n}); los demás de las mismas sentencias, que sí lo estaban, se han dejado como venían. Si eran datos binarios (BLOB), no han llegado igual: vuelca con --hex-blob'
+        => 'Texts that were not UTF-8, read as Latin-1 / Windows-1252 ({n}); the others in the same statements, which were, have been left as they came. If they were binary data (BLOB), they have not arrived the same: dump with --hex-blob',
+    'Eventos programados de MySQL saltados: aquí no existen'
+        => 'MySQL scheduled events skipped: they do not exist here',
+    'Sentencias sin equivalente aquí saltadas ({que})'
+        => 'Statements without an equivalent here skipped ({que})',
+    'Tablas virtuales de SQLite (FTS, R-Tree…) saltadas, con sus tablas auxiliares: aquí no existen'
+        => 'SQLite virtual tables (FTS, R-Tree…) skipped, with their auxiliary tables: they do not exist here',
+    'Vistas materializadas de PostgreSQL creadas como vistas normales: aquí se calculan cada vez que se consultan'
+        => 'PostgreSQL materialized views created as normal views: here they are computed every time they are queried',
+    'Particiones de PostgreSQL: no se crean; sus filas van a su tabla madre'
+        => 'PostgreSQL partitions: they are not created; their rows go to their parent table',
+    'La tabla «{tabla}» está en varios esquemas ({esquemas}) y aquí no hay esquemas: se mezclarían sus filas. Vuelca e importa cada esquema por separado (pg_dump -n esquema).'
+        => 'The table «{tabla}» is in several schemas ({esquemas}) and there are no schemas here: their rows would get mixed. Dump and import each schema separately (pg_dump -n schema).',
+    // 2.9: transacciones en la consola
+    'No se ha ejecutado ninguna: en una transacción van todas o ninguna.'
+        => 'None has been run: in a transaction it is all or none.',
+    '{n} sentencias en una transacción: se han ejecutado todas. Abajo, el resultado de la última.'
+        => '{n} statements in a transaction: all of them have been run. Below, the result of the last one.',
+    'Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>. Varias sentencias separadas por <code>;</code> se ejecutan en una transacción: todas o ninguna.'
+        => 'Several lines and <code>--</code> and <code>/* */</code> comments are allowed. Several statements separated by <code>;</code> run in a transaction: all or none.',
+    // 2.9: ficheros JSON en la pantalla de integridad
+    'Ficheros JSON estropeados y claves foráneas que apuntan a filas que no existen, en {1}'
+        => 'Damaged JSON files and foreign keys that point to rows that do not exist, in {1}',
+    'Ficheros JSON'
+        => 'JSON files',
+    '{1} <strong>Todo correcto.</strong> Todos los ficheros de las tablas se leen bien.'
+        => '{1} <strong>All correct.</strong> Every file of the tables reads fine.',
+    '{1} <strong>{2} problema(s) en los ficheros.</strong> Casi siempre es una edición a mano que ha roto el JSON. Lo seguro (comas, llaves y corchetes entre filas, índices, el estado de la tabla) el motor lo repara solo en cuanto lo lee; una fila que no se puede arreglar con seguridad necesita que decidas tú.'
+        => '{1} <strong>{2} problem(s) in the files.</strong> It is almost always a hand edit that broke the JSON. What is safe (commas, braces and brackets between rows, indexes, the state of the table) the engine repairs on its own as soon as it reads it; a row that cannot be fixed safely needs you to decide.',
+    'Fichero'
+        => 'File',
+    'Problema'
+        => 'Problem',
+    'Arreglo'
+        => 'Fix',
+    'Reparar los ficheros'
+        => 'Repair the files',
+    'Se repara lo seguro y se apartan las filas que no se pueden arreglar con seguridad. <strong>No se pierde nada</strong>: el original de cada fichero reparado se guarda en la carpeta <code>.reparados</code> de la base, con la fecha, y las filas apartadas siguen ahí.'
+        => 'What is safe is repaired and the rows that cannot be fixed safely are set aside. <strong>Nothing is lost</strong>: the original of every repaired file is kept in the <code>.reparados</code> folder of the database, with the date, and the rows set aside are still there.',
+    '¿Reparar los ficheros y apartar las filas que no se pueden arreglar?'
+        => 'Repair the files and set aside the rows that cannot be fixed?',
+    '{1} Reparar los ficheros'
+        => '{1} Repair the files',
+    'Claves foráneas'
+        => 'Foreign keys',
+    '<strong>Qué comprueba:</strong> que cada fichero JSON de las tablas se pueda leer, y que toda fila con una clave foránea apunte a una fila que existe en su tabla destino (las filas con <code>NULL</code> en esas columnas no cuentan, igual que en la comprobación normal del motor). <strong>Lee del disco.</strong> <br> Desde SQL: <code>CHECK TABLES</code> y <code>REPAIR TABLES</code> para los ficheros, <code>CHECK KEYS</code> y <code>REPAIR KEYS</code> para las claves, con <code>FROM tabla</code> opcional para limitarlo a una tabla.'
+        => '<strong>What it checks:</strong> that every JSON file of the tables can be read, and that every row with a foreign key points to a row that exists in its target table (rows with <code>NULL</code> in those columns do not count, as in the engine\'s normal check). <strong>It reads from disk.</strong> <br> From SQL: <code>CHECK TABLES</code> and <code>REPAIR TABLES</code> for the files, <code>CHECK KEYS</code> and <code>REPAIR KEYS</code> for the keys, with an optional <code>FROM table</code> to limit it to one table.',
+    'Filas apartadas'
+        => 'Rows set aside',
+    'Estas filas no se podían arreglar sin adivinar y han salido de su tabla. Siguen tal cual en la copia del fichero original, en la carpeta <code>.reparados</code> de la base. Para recuperarlas, corrígelas y vuelve a meterlas con un <code>INSERT</code>.'
+        => 'These rows could not be fixed without guessing and have left their table. They are still there, as they were, in the copy of the original file, in the <code>.reparados</code> folder of the database. To recover them, fix them and put them back with an <code>INSERT</code>.',
+    // 2.9: filas apartadas pendientes
+    'No es una fila: tiene que ser un objeto JSON, {"columna": valor, …}, como el ejemplo.'
+        => 'Not a row: it has to be a JSON object, {"column": value, …}, like the example.',
+    '{1} no es una columna de {2}.'
+        => '{1} is not a column of {2}.',
+    'Fila corregida y de vuelta en {1}.'
+        => 'Row fixed and back in {1}.',
+    'Filas apartadas pendientes'
+        => 'Rows set aside, pending',
+    'Filas que se apartaron porque no se podían arreglar sin adivinar. Corrige cada una tomando como modelo la fila de ejemplo y guárdala: el motor comprueba los tipos, los valores obligatorios, las claves únicas y las foráneas antes de meterla. Si no la quieres, descártala: sigue en la copia de <code>.reparados</code>.'
+        => 'Rows that were set aside because they could not be fixed without guessing. Fix each one using the example row as a model and save it: the engine checks the types, the required values, the unique and the foreign keys before putting it back. If you do not want it, discard it: it stays in the copy in <code>.reparados</code>.',
+    'Fila {1} de {2}'
+        => 'Row {1} of {2}',
+    'Tal como estaba'
+        => 'As it was',
+    'Ejemplo de una fila correcta de {1}'
+        => 'Example of a correct row of {1}',
+    'Corregida'
+        => 'Fixed',
+    '{1} Guardar'
+        => '{1} Save',
+    '¿Descartar esta fila? Seguirá en la copia de .reparados.'
+        => 'Discard this row? It will stay in the copy in .reparados.',
+    'Descartar'
+        => 'Discard',
+
+    // 2.9: el DEFAULT calculado al editar una columna
+    'Se calcula al insertar: CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIME o una expresión'
+        => 'Worked out when inserting: CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIME or an expression',
+
+    // 2.9: COLLATE de las columnas al importar y exportar
+    'Access compara los textos sin distinguir mayúsculas y no tiene cómo distinguirlas: COLLATE BINARY no se puede escribir'
+        => 'Access compares text without telling upper from lower case and has no way to tell them apart: COLLATE BINARY cannot be written',
+    '{columna}: COLLATE RTRIM (sin contar los espacios del final al comparar) no existe en PostgreSQL'
+        => '{columna}: COLLATE RTRIM (trailing spaces not counted when comparing) does not exist in PostgreSQL',
+    'CHARACTER SET quitado de las columnas: aquí todo el texto es UTF-8'
+        => 'CHARACTER SET removed from the columns: here all text is UTF-8',
+    'COLLATE {nombre} quitado de las columnas: aquí solo hay NOCASE, RTRIM y la binaria'
+        => 'COLLATE {nombre} removed from the columns: here there are only NOCASE, RTRIM and binary',
+    'Columnas que no distinguen mayúsculas (…_ci, citext) importadas con COLLATE NOCASE: aquí iguala mayúsculas y minúsculas solo de la A a la Z, sin acentos'
+        => 'Case-insensitive columns (…_ci, citext) imported with COLLATE NOCASE: here only A to Z match regardless of case, and accents still count',
 ];

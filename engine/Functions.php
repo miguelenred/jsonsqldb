@@ -6,18 +6,21 @@ namespace JsonSQLDB;
 /**
  * Funciones SQL. Nombres y comportamiento iguales a los de SQLite.
  *
- * Texto:     UPPER LOWER LENGTH SUBSTR/SUBSTRING TRIM LTRIM RTRIM REPLACE TRANSLATE INSTR
+ * Texto:     CONCAT UPPER LOWER LENGTH SUBSTR/SUBSTRING TRIM LTRIM RTRIM REPLACE TRANSLATE INSTR
  * Números:   ABS ROUND RANDOM
  * Fecha:     DATE TIME DATETIME STRFTIME  (acepta 'now')
  * Nulos:     COALESCE NULLIF IFNULL
  * Varios:    MIN MAX con 2 o más argumentos (con 1 son de agregación)
- * Agregados: COUNT SUM AVG MIN MAX GROUP_CONCAT  (admiten DISTINCT)
+ *
+ * Las demás de SQLite y las de MySQL, en FunctionsAmpliadas, y los agregados
+ * (los de Evaluator::AGREGADOS, que admiten DISTINCT), en SelectAgrupada.
  *
  * https://miguelenred.es/jsonsqldb
  */
-final class Functions
+class Functions
 {
-    public const AGREGADOS = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'GROUP_CONCAT'];
+    /** Un conjunto de TRIM con el que trim() de PHP no vale: caracteres de más de un byte o '..' (ver 'TRIM*') */
+    public const POR_CARACTERES = '/[\x80-\xff]|\.\./';
 
     /** Ejecuta una función escalar con los argumentos ya evaluados. */
     public static function escalar(string $nombre, array $args)
@@ -57,6 +60,20 @@ final class Functions
                 $c = isset($args[1]) ? Valor::aTexto($args[1]) : " \t\n\r\0\x0B";
                 if ($c === '') { return $s; }
                 return $nombre === 'TRIM' ? trim($s, $c) : ($nombre === 'LTRIM' ? ltrim($s, $c) : rtrim($s, $c));
+            case 'TRIM*':
+            case 'LTRIM*':
+            case 'RTRIM*':
+                // Con caracteres de más de un byte en el conjunto, o '..' (que
+                // para trim() de PHP es un rango), carácter a carácter, como
+                // SQLite (2.9: quitaba bytes sueltos, y TRIM('áxá', 'ñ') dejaba
+                // un texto UTF-8 roto). Con '*' llega uno que puede tenerlos
+                // (ver Evaluator::resolver()); si no los tiene, el de siempre
+                self::exige(substr($nombre, 0, -1), $args, 1, 2);
+                $c = $args[1] === null ? null : Valor::aTexto($args[1]);
+                if ($c === null || !preg_match(self::POR_CARACTERES, $c)) {
+                    return self::escalar(substr($nombre, 0, -1), $args);
+                }
+                return $args[0] === null ? null : self::recortar(Valor::aTexto($args[0]), $c, $nombre !== 'RTRIM*', $nombre !== 'LTRIM*');
             case 'TRANSLATE':
                 // TRANSLATE(texto, de, a): cada carácter de «de» pasa a ser el que
                 // está en su misma posición en «a»; los que sobran en «de», fuera
@@ -143,84 +160,64 @@ final class Functions
             case 'STRFTIME':
                 self::exige($nombre, $args, 2, 12);
                 $d = self::conModificadores($args[1], array_slice($args, 2));
-                return $d === null ? null : self::strftime(Valor::aTexto($args[0]), $d);
+                // %s, los segundos de UNIXEPOCH() con la misma fecha (2.9: la
+                // tomaba en la zona horaria de PHP, y no en UTC como SQLite)
+                return $d === null ? null : self::formatearFecha(Valor::aTexto($args[0]), $d, self::FECHA_SQLITE, null,
+                    static fn(): ?int => FunctionsAmpliadas::compatibles('UNIXEPOCH', array_slice($args, 1)));
         }
-
-        throw JsonSqlDbError::syntax("Función no soportada: $nombre()");
+        return FunctionsAmpliadas::compatibles($nombre, $args);
     }
 
     /**
-     * Función de agregación sobre los valores ya evaluados de un grupo.
-     * COUNT(*) llega con $valores = null y $filas = nº de filas del grupo.
+     * El valor que se compara con una colación: NOCASE pasa a minúsculas solo
+     * de la A a la Z, como SQLite; RTRIM quita los espacios del final. Lo que
+     * no es texto, igual.
+     *
+     * @param mixed $v
+     * @return mixed
      */
-    public static function agregado(
-        string $nombre,
-        ?array $valores,
-        int $filas,
-        bool $distinct,
-        string $separador = ','
-    ) {
-        if ($nombre === 'COUNT' && $valores === null) {
-            return $filas;                       // COUNT(*)
+    public static function plegar($v, string $colacion)
+    {
+        if (!is_string($v)) {
+            return $v;
         }
-        $valores = $valores ?? [];
+        return $colacion === 'NOCASE' ? strtr($v, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') : rtrim($v, ' ');
+    }
 
-        // Los agregados ignoran los NULL
-        $limpios = [];
-        foreach ($valores as $v) {
-            if ($v !== null) { $limpios[] = $v; }
+    /**
+     * NULLIF, y MIN, MAX, GREATEST y LEAST de varios valores, con una
+     * colación (2.9): comparan los valores plegados y devuelven el de
+     * verdad. Como en SQLite, con dos iguales MIN da el último y MAX el
+     * primero.
+     */
+    public static function conColacion(string $nombre, array $args, string $colacion)
+    {
+        if ($nombre === 'NULLIF') {
+            self::exige($nombre, $args, 2);
+            return Valor::comparar(self::plegar($args[0], $colacion), self::plegar($args[1], $colacion)) === 0 ? null : $args[0];
         }
-        if ($distinct) {
-            $vistos = [];
-            $unicos = [];
-            foreach ($limpios as $v) {
-                $k = Valor::clave($v);
-                if (!isset($vistos[$k])) { $vistos[$k] = true; $unicos[] = $v; }
+        if (count($args) < 2) {
+            return self::escalar($nombre, $args);    // el error de siempre
+        }
+        $min   = $nombre === 'MIN' || $nombre === 'LEAST';
+        $mejor = 0;
+        foreach ($args as $i => $v) {
+            if ($v === null) {
+                return null;
             }
-            $limpios = $unicos;
+            $c = $i === 0 ? null : Valor::comparar(self::plegar($args[$mejor], $colacion), self::plegar($v, $colacion));
+            if ($c !== null && ($min ? $c >= 0 : $c < 0)) {
+                $mejor = $i;
+            }
         }
-
-        switch ($nombre) {
-            case 'COUNT':
-                return count($limpios);
-            case 'SUM':
-                if ($limpios === []) { return null; }
-                $s = 0;
-                foreach ($limpios as $v) { $s += Valor::aNumero($v); }
-                return $s;
-            case 'AVG':
-                if ($limpios === []) { return null; }
-                $s = 0;
-                foreach ($limpios as $v) { $s += Valor::aNumero($v); }
-                return (float)($s / count($limpios));        // siempre decimal, como SQLite y MySQL
-            case 'GROUP_CONCAT':
-                if ($limpios === []) { return null; }
-                // El orden es el de las filas del grupo. SQLite no lo garantiza;
-                // aquí sí, que es más útil y no cuesta nada.
-                return implode($separador, array_map(
-                    static fn($v): string => Valor::aTexto($v), $limpios));
-
-            case 'MIN':
-            case 'MAX':
-                $res = null;
-                foreach ($limpios as $v) {
-                    if ($res === null) { $res = $v; continue; }
-                    $c = Valor::comparar($v, $res);
-                    if ($c !== null && (($nombre === 'MIN' && $c < 0) || ($nombre === 'MAX' && $c > 0))) {
-                        $res = $v;
-                    }
-                }
-                return $res;
-        }
-
-        throw JsonSqlDbError::syntax("Función de agregación no soportada: $nombre()");
+        return $args[$mejor];
     }
 
     // ------------------------------------------------------------------
     // Auxiliares
     // ------------------------------------------------------------------
 
-    private static function substr(array $args)
+    protected static function substr(array $args)
     {
         self::exige('SUBSTR', $args, 2, 3);
         if ($args[0] === null || $args[1] === null) {
@@ -254,7 +251,7 @@ final class Functions
         return self::corte($s, $desde, max(0, $hasta - $desde));
     }
 
-    private static function corte(string $s, int $ini, ?int $len): string
+    protected static function corte(string $s, int $ini, ?int $len): string
     {
         if (function_exists('mb_substr')) {
             return $len === null ? mb_substr($s, $ini, null, 'UTF-8') : mb_substr($s, $ini, $len, 'UTF-8');
@@ -262,6 +259,24 @@ final class Functions
         $car = preg_split('//u', $s, -1, PREG_SPLIT_NO_EMPTY) ?: [];
         $tro = $len === null ? array_slice($car, $ini) : array_slice($car, $ini, $len);
         return implode('', $tro);
+    }
+
+    /** TRIM, LTRIM y RTRIM carácter a carácter (2.9): quita de los extremos los caracteres UTF-8 de $quitar, sin partir ninguno */
+    private static function recortar(string $s, string $quitar, bool $izquierda, bool $derecha): string
+    {
+        $lista = preg_split('//u', $quitar, -1, PREG_SPLIT_NO_EMPTY) ?: str_split($quitar);
+        do {
+            $antes = $s;
+            foreach ($lista as $c) {
+                if ($izquierda && str_starts_with($s, $c)) {
+                    $s = substr($s, strlen($c));
+                }
+                if ($derecha && str_ends_with($s, $c)) {
+                    $s = substr($s, 0, -strlen($c));
+                }
+            }
+        } while ($s !== $antes);
+        return $s;
     }
 
     /** Acentos y eñes, para poder cambiar de caja sin la extensión mbstring */
@@ -317,7 +332,7 @@ final class Functions
      *
      * @param array<int,mixed> $mods
      */
-    private static function conModificadores($v, array $mods): ?\DateTimeImmutable
+    protected static function conModificadores($v, array $mods): ?\DateTimeImmutable
     {
         if ($mods !== [] && is_string($mods[0]) && strcasecmp(trim($mods[0]), 'unixepoch') === 0) {
             if ($v === null || !is_numeric($v)) {
@@ -341,7 +356,7 @@ final class Functions
      *
      * @param array<int,mixed> $mods
      */
-    private static function modificar(?\DateTimeImmutable $d, array $mods): ?\DateTimeImmutable
+    protected static function modificar(?\DateTimeImmutable $d, array $mods): ?\DateTimeImmutable
     {
         foreach ($mods as $m) {
             if ($d === null || $m === null) {
@@ -356,9 +371,13 @@ final class Functions
                     }
                     $d = $d->modify(sprintf('%+d %s', Valor::entero($n), $p[3]));
                 } else {
-                    // En segundos, para admitir '+1.5 days' como SQLite
-                    $seg = Valor::entero(round($n * ['second' => 1, 'minute' => 60, 'hour' => 3600, 'day' => 86400][$p[3]]));
-                    $d = $d->modify(sprintf('%+d seconds', $seg));
+                    // En milisegundos, como SQLite, para admitir '+1.5 days' (2.9:
+                    // en segundos, y '+0.5 seconds' sumaba uno entero)
+                    $ms = Valor::entero(round($n * ['second' => 1000, 'minute' => 60000, 'hour' => 3600000, 'day' => 86400000][$p[3]]));
+                    $d  = $d->modify(sprintf('%+d seconds', intdiv($ms, 1000)));
+                    if ($ms % 1000 !== 0) {
+                        $d = $d->modify(sprintf('%+d microseconds', $ms % 1000 * 1000));
+                    }
                 }
                 continue;
             }
@@ -408,27 +427,54 @@ final class Functions
         return null;
     }
 
-    /** strftime con los especificadores más habituales de SQLite. */
-    private static function strftime(string $formato, \DateTimeImmutable $d): string
+    /** Un valor como texto JSON, compacto como el de SQLite y MySQL */
+    public static function aJson($v): string
     {
-        $mapa = [
-            '%Y' => $d->format('Y'),
-            '%m' => $d->format('m'),
-            '%d' => $d->format('d'),
-            '%H' => $d->format('H'),
-            '%M' => $d->format('i'),
-            '%S' => $d->format('s'),
-            '%f' => $d->format('s.v'),
-            '%j' => str_pad((string)((int)$d->format('z') + 1), 3, '0', STR_PAD_LEFT),
-            '%w' => $d->format('w'),
-            '%W' => $d->format('W'),
-            '%s' => (string)$d->getTimestamp(),
-            '%%' => '%',
-        ];
-        return strtr($formato, $mapa);
+        $t = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
+        if ($t === false) {
+            throw JsonSqlDbError::type('No se puede escribir como JSON: tiene bytes que no son texto (RANDOMBLOB, ZEROBLOB…)');
+        }
+        return $t;
     }
 
-    private static function exige(string $nombre, array $args, int $min, ?int $max = null): void
+    /**
+     * Especificadores de fecha de strftime() de SQLite, como el formato de
+     * DateTime de PHP que les toca; '#j' es el día del año en tres cifras, '#s'
+     * los segundos desde 1970 y '#W' la semana del año de SQLite (ver
+     * formatearFecha(); los de MySQL, en FunctionsAmpliadas::FECHA_MYSQL).
+     */
+    private const FECHA_SQLITE = ['Y' => 'Y', 'm' => 'm', 'd' => 'd', 'H' => 'H', 'M' => 'i', 'S' => 's', 'f' => 's.v',
+                                  'j' => '#j', 'w' => 'w', 'W' => '#W', 's' => '#s'];
+
+    /**
+     * Una fecha con un formato de especificadores %x. Uno que no está en el
+     * mapa se deja tal cual (strftime de SQLite) o, con $funcion, es un error
+     * (DATE_FORMAT de MySQL); los nombres de días y meses, en inglés.
+     *
+     * @param array<string, string> $mapa ver FECHA_SQLITE y FunctionsAmpliadas::FECHA_MYSQL
+     */
+    protected static function formatearFecha(string $formato, \DateTimeImmutable $d, array $mapa, ?string $funcion = null,
+                                           ?callable $segundos = null): string
+    {
+        return (string)preg_replace_callback('/%(.)/s', static function (array $m) use ($d, $mapa, $funcion, $segundos): string {
+            $codigo = $m[1] === '%' ? '%' : ($mapa[$m[1]] ?? null);
+            if ($codigo === null) {
+                if ($funcion !== null) {
+                    throw JsonSqlDbError::syntax("$funcion: especificador no soportado: %{$m[1]}");
+                }
+                return $m[0];
+            }
+            if ($codigo === '%') { return '%'; }
+            if ($codigo === '#j') { return str_pad((string)((int)$d->format('z') + 1), 3, '0', STR_PAD_LEFT); }
+            // %W de SQLite: la semana 01 empieza el primer lunes del año, y los
+            // días de antes son la 00 (2.9: era la semana ISO, otra cosa)
+            if ($codigo === '#W') { return sprintf('%02d', intdiv((int)$d->format('z') + 8 - (int)$d->format('N'), 7)); }
+            if ($codigo === '#s') { return (string)($segundos === null ? $d->getTimestamp() : $segundos()); }
+            return $d->format($codigo);
+        }, $formato);
+    }
+
+    protected static function exige(string $nombre, array $args, int $min, ?int $max = null): void
     {
         $n = count($args);
         $max ??= $min;

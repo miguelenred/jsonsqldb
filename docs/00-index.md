@@ -26,10 +26,10 @@ done.
 Three pieces, each on top of the previous one:
 
 ```
-jsonsqldbadmin/   web panel          →  talks only to the API
+jsonsqldbadmin/   web panel          →  talks to the API, or loads the engine directly (2.7)
 api/              signed HTTP API    →  talks only to the engine
 engine/           SQL engine         →  reads and writes data/
-data/             one folder per database, one .json per table
+data/             one folder per database, a few JSON files per table
 ```
 
 ## Documentation
@@ -47,6 +47,7 @@ data/             one folder per database, one .json per table
 | [03-writes.md](03-writes.md) | `INSERT`/`UPDATE`/`DELETE`, DDL, keys, triggers, views, integrity |
 | [04-api.md](04-api.md) | HTTP endpoint, HMAC signature, bound parameters, clients |
 | [05-admin.md](05-admin.md) | jsonSQLDBadmin: installation, users, what it can do, import and export with other engines and without size limits, Excel, scheduled backups, languages, configuration |
+| [06-format.md](06-format.md) | reference of the files on disk: each file's exact shape, values by type, index keys, journal, transactions, repairs; reading and changing them from outside |
 | [../nginx/README.md](../nginx/README.md) | **Required if you use nginx**: the equivalent of the `.htaccess` rules |
 | [../litespeed/README.md](../litespeed/README.md) | LiteSpeed Enterprise (works as Apache) and OpenLiteSpeed (**needs the rules in the vhost**) |
 
@@ -61,8 +62,9 @@ needs nothing.
 
 **Install**: upload the folder to the server, run `php configurar.php` to
 create both configuration files with random keys (or `--local` for plain HTTP
-on your own machine), and open `jsonsqldbadmin/`. The first screen asks you to
-create the administrator. Details in [05-admin.md §1](05-admin.md).
+on your own machine), and open `jsonsqldbadmin/`. The first screen asks for the
+installation code that `configurar.php` prints and lets you create the
+administrator. Details in [05-admin.md §1](05-admin.md).
 
 **Create the first database**: from the panel (*Databases → New database*),
 with `CREATE DATABASE mydb` through the API with an empty `db`, or with
@@ -81,13 +83,18 @@ $rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja']
 - **Values are never concatenated into the SQL.** Write `?` and send the values
   apart; the server inserts them already parsed. See [04-api.md §1.1](04-api.md).
 - **The database goes in the `db` parameter**, not in the SQL. There is no
-  `USE` and no `mydb.customers`, and a query does not span two databases.
+  `mydb.customers`, `USE` only accepts the database already in use (2.9), and a
+  query does not span two databases.
+- **Several statements can be one transaction** (2.9): all of them or none.
+  While it runs the whole database waits for it, and it never spans requests.
+  See [03-writes.md](03-writes.md).
 - **`DECIMAL` is rounded floating point**, not exact decimal. For money that
   has to add up to the cent, store cents in an `INTEGER`. See
   [01-core.md](01-core.md).
 - **Alphabetical order is configurable** (`JSONSQLDB_COLACION`): by default it
-  ignores case and accents and puts `ñ` after `n`. It only affects `ORDER BY`.
-  See [02-queries.md](02-queries.md).
+  ignores case and accents and puts `ñ` after `n`. It only affects `ORDER BY`;
+  for a column that compares without telling case apart, declare it
+  `COLLATE NOCASE` (2.9). See [02-queries.md](02-queries.md).
 - **`ALTER TABLE` cannot do everything**: it adds, modifies and drops columns,
   unique, foreign and primary keys, but `AUTOINCREMENT` can only be set when
   the table is created. See [03-writes.md](03-writes.md).
@@ -100,31 +107,36 @@ $rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja']
 ## Tests
 
 The test files, no dependencies. They use temporary folders and never touch your
-data.
+data. The ones that load dumps into other systems or run PowerShell scripts do
+more where those are installed (CI has them).
 
 ```
-php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 72    parser and bound parameters
-php tests/f2_select.php       → OK: 151   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 68    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 61    real requests against the API
-php tests/f5_esquema.php      → OK: 105   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 142   the panel, driven like a user
+php tests/f1_nucleo.php       → OK: 73    storage, types, locking, direct access
+php tests/f2_parser.php       → OK: 83    parser and bound parameters
+php tests/f2_select.php       → OK: 164   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 110   writes, DDL, keys, triggers, transactions and holes
+php tests/f4_api.php          → OK: 76    real requests against the API
+php tests/f5_esquema.php      → OK: 122   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 176   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 65    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 33    every intermediate state a crash can leave
-php tests/f10_indices_incrementales.php → OK: 18   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
-php tests/f12_contra_sqlite.php → OK: 4    145 queries and 16 writes, same results as SQLite
+php tests/f7_concurrencia.php → OK: 35    real simultaneous processes and locking
+php tests/f8_indices.php      → OK: 81    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 36    every intermediate state a crash can leave
+php tests/f10_indices_incrementales.php → OK: 21   indexes corrected instead of rebuilt
+php tests/f11_asistente.php    → OK: 41    panel setup wizard and direct connection
+php tests/f12_contra_sqlite.php → OK: 12   164 queries, 16 writes and 8 triggers that touch rows of their own statement, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 31 with every server  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
+php tests/f14_volcados.php     → OK: 54    dumps to and from SQLite, MySQL, PostgreSQL, SQL Server (more with the servers)
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
-php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQL and PostgreSQL do the same there
-php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
-php tests/f18_access.php       → OK: 13    Microsoft Access: the PowerShell script, import and export
-php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries on tables of many parts, against SQLite
-php tests/f20_memoria.php      → OK: 21    the panel with 32 MB: export, import and backups of a larger database (--directa: 22)
+php tests/f16_vistas_triggers.php → OK: 10  views and triggers exported to other systems (more with MySQL and PostgreSQL: they must do the same there)
+php tests/f17_rutinas_importadas.php → OK: 6 views and triggers imported from MySQL, PostgreSQL and SQL Server (more with the servers)
+php tests/f18_access.php       → OK: 10    Microsoft Access: import and export (more with PowerShell: the script)
+php tests/f19_escrituras_contra_sqlite.php → OK: 19  random writes and queries on tables of many parts, against SQLite
+php tests/f20_memoria.php      → OK: 31    the panel with 32 MB: export, import and backups of a larger database (also --directa)
+php tests/f21_compatibilidad.php → OK: 96  SQLite and MySQL syntax and functions, windows, recursion, COLLATE, against SQLite
+php tests/f22_sqlserver.php    → OK: 4     SQL Server's script and import (more with PowerShell)
+php tests/f23_reparar.php      → OK: 28    hand-broken JSON files repaired, or set aside
+php tests/f24_versiones_anteriores.php → OK: 27  every published version's database opened by this one (needs the git tags)
 ```
 
 `f5_admin.php` needs the cURL extension and starts two PHP built-in servers,

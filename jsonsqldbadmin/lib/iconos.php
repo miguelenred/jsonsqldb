@@ -9,7 +9,7 @@ declare(strict_types=1);
  *   icono('trash', 'x')   con una clase más
  *
  * Acepta también los nombres de Bootstrap Icons que usaba el panel antes de
- * la 2.7 (hdd-stack, clipboard-check...), para no tener que tocar cada vista.
+ * la 2.7 (hdd-stack, pencil...), para no tener que tocar cada vista.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -28,7 +28,6 @@ function icono(string $nombre, string $clase = ''): string
         'edit'       => '<path d="M4 20h4L19 9a2.8 2.8 0 00-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/>',
         'trash'      => '<path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>',
         'key'        => '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><path d="M16 7l3 3"/>',
-        'link'       => '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
         'bolt'       => '<path d="M13 3L4 14h7l-1 7 9-11h-7l1-7z"/>',
         'shield'     => '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/>',
         'database'   => '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
@@ -42,11 +41,9 @@ function icono(string $nombre, string $clase = ''): string
         'wrench'     => '<path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.6 2.6-2.4-.6-.6-2.4 2.6-2.6z"/>',
         'check'      => '<path d="M5 12l5 5 9-10"/>',
         'history'    => '<path d="M3 12a9 9 0 103-6.7"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/>',
-        'layers'     => '<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>',
         'info'       => '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
         // Iconos específicos del panel, en el mismo trazo
         'users'      => '<path d="M16 20v-1a4 4 0 00-4-4H6a4 4 0 00-4 4v1"/><circle cx="9" cy="8" r="4"/><path d="M22 20v-1a4 4 0 00-3-3.9"/><path d="M16 4.1a4 4 0 010 7.8"/>',
-        'user'       => '<path d="M20 21v-1a6 6 0 00-6-6h-4a6 6 0 00-6 6v1"/><circle cx="12" cy="7" r="4"/>',
         'user-plus'  => '<path d="M15 21v-1a5 5 0 00-5-5H6a5 5 0 00-5 5v1"/><circle cx="8" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
         'server'     => '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01"/><path d="M7 16.5h.01"/>',
         'alert'      => '<path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
@@ -59,17 +56,14 @@ function icono(string $nombre, string $clase = ''): string
         'caret-up'   => '<path d="M7 14l5-5 5 5"/>',
         'caret-down' => '<path d="M7 10l5 5 5-5"/>',
         'plug'       => '<path d="M9 3v5"/><path d="M15 3v5"/><path d="M6 8h12v3a6 6 0 01-12 0V8z"/><path d="M12 17v4"/>',
-        'folder'     => '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
     ];
     static $alias = [
         'hdd-stack' => 'server', 'plus-circle' => 'plus', 'plus-lg' => 'plus', 'check2' => 'check',
         'check2-circle' => 'check', 'eye' => 'view', 'x-octagon' => 'stop', 'x-lg' => 'x',
-        'shield-check' => 'shield', 'people' => 'users', 'pencil' => 'edit', 'exclamation-triangle' => 'alert',
-        'clipboard-check' => 'history', 'play-fill' => 'play', 'person-plus' => 'user-plus',
-        'person-circle' => 'user', 'list-ul' => 'list', 'lightning' => 'bolt',
-        'layout-three-columns' => 'columns', 'diagram-3' => 'columns', 'info-circle' => 'info',
-        'gear' => 'settings', 'filetype-sql' => 'file', 'filetype-csv' => 'file', 'file-zip' => 'archive',
-        'box-arrow-right' => 'logout', 'arrow-clockwise' => 'refresh',
+        'people' => 'users', 'pencil' => 'edit', 'exclamation-triangle' => 'alert', 'play-fill' => 'play',
+        'person-plus' => 'user-plus', 'lightning' => 'bolt', 'layout-three-columns' => 'columns', 'info-circle' => 'info',
+        'gear' => 'settings', 'filetype-sql' => 'file', 'filetype-csv' => 'file', 'filetype-json' => 'file',
+        'filetype-xlsx' => 'file', 'file-zip' => 'archive',
     ];
     $trazo = $trazos[$alias[$nombre] ?? $nombre] ?? $trazos['info'];
     return '<svg class="ic' . ($clase !== '' ? ' ' . $clase : '') . '" viewBox="0 0 24 24" fill="none" '

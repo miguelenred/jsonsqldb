@@ -64,14 +64,14 @@ final class Idioma
         return self::POR_DEFECTO;
     }
 
-    /** Cambia el idioma: en la sesión y, si alguien ha entrado, en su usuario. */
-    public static function elegir(string $idioma): void
+    /** Cambia el idioma: en la sesión y, con $guardar y si alguien ha entrado, en su usuario. */
+    public static function elegir(string $idioma, bool $guardar = false): void
     {
         if (!isset(self::DISPONIBLES[$idioma])) {
             return;
         }
         $_SESSION['idioma'] = $idioma;
-        if (class_exists('Auth', false) && Auth::identificado()) {
+        if ($guardar && class_exists('Auth', false) && Auth::identificado()) {
             Auth::guardarIdioma((string)$_SESSION['usuario']['usuario'], $idioma);
         }
         self::$actual = $idioma;

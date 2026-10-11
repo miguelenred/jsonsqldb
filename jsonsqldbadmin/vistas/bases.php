@@ -8,7 +8,7 @@ $zipDisponible = mismoHostQueLaApi() !== false;
 <div class="page-head">
   <div>
     <h1><?= h(t('Bases de datos')) ?></h1>
-    <p><?= count($bases) ?> <?= count($bases) === 1 ? 'base' : 'bases' ?> ·
+    <p><?= count($bases) ?> <?= h(count($bases) === 1 ? t('base') : t('bases')) ?> ·
        <?= Api::directa() ? t('conexión directa al motor') : t('conexión por la API') ?></p>
   </div>
 </div>
@@ -39,12 +39,14 @@ $zipDisponible = mismoHostQueLaApi() !== false;
                               data-bs-target="#imp<?= h(md5($b)) ?>" title="<?= h(t('Restaurar desde una copia ZIP')) ?>">
                         <?= icono('upload') ?></button>
                     <?php endif; ?>
+                    <?php if (Auth::esAdmin()): ?>
                     <form method="post" class="d-flex gap-1" title="<?= h(t('Volcado SQL para otro motor')) ?>">
                       <?= csrf() ?>
                       <input type="hidden" name="accion" value="exportar_base">
                       <input type="hidden" name="nombre" value="<?= h($b) ?>">
                       <select class="form-select form-select-sm" name="formato" aria-label="<?= h(t('Formato del volcado')) ?>" style="width:auto">
                         <option value="sql"><?= h(t('SQL: jsonSQLDB y SQLite')) ?></option>
+                        <option value="json"><?= h(t('JSON: jsonSQLDB')) ?></option>
                         <option value="mysql"><?= h(t('SQL: MySQL / MariaDB')) ?></option>
                         <option value="postgresql"><?= h(t('SQL: PostgreSQL')) ?></option>
                         <option value="sqlserver"><?= h(t('SQL: SQL Server')) ?></option>
@@ -52,8 +54,9 @@ $zipDisponible = mismoHostQueLaApi() !== false;
                       </select>
                       <button class="btn btn-sm btn-outline-secondary" title="<?= h(t('Descargar el volcado')) ?>"><?= icono('download') ?></button>
                     </form>
+                    <?php endif; ?>
                     <?php
-                    $formatos = $zipDisponible ? ['zip' => [t('Copia ZIP'), 'file-zip']] : [];
+                    $formatos = $zipDisponible && Auth::esAdmin() ? ['zip' => [t('Copia ZIP'), 'file-zip']] : [];
                     foreach ($formatos as $f => $bt): ?>
                       <form method="post">
                         <?= csrf() ?>
@@ -154,13 +157,13 @@ $zipDisponible = mismoHostQueLaApi() !== false;
           <div class="d-flex gap-2 flex-wrap"><?= campoImportacion('zip', '.zip', 'zip' . md5($b)) ?></div>
         </div>
         <div class="form-text">
-          <?= t('Tiene que ser una copia generada por este panel. Solo se restauran los ficheros <code>.json</code>; cualquier otra cosa que venga dentro se ignora, y si el ZIP trae rutas que salgan de la carpeta de destino se rechaza entero sin tocar nada.') ?>
+          <?= t('Tiene que ser una copia generada por este panel. Se restauran los ficheros <code>.json</code> de la base y, de <code>.reparados/</code>, los originales de lo reparado y las filas apartadas; cualquier otra cosa que venga dentro se ignora. Si el ZIP trae rutas que salgan de la carpeta de destino, o un fichero que no cabe en la memoria de PHP, se rechaza entero sin tocar nada.') ?>
         </div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><?= h(t('Cancelar')) ?></button>
         <button class="btn btn-warning"
-                data-confirm-click="¿Sustituir el contenido de <?= h($b) ?>?">
+                data-confirm-click="<?= h(t('¿Sustituir el contenido de {1}?', [1 => $b])) ?>">
           <?= t('{1} Restaurar', [1 => icono('upload')]) ?></button>
       </div>
     </form>

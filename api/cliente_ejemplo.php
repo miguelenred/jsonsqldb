@@ -15,6 +15,10 @@ declare(strict_types=1);
  *   $cli = JsonSqlDbCliente::pruebas();
  *   $filas = $cli->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Torrevieja']);
  *
+ * Varias sentencias como una transacción, todas o ninguna (2.9):
+ *   $cli->lote([['UPDATE cuentas SET saldo = saldo - ? WHERE id = ?', [50, 1]],
+ *               ['UPDATE cuentas SET saldo = saldo + ? WHERE id = ?', [50, 2]]]);
+ *
  * O montándolo a mano, que es lo que hará tu aplicación de verdad:
  *
  *   $cli = new JsonSqlDbCliente('https://miservidor/jsonsqldb/api/jsonsqldb_api.php',
@@ -53,7 +57,11 @@ final class JsonSqlDbCliente
                         (string)(getenv('JSONSQLDB_API_KEY') ?: 'CHANGE_ME_EXAMPLE_API_KEY'),
                         (string)(getenv('JSONSQLDB_HMAC_SECRET') ?: 'CHANGE_ME_EXAMPLE_SECRET'),
                         self::EJEMPLO_BASE);
-        $cli->aceptarAutofirmado();
+        // Sin comprobar el certificado, solo contra el propio equipo (2.9):
+        // antes también contra un servidor de verdad, sin decir nada
+        if (in_array(strtolower((string)parse_url($cli->url, PHP_URL_HOST)), ['localhost', '127.0.0.1', '[::1]'], true)) {
+            $cli->aceptarAutofirmado();
+        }
         return $cli;
     }
 
@@ -106,20 +114,54 @@ final class JsonSqlDbCliente
         $params = $parametros === []
             ? ''
             : (string)json_encode(array_values($parametros), JSON_UNESCAPED_UNICODE);
+        return $this->pedir(['sql' => $sql, 'params' => $params], $sql . $params);
+    }
 
+    /**
+     * Varias sentencias en una transacción (2.9): se ejecutan todas, o
+     * ninguna si una falla, y cada una ve lo que hicieron las anteriores.
+     * Cada sentencia es un texto SQL o [sql, parámetros]. Devuelve el
+     * resultado de cada una, en orden.
+     *
+     *   $cli->lote([
+     *       ['UPDATE cuentas SET saldo = saldo - ? WHERE id = ?', [50, 1]],
+     *       ['UPDATE cuentas SET saldo = saldo + ? WHERE id = ?', [50, 2]],
+     *   ]);
+     *
+     * @param list<string|array{0: string, 1?: array}> $sentencias
+     * @return list<array>
+     * @throws RuntimeException si la API devuelve un error (y entonces no se ha hecho nada)
+     */
+    public function lote(array $sentencias): array
+    {
+        $lote = (string)json_encode(array_map(static fn($s): array => is_array($s)
+            ? ['sql' => (string)$s[0], 'params' => array_values((array)($s[1] ?? []))]
+            : ['sql' => (string)$s, 'params' => []], array_values($sentencias)), JSON_UNESCAPED_UNICODE);
+        // En la firma, el texto del lote tal como se envía ocupa el lugar de sql y params
+        return $this->pedir(['lote' => $lote], $lote);
+    }
+
+    /**
+     * La petición firmada: $campos (sql y params, o lote) y lo que de ellos
+     * entra en la firma.
+     *
+     * @param array<string, string> $campos
+     */
+    private function pedir(array $campos, string $firmado): array
+    {
         $timestamp = (string)time();
+        // Al azar en cada petición: dos consultas iguales en el mismo segundo
+        // tendrían si no el mismo token, y la API rechazaría la segunda
+        $nonce     = bin2hex(random_bytes(8));
         $token     = hash_hmac(
             'sha256',
-            '+' . $this->apiKey . '|' . $this->base . '|' . $timestamp . '|' . $sql . $params . '¿',
+            '+' . $this->apiKey . '|' . $this->base . '|' . $timestamp . '|' . $nonce . '|' . $firmado . '¿',
             $this->secreto
         );
 
-        $post = http_build_query([
-            'api_key'   => $this->apiKey,
-            'db'        => $this->base,
-            'sql'       => $sql,
-            'params'    => $params,
+        $post = http_build_query(['api_key' => $this->apiKey, 'db' => $this->base] + $campos + [
             'timestamp' => $timestamp,
+            'nonce'     => $nonce,
             'token'     => $token,
         ]);
 
@@ -140,7 +182,6 @@ final class JsonSqlDbCliente
         curl_setopt_array($ch, $opciones);
         $respuesta = curl_exec($ch);
         $errorCurl = curl_error($ch);
-        curl_close($ch);
 
         if ($respuesta === false) {
             throw new RuntimeException('No se pudo conectar con la API: ' . $errorCurl);

@@ -237,7 +237,6 @@ function generar(): array {
     }
     if ($modo === 4) {                                  // JOIN
         $tipo = uno(['JOIN', 'LEFT JOIN', 'INNER JOIN']);
-        $w = $where === '' ? '' : $where . ' AND ';
         $agg = mt_rand(0, 1) === 0;
         if ($agg) {
             return ["SELECT COUNT(*) AS n, SUM(u.x) AS s FROM t $tipo u ON u.tid = t.id"
@@ -332,7 +331,7 @@ for ($i = 1; $i <= $opciones['n']; $i++) {
         try {
             enSqlite($s, $sql);
             $divergencias[] = [$i, $sql, $orden, $modo, 'el motor la rechaza y SQLite no: ' . $e->getMessage(), []];
-        } catch (Throwable $e2) {
+        } catch (Throwable) {
             // los dos la rechazan
         }
         continue;

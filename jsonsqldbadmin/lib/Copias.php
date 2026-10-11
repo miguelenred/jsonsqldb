@@ -42,13 +42,13 @@ final class Copias
     {
         $p = [
             'id'         => bin2hex(random_bytes(8)),
-            'base'       => nombreBase((string)($d['base'] ?? '')),
+            'base'       => nombreBase(textoDe($d, 'base')),
             'frecuencia' => in_array($d['frecuencia'] ?? '', self::FRECUENCIAS, true) ? (string)$d['frecuencia'] : 'diaria',
-            'horas'      => max(1, min(168, (int)($d['horas'] ?? 24))),
-            'hora'       => max(0, min(23, (int)($d['hora'] ?? 3))),
-            'dia'        => max(1, min(7, (int)($d['dia'] ?? 1))),
+            'horas'      => max(1, min(168, (int)textoDe($d, 'horas', '24'))),
+            'hora'       => max(0, min(23, (int)textoDe($d, 'hora', '3'))),
+            'dia'        => max(1, min(7, (int)textoDe($d, 'dia', '1'))),
             'formato'    => in_array($d['formato'] ?? '', self::FORMATOS, true) ? (string)$d['formato'] : 'zip',
-            'conservar'  => max(1, min(365, (int)($d['conservar'] ?? 7))),
+            'conservar'  => max(1, min(365, (int)textoDe($d, 'conservar', '7'))),
             'ultima'     => null,
             'error'      => null,
         ];
@@ -76,15 +76,19 @@ final class Copias
             return $ahora - $ultima >= (int)$p['horas'] * 3600;
         }
         // La última vez que debió hacerse: hoy (o el día de la semana) a su hora,
-        // o la anterior si esa todavía no ha llegado
-        $momento = (int)mktime((int)$p['hora'], 0, 0, (int)date('n', $ahora), (int)date('j', $ahora), (int)date('Y', $ahora));
+        // o la anterior si esa todavía no ha llegado. Los días se restan en el
+        // calendario (mktime), no en segundos: el día del cambio de hora tiene
+        // 23 o 25 horas, y restando 86.400 segundos salía una copia de más
+        $dia = (int)date('j', $ahora);
         if ($p['frecuencia'] === 'semanal') {
-            $momento -= (((int)date('N', $ahora) - (int)$p['dia'] + 7) % 7) * 86400;
-            if ($momento > $ahora) { $momento -= 7 * 86400; }
-        } elseif ($momento > $ahora) {
-            $momento -= 86400;
+            $dia -= ((int)date('N', $ahora) - (int)$p['dia'] + 7) % 7;
         }
-        return $ultima < $momento;
+        $momento = static fn(int $d): int => (int)mktime((int)$p['hora'], 0, 0, (int)date('n', $ahora), $d, (int)date('Y', $ahora));
+        $cuando  = $momento($dia);
+        if ($cuando > $ahora) {
+            $cuando = $momento($dia - ($p['frecuencia'] === 'semanal' ? 7 : 1));
+        }
+        return $ultima < $cuando;
     }
 
     /** ¿Hay alguna copia pendiente? (barato: solo lee la programación) */

@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, with
 the data stored as JSON files you can read. No database server, no Composer, no
 extensions beyond the standard ones. You copy a folder and it works.
 
-**Version 2.8.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
+**Version 2.9.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
 8.1 or later recommended, [see why](#php-80-works-but-81-or-later-is-recommended))
 
 ---
@@ -20,7 +20,7 @@ from PHP, and you manage it from a web panel.
 
 ## Why you can rely on it
 
-- **It gives the same answers as SQLite.** Every CI run compares 139
+- **It gives the same answers as SQLite.** Every CI run compares 164
   hand-written queries, 16 writes and 6,000 randomly generated queries against
   SQLite on the same data, with and without indexes
   (`tests/f12_contra_sqlite.php`, `tests/f13_fuzz_contra_sqlite.php`). The few
@@ -53,10 +53,13 @@ need, use them: a database server is faster, and the difference grows with the
 size of the tables and the number of simultaneous writers. And know the limits
 before you choose this one:
 
-- **There are no transactions.** Each statement is atomic on its own — it either
-  completes or leaves the data as it was — but there is no `BEGIN`, `COMMIT` or
-  `ROLLBACK` to group several into one unit of work. If your data needs that,
-  this is not the right tool.
+- **A transaction holds the whole database.** Each statement is atomic on its
+  own, and since 2.9 several can run as one transaction (`$db->transaccion()`
+  or `$db->lote()` from PHP, the API's `lote` field, several statements in the
+  panel's SQL console): all of them or none. But while one runs, everyone else
+  waits for the whole database, and a transaction never spans requests. If
+  your application needs long transactions among many users at once, this is
+  not the right tool.
 - **Writes to the same table commit one at a time.** Reads never wait for most
   of a write, and writes to different tables run in parallel, but two writes to
   the same table take turns to commit.
@@ -70,7 +73,8 @@ ordinary error explaining what happened, instead of dying
 with PHP's uncatchable fatal. The query still fails, but the process survives and
 the API answers properly. Data is never corrupted by it: reads write nothing,
 writes are buffered and flushed at the end, every file is written atomically, and
-multi-file writes are finished or discarded whole by the journal.
+multi-file writes are finished or discarded whole by the journal (one too large
+for memory goes in stretches inside a transaction, 2.9).
 
 Rough numbers on 20,000 customers and 30,000 orders, one core, PHP 8.3,
 on-disk cache: a primary key lookup 0.6 ms and 6 MB, a lookup by a `UNIQUE` text
@@ -81,7 +85,7 @@ of those repeated on unchanged data under half a millisecond. On 100,000 rows:
 primary key lookup 0.75 ms and 6 MB, `UNIQUE` text lookup 2 ms, `GROUP BY`
 115 ms and 6 MB, single-row `INSERT` 14 ms. The writes are measured
 on a disk where an `fsync` costs 0.1 ms; on a shared host's disk, where it
-costs a few milliseconds, add that four times. A write reads and rewrites only the parts
+costs a few milliseconds, add that five times. A write reads and rewrites only the parts
 it touches and the pieces of the indexes that cover them; a read holds the
 whole table only when the query genuinely needs every row at once. Measure on
 your own hardware rather than trusting these — a shared host with a network
@@ -109,11 +113,15 @@ statements cost two thousand times that.
 read only the parts of the table where the matching rows live, and on a
 numeric column only the index pieces whose recorded range can hold the value:
 on 100,000 rows a primary key lookup takes 0.75 ms and 5.5 MB instead of scanning
-29 MB of JSON, reading one line of one part by its byte offset. A `BETWEEN` on
+the table, reading one line of one part by its byte offset. A `BETWEEN` on
 a numeric indexed column reads only the parts whose values can fall in the
 range. The last index pieces read stay in the process, so a loop of lookups
 does not decode them again.
-Ranges, `LIKE`, `ORDER BY` and aggregates still read everything. Writes use them
+Since 2.9 a range on an indexed column (texts and dates too) reads only the
+index pieces and parts that can hold it, `COUNT(*)` of a range counts in the
+index, and on a numeric indexed column so do `ORDER BY … LIMIT n` and `MIN` /
+`MAX` without a `WHERE`; `LIKE` and the other aggregates still read
+everything. Writes use them
 too: an `INSERT` checks uniqueness against the index on disk and appends to the
 last part without loading the table, and an `UPDATE` or `DELETE` by key reads
 and rewrites only the parts that hold the affected rows. An index is stored in
@@ -128,22 +136,51 @@ accumulator per group rather than the rows, `ORDER BY … LIMIT n` keeps only th
 n rows in the lead, `SELECT * FROM t LIMIT 50` stops reading as soon as it has
 enough, and `SELECT COUNT(*)` and `SHOW TABLES` never build the rows at all.
 Only a query that genuinely needs every row at once — `ORDER BY` without
-`LIMIT`, the inner side of a `JOIN`, `DISTINCT` — holds the table.
+`LIMIT`, the inner side of a `JOIN` — holds the table; `DISTINCT` holds only
+the distinct rows (2.9), and since 2.9 what does not fit in memory — an `ORDER
+BY`, a `JOIN`, a `GROUP BY` of many groups, a subquery, a view or a `WITH`, a
+`UNION`, window functions — goes to files on disk and gives the same rows.
+With a million rows and 256 MB, every query measured answers: see [A million
+rows](docs/01-core.md#a-million-rows-29).
 
 **Files and space, and how to tune them for your hosting.** A table is one
 file per 1,000 rows, plus one per part for each index, plus — without APCu —
-a serialised copy of each in `.cache/`. The benchmark with 100,000 customers
-and 150,000 orders ends with 709 files and 29 MB of data and indexes, and
-707 files and 41 MB of cache. Space is never the problem on a cheap plan; the
+a serialised copy of each in `.cache/`. The benchmark with 100,000 customers,
+150,000 orders and 100,000 notes ends with 911 files and 36.8 MB of data and
+indexes, and 840 files and 42 MB of cache. Space is never the problem on a cheap plan; the
 number of files can be, if the account counts inodes. Three knobs, in order:
-APCu (the cache leaves the disk entirely, no speed lost);
-`JSONSQLDB_CACHE_ACTIVA = 'apcu'` or `false` (no `.cache/`, reads decode JSON
-every time: a key lookup 13 ms instead of 8 on 100,000 rows);
-`JSONSQLDB_FILAS_POR_PARTE = 5000` (four times fewer files of every kind; a
-key lookup 6.7 ms instead of 2 and an `UPDATE` by key 25 ms instead of 11 on
-20,000 rows; scans unchanged). The full table of trade-offs, measured, is in
+APCu (used automatically when present; since 2.9 `JSONSQLDB_CACHE_APCU = false`
+leaves it aside): the cache goes to shared memory instead of `.cache/`, except
+the `.php` copies of the table parts that OPcache keeps compiled, while OPcache
+is active; `JSONSQLDB_CACHE_ACTIVA = 'apcu'` (nothing in `.cache/` at all, at the
+cost of those copies: loading a whole 60,000-row table from the cache goes from
+well under a millisecond to about 20 ms) or `false` (no cache: reads decode JSON
+every time; on 100,000 rows a scan with a filter 159 ms instead of 116, a
+lookup by key about the same, since it reads one line);
+`JSONSQLDB_FILAS_POR_PARTE = 5000` (four times fewer files of every kind; on
+20,000 rows a lookup by key the same, an `UPDATE` by key 12 ms instead of 10,
+and scans 1.4 to 1.9 times slower). The full table of trade-offs, measured, is in
 [`docs/01-core.md` §9](docs/01-core.md#9-files-space-and-how-to-tune-them).
 Deleting `.cache/` is always safe.
+
+**With OPcache, table parts stay compiled in shared memory between requests
+(2.9).** If PHP has OPcache active, each table part that has not changed for a
+couple of seconds is also kept as a small `.php` file that OPcache holds in its
+memory: measured between web requests on 60,000 rows, loading the whole table
+went from about 22 ms to about 0.15 ms and full scans became 33–56 % faster.
+Writes are not slowed, it never takes more than OPcache can spare (it stops at
+a quarter of free memory), and it is used automatically:
+`JSONSQLDB_CACHE_OPCACHE = false` turns it off. Without OPcache the engine works
+the same. What each cache does, and how to switch it, is in
+[`docs/01-core.md`](docs/01-core.md#the-caches-one-by-one).
+
+**PHP 8's JIT helps the heavy queries; turn it on if your hosting lets you.**
+With OPcache's JIT (`opcache.jit=tracing` and `opcache.jit_buffer_size=64M` in
+`php.ini`), measured between web requests on 20,000 customers and 30,000 orders
+(PHP 8.3, median of 150 requests): a lookup by key the same (0.55 ms), a range
+scan 3.5 → 2.1 ms, a `GROUP BY` 12.8 → 7.4 ms, an aggregated join of both tables
+62.6 → 48.1 ms; writes, within the noise of the disk. It is a recommendation,
+not a requirement: nothing depends on it.
 
 **A `JOIN` behind a selective `WHERE` looks rows up instead of hashing a
 table.** The parts of the `WHERE` that concern the left side run before the
@@ -154,28 +191,33 @@ join, and when few rows are left and the right-hand table has an index on the
 **A repeated `SELECT` on unchanged data is not run again.** Its result is
 cached under the SQL, the parameters and the revision of every table it
 touches; any write to one of them changes the revision and the cached result
-stops matching. Queries that depend on the moment (`RANDOM()`, `DATE('now')`)
-and results over `JSONSQLDB_CACHE_RESULTADOS` rows are never cached.
+stops matching. Queries that depend on the moment (`RANDOM()`, `DATE('now')`),
+results over `JSONSQLDB_CACHE_RESULTADOS` rows and, since 2.9, queries that took
+less than a millisecond (cheaper to run than to store) are never cached.
 
-**Be realistic about the limits.** A query result is held in memory, so this is
-built for tables in the thousands to low hundreds of thousands of rows, not
-millions. There is no network protocol and no connection pool: concurrency is
+**Be realistic about the limits.** It is built for tables in the thousands to
+low hundreds of thousands of rows. A million works, with the same results, but
+a query that has to go through the whole table takes seconds, and tens of
+seconds if it does not fit in memory and goes to disk. There is no network protocol and no connection pool: concurrency is
 handled with file locks, which is fine for a handful of simultaneous writers and
 not for hundreds. A write locks only its own table when it cannot affect any
-other; anything involving foreign keys, triggers or schema changes locks the
-whole database.
+other, and every table its foreign keys and triggers can reach when it can;
+schema changes, writes that read other tables, transactions and a set of tables
+that cannot be worked out lock the whole database.
 
 **Every write that touches more than one file is crash-safe.** That is nearly
 all of them: a table past `JSONSQLDB_FILAS_POR_PARTE` rows lives in several
-files, a table with indexes has one file per index, every write rewrites the
-revision file, and an `INSERT` into a table with `AUTOINCREMENT` also rewrites
-the schema file. Every file is first written to a temporary and forced to disk;
+files, a table with indexes has one file per index and part, every write rewrites the
+revision file (which also keeps the `AUTOINCREMENT` counter, so an `INSERT`
+does not rewrite the structure). Every file is first written to a temporary and forced to disk;
 then a manifest lists the renames and they are applied together. A power cut
 before the manifest leaves the data untouched; one after it is finished the
 next time the database is opened — whole or not at all, never half. The journal
 is scoped to whatever lock the write holds, so two writes to different tables
-still run at the same time. What is still not covered is grouping several
-statements into one unit of work — there is no `BEGIN`/`COMMIT`.
+still run at the same time. Several statements grouped into one transaction
+(2.9) are kept or undone together: the files they replace are kept until it
+ends, and one left unfinished by a process that died is undone the next time
+the database is opened.
 
 ---
 
@@ -190,7 +232,9 @@ so, with the numbers, where it happened.
    names spelled out, no binary encoding, no compression, no format that needs
    a tool to decode. The indexes, the revision files and the journal follow the
    same rule. This is why the on-disk cache is a copy that can be deleted, not
-   the data itself, and why a per-piece filter for text keys was not added.
+   the data itself. The one thing not readable is the Bloom filter of the keys
+   in each index piece (2.9, base64): a summary of the readable keys next to it,
+   which a piece can do without (it is then read whole).
 
 2. **It runs on cheap hosting.** No database server, or one too small or too
    limited to use: that is the hosting this project is for. Plain PHP 8.0 or
@@ -219,9 +263,9 @@ not for a power cut (see
 | | |
 |---|---|
 | **PHP** | 8.0 or later. Developed on 8.3; CI runs every version from **8.0 to 8.5**. **8.1 or later recommended**: 8.0 has no `fsync()`, so a power cut can lose roughly the last 30 seconds of writes (a crashed or killed process loses nothing on any version). See [below](#php-80-works-but-81-or-later-is-recommended) |
-| **PHP extensions** | Only the standard ones (`json`, `pcre`, `hash`, `filter`). **No** mbstring, **no** intl, **no** PDO |
-| **cURL** | Optional. **jsonSQLDBadmin** uses it for the API when it is there, and PHP's own streams when it is not; with the direct connection it makes no HTTP calls at all. The panel tests (`f5_admin.php`, `f11_asistente.php`) do need it. Not needed by the engine |
-| **zip** | Optional. Only for the panel's ZIP backup and restore and for loading Excel (.xlsx) files |
+| **PHP extensions** | Only the standard ones, on in every usual build: `json`, `pcre`, `hash`, `filter` and `ctype`; the panel also uses `session` and `tokenizer`. **No** mbstring, **no** intl, **no** PDO |
+| **cURL** | Optional. **jsonSQLDBadmin** uses it for the API when it is there, and PHP's own streams when it is not; with the direct connection it makes no HTTP calls at all. The panel tests (`f5_admin.php`, `f11_asistente.php`, `f20_memoria.php`) and the PHP example client (`api/cliente_ejemplo.php`) do need it. Not needed by the engine |
+| **zip** | Optional. Only for the panel's ZIP backup and restore and for Excel (.xlsx) files: importing (with `XMLReader`, standard), exporting and the import template |
 | **Web server** | Apache, LiteSpeed, IIS or nginx — see below |
 | **Composer** | Optional. Only to install this project; it pulls in nothing else |
 
@@ -253,7 +297,7 @@ hosting does not give, and flushes the whole machine.
 |---|---|---|
 | The PHP process dies, is killed or runs out of memory mid-write | nothing is lost: the journal finishes or discards the write | nothing is lost |
 | Power cut, or the operating system crashes | writes the system had not yet put on disk are lost — on Linux with default settings, roughly the **last 30 seconds** — even though they were reported as done | nothing that was reported as done is lost |
-| Could a table be left damaged? | on ext4 with default options (the usual on hosting), no: the kernel writes a replaced file's data before its rename. On other filesystems a replaced file could be left empty; `INTEGRITY CHECK` would report it and a backup is the way back | no |
+| Could a table be left damaged? | on ext4 with default options (the usual on hosting), no: the kernel writes a replaced file's data before its rename. On other filesystems a replaced file could be left empty; `CHECK TABLES` would report it and a backup is the way back | no |
 
 Everything else — features, speed, memory — is the same on 8.0. The setup
 wizard and the Configuration page of jsonSQLDBadmin show this warning when they
@@ -302,6 +346,22 @@ sudo chmod -R 750 data logs jsonsqldbadmin/datos
 ```
 
 On Windows with XAMPP the default permissions usually work as they are.
+
+### Keeping your project in git
+
+The bundled `.gitignore` already leaves out what must not go into a
+repository: the two real configuration files (`api/jsonsqldb_api_config.php` and
+`jsonsqldbadmin/config.php`, which hold the keys and secrets); everything inside
+`data/` (the databases, with their `.cache/`, `.tx/`, `.lote/`, `.reparados/`
+and `.orden/` folders); everything inside `logs/` (the query log and the API
+state in `logs/api/`); and everything inside `jsonsqldbadmin/datos/` (panel
+users, audit trail, backups, files to import, the installation code). It keeps
+only the `.htaccess`, `web.config` and `.gitkeep` that protect those folders.
+Commit everything else, `config.php` at the root included: it holds settings,
+not secrets. If you point `JSONSQLDB_DATA_PATH`, `JSONSQLDB_LOG_PATH`,
+`API_ESTADO_PATH` or `ADMIN_DATA_PATH` to another folder inside the project,
+add that folder to `.gitignore` yourself. A database is better kept out of
+git: copy it with the panel's ZIP or SQL dump instead.
 
 ---
 
@@ -357,7 +417,8 @@ at least 10 characters.
 Once that user exists the setup screen disappears and the panel asks for
 credentials like any other. If you ever lose access, delete
 `jsonsqldbadmin/datos/usuarios.json` and the panel will ask you to create the
-administrator again.
+administrator again, with a new installation code it writes to
+`jsonsqldbadmin/datos/codigo-instalacion.txt`.
 
 If you are on nginx or OpenLiteSpeed, do [`nginx/`](nginx/) or
 [`litespeed/`](litespeed/) **before** exposing anything.
@@ -399,23 +460,28 @@ POST /jsonsqldb/api/jsonsqldb_api.php
 ```
 
 That is a deliberate design choice, not a limitation. It means the storage layer
-is never exposed, permissions are enforced in one place, every query is logged,
+is never exposed, permissions are enforced in one place, every write and every
+error is logged (every read too, if you set `JSONSQLDB_LOG_NIVEL` to `todo`),
 and your application can live on a different machine from the data.
 
 ### Request and response
 
 Every request carries an API key, the target database, the SQL, its bound
-parameters, a timestamp and an HMAC-SHA256 signature over all of it:
+parameters, a timestamp, a random nonce (2.9) and an HMAC-SHA256 signature over
+all of it:
 
 ```php
 $token = hash_hmac('sha256',
-    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $sql . $params . "¿", $secreto);
+    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $nonce . "|" . $sql . $params . "¿", $secreto);
 ```
 
 Each API key signs with its own `hmac_secret`, so a compromised application
 cannot sign as another key. `$db` is the database name as sent, or the empty
 string for statements that target none (`SHOW DATABASES`, `CREATE DATABASE`);
-`$params` is the JSON as sent, or empty when there are none.
+`$params` is the JSON as sent, or empty when there are none. A request without
+a nonce is still accepted with the formula of before 2.9. Several statements
+can go as one transaction in a `lote` field instead of `sql` and `params`
+(2.9): see [docs/04-api.md](docs/04-api.md).
 
 > **The database name entered the formula in 2.0, and this breaks old clients.**
 > Before, `db` was outside the signature, so a legitimate signed request could be
@@ -425,7 +491,7 @@ string for statements that target none (`SHOW DATABASES`, `CREATE DATABASE`);
 > and PowerShell clients and the admin panel already use the new one. Full
 > details in [docs/04-api.md](docs/04-api.md).
 
-**All responses are JSON.** Three shapes, and that is all:
+**All responses are JSON.** Four shapes, and that is all:
 
 ```jsonc
 // SELECT and SHOW: an array of rows
@@ -434,7 +500,10 @@ string for statements that target none (`SHOW DATABASES`, `CREATE DATABASE`);
 // INSERT / UPDATE / DELETE / DDL
 {"success": true, "filas": 3, "mensaje": "3 fila(s) insertada(s)"}
 
-// Anything that went wrong
+// A lote (2.9): the result of each statement, in order
+[ {"success": true, "filas": 1, "mensaje": "..."}, [ {"id": 1} ] ]
+
+// Anything that went wrong ("Error en la consulta" alone unless DEVOLVER_ERRORES is true)
 {"error": "Error en la consulta: SYNTAX: ..."}
 ```
 
@@ -442,8 +511,8 @@ Numbers come back as JSON numbers, not strings. `NULL` comes back as `null`.
 
 ### Example clients
 
-Two ready-to-use clients are included. Copy the one you need into your
-application; neither has dependencies.
+Three ready-to-use clients are included. Copy the one you need into your
+application; none has dependencies.
 
 | File | For |
 |---|---|
@@ -451,8 +520,8 @@ application; neither has dependencies.
 | [`api/cliente_ejemplo.ps1`](api/cliente_ejemplo.ps1) | PowerShell scripts |
 | [`api/cliente_ejemplo.py`](api/cliente_ejemplo.py) | Python 3.7+, standard library only |
 
-They handle the signature, the bound parameters and the TLS certificate
-(including self-signed ones) for you.
+They handle the signature, the bound parameters and the TLS certificate (your
+own CA's, or a self-signed one if you accept it explicitly) for you.
 
 ```php
 require 'cliente_ejemplo.php';
@@ -486,7 +555,9 @@ $db->consultar('SELECT * FROM customers WHERE name = ?', [$name]);
 ## Direct connection (no API)
 
 PHP code running on the same server can use the engine without going through
-HTTP. It is **disabled by default**. To enable it, in `config.php`:
+HTTP. It is **disabled by default**, and the API **enabled**; each has its
+switch in `config.php` (`JSONSQLDB_API_ACTIVA = false` turns the API off, 2.9).
+To enable the direct connection:
 
 ```php
 defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', true);
@@ -501,9 +572,10 @@ defined('JSONSQLDB_CONEXION_DIRECTA') || define('JSONSQLDB_CONEXION_DIRECTA', tr
 - **There is no API key and no signature.** It bypasses HMAC authentication, the
   rate limit, replay protection and the IP allow-list. Nothing stands between an
   unvalidated variable in your code and the data.
-- **It is still logged.** Every query goes to the log exactly as it would through
-  the API, with the `ip` field set to `"local"`, since there is no HTTP request
-  to take an address from.
+- **It is still logged.** What goes to the log (by default, since 2.9, writes
+  and errors: `JSONSQLDB_LOG_NIVEL`) goes there exactly as through the API, with
+  the `ip` field set to `"local"`, since there is no HTTP request to take an
+  address from.
 - **Bound parameters still work, and you should still use them.** They are the
   only thing protecting you from injection here, and there is no API forcing you
   to get it right.
@@ -531,6 +603,17 @@ $total = $db->consultar('SELECT COUNT(*) AS n FROM customers')[0]['n'];
 $r = $db->consultar('UPDATE customers SET balance = balance + ? WHERE id = ?', [25.40, 7]);
 echo $r['filas'], " row(s) updated\n";
 
+// A transaction (2.9): all of it or nothing. Inside, each statement sees the
+// previous ones; an exception that leaves the function undoes everything (a
+// statement that fails leaves nothing of its own). The whole database waits
+// for it, so keep it short
+$db->transaccion(function (JsonSQLDB\Database $db) {
+    $db->consultar('UPDATE accounts SET balance = balance - ? WHERE id = ?', [50, 1]);
+    $db->consultar('UPDATE accounts SET balance = balance + ? WHERE id = ?', [50, 2]);
+});
+// The same as a list of statements, which is what the API's lote runs
+$db->lote([['INSERT INTO log (what) VALUES (?)', ['x']], 'DELETE FROM queue WHERE done = 1']);
+
 // Schema and maintenance — a direct connection is always admin
 $db->consultar('ALTER TABLE customers ADD COLUMN notes VARCHAR(200)');
 $db->consultar('CHECK KEYS');
@@ -547,7 +630,7 @@ you what kind of problem it was:
 try {
     $db->consultar('INSERT INTO customers (code) VALUES (?)', ['A1']);
 } catch (JsonSQLDB\JsonSqlDbError $e) {
-    echo $e->sqlState, ': ', $e->getMessage();   // CONSTRAINT: ... already exists
+    echo $e->sqlState, ': ', $e->getMessage();   // CONSTRAINT: Valor duplicado en restricción UNIQUE …
 }
 ```
 
@@ -559,16 +642,22 @@ It talks to the engine in one of two ways, chosen in a **setup wizard** the
 first time it is opened: **through the API**, over HTTP and signed exactly like
 your application (it uses cURL if it is there and PHP's own streams if not), or
 by **direct connection** (2.7), loading the engine without HTTP when the panel
-and the data are on the same machine. With either, the engine itself applies
-the role of each panel user. Apart from the ZIP backup and restore, the panel
-never reads or writes the data files.
+and the data are on the same machine. With the direct connection the engine
+itself applies the role of each panel user; through the API it does when a
+read-only key is configured (`ADMIN_API_KEY_LECTURA`), and otherwise the
+panel's own check is the only barrier. Apart from the ZIP backup and restore, the panel
+never reads or writes the data files: an import on the same machine runs in a
+transaction of the engine, which the panel loads for it.
 
 It manages databases, tables, columns, keys, views, triggers and rows; checks
-and repairs referential integrity; exports to CSV, `INSERT` statements, ZIP or
-an SQL dump for SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft
+and repairs referential integrity and hand-broken JSON files; runs several
+statements as one transaction from its SQL console; exports to CSV, `INSERT`
+statements, JSON, Excel (.xlsx), ZIP, the whole database as one JSON document
+or an SQL dump for SQLite, MySQL / MariaDB, PostgreSQL, SQL Server or Microsoft
 Access — views and triggers translated to each one's SQL — and imports the dumps
-those engines make, with their views and triggers, CSV and Excel (.xlsx) files
-and its own ZIP (for Access, with a PowerShell script it offers). Exports and
+those engines make, with their views and triggers, CSV, JSON and Excel files
+and its own ZIP (for Access and for SQL Server, with PowerShell scripts it
+offers). Only administrators export (2.9). Exports and
 imports have no size limit: what does not fit in PHP's memory goes in batches
 worked out from the free memory, a file larger than the upload limit is sent in
 pieces (and resumes if the connection drops), and a file can also be left by FTP
@@ -593,44 +682,64 @@ theme. The panel makes **zero** external requests.
 
 | | |
 |---|---|
-| **Query** | `SELECT` |
-| **Write** | `INSERT`, `UPDATE`, `DELETE` |
-| **Schema** | `CREATE TABLE`, `CREATE TABLE … AS SELECT`, `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW`, `CREATE INDEX`, `DROP INDEX` |
+| **Query** | `SELECT`; `EXPLAIN SELECT …` (2.9: runs it and says how each table was read) |
+| **Write** | `INSERT` (with `OR IGNORE`, `OR REPLACE`, `ON CONFLICT … DO UPDATE` and `RETURNING`, 2.8), `UPDATE`, `DELETE`; also with other tables (2.9): `UPDATE … FROM`, `UPDATE … JOIN … SET`, `DELETE … USING`, `DELETE t FROM t JOIN …` |
+| **Schema** | `CREATE TABLE`, `CREATE TABLE … AS SELECT`, `CREATE TABLE … LIKE` (2.9), `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW`, `CREATE [UNIQUE] INDEX`, `DROP INDEX` |
 | **Database** | `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` |
-| **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` |
-| **Maintenance** | `CHECK KEYS`, `REPAIR KEYS` |
+| **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES`, `SHOW CREATE TABLE`, `SHOW CREATE VIEW` (2.9) |
+| **Maintenance** | `CHECK KEYS`, `REPAIR KEYS`; `CHECK TABLES`, `REPAIR TABLES`, `VACUUM` (2.9) |
+| **Transactions** | a batch of statements (2.9), which may start with `BEGIN` and end with `COMMIT` or `ROLLBACK` |
 
-`SELECT` supports `DISTINCT`, `WITH` (CTEs), `UNION` / `UNION ALL` /
-`INTERSECT` / `EXCEPT`, correlated subqueries, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `WHERE`, `GROUP BY`,
-`HAVING`, `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
+`SELECT` supports `DISTINCT`, `WITH` (CTEs, also `WITH RECURSIVE`, 2.9), `UNION` / `UNION ALL` /
+`INTERSECT` / `EXCEPT`, correlated subqueries, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `JOIN … USING` and `NATURAL JOIN` (2.9), `WHERE`, `GROUP BY`,
+`HAVING`, window functions (`OVER`, 2.9), `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
 subqueries in `WHERE` and in `FROM`, and `CASE WHEN`.
 
-`ALTER TABLE` supports `ADD COLUMN`, `MODIFY COLUMN`, `DROP COLUMN`,
-`RENAME COLUMN`, `RENAME TO`, `ADD CONSTRAINT` (unique / foreign key),
-`DROP CONSTRAINT`, `ADD PRIMARY KEY` and `DROP PRIMARY KEY`.
+`ALTER TABLE` supports `ADD COLUMN`, `MODIFY COLUMN`, `CHANGE` (2.9),
+`DROP COLUMN`, `RENAME COLUMN`, `RENAME TO`, `ADD CONSTRAINT` (unique, foreign
+key, `CHECK`), `DROP CONSTRAINT`, `DROP CHECK` (2.9), `ADD PRIMARY KEY`,
+`DROP PRIMARY KEY` and `ADD` / `DROP INDEX` (2.9).
 
 ### Operators
 
-`=` `<>` `!=` `<` `<=` `>` `>=` · `AND` `OR` `NOT` · `IS NULL` `IS NOT NULL` ·
-`IN` `NOT IN` · `BETWEEN` `NOT BETWEEN` · `LIKE` `NOT LIKE` (with `%` and `_`,
-case-insensitive) · `EXISTS` `NOT EXISTS` · `REGEXP` `RLIKE` (and `NOT`) · `||` (string concatenation) ·
-`+` `-` `*` `/` `%`
+`=` `==` `<>` `!=` `<` `<=` `>` `>=` · `AND` `OR` `NOT` `XOR` · `IS NULL` `IS NOT NULL` ·
+`IS` `IS NOT` `IS [NOT] DISTINCT FROM` `<=>` · `IN` `NOT IN` · `BETWEEN` `NOT BETWEEN` ·
+`LIKE` `NOT LIKE` (with `%` and `_`, case-insensitive) · `GLOB` (case-sensitive) ·
+`EXISTS` `NOT EXISTS` · `REGEXP` `RLIKE` (and `NOT`) · `||` (string concatenation) ·
+`+` `-` `*` `/` `%` `DIV` `MOD` · `&` `|` `~` `<<` `>>` · `->` `->>` (JSON) · `COLLATE`
+— the ones of SQLite and MySQL added in 2.9 behave as there.
 
 ### Functions
 
-**Aggregate** — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`
+Most of SQLite's and MySQL's (2.9), each behaving as in the engine it comes
+from (one difference: a value with only a time, `'12:00:00'`, is not a date
+here, so `TIME('12:00:00')` is `NULL`; SQLite reads it as 2000-01-01); the full list, and what wins where the two differ, is in
+[`docs/02-queries.md` §3](docs/02-queries.md#3-functions).
 
-**Text** — `CONCAT`, `UPPER`, `LOWER`, `LENGTH`, `TRIM`, `LTRIM`, `RTRIM`, `REPLACE`,
-`SUBSTR`, `SUBSTRING`, `INSTR`
+**Aggregate** — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `TOTAL`, `GROUP_CONCAT` /
+`STRING_AGG`, `ANY_VALUE`, `JSON_GROUP_ARRAY`, `JSON_GROUP_OBJECT`, `STDDEV`,
+`VARIANCE`, `BIT_AND` / `OR` / `XOR`…, with `FILTER (WHERE …)`, and as window
+functions with `OVER (…)` together with `ROW_NUMBER`, `RANK`, `LAG`, `LEAD`…
 
-**Numeric** — `ABS`, `ROUND`, `RANDOM`
+**Text** — `CONCAT`, `CONCAT_WS`, `UPPER`, `LOWER`, `LENGTH`, `TRIM`, `REPLACE`,
+`SUBSTR`, `INSTR`, `LPAD`, `REVERSE`, `REPEAT`, `SUBSTRING_INDEX`,
+`FORMAT` / `PRINTF`…
 
-**Date and time** — `DATE`, `TIME`, `DATETIME`, `STRFTIME`
+**Numeric** — `ABS`, `ROUND`, `CEIL`, `FLOOR`, `POWER`, `SQRT`, `LN`, `LOG10`,
+the trigonometric ones, `GREATEST`, `LEAST`, `RANDOM`…
 
-**Null handling** — `COALESCE`, `IFNULL`, `NULLIF`
+**Date and time** — SQLite's `DATE`, `TIME`, `DATETIME`, `STRFTIME`,
+`JULIANDAY` with their modifiers, and MySQL's `NOW`, `DATE_ADD`, `DATEDIFF`,
+`DATE_FORMAT`, `STR_TO_DATE`, `+ INTERVAL n unit`…
+
+**JSON** — `json_extract`, `->`, `->>`, `json_set`, `json_array`, `json_object`…
+
+**Hashes** — `MD5`, `SHA1`, `SHA2`, `CRC32`, `UUID`…
+
+**Null handling** — `COALESCE`, `IFNULL`, `NULLIF`, `IF`, `IIF`
 
 **Conversion** — `CAST(expr AS type)`, accepting the same type names as
-`CREATE TABLE`
+`CREATE TABLE`, and `CONVERT`
 
 `CONCAT()` is available for people coming from MySQL, but `||` is the native
 operator, as in SQLite:
@@ -643,30 +752,34 @@ SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 
 **It resembles SQLite's but is not compatible with it.** There are SQLite
 constructs missing here, others borrowed from MySQL, and concrete behavioural
-differences — the largest being that a text compared against a number is
-converted (`'12abc'` is 12) rather than following the declared column's affinity.
+differences — the largest being that a text that is a number compares as that
+number wherever it comes from (`'12' = 12`, `'9' < '10'`), rather than following
+the declared column's affinity.
 Do not assume a query that runs in SQLite runs here, or the other way round.
 
 Borrowings, where they are what people expect:
 `CONCAT`, `REGEXP`/`RLIKE` and `LIMIT n, m` come from MySQL, `CAST` and
 `FULL JOIN` are standard SQL, and `AUTO_INCREMENT` is accepted alongside
-`AUTOINCREMENT`. Anything not mentioned behaves as in SQLite. See
-[`docs/02-queries.md`](docs/02-queries.md) for the full table.
+`AUTOINCREMENT`; since 2.9 also most of MySQL's syntax and functions that
+people bring with them (`ON DUPLICATE KEY UPDATE`, `INSERT … SET`, `UNSIGNED`,
+`ENUM`, `TRUNCATE TABLE`, `DESCRIBE`…). Anything not mentioned behaves as in
+SQLite. See [`docs/02-queries.md`](docs/02-queries.md) for the full table.
 
 ### What is not supported
 
 The rule: **if a statement is accepted, it does exactly what it promises;
 otherwise it is rejected with a clear error.** Nothing is accepted and silently
-ignored.
+ignored; the few statements accepted without doing anything (2.9: `ANALYZE`,
+`SELECT … FOR UPDATE`, MySQL's table options…) are those whose promise already
+holds here.
 
 These exist in SQLite and raise an error here: `INSERT OR FAIL` / `OR ROLLBACK`
 (use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT`, supported since 2.8), `CREATE TEMP`/`TEMPORARY TABLE` (no
-temporary tables), `WITHOUT ROWID` (there is no rowid), `BEGIN`/`COMMIT`/
-`ROLLBACK` (no multi-statement transactions), `CHECK` constraints (use a `BEFORE`
-trigger with `RAISE(ABORT, …)`), `CREATE UNIQUE INDEX` (an index here only speeds
-up lookups; use `ALTER TABLE … ADD UNIQUE`, which creates its own index), `GLOB` (use `LIKE`
-or `REGEXP`), window functions (`OVER`), and `WITH RECURSIVE` — plain CTEs do
-work, but a query cannot refer to itself.
+temporary tables), `WITHOUT ROWID` (there is no rowid), and `BEGIN`/`COMMIT`/
+`ROLLBACK` anywhere but at the start and the end of a batch, which is already
+a transaction (each request is independent). `CHECK` constraints, `CREATE
+UNIQUE INDEX`, `GLOB`, window functions (`OVER`), `WITH RECURSIVE` and
+`COLLATE NOCASE` / `RTRIM` in a column work since 2.9.
 
 Behavioural differences worth knowing: `DECIMAL` is a rounded float, `ORDER BY`
 uses a configurable collation rather than binary order, and `LIKE` is
@@ -676,16 +789,18 @@ case-insensitive but accent-sensitive.
 
 | Type | Aliases | Notes |
 |---|---|---|
-| `INTEGER` | `INT`, `BIGINT`, `SMALLINT`, `TINYINT` | The only type that can be `AUTOINCREMENT` |
+| `INTEGER` | `INT`, `BIGINT`, `SMALLINT`, `MEDIUMINT`, `TINYINT`, `BIT`, `YEAR` | The only type that can be `AUTOINCREMENT`; `UNSIGNED` rejects negatives (2.9) |
 | `DECIMAL(p,s)` | `NUMERIC`, `NUMBER`, `MONEY` | Float rounded to `s` decimals. `p` is accepted and ignored |
 | `DOUBLE` | `REAL`, `FLOAT`, `DOUBLE PRECISION` | Not rounded |
-| `TEXT` | `VARCHAR(n)`, `CHAR`, `STRING` | `n` is enforced as a maximum length |
+| `TEXT` | `VARCHAR(n)`, `CHAR`, `NVARCHAR`, `NCHAR`, `CLOB`, `STRING`, MySQL's `TINYTEXT` / `MEDIUMTEXT` / `LONGTEXT`, `JSON` and `UUID`; `BLOB`, `BINARY` and `VARBINARY` (text only) | `n` is enforced as a maximum length; `COLLATE NOCASE` / `RTRIM` (2.9) |
+| `ENUM('a', 'b')` | | A text that only takes those values (2.9) |
 | `DATETIME` | `DATE`, `TIMESTAMP` | See the format note below |
-| `BOOLEAN` | `BOOL` | Stored as 1 / 0 |
+| `BOOLEAN` | `BOOL` | An `INTEGER`, as in SQLite: `true` and `false` are stored as 1 and 0 |
 
-> **`DATETIME` format.** Values must be **`YYYY-MM-DD`**, with the time part
-> **optional**: `YYYY-MM-DD HH:MM:SS`. So `2026-08-20` and
-> `2026-08-20 14:30:00` are both valid; `20/08/2026` and `08-20-2026` are
+> **`DATETIME` format.** Values must be **`YYYY-MM-DD`**, with an **optional**
+> time `HH:MM`, `HH:MM:SS` or `HH:MM:SS.fff` after a space or a `T` (stored
+> with a space). So `2026-08-20`, `2026-08-20 14:30` and `2026-08-20 14:30:00`
+> are all valid; `20/08/2026` and `08-20-2026` are
 > rejected with a type error. jsonSQLDBadmin shows this reminder in the column
 > forms.
 
@@ -697,7 +812,9 @@ case-insensitive but accent-sensitive.
 ### Constraints and behaviour
 
 `PRIMARY KEY` (simple or composite) · `AUTOINCREMENT` · `NOT NULL` · `UNIQUE`
-(single or multi-column) · `DEFAULT` · `FOREIGN KEY` with `ON DELETE` /
+(single or multi-column) · `DEFAULT` · `CHECK` · `COLLATE NOCASE` / `RTRIM` on a
+text column (2.9, as in SQLite: see [Part 2](docs/02-queries.md)) ·
+`FOREIGN KEY` with `ON DELETE` /
 `ON UPDATE` `NO ACTION` `CASCADE` `RESTRICT` `SET NULL` `SET DEFAULT` ·
 `BEFORE`/`AFTER` triggers on `INSERT`/`UPDATE`/`DELETE` with `WHEN`, `NEW.`,
 `OLD.` and `RAISE(ABORT, '…')`.
@@ -707,7 +824,17 @@ exists in the parent table, and `REPAIR KEYS` sets those keys to `NULL` where th
 column allows it — it never deletes rows. The engine enforces foreign keys on
 every write, so this only happens when someone edits a `.json` by hand or
 restores one table's backup without the other. The check reads straight from
-disk, bypassing the cache, which is the only way a hand edit would show up.
+disk.
+
+**A file edited or broken by hand is noticed and, when it is safe, repaired
+(2.9).** Each cached part, structure and index piece carries the seal of its
+file (size, date, inode), so an edit is seen by the next query instead of
+staying hidden behind the cache. A JSON broken by an extra or missing comma,
+bracket or brace is repaired on its own when it is read, keeping the original
+in `.reparados/`; a row that cannot be fixed without guessing makes the query
+fail with the file and the line, until it is fixed by hand or `REPAIR TABLES`
+sets it aside. `CHECK TABLES` lists what is damaged. Details in
+[`docs/01-core.md`](docs/01-core.md#editing-the-files-by-hand-29).
 
 **Views** are stored `SELECT` statements you query like a table. They hold no
 data, are resolved on every query, and are read-only. They can nest up to 8
@@ -739,13 +866,17 @@ Everything the engine shares between processes lives inside the database
 folder, so two installations with different data folders never see each other;
 APCu keys are prefixed with a digest of the data path for the same reason.
 Keep `JSONSQLDB_DATA_PATH`, `API_ESTADO_PATH`, `ADMIN_SESION_NOMBRE` and
-`ADMIN_DATA_PATH` separate — all four already default to paths inside the
-project folder.
+`ADMIN_DATA_PATH` separate. Three of them already default to paths inside the
+project folder; the session name is `jsonsqldbadmin` in every copy, so two
+panels on the same domain need a different `ADMIN_SESION_NOMBRE` in one of them.
 
 ### Upgrading from an earlier version
 
 Replace the folder and keep your two configuration files
-(`api/jsonsqldb_api_config.php` and `jsonsqldbadmin/config.php`, both gitignored).
+(`api/jsonsqldb_api_config.php` and `jsonsqldbadmin/config.php`, both gitignored),
+and whatever lives inside the folder (`data/`, `logs/` and `jsonsqldbadmin/datos/`
+with the default paths); carry over any setting you changed in the root
+`config.php`, which ships with its defaults.
 **The data needs no conversion**: an existing database is read as it is, and each
 table moves to the current layout on the first write to it — a `<table>.rev.json`
 replacing its entry in the old shared `_revs.json` (pre-2.0), index files for its
@@ -755,6 +886,18 @@ piece per part plus a `creada` marker in `rev.json` (2.6). Revision numbers carr
 where they were rather than restarting, so a stale cache entry cannot be mistaken
 for a current one.
 
+**This is checked against every published version**, from 1.0.0 to 2.8.0:
+`tests/f24_versiones_anteriores.php` takes each one from its git tag, builds a
+database with that version's own engine and settings (tables spread over
+several parts — 5,000 rows each in 1.x, 1,000 since 2.0 — with autoincrement,
+`UNIQUE`, an index, a foreign key, a view and a trigger, as far as that version
+supported them, plus deletes and updates), and opens it with the current
+engine: it must return what the old engine returned, write correctly, carry
+the autoincrement on without reusing deleted ids, keep enforcing the
+constraints and the trigger, and leave indexes, files and keys consistent. The
+reverse is not supported: a database written by a newer version is not meant to
+be opened by an older engine.
+
 **Coming from 1.x, update your API clients before or at the same time**, because
 the HMAC formula changed in 2.0 and old signatures are rejected. The bundled PHP,
 Python and PowerShell clients and the admin panel are already updated.
@@ -762,23 +905,58 @@ Python and PowerShell clients and the admin panel are already updated.
 One thing worth doing first: **open each database with the old version once**
 before swapping the folder, so anything left half-finished is settled by the
 version that wrote it. It is not required — a journal left pending by any earlier
-version is recognised and undone by 2.5 as well — but it is the tidier order.
+version is recognised and settled by this one too (an undo journal of 2.4 or
+earlier is undone, a redo journal is finished) — but it is the tidier order.
 
 Two configuration constants were removed in 2.5 and are ignored if still
 defined: `JSONSQLDB_JOURNAL_DATOS` and `JSONSQLDB_CACHE_MAX_FILAS`. One was
-added in 2.6, `JSONSQLDB_CACHE_RESULTADOS`, with a working default; nothing to
-change unless you want the result cache off.
+added in 2.6, `JSONSQLDB_CACHE_RESULTADOS`, and one in 2.7,
+`JSONSQLDB_ESCRITURA_POR_PARTES`, both with working defaults. Three were added
+in 2.9, `JSONSQLDB_CACHE_APCU`, `JSONSQLDB_CACHE_OPCACHE` and
+`JSONSQLDB_API_ACTIVA`, all on by default; an existing `config.php` without
+them gets the defaults. And without `JSONSQLDB_LOG_NIVEL` the log now records
+writes and errors only (`escrituras`; before, `todo`).
+
+**From 2.8 or earlier to 2.9, the cache starts over.** Its entries now carry
+the seal of the file they came from, so 2.9 uses keys of its own and ignores
+the old ones (and an earlier version, should you go back, ignores those of
+2.9). The old entries in `.cache/` are just unused files: deleting the folder
+after upgrading frees the space, and is always safe. A table touched by a
+transaction may also get a `gen` field in its `rev.json`; earlier versions
+ignore it.
+
+**Going back from 2.9 to an earlier version: run `VACUUM` first.** Since 2.9 a
+deleted row leaves `null` in its place instead of moving the rows behind it
+(see [Storage](#storage)), and 2.8 or earlier cannot read a table with such
+holes: they stop with an error on the first scan rather than return wrong rows.
+`VACUUM` rewrites every table that has holes without them, after which the
+files are exactly the kind earlier versions write.
+
+A table with `CHECK` constraints or `ENUM` columns (2.9) is read by earlier
+versions without them: its data comes out the same, but they would let a row
+that breaks them be written. A `COLLATE NOCASE` or `RTRIM` column (2.9) has to
+lose it before going back (`ALTER TABLE … MODIFY` without it): earlier versions
+compare it as binary, and its indexes, built with the collation, would miss
+rows there. Views and triggers are stored as their SQL, so one that uses SQL
+only 2.9 accepts (a window function, `UPDATE … FROM`) is an error there when it
+runs.
 
 ### Storage
 
 Each database is a directory. A table is `table.json` with the rows,
-`table.meta.json` with the structure (columns, types, keys, indexes, triggers,
-autoincrement counter), `table.rev.json` with a revision counter and the state of
-the table's parts and indexes, plus `table.partN.json` once it grows past
+`table.meta.json` with the structure (columns, types, keys, indexes, triggers),
+`table.rev.json` with a revision counter, the autoincrement counter and the
+state of the table's parts and indexes, plus `table.partN.json` once it grows past
 `JSONSQLDB_FILAS_POR_PARTE` rows (1,000 by default) and one
 `table.idx.<n>.json` / `table.idx.<n>.partN.json` per index and part. A
 `_database.json` holds database-level metadata. Everything is readable JSON,
-one row per line, so a file stays diffable and editable by hand.
+one row per line, so a file stays diffable and editable by hand. A deleted row
+leaves `null` on its line (2.9), so deleting does not move the rows behind it
+(except in a table with triggers or a foreign key to itself, which a `DELETE`
+loads whole and writes without them); when holes pass 25 % of a table it is
+rewritten without them, and `VACUUM` does it on demand. `VACUUM` also rebuilds
+the indexes written by 2.8 or earlier, so that lookups by a text key get the
+filter of 2.9 (see [CHANGELOG](CHANGELOG.md)).
 
 The revision file is per table and not one shared file, because two writes to
 different tables run at the same time: a single shared counter meant whichever
@@ -797,17 +975,17 @@ one automatically, named `auto_<columns>`; `CREATE INDEX name ON t (a, b)` adds
 your own. A composite index is used left to right: `(a, b)` serves a lookup on
 `a`, or on `a` and `b`, but not on `b` alone.
 
-Only `=` and `IN` against literals, and only in the top-level `AND` chain of a
-`WHERE`. Anything under a `NOT`, a top-level `OR`, `IS NULL` and `NOT IN` are
-left alone, because using an index there would change the result rather than just
-speed it up. Index keys follow the engine's own equality, not PHP's: `5`, `'5'`
+`=`, `IN` and, since 2.9, `<`, `<=`, `>`, `>=` and `BETWEEN` against literals
+use an index, only in the top-level `AND` chain of a `WHERE`.
+Anything under a `NOT`, a top-level `OR`, `IS NULL` and `NOT IN` are left alone,
+because using an index there would change the result rather than just speed it
+up. Index keys follow the engine's own equality, not PHP's: `5`, `'5'`
 and `'5.0'` share a key, so looking up a number still finds the row that stored
 it as text.
 
 An index is stored in **one piece per part of the table** and **corrected
 rather than rebuilt** whenever the engine can prove what changed: rows appended
-at the end, rows replaced in place, or rows shifted from a position on by a
-`DELETE`. Only the pieces that cover the positions concerned are read and
+at the end, rows replaced in place, or a deleted row left as a hole (2.9). Only the pieces that cover the positions concerned are read and
 rewritten; the header of every other piece is checked so a damaged file is
 rebuilt at the next write. Any doubt rebuilds the index from the rows. The
 revision file says which revision each piece belongs to; on any mismatch the
@@ -821,11 +999,12 @@ table — which is what makes a deadlock impossible:
 
 | Operation | Database | Table |
 |---|---|---|
-| Reads (`SELECT`, `SHOW`, `CHECK KEYS`) | shared | **shared**, per table read |
+| Reads (`SELECT`, `SHOW`, `CHECK KEYS`, `CHECK TABLES`), also each statement of a `lote` that only reads (2.9) | shared | **shared**, per table read |
 | A write to **one** table with no foreign keys or triggers | shared | **exclusive** |
 | An `UPDATE` or `DELETE` that depends only on each row (2.7) | shared | **shared** while it works, **exclusive** only to commit (writes by part) |
 | Cascades and triggers, when the set of tables is knowable | shared | **exclusive on every table** it can reach |
-| Schema changes, views, `REPAIR KEYS`, `INSERT ... SELECT` | **exclusive** | — |
+| Schema changes, views, `REPAIR KEYS`, `REPAIR TABLES`, `VACUUM`, and writes that read other tables (`INSERT ... SELECT`, a subquery, an `UPDATE` or `DELETE` with other tables, also in a trigger they fire) | **exclusive** | — |
+| A transaction (2.9), from start to end, also a `lote` that writes | **exclusive** | — |
 
 So two writes to different tables run at the same time, and a write does not
 block reads of other tables.
@@ -853,12 +1032,13 @@ never a file whose contents were still sitting in the operating system's cache.
 `fsync()` exists from PHP 8.1; on 8.0 the buffer is flushed, which is as far as
 that version goes.
 
-That covers one file. Multi-file writes are protected by a **redo journal** in
-`.tx/<scope>/`: every file is written to its temporary first, then a manifest
+That covers one file. Multi-file writes are protected by a **redo journal**,
+`.tx/<scope>.json`: every file is written to its temporary first, then a manifest
 listing the renames is written in one piece, then the renames happen. A crash
 before the manifest leaves the data untouched (the temporaries are swept); a
-crash after it is finished on the next open, as many times as it takes. It
-replaced the copy-everything-first undo journal of earlier versions, which is
+crash after it is finished on the next open, as many times as it takes; so is
+a write whose rename failed without a crash (on Windows, a file another program
+holds open). It replaced the copy-everything-first undo journal of earlier versions, which is
 where most of the write cost used to go; pending journals of the old format are
 still recognised and undone.
 
@@ -883,8 +1063,10 @@ memory_limit  ≥  20 × (the largest table a single query has to hold in full)
 ```
 
 A query holds a table in full only when it needs every row at once: `ORDER BY`
-without `LIMIT`, `GROUP BY`, the inner side of a `JOIN`, `DISTINCT`. A `WHERE`
-scan does not, and neither does a write. If APCu is enabled, its memory is
+without `LIMIT` and the inner side of a `JOIN` (until they do not fit: since
+2.9 both then go to files on disk). `GROUP BY` holds one accumulator per group
+and `DISTINCT` the distinct rows; a `WHERE` scan holds only what passes, and a
+write only what it changes. If APCu is enabled, its memory is
 separate and does not count against `memory_limit`.
 
 **Lowering `JSONSQLDB_FILAS_POR_PARTE` does not reduce the full-table case.**
@@ -918,7 +1100,9 @@ On 100,000 rows: a primary key lookup from 9.3 ms and 13 MB to 0.75 ms and
 5.5 MB, ten keys by `IN` from 9.1 ms to 0.56 ms, a range without index from
 92 ms to 58 ms, and the rest the same. A lookup by a `UNIQUE` text column
 goes from 8.6 ms to 1.9 ms: a text key can be in any piece of the index, so all
-of them are read, but as text, searching for the key, without decoding them.
+of them are read, but as text, searching for the key, without decoding them (in
+2.7; since 2.9 the filter in each piece's head leaves only the piece that can
+hold the key).
 Writes of one row on 100,000 rows: `INSERT` 22.5 → 13.6 ms, `UPDATE` 26.1 →
 13.9 ms, `DELETE` 22.5 → 9.9 ms. The
 writes do not change here because this machine's disk makes an `fsync` cost
@@ -929,7 +1113,7 @@ Memory: lookups use 1.5 MB less; everything else about 0.6 MB more on this
 benchmark. Of that, 0.24 MB is the larger code of the engine, which with
 OPcache (the normal case on a web server) lives in shared memory and does not
 count; the rest is what the process keeps between statements (four index
-pieces, the row offsets of sixteen parts, the table structures), which a
+pieces, the row offsets of 64 parts (16 in 2.7), the table structures), which a
 request of one or two queries does not accumulate and which is the first thing
 let go when memory runs short.
 
@@ -944,15 +1128,17 @@ without decoding a single row; and the cache steps aside when memory is tight.
 
 #### When it still will not fit
 
-A result that genuinely does not fit cannot be made to fit. What the engine
+A result that genuinely does not fit cannot be made to fit (a sort can, since
+2.9: it goes to files on disk). What the engine
 guarantees is *how* it fails: `JSONSQLDB_MEMORIA_VIGILAR` makes it stop and raise
 a normal error with `sqlState` `MEMORIA` — catchable, with the connection intact
 and the data untouched — instead of PHP's fatal, which cannot be caught, runs no
 `finally`, and hands the client a broken response.
 
 Data is never at risk from running out of memory, whichever way it ends: a read
-writes nothing, a write accumulates in memory and flushes at the end so it has
-not touched the disk yet, and the locks are released by the operating system when
+writes nothing, a write either flushes at the end or, when it does not fit in
+memory (2.9), writes in stretches inside a transaction that is undone if it
+does not finish, and the locks are released by the operating system when
 the process dies.
 
 ### Query execution
@@ -960,8 +1146,9 @@ the process dies.
 1. **Lexer** turns the SQL text into tokens. String literals only accept `''` as
    an escape — there is no backslash escaping, which removes a whole class of
    injection tricks.
-2. **Parser** builds a syntax tree. Only one statement per request is accepted,
-   so `; DROP TABLE …` never gets a chance to run. Bound parameters are inserted
+2. **Parser** builds a syntax tree. Only one statement per text is accepted,
+   so `; DROP TABLE …` never gets a chance to run; a batch (2.9) is a list of
+   statements, each parsed on its own. Bound parameters are inserted
    into the tree **here**, as literal nodes — they are never concatenated into
    SQL text.
 3. **Executor** resolves sources and joins, applies `WHERE`, groups, applies
@@ -972,51 +1159,65 @@ the process dies.
 
 ### The API layer
 
-The endpoint verifies, in this order: source IP against the allow-list, HTTPS if
-required, the request size, the API key, the HMAC signature over
-`api_key | timestamp | sql | params`, the timestamp window, the rate limit, and
-finally the key's permission level against the *parsed* statement type — so
-permissions are checked against what the statement actually is, not against a
-string match on its text.
+The endpoint checks, in this order: that the API is on (`JSONSQLDB_API_ACTIVA`,
+2.9), the source IP against the allow-list, that
+the configuration is not the published template, HTTPS if required, that the
+request is a `POST` of an accepted size, its fields, the lockout of an IP after
+failed authentications, the token's format and the timestamp window, the API key
+and its HMAC signature over `api_key | db | timestamp | nonce | sql + params`
+(or the batch in place of the SQL and parameters) — an unknown key gets the
+same answer as a wrong signature —, replay protection and the rate limits (per
+IP and per key), the databases the key may use, and finally the key's
+permission level against the *parsed* statement type — so permissions are
+checked against what the statement actually is, not against a string match on
+its text.
 
-Three permission levels: `lectura` (SELECT/SHOW), `escritura` (adds
-INSERT/UPDATE/DELETE), `admin` (adds DDL). Each key is also restricted to a list
-of databases.
+Three permission levels: `lectura` (`SELECT`, `SHOW`, `EXPLAIN`, `CHECK`),
+`escritura` (adds `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`REPAIR`), `admin` (adds DDL and
+`VACUUM`). Each key is also restricted to a list of databases.
 
-Optional, all off by default so nothing breaks on first install: IP allow-list
-(single IPs and CIDR ranges, IPv4 and IPv6), HTTPS enforcement, HSTS, replay
-protection, per-IP rate limiting, and suppressing detailed error messages.
+On by default: HTTPS enforcement (`php configurar.php --local` turns it off
+for a development machine), replay protection, the per-IP rate limit and
+lockout, and generic error messages instead of detailed ones
+(`DEVOLVER_ERRORES = false`). Off by default: the per-key rate limit, the IP
+allow-list (single IPs and CIDR ranges, IPv4 and IPv6) and
+HSTS.
 
 ---
 
 ## Tests
 
-Twelve suites, no dependencies, all using temporary directories — they never
-touch your data.
+Twenty-six suites, no dependencies, all using temporary directories — they
+never touch your data. The ones that load dumps into other systems or run
+PowerShell scripts do more where those are installed (CI has them).
 
 ```
-php tests/f1_nucleo.php       → OK: 66    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 72    parser and bound parameters
-php tests/f2_select.php       → OK: 151   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 68    writes, DDL, keys and triggers
-php tests/f4_api.php          → OK: 61    real requests against the API
-php tests/f5_esquema.php      → OK: 105   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 142   the panel, driven like a user
+php tests/f1_nucleo.php       → OK: 73    storage, types, locking, direct access
+php tests/f2_parser.php       → OK: 83    parser and bound parameters
+php tests/f2_select.php       → OK: 164   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 110   writes, DDL, keys, triggers, transactions and holes
+php tests/f4_api.php          → OK: 76    real requests against the API
+php tests/f5_esquema.php      → OK: 122   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 176   the panel, driven like a user
 php tests/f6_cortes.php       → OK: 33    crash recovery, killing real processes
-php tests/f7_concurrencia.php → OK: 29    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 65    indexes, against a full scan every time
-php tests/f9_journal.php      → OK: 33    every intermediate state a crash can leave
-php tests/f10_indices_incrementales.php → OK: 18   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 35    panel setup wizard and direct connection
-php tests/f12_contra_sqlite.php → OK: 4    145 queries and 16 writes, same results as SQLite
+php tests/f7_concurrencia.php → OK: 35    real simultaneous processes and locking
+php tests/f8_indices.php      → OK: 81    indexes, against a full scan every time
+php tests/f9_journal.php      → OK: 36    every intermediate state a crash can leave
+php tests/f10_indices_incrementales.php → OK: 21   indexes corrected instead of rebuilt
+php tests/f11_asistente.php    → OK: 41    panel setup wizard and direct connection
+php tests/f12_contra_sqlite.php → OK: 12   164 queries, 16 writes and 8 triggers that touch rows of their own statement, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 31 with every server  dumps to and from SQLite, MySQL, PostgreSQL, SQL Server
+php tests/f14_volcados.php     → OK: 54    dumps to and from SQLite, MySQL, PostgreSQL, SQL Server (more with the servers)
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
-php tests/f16_vistas_triggers.php → OK: 11 views and triggers exported to MySQL and PostgreSQL do the same there
-php tests/f17_rutinas_importadas.php → OK: 11 views and triggers imported from MySQL, PostgreSQL and SQL Server
-php tests/f18_access.php       → OK: 13    Microsoft Access: the PowerShell script, import and export
-php tests/f19_escrituras_contra_sqlite.php → OK: 7  random writes and queries on tables of many parts, against SQLite
-php tests/f20_memoria.php      → OK: 21    the panel with 32 MB: export, import and backups of a larger database (--directa: 22)
+php tests/f16_vistas_triggers.php → OK: 10  views and triggers exported to other systems (more with MySQL and PostgreSQL: they must do the same there)
+php tests/f17_rutinas_importadas.php → OK: 6 views and triggers imported from MySQL, PostgreSQL and SQL Server (more with the servers)
+php tests/f18_access.php       → OK: 10    Microsoft Access: import and export (more with PowerShell: the script)
+php tests/f19_escrituras_contra_sqlite.php → OK: 19  random writes and queries on tables of many parts, against SQLite
+php tests/f20_memoria.php      → OK: 31    the panel with 32 MB: export, import and backups of a larger database (also --directa)
+php tests/f21_compatibilidad.php → OK: 96  SQLite and MySQL syntax and functions, windows, recursion, COLLATE, against SQLite
+php tests/f22_sqlserver.php    → OK: 4     SQL Server's script and import (more with PowerShell)
+php tests/f23_reparar.php      → OK: 28    hand-broken JSON files repaired, or set aside
+php tests/f24_versiones_anteriores.php → OK: 27  every published version's database opened by this one (needs the git tags)
 ```
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that
@@ -1059,6 +1260,7 @@ Full documentation lives in [`docs/`](docs/):
 | [`docs/03-writes.md`](docs/03-writes.md) | Writes, DDL, keys, triggers, views, integrity |
 | [`docs/04-api.md`](docs/04-api.md) | The HTTP API, signing, bound parameters, clients |
 | [`docs/05-admin.md`](docs/05-admin.md) | jsonSQLDBadmin |
+| [`docs/06-format.md`](docs/06-format.md) | Reference of the files on disk |
 | [`nginx/README.md`](nginx/README.md) | nginx setup — **required reading if you use nginx** |
 | [`litespeed/README.md`](litespeed/README.md) | LiteSpeed Enterprise and OpenLiteSpeed — what applies and what to configure |
 

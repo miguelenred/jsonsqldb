@@ -59,7 +59,9 @@ final class Logger
         if ($nivel === 'errores' && $error === null) {
             return;
         }
-        if ($nivel === 'escrituras' && $error === null && $op === 'SELECT') {
+        // Lecturas: SELECT, UNION, SHOW y CHECK (2.9; antes solo se saltaba SELECT)
+        if ($nivel === 'escrituras' && $error === null
+            && ($op === 'SELECT' || $op === 'UNION' || $op === 'EXPLAIN' || strncmp($op, 'SHOW', 4) === 0 || strncmp($op, 'CHECK', 5) === 0)) {
             return;
         }
 
@@ -77,7 +79,7 @@ final class Logger
             'rows'   => $filas,
             'ms'     => round($ms, 2),
             'origen' => self::$origen,
-            'sql'    => $max > 0 && strlen($sql) > $max ? substr($sql, 0, $max) . '…' : $sql,
+            'sql'    => $max > 0 && strlen($sql) > $max ? self::cortar($sql, $max) . '…' : $sql,
         ];
         // Los valores solo se registran si se ha pedido expresamente: ahí viajan
         // contraseñas, tokens y datos personales.
@@ -86,7 +88,13 @@ final class Logger
         }
         $entrada['error'] = $error;
 
-        $linea = json_encode($entrada, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        // La línea se escribe siempre (2.9): con bytes que no son UTF-8 en la
+        // SQL o en los valores, o un valor que JSON no admite, json_encode()
+        // fallaba y la consulta no quedaba en el registro, aunque fuera una
+        // escritura. Un byte que no es UTF-8 sale como U+FFFD, y un valor que
+        // JSON no admite (INF, NAN), como 0
+        $linea = json_encode($entrada, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
         if ($linea === false) {
             return;
         }
@@ -97,6 +105,20 @@ final class Logger
         if (mt_rand(1, 200) === 1) {
             self::purgar($dir);
         }
+    }
+
+    /**
+     * Los primeros $max bytes de un texto más largo, sin partir una letra de
+     * UTF-8 (2.9): se vuelve atrás hasta su primer byte, como mucho tres (los
+     * de en medio son 10xxxxxx). Cortada, la letra hacía fallar la línea entera.
+     */
+    private static function cortar(string $texto, int $max): string
+    {
+        $corte = $max;
+        while ($corte > 0 && $corte > $max - 3 && (ord($texto[$corte]) & 0xC0) === 0x80) {
+            $corte--;
+        }
+        return substr($texto, 0, $corte);
     }
 
     /** Fichero del día, rotando si supera el tamaño máximo. */

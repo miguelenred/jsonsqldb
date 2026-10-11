@@ -1,21 +1,32 @@
 <?php
-$sql       = (string)($_POST['sql'] ?? $_GET['sql'] ?? '');
+$sql       = post('sql', get('sql'));
 $resultado = null;
 $error     = null;
 $ms        = 0.0;
+$sentencias = 1;
 
 if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     try {
         Auth::comprobarCsrf();
-        if (!Auth::esAdmin() && !preg_match('/^\s*(SELECT|SHOW)\b/i', $sql)) {
-            throw new RuntimeException(t('Con permiso de lectura solo se pueden lanzar SELECT y SHOW.'));
+        // Varias sentencias (2.9): en una transacción, todas o ninguna
+        $lista = Importar::partir($sql);
+        $sentencias = max(1, count($lista));
+        foreach ($sentencias > 1 ? $lista : [$sql] as $una) {
+            if (!Auth::esAdmin() && !preg_match('/^\s*(SELECT|SHOW)\b/i', $una)) {
+                throw new RuntimeException(t('Con permiso de lectura solo se pueden lanzar SELECT y SHOW.'));
+            }
         }
         $t0        = microtime(true);
-        $resultado = Api::sql($base, $sql);
+        if ($sentencias > 1) {
+            $todos     = Api::lote($base, $lista);
+            $resultado = (array)$todos[count($todos) - 1];
+        } else {
+            $resultado = Api::sql($base, $sql);
+        }
         $ms        = (microtime(true) - $t0) * 1000;
         Audit::registrar('sql', substr($sql, 0, 500), $base);
     } catch (Throwable $e) {
-        $error = $e->getMessage();
+        $error = ($sentencias > 1 ? t('No se ha ejecutado ninguna: en una transacción van todas o ninguna.') . ' ' : '') . $e->getMessage();
         Audit::registrar('sql_error', substr($sql, 0, 500) . ' → ' . $e->getMessage(), $base);
     }
 }
@@ -35,7 +46,7 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 placeholder="<?= h(t('SELECT * FROM mi_tabla WHERE ...')) ?>"><?= h($sql) ?></textarea>
       <div class="d-flex justify-content-between align-items-center mt-2">
         <div class="form-text mb-0">
-          <?= t('Una sentencia por ejecución. Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>.') ?>
+          <?= t('Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>. Varias sentencias separadas por <code>;</code> se ejecutan en una transacción: todas o ninguna.') ?>
         </div>
         <button class="btn btn-primary"><?= icono('play-fill') ?> <?= h(t('Ejecutar')) ?></button>
       </div>
@@ -48,6 +59,9 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 <?php endif; ?>
 
 <?php if ($resultado !== null): ?>
+  <?php if ($sentencias > 1): ?>
+    <div class="alert alert-info"><?= icono('check2-circle') ?> <?= h(t('{n} sentencias en una transacción: se han ejecutado todas. Abajo, el resultado de la última.', ['n' => $sentencias])) ?></div>
+  <?php endif; ?>
   <?php if (isset($resultado['success'])): ?>
     <div class="alert alert-success">
       <?= icono('check2-circle') ?> <?= h($resultado['mensaje']) ?>
@@ -64,7 +78,7 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         <span><?= count($resultado) ?> <?= h(t('fila(s)')) ?>
           <span class="text-body-secondary ms-2"><?= number_format($ms, 1, ',', '.') ?> <?= h(t('ms')) ?></span></span>
         <div class="d-flex gap-2">
-          <?php foreach (['csv' => ['CSV', 'filetype-csv'], 'sql' => ['INSERT', 'filetype-sql']] as $f => $b): ?>
+          <?php foreach (Auth::esAdmin() && $sentencias === 1 ? ['csv' => ['CSV', 'filetype-csv'], 'sql' => ['INSERT', 'filetype-sql'], 'json' => ['JSON', 'filetype-json']] + (class_exists('ZipArchive') ? ['xlsx' => ['Excel', 'filetype-xlsx']] : []) : [] as $f => $b): ?>
             <form method="post">
               <?= csrf() ?>
               <input type="hidden" name="accion" value="exportar">

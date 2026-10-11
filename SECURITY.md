@@ -64,24 +64,61 @@ concept helps a lot; a working exploit is not required.
   where a confirmed write is not durable across a power cut. API errors keep
   HTTP 200 with an `error` key (docs/04-api.md explains why).
 
+- **2.9.0 — a restored ZIP could make the engine delete files of the
+  database's folder.** Up to 2.8.0, the panel restored files under `.tx/` and
+  `.lote/`, which the engine takes, on opening the database, for a write cut
+  short: a ZIP made for it could delete or replace the folder's `.htaccess`
+  and `web.config`. Only an administrator can restore a ZIP. **If you
+  restored a ZIP you did not make yourself, check that each database folder
+  still has its `.htaccess` and `web.config`.**
+- **2.9.0 — SQL dumps for other engines could carry SQL inside a comment.**
+  Up to 2.8.0, a `CHECK`, a default, or a view or trigger written as a
+  comment because the other engine does not accept it kept its line breaks,
+  and loading the dump ran what followed one. **Review a dump made with an
+  earlier version before loading it into MySQL, PostgreSQL or SQL Server.**
+- **2.9.0 — other fixes of the security review of 2.9**: signing in to the
+  panel cleared the failed attempts of the whole IP, so one account could
+  keep guessing the password of another; attempts at the same time went past
+  the limit; the setup wizard, which anyone can open before installation, made
+  the server request an address built from the request's `Host` header; a link
+  to `?idioma=en` changed the language saved for whoever was signed in; the API
+  accepted a captured request again when the client's clock ran ahead, and
+  told an unknown key apart from a wrong signature; the PHP example client's
+  shortcut accepted a self-signed certificate from any server; a request whose
+  user agent, error or SQL had bytes that are not valid UTF-8 was left out of
+  the API's log and of the query log; the triggers' reads of other tables were
+  not locked; a key that can only read could fill the disk through the result
+  cache, and hold the whole database for everyone with a `lote` of heavy
+  reads; changing your own password in the panel did not ask for the current
+  one; the sign-in page and the setup wizard showed the exact PHP version and
+  the server's full paths; a value saved from the Configuration page could end
+  up as PHP code in `config.php`; and an IPv6 client could get around the
+  request limit and the lockout by changing address (an IPv6 address now
+  counts by its /64). See the CHANGELOG.
+
 ## Before you deploy
 
 These are the things that actually matter, in order.
 
-1. **Change `HMAC_SECRET` and every API key** in
-   `api/jsonsqldb_api_config.php`. The values in the `.dist` templates are
-   placeholders, not defaults — the project ships with `CHANGE_ME_` strings on
-   purpose, so an unconfigured install fails loudly instead of running with a
-   known secret.
+1. **Change every API key and its `hmac_secret`** in
+   `api/jsonsqldb_api_config.php` (`php configurar.php` does it with random
+   values). The values in the `.dist` templates are placeholders, not defaults —
+   the project ships with `CHANGE_ME_` strings on purpose, so an unconfigured
+   install refuses to work instead of running with a known secret. Each account
+   has its own secret: an application that leaks its own cannot sign as
+   another, the admin one included.
 2. **Give each application its own API key**, restricted to the databases it
    needs (`'bases' => ['thatdb']`) and to the lowest permission level that works
    (`lectura` < `escritura` < `admin`).
-3. **Serve everything over HTTPS** and set `EXIGIR_HTTPS` to `true`. The HMAC
-   signature stops anyone tampering with a query; it does nothing to stop them
-   reading it.
+3. **Serve everything over HTTPS** and keep `EXIGIR_HTTPS` and
+   `ADMIN_EXIGIR_HTTPS` on, as they come (`php configurar.php --local` turns
+   them off for a development machine; turn them back on before publishing).
+   The HMAC signature stops anyone tampering with a query; it does nothing to
+   stop them reading it.
 4. **Check that your web server is actually blocking the private folders.**
-   Apache and IIS are covered by the bundled `.htaccess` and `web.config`.
-   **nginx reads neither** — you must install the rules from `nginx/`. Verify it:
+   Apache, LiteSpeed Enterprise and IIS are covered by the bundled `.htaccess`
+   and `web.config`. **nginx and OpenLiteSpeed read neither** — you must
+   install the rules from `nginx/` or follow `litespeed/README.md`. Verify it:
 
    ```bash
    curl -o /dev/null -s -w "%{http_code}\n" https://yourserver/jsonsqldb/data/
@@ -91,15 +128,18 @@ These are the things that actually matter, in order.
 5. **Restrict the admin panel.** `ADMIN_IPS_PERMITIDAS` limits which IPs can even
    reach the login screen. If only you use it, this is the single most effective
    measure available.
-6. **Turn on `RATE_LIMIT_ACTIVO` and `ANTI_REPLAY_ACTIVO`** if the API is
-   reachable from the internet.
-7. **Set `DEVOLVER_ERRORES` to `false`** in production. With `true`, engine error
-   messages reach the client — convenient while developing, too talkative
-   afterwards.
-8. **Only enable `CONFIAR_EN_PROXY` if there really is a trusted proxy in front.**
+6. **Keep `RATE_LIMIT_ACTIVO` and `ANTI_REPLAY_ACTIVO` on**, as they come, if
+   the API is reachable from the internet.
+7. **Keep `DEVOLVER_ERRORES` off** in production, as it comes. With `true`,
+   engine error messages reach the client — convenient while developing, too
+   talkative afterwards.
+8. **Only enable `CONFIAR_EN_PROXY` (API) or `ADMIN_CONFIAR_EN_PROXY` (panel) if there really is a trusted proxy in front.**
    With it on, the API believes the `X-Forwarded-For` and `X-Forwarded-Proto`
    headers; if nothing is setting them, anyone can forge their IP and bypass both
-   the allow-list and the rate limit.
+   the allow-list and the rate limit. Since 2.9 the IP taken is the last one in
+   `X-Forwarded-For`, the one your proxy adds; up to 2.8.0 it was the first,
+   which the client writes, and that let a client choose its IP even behind a
+   real proxy.
 
 9. **Check who else on the server can read the data.** Folders are created as
    `0775` and files with PHP's default mode, so what the others can do depends
@@ -116,13 +156,23 @@ These are the things that actually matter, in order.
 
 - Values are never concatenated into SQL. Bound parameters are placed into the
   parsed syntax tree as literals.
-- Only one statement is accepted per request, so statement chaining is not
-  possible.
+- The API signs the SQL and the parameters joined without a separator. Cutting
+  the same signed text at another point gets nothing new in: the parameters
+  must be a JSON list of simple values reaching the end, with exactly one value
+  per `?`, and a valid list has no shorter ending that is a list too. The only
+  other cut that passes turns a JSON list the SQL itself ends with (in a
+  comment, say) into the values — still text the client signed, bound as data
+  (docs/04-api.md).
+- A statement is one statement: a second one after a `;` is refused, so
+  statement chaining is not possible. A `lote` (2.9) is a list of them sent on
+  purpose, each parsed on its own and checked against the key's permission.
 - Permissions are checked against the parsed statement type, not against pattern
   matching on the SQL text.
 - Panel passwords are hashed with bcrypt; sessions expire on inactivity; every
   form carries a CSRF token; repeated failed logins lock the IP out.
 - All panel output is escaped with `htmlspecialchars`.
 - Security headers are sent on both the API and the panel, including a
-  `Content-Security-Policy` restricted to `self` (the panel loads no external
-  resources).
+  `Content-Security-Policy`: `default-src 'none'` on the API, which only
+  returns JSON, and restricted to `self` on the panel, which loads no external
+  resources and runs only its own script files and the inline scripts that
+  carry the response's nonce.

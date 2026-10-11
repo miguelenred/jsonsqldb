@@ -15,15 +15,24 @@ File: `api/jsonsqldb_api.php` — configuration: `api/jsonsqldb_api_config.php`
 | `db` | name of the database the statement runs against |
 | `sql` | statement to run (may be multi-line and carry comments) |
 | `params` | optional: JSON list with the values of the `?` in the SQL |
+| `lote` | instead of `sql` and `params` (2.9): a transaction, see [below](#several-statements-as-one-transaction-29) |
 | `timestamp` | current UNIX time, 10 digits |
+| `nonce` | 16 to 64 random hexadecimal digits in lowercase, different in every request (2.9; optional, but recommended) |
 | `token` | HMAC-SHA256 signature of the request |
 
 The signature is computed as:
 
 ```php
 $token = hash_hmac('sha256',
-    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $sql . $params . "¿", $secret);
+    "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $nonce . "|" . $sql . $params . "¿", $secret);
 ```
+
+Without `nonce` the API still accepts the signature of before 2.9, without
+`$nonce . "|"`. But then two identical requests in the same second have the
+same token, and with the anti-replay on the second one is rejected as a
+repeated one: that is what happened to the panel when it ran the same
+statement twice in one second. The panel and the three example clients (PHP,
+Python and PowerShell) send a nonce since 2.9.
 
 where `$secret` is the `hmac_secret` field of that account in
 `api/jsonsqldb_api_config.php`. **Every account has its own**, different from the
@@ -31,26 +40,71 @@ others.
 
 `$db` is the database name exactly as sent in the `db` field, or an empty
 string for the statements that target none (`SHOW DATABASES`,
-`CREATE DATABASE`). `$params` is the JSON exactly as sent, or an empty string
+`CREATE DATABASE`, `DROP DATABASE`). `$params` is the JSON exactly as sent, or an empty string
 if there are no parameters.
 
-The signature covers the key, the database, the time, the SQL and the
-parameters, so none of them can be changed in transit without knowing the
-secret.
+The signature covers the key, the database, the time, the nonce, the SQL and
+the parameters (or the `lote`), so none of them can be changed in transit
+without knowing the secret.
+
+`$sql` and `$params` go together without a separator, so the same signed text
+could in theory be cut at another point. That cannot smuggle anything in:
+`params` must be empty or a JSON list of simple values reaching the end of the
+text, and the statement must have exactly as many `?` as the list has values.
+A valid list has no shorter ending that is itself a valid list, so the only
+other cut that can pass takes a JSON list that the SQL itself ends with — the
+`[5]` of a comment in `… WHERE id = ? -- [5]`, for example — and uses it as the
+values. What runs is still text the client signed, with the values bound as
+data. A token is accepted only once (anti-replay), and over HTTPS nobody in
+between can read or hold back the request.
 
 > **Breaking change in 2.0.** Until then the database was outside the
 > signature, which allowed taking a legitimate request, changing its `db` field
 > and replaying it against another database: the signature stayed valid because
 > it did not cover it. For a key with access to several databases that was
 > enough to run on the wrong one. **Any client signing with the old formula
-> stops working** and must be updated. The four example clients (PHP, Python,
-> PowerShell and the panel) already use the new one.
+> stops working** and must be updated. The three example clients (PHP, Python
+> and PowerShell) and the panel already use the new one.
+
+### Several statements as one transaction (2.9)
+
+Instead of `sql` and `params`, the field `lote` carries a JSON list of 1 to
+1,000 statements, each an SQL text or `{"sql": "...", "params": [...]}`:
+
+```json
+[{"sql": "UPDATE accounts SET balance = balance - ? WHERE id = ?", "params": [50, 1]},
+ {"sql": "UPDATE accounts SET balance = balance + ? WHERE id = ?", "params": [50, 2]}]
+```
+
+They run as one transaction: all of them, or none if one fails, and each sees
+what the previous ones did. `BEGIN` (or `START TRANSACTION`) as the first and
+`COMMIT` (or `END`) as the last are accepted and change nothing; `ROLLBACK` as
+the last runs the list and undoes it all. While it runs the database is locked
+for everyone else (a `lote` that only reads runs each statement with the shared
+lock, as a single `SELECT`, and others read and write in between; 2.9), and a
+transaction never spans requests: a client that hung
+halfway would otherwise leave it locked. The key's permission is checked for
+each statement, and one it does not allow undoes the whole list; each has the
+same limits as a single statement. A key limited to some databases cannot put
+`SHOW DATABASES` in a `lote` (it would see them all): it sends it on its own,
+which lists only its databases. In the signature, the `lote` text exactly as sent takes the place of
+`$sql . $params`:
+
+```php
+$token = hash_hmac('sha256', "+" . $apiKey . "|" . $db . "|" . $timestamp . "|" . $nonce . "|" . $lote . "¿", $secret);
+```
+
+The answer is a list with the result of each statement, in order. The three
+example clients have a function for it (2.9): `lote()` in PHP and Python,
+`API-SQL-Lote` in PowerShell (see [Client](#6-client) and the sections
+below).
 
 ### The database goes in `db`, not in the SQL
 
-There is no `USE` and no `mydb.customers` prefix: every request says in `db`
-which database it works on, and the API checks that the key has access to that
-database before running anything. With the client, the database is the fourth
+There is no `mydb.customers` prefix: every request says in `db` which database
+it works on, and the API checks that the key has access to that database before
+running anything. `USE` of that same database is accepted and does nothing
+(2.9); `USE` of another one is an error. With the client, the database is the fourth
 argument:
 
 ```php
@@ -100,8 +154,9 @@ account's key and secret (see SECURITY.md).
 statements. It does not allow `CREATE`, `ALTER`, `DROP` or triggers: those need
 an `admin` key.
 
-In PHP the shortcut is `JsonSqlDbCliente::pruebas()`; in PowerShell it is preset
-in `$Global:JsonSqlDb`. For your application, create a key of its own limited to
+In PHP the shortcut is `JsonSqlDbCliente::pruebas()` (it accepts a self-signed
+certificate only on `localhost`; before 2.9 it accepted one from any server); in
+PowerShell it is preset in `$Global:JsonSqlDb`. For your application, create a key of its own limited to
 its databases instead of reusing this one.
 
 ### From Python
@@ -118,6 +173,10 @@ cli = JsonSqlDbCliente("https://myserver/jsonsqldb/api/jsonsqldb_api.php",
 rows = cli.consultar("SELECT * FROM customers WHERE city = ?", ["Madrid"])
 cli.consultar("INSERT INTO customers (name, balance) VALUES (?, ?)", ["O'Donnell", 10.55])
 print(cli.valor("SELECT COUNT(*) FROM customers"))
+
+# Several statements as one transaction (2.9): all of them, or none
+cli.lote([("UPDATE accounts SET balance = balance - ? WHERE id = ?", [50, 1]),
+          ("UPDATE accounts SET balance = balance + ? WHERE id = ?", [50, 2])])
 ```
 
 It returns lists of dictionaries for `SELECT` and `SHOW`, and a dictionary
@@ -146,7 +205,16 @@ Set-JsonSqlDbConexion -Url 'https://shirka:44311/jsonsqldb/api/jsonsqldb_api.php
 
 API-SQL-JSON "SELECT * FROM customers WHERE city = ?" @('Torrevieja')
 API-SQL-JSON "SHOW DATABASES" -Base ''
+
+# Several statements as one transaction (2.9): all of them, or none
+API-SQL-Lote @(
+    @{ Sql = 'UPDATE accounts SET balance = balance - ? WHERE id = ?'; Parametros = @(50, 1) },
+    @{ Sql = 'UPDATE accounts SET balance = balance + ? WHERE id = ?'; Parametros = @(50, 2) }
+)
 ```
+
+`API-SQL-Lote` returns the list of results whole, also when it has one
+element.
 
 Two PowerShell-specific details: decimals are converted with `InvariantCulture`,
 so `10.55` comes out and not `10,55`; and the `¿` of the signature is built
@@ -179,10 +247,14 @@ Rules:
 
 - One `?` = one value. If the count does not match, the request is rejected.
 - Allowed values: `null`, boolean (stored as 1/0), integer, decimal and text.
-  No lists or objects.
+  No lists or objects, and no number out of range: `1e400`, which JSON decodes
+  as infinity, is rejected with its own message (2.9: it ended in an internal
+  error).
 - The `?` go where a **value** goes: `WHERE`, `VALUES`, `SET`, `HAVING`,
   function arguments, `LIMIT` and `OFFSET`. They cannot stand for table or
-  column names: that is structure, not data.
+  column names: that is structure, not data. `LIMIT` and `OFFSET` take a number,
+  a `?` or a constant expression, but not a subquery (2.9: an internal error;
+  SQLite accepts one there, this engine works the number out before reading).
 - `IN (?, ?, ?)` needs one `?` per element; build the list from how many values
   you have.
 - A `?` inside a string (`'really?'`) is text, not a placeholder.
@@ -232,13 +304,13 @@ the client.
 **How to tell an error: by the `error` key, not by the HTTP status.** Almost
 every error — a bad key or signature, an expired or repeated token, the request
 limit, a database the key may not use, a wrong method, a request too large, an
-SQL error — comes with **HTTP 200** and the JSON above. Only four cases use
+SQL error — comes with **HTTP 200** and the JSON above. Only these cases use
 another status, because they happen before the API can answer normally:
 
 | Status | When |
 |---|---|
-| 403 | The IP is not in `IPS_PERMITIDAS`, or the request came over HTTP with `EXIGIR_HTTPS` on |
-| 500 | The configuration is unfinished (`CHANGE_ME_` values), or a query ran out of memory |
+| 403 | The API is turned off (`JSONSQLDB_API_ACTIVA = false`), the IP is not in `IPS_PERMITIDAS`, or the request came over HTTP with `EXIGIR_HTTPS` on |
+| 500 | The configuration is unfinished (`CHANGE_ME_` values), or a query ran out of memory or time |
 
 This is deliberate and stays so (an external audit of 2.7.2 suggested 401, 403,
 429… for each case): changing it would change what existing clients receive —
@@ -246,6 +318,10 @@ PowerShell's `Invoke-RestMethod`, for one, throws an exception on a 4xx instead
 of returning the JSON with the reason. A client checks `error` in the body, as
 the example clients in `api/` do. A monitoring system or a proxy that needs to
 tell failures apart can read the same key, or the API's log.
+
+An error always comes as that JSON. If its message carries bytes that are not
+valid UTF-8 — the name of a table that does not exist, written that way — they
+come as `�` (2.9: the body was empty).
 
 > **Leave it at `false` in production.** With `DEVOLVER_ERRORES = true` the
 > response includes the internal message, which may name tables and columns:
@@ -270,13 +346,15 @@ $API_KEYS = [
 
 | Permission | Allowed statements |
 |---|---|
-| `lectura` | `SELECT`, `SHOW`, `CHECK KEYS` |
-| `escritura` | those plus `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS` |
-| `admin` | everything, including `CREATE`, `ALTER`, `DROP` and triggers |
+| `lectura` | `SELECT`, `SHOW`, `EXPLAIN`, `CHECK KEYS`, `CHECK TABLES` |
+| `escritura` | those plus `INSERT`, `UPDATE`, `DELETE` (also `TRUNCATE TABLE`, which is one), `REPAIR KEYS`, `REPAIR TABLES` |
+| `admin` | everything, including `CREATE`, `ALTER`, `DROP`, triggers and `VACUUM` |
 
 The permission is checked **after parsing the SQL and before running it**, so
 it looks at what the statement really does, not at how it is written. `bases`
-limits which databases the key can access; `['*']` means all.
+limits which databases the key can access; `['*']` means all. `ANALYZE`, and
+`USE` of the database the request is for, change nothing and are answered to
+any key.
 
 What each permission can do, without ambiguity:
 
@@ -285,10 +363,13 @@ What each permission can do, without ambiguity:
 | `SELECT`, `UNION` | yes | yes | yes |
 | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA` / `COLUMNS` | yes | yes | yes |
 | `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` | yes | yes | yes |
+| `SHOW CREATE TABLE`, `SHOW CREATE VIEW`, `EXPLAIN` (2.9) | yes | yes | yes |
 | `SHOW DATABASES` | yes | yes | yes |
-| `CHECK KEYS` | yes | yes | yes |
-| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS` | no | yes | yes |
-| `CREATE` / `ALTER` / `DROP` of table, index, view or trigger | no | no | yes |
+| `CHECK KEYS`, `CHECK TABLES` (2.9) | yes | yes | yes |
+| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS`, `REPAIR TABLES` (2.9) | no | yes | yes |
+| `TRUNCATE TABLE` (2.9) | no | yes | yes |
+| `CREATE` / `ALTER` / `DROP` of table, index, view or trigger, `VACUUM` | no | no | yes |
+| `ANALYZE`, `USE` of the request's database | yes | yes | yes |
 | `CREATE DATABASE`, `DROP DATABASE` | no | no | yes |
 
 The list is maintained by hand in `api/jsonsqldb_api.php`, so adding a statement
@@ -313,23 +394,36 @@ The admin key and its `hmac_secret` must match `ADMIN_API_KEY` and
 
 | Control | Configuration | Default |
 |---|---|---|
+| API on or off (2.9; in the engine's `config.php`) | `JSONSQLDB_API_ACTIVA` | **on** |
 | POST only | — | always |
 | Maximum request size | `MAX_POST_SIZE` | 200 KB |
-| Maximum SQL length | `MAX_SQL_LENGTH` | 100,000 characters |
+| Maximum SQL length | `MAX_SQL_LENGTH` | 100,000 bytes |
 | Bound parameters per request | `MAX_PARAMS`, `MAX_PARAMS_LENGTH` | 1,000 values, 100 KB |
 | Maximum clock skew | `RATE_TIMESTAMP_DIFF` | 300 s |
-| Anti-replay (single-use token) | `ANTI_REPLAY_ACTIVO` | enabled |
-| Per-IP request limit | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **enabled**, 150 / 24 h |
-| Per-IP block after authentication failures | `RATE_LIMIT_FALLOS_IP` | 10 in the window, only that IP |
+| Anti-replay (single-use token; a repeated one does not count as an authentication failure of the IP, 2.9) | `ANTI_REPLAY_ACTIVO` | enabled |
+| Per-IP request limit (an IPv6 by its /64, 2.9) | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **enabled**, 150 / 24 h |
+| Per-IP block after authentication failures (an IPv6 by its /64, 2.9) | `RATE_LIMIT_FALLOS_IP` | 10 in the window, only that IP |
 | Per-key request limit, from any IP | `RATE_LIMIT_POR_CLAVE` | 0 (no limit) |
 | IP allow-list (single IP or CIDR) | `IPS_PERMITIDAS` | empty (no filter) |
 | Require HTTPS | `EXIGIR_HTTPS` | **`true`** |
 | HSTS header | `HSTS_ACTIVO` | `false` |
 | Trust X-Forwarded-For / -Proto | `CONFIAR_EN_PROXY` | `false` |
 
+`RATE_LIMIT_ACTIVO = false` turns off all three limits: the per-IP request
+limit, the block after authentication failures (`RATE_LIMIT_FALLOS_IP`) and
+the per-key limit (`RATE_LIMIT_POR_CLAVE`).
+
 All state (per-IP counters, failures and used tokens) is kept in **JSON**, in
-`logs/api/estado.json`, under an exclusive lock and pruning only expired
-entries. There is no external database underneath.
+`logs/api/estado/`, spread over up to 256 small files per kind (`n-XX.json`
+tokens, `i-XX.json` IPs, `c-XX.json` keys) by the first two digits of the md5
+of the token, the IP or the key (2.9). A request reads and rewrites only the
+two or three files that are its own, each under its exclusive lock and pruned
+of expired entries, so its cost does not grow with the traffic of the whole
+installation: with 5,000 requests in the window, 2.4 → 0.25 ms per request.
+Until 2.8 it was one `logs/api/estado.json`, rewritten whole on every request;
+after updating, its tokens are still refused for the few minutes they could be
+valid, and then the file is deleted (the per-IP counters start again from
+zero). There is no external database underneath.
 
 Up to 2.7.2 there was also a **global** cut-off: 30 authentication failures
 from anyone closed the API to every client for up to a day, which made it
@@ -340,13 +434,31 @@ authentication failures now block only the IP they come from
 version keeps working: the new constants take their defaults when they are
 missing.
 
+An IPv6 address counts by its /64 network (2.9) for the request limit and the
+block after failures: that is what a provider gives each customer, and with
+2^64 addresses to choose from, changing address on every request got around
+both. The request log and `IPS_PERMITIDAS` still use the full address; an IPv4
+address written as IPv6 (`::ffff:1.2.3.4`) counts as the IPv4 one.
+
 What a rejected request leaves in the request log is cut down (the database
 name to 64 characters, the error to 1,000), and once a day has 20 full log files
-the requests rejected before their key is known are no longer logged, so they
+the requests rejected before their signature has been checked are no longer logged, so they
 cannot fill the disk.
 
 Token comparison uses `hash_equals`, so the secret cannot be guessed by timing
 responses.
+
+### Turning the API off (2.9)
+
+`JSONSQLDB_API_ACTIVA` in the engine's `config.php`, `true` by default, is the
+counterpart of `JSONSQLDB_CONEXION_DIRECTA`, `false` by default. Set to
+`false`, the API answers every request with HTTP 403 and
+`{"error": "La API está desactivada"}`, before looking at its key: nothing is
+logged, counted or written. It is for an installation used only through the
+direct connection, or to close the API for a while. The panel, if it goes
+through the API, stops working too: switch it to the direct connection
+(`ADMIN_CONEXION = 'directa'`, see docs/05-admin.md). A `config.php` from an
+earlier version, without the constant, keeps the API on.
 
 ### The defaults are the safe ones
 
@@ -362,7 +474,10 @@ would rather get on your machine than discover in production.
 `TIME_LIMIT` is **60 seconds** and `MEMORY_LIMIT` **256 MB**. An expensive query
 occupies a PHP worker for all of that, and with a handful of workers that is a
 denial of service made of legitimate requests. Raise them only if you have
-queries or exports that really need it.
+queries or exports that really need it. A query that runs out of either gets
+an HTTP 500 with a JSON error, like any other (`Consulta demasiado grande` or
+`Consulta demasiado larga`, or the full message with `DEVOLVER_ERRORES`), and
+is logged; before 2.9, running out of time gave an empty answer.
 
 ### One secret per key
 
@@ -386,7 +501,8 @@ With one secret per key, a compromised application only compromises its own,
 and is revoked by changing its key and secret without touching the others.
 
 An account without `hmac_secret` cannot sign anything: the API answers
-*«Configuración incompleta»* saying which key it is and what is missing.
+*«Configuración incompleta»*, and says which key it is and what is missing with
+`DEVOLVER_ERRORES` on; the request log always has it.
 
 ### What to enable in production
 
@@ -406,16 +522,25 @@ already ship at their safe value: nothing to enable, only not to disable.
 `CONFIAR_EN_PROXY` deserves a warning of its own: enable it **only** if a trusted
 proxy or load balancer sits in front. With it on, the API believes the
 `X-Forwarded-For` and `X-Forwarded-Proto` headers; if nobody is setting them,
-anyone can fake their IP and bypass `IPS_PERMITIDAS` and the rate limit.
+anyone can fake their IP and bypass `IPS_PERMITIDAS` and the rate limit. The IP
+taken is the **last** one in `X-Forwarded-For`, the one the proxy adds (2.9;
+before, the first, which the client writes). With two proxies in a row, that
+is the IP of the first proxy: set the inner one to pass the client's on.
 
 ## 5. Logging
 
-Every request leaves two traces:
+A request leaves up to two traces:
 
-- `logs/api/peticiones-YYYY-MM-DD.json` — the request: date, IP, user agent,
-  database, API key label, operation, rows, milliseconds and error.
-- `logs/consultas-YYYY-MM-DD.json` — the query run by the engine, with the full
-  SQL.
+- `logs/api/peticiones-YYYY-MM-DD.json` — every request: date, IP, user agent,
+  database, API key label, operation, rows, milliseconds and error. The key
+  label is written once its signature has been checked, also when the request
+  fails afterwards (2.9: a failed one had none, nor its operation); a request
+  refused before that has none. A user agent or an error with bytes that are
+  not valid UTF-8 is written with `�` in their place (2.9: that request was
+  left out of the log).
+- `logs/consultas-YYYY-MM-DD.json` — the statement run by the engine, with its
+  SQL cut to `JSONSQLDB_LOG_MAX_SQL` bytes (2,000 by default), between letters. Since 2.9, by default only writes and errors (`JSONSQLDB_LOG_NIVEL
+  = 'escrituras'`); `'todo'` logs every query too.
 
 Both are one file per day, rotate by size and are purged according to
 `JSONSQLDB_LOG_DIAS` (0 = keep forever).
@@ -438,7 +563,16 @@ $cli = new JsonSqlDbCliente(
 
 $rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Madrid']);
 $cli->consultar('INSERT INTO customers (name, city) VALUES (?, ?)', ["O'Donnell", 'Logroño']);
+
+// Several statements as one transaction (2.9): all of them, or none if one fails
+$cli->lote([
+    ['UPDATE accounts SET balance = balance - ? WHERE id = ?', [50, 1]],
+    ['UPDATE accounts SET balance = balance + ? WHERE id = ?', [50, 2]],
+]);
 ```
+
+`lote()` takes each statement as an SQL text or `[sql, params]` and returns the
+result of each, in order; if one fails it throws, and nothing was done.
 
 Values travel in `params` and the server binds them to the `?` (see 1.1). The
 client escapes nothing and does not touch the SQL.
@@ -474,17 +608,17 @@ them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 | `api/cliente_ejemplo.php` | PHP client for applications |
 | `api/cliente_ejemplo.ps1` | PowerShell client, with the same bound parameters |
 | `api/cliente_ejemplo.py` | Python client, standard library only |
-| `engine/ApiStore.php` | API state in JSON: rate limit, failures, nonces, history |
-| `tests/f4_api.php` | 61 checks sending real requests |
+| `engine/ApiStore.php` | API state in JSON, spread over small files (2.9): rate limit, failures, nonces, history |
+| `tests/f4_api.php` | 76 checks sending real requests |
 
 ## 9. Tests
 
 ```
-php tests/f1_nucleo.php       → OK: 66
-php tests/f2_parser.php       → OK: 72
-php tests/f2_select.php       → OK: 151
-php tests/f3_escrituras.php   → OK: 68
-php tests/f4_api.php          → OK: 61
-php tests/f5_esquema.php      → OK: 105
-php tests/f5_admin.php        → OK: 142
+php tests/f1_nucleo.php       → OK: 73
+php tests/f2_parser.php       → OK: 83
+php tests/f2_select.php       → OK: 164
+php tests/f3_escrituras.php   → OK: 110
+php tests/f4_api.php          → OK: 76
+php tests/f5_esquema.php      → OK: 122
+php tests/f5_admin.php        → OK: 176
 ```

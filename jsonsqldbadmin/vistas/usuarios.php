@@ -97,7 +97,11 @@ usort($usuarios, static fn($a, $b) => strcasecmp((string)$a['usuario'], (string)
       <input type="hidden" name="volver" value="usuarios">
       <div class="modal-header"><h5 class="modal-title"><?= t('Contraseña de «{1}»', [1 => h($n)]) ?></h5></div>
       <div class="modal-body">
-        <input class="form-control" name="clave" type="password" required minlength="10"
+        <?php if (strcasecmp($n, $yo) === 0): ?>
+          <input class="form-control mb-2" name="actual" type="password" required autocomplete="current-password"
+                 placeholder="<?= h(t('Contraseña actual')) ?>">
+        <?php endif; ?>
+        <input class="form-control" name="clave" type="password" required minlength="10" autocomplete="new-password"
                placeholder="<?= h(t('Nueva contraseña')) ?>">
         <div class="form-text"><?= h(t('Mínimo 10 caracteres.')) ?></div>
       </div>

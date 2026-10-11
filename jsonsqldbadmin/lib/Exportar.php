@@ -13,6 +13,88 @@ require_once __DIR__ . '/GeneradorSql.php';   // vistas y triggers en el SQL de 
  */
 final class Exportar
 {
+    /**
+     * Lo que se escribe al final de un volcado que se cortó a medias: una
+     * sentencia que ningún motor acepta, para que importarlo dé error (y en
+     * el panel, que importa todo o nada, no cargue nada) en vez de cargar una
+     * parte sin que nadie llegue a leer el comentario de la última línea.
+     */
+    public const INCOMPLETO = 'INCOMPLETE_DUMP_DO_NOT_IMPORT;';
+
+    /** Lo que cierra una descarga que se ha cortado: el aviso y la sentencia de arriba */
+    private static function incompleta(string $error): string
+    {
+        return "\n" . self::comentario(t('ERROR: la exportación está incompleta: {error}', ['error' => $error])) . self::INCOMPLETO . "\n";
+    }
+
+    /**
+     * Un texto como comentario del volcado, «-- » en cada una de sus líneas.
+     * Lo que se comenta puede venir de la base (un CHECK o una vista que el
+     * otro motor no admite, el error al traducirla) y llevar saltos de línea,
+     * también un \r suelto: con «-- » solo delante, lo que hubiera detrás de
+     * uno se ejecutaba al cargar el volcado en el otro motor (2.9).
+     */
+    private static function comentario(string $texto): string
+    {
+        return '-- ' . implode("\n-- ", preg_split('/\r\n|\r|\n/', $texto)) . "\n";
+    }
+
+    /**
+     * JSON (2.9): una lista de objetos, uno por fila y una fila por línea. Es
+     * lo que el panel acepta al importar en una tabla.
+     *
+     * @param iterable<array<string,mixed>> $filas
+     */
+    public static function json(iterable $filas, string $nombre): void
+    {
+        self::primerLote($filas);
+        self::cabeceras($nombre . '.json', 'text/plain; charset=UTF-8');
+        try {
+            $primera = true;
+            echo '[';
+            foreach ($filas as $f) {
+                echo ($primera ? "\n" : ",\n"), self::filaJson($f);
+                $primera = false;
+            }
+            echo "\n]\n";
+        } catch (Throwable $e) {
+            echo self::incompleta($e->getMessage());
+        }
+        exit;
+    }
+
+    /**
+     * Excel (2.9), con EscritorXlsx: se escribe entero antes de empezar la
+     * descarga, así que un error se ve en el panel y no deja un fichero roto.
+     *
+     * @param iterable<array<string,mixed>> $filas
+     * @param array<string,string>          $tipos columna => tipo, si se sabe
+     */
+    public static function xlsx(iterable $filas, string $nombre, array $tipos = []): void
+    {
+        self::primerLote($filas);
+        $libro = null;
+        $tmp = self::temporal(t('No se pudo crear el fichero de Excel.'));
+        try {
+            foreach ($filas as $f) {
+                $libro ??= new EscritorXlsx(array_map('strval', array_keys($f)), $tipos);
+                $libro->fila($f);
+            }
+            if ($libro !== null) {
+                $libro->guardar($tmp);
+            }
+            self::cabeceras($nombre . '.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Length: ' . filesize($tmp));
+            readfile($tmp);
+        } finally {
+            if ($libro !== null) {
+                $libro->borrarTemporales();
+            }
+            @unlink($tmp);
+        }
+        exit;
+    }
+
     /** @param iterable<array<string,mixed>> $filas  un array o un generador (por lotes, ver Lotes) */
     public static function csv(iterable $filas, string $nombre): void
     {
@@ -23,25 +105,54 @@ final class Exportar
         // BOM para que Excel reconozca el UTF-8 y no rompa los acentos
         fwrite($salida, "\xEF\xBB\xBF");
 
-        $sep = (string)ADMIN_CSV_SEPARADOR;
-        $primera = true;
         try {
-            self::lineasCsv($filas, $salida, $sep, $primera);
+            self::lineasCsv($filas, $salida);
         } catch (Throwable $e) {
-            // La descarga ya ha empezado: el error, en la última línea, para
-            // que nadie tome el fichero por completo
-            fwrite($salida, "\n" . t('ERROR: la exportación está incompleta: {error}', ['error' => $e->getMessage()]) . "\n");
+            // La descarga ya ha empezado: el error, al final, para que nadie
+            // tome el fichero por completo
+            fwrite($salida, self::incompleta($e->getMessage()));
         }
         fclose($salida);
         exit;
     }
 
-    /** @param resource $salida */
-    private static function lineasCsv(iterable $filas, $salida, string $sep, bool $primera): void
+    /**
+     * Lo que Excel tomaría por una fórmula al abrir un CSV: se exporta con un
+     * apóstrofo delante, y al importar se le quita uno (ver Importar::csv()).
+     * También lo que ya empieza por apóstrofos y sigue con una fórmula (2.9):
+     * sin el suyo, '-5 volvía como -5 al importarlo.
+     */
+    public const FORMULA = '/^\'*(?:\s*[=+\-@]|[\t\r])/';
+
+    /**
+     * Las filas en CSV, con su cabecera, como texto: para enseñar un ejemplo.
+     *
+     * @param list<array<string,mixed>> $filas
+     */
+    public static function textoCsv(array $filas): string
     {
+        $m = fopen('php://memory', 'w+b');
+        self::lineasCsv($filas, $m);
+        rewind($m);
+        $texto = (string)stream_get_contents($m);
+        fclose($m);
+        return $texto;
+    }
+
+    /** Una fila del JSON que exporta y acepta el panel */
+    public static function filaJson(array $f): string
+    {
+        return (string)json_encode($f, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION | JSON_INVALID_UTF8_SUBSTITUTE);
+    }
+
+    /** @param resource $salida */
+    private static function lineasCsv(iterable $filas, $salida): void
+    {
+        $sep = (string)ADMIN_CSV_SEPARADOR;
+        $primera = true;
         foreach ($filas as $f) {
             if ($primera) {
-                fputcsv($salida, array_keys($f), $sep, '"', '\\');
+                fputcsv($salida, array_keys($f), $sep, '"', '');
                 $primera = false;
             }
             $linea = [];
@@ -50,12 +161,15 @@ final class Exportar
                 // Un texto que empieza por = + - @ lo toma Excel por una fórmula
                 // y la ejecuta al abrir el fichero: con un apóstrofo delante, es
                 // texto (Excel no lo muestra). Los números no se tocan
-                if (is_string($v) && preg_match('/^[\s]*[=+\-@]|^[\t\r]/', $v)) {
+                if (is_string($v) && preg_match(self::FORMULA, $v)) {
                     $texto = "'" . $texto;
                 }
                 $linea[] = $texto;
             }
-            fputcsv($salida, $linea, $sep, '"', '\\');
+            // Sin carácter de escape (2.9), como el CSV estándar y Excel: solo
+            // se doblan las comillas. Con '\\', una barra seguida de comillas
+            // se escribía sin doblarlas y el texto no volvía igual
+            fputcsv($salida, $linea, $sep, '"', '');
         }
     }
 
@@ -66,8 +180,13 @@ final class Exportar
      */
     private static function primerLote(iterable $filas): void
     {
-        if ($filas instanceof Generator) {
-            $filas->current();
+        // Un generador vacío se da por terminado al pedirle la primera fila, y
+        // el foreach de después fallaba («Cannot traverse an already closed
+        // generator») con la descarga ya empezada: el fichero solo llevaba el
+        // error. Sin filas no hay nada que exportar, y se dice en el panel
+        $vacio = $filas instanceof Generator ? ($filas->current() === null && !$filas->valid()) : ($filas === []);
+        if ($vacio) {
+            throw new RuntimeException(t('La consulta no ha devuelto ninguna fila: no hay nada que exportar'));
         }
     }
 
@@ -80,15 +199,7 @@ final class Exportar
      */
     public static function zip(string $base, string $ruta): void
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'jsonsqldb_');
-        if ($tmp === false) {
-            throw new RuntimeException(t('No se pudo crear el fichero temporal del ZIP.'));
-        }
-        // Se borra pase lo que pase, también si la petición muere por el camino
-        register_shutdown_function(static function () use ($tmp): void {
-            if (is_file($tmp)) { @unlink($tmp); }
-        });
-
+        $tmp = self::temporal(t('No se pudo crear el fichero temporal del ZIP.'));
         try {
             self::zipEn($base, $ruta, $tmp);
             self::cabeceras($base . '.zip', 'application/zip');
@@ -98,6 +209,24 @@ final class Exportar
             if (is_file($tmp)) { @unlink($tmp); }
         }
         exit;
+    }
+
+    /**
+     * Un fichero temporal para montar una descarga (el ZIP, el Excel), que se
+     * borra pase lo que pase: también si la petición muere por el camino (la
+     * memoria, el tiempo), cuando ningún finally llega a ejecutarse (2.9: el
+     * Excel dejaba el suyo).
+     */
+    private static function temporal(string $error): string
+    {
+        $tmp = ficheroTemporal('jsonsqldb_');
+        if ($tmp === false) {
+            throw new RuntimeException($error);
+        }
+        register_shutdown_function(static function () use ($tmp): void {
+            if (is_file($tmp)) { @unlink($tmp); }
+        });
+        return $tmp;
     }
 
     /** Escribe en $destino la copia ZIP de la base (ver zip()). */
@@ -127,6 +256,11 @@ final class Exportar
                 /** @var SplFileInfo $item */
                 $real    = str_replace('\\', '/', $item->getPathname());
                 $interna = substr($real, $corte);
+                // La caché y los temporales de una ordenación se rehacen solos: a
+                // la copia no aportan nada y la caché puede ocupar mucho
+                if (preg_match('#/\.(cache|orden)(/|$)#', substr($real, strlen($ruta)))) {
+                    continue;
+                }
                 if ($item->isDir()) {
                     $zip->addEmptyDir($interna);
                 } elseif ($item->isFile() && !esFicheroDeBloqueo($item->getFilename())) {
@@ -171,20 +305,77 @@ final class Exportar
     public static function base(string $base, array $tablas, array $triggers, array $vistas = [],
                                 array $indices = [], string $dialecto = 'sqlite', ?callable $cargar = null): void
     {
-        $ext = ['mysql' => '.mysql.sql', 'postgresql' => '.pg.sql', 'sqlserver' => '.sqlserver.sql', 'access' => '.access.sql'][$dialecto] ?? '.sql';
+        $ext = ['mysql' => '.mysql.sql', 'postgresql' => '.pg.sql', 'sqlserver' => '.sqlserver.sql', 'access' => '.access.sql', 'json' => '.json'][$dialecto] ?? '.sql';
+        // Antes de empezar la descarga, una fila de cada tabla (2.9): una tabla
+        // que no se puede leer (no cabe en la memoria de PHP) cortaba el volcado
+        // a medias, con las tablas de detrás sin escribir y un fichero que
+        // parecía completo. Así el error se ve en el panel y no se descarga nada
+        $fallan = [];
+        foreach ($tablas as $t) {
+            try {
+                Api::sql($base, 'SELECT * FROM ' . cita((string)$t['tabla']) . ' LIMIT 1');
+            } catch (Throwable $e) {
+                $fallan[] = $t['tabla'] . ': ' . $e->getMessage();
+            }
+        }
+        if ($fallan !== []) {
+            throw new RuntimeException(t('No se puede volcar la base: estas tablas no se pueden leer y el volcado quedaría incompleto. {detalle}',
+                ['detalle' => implode(' · ', $fallan)]));
+        }
         self::cabeceras($base . $ext, 'text/plain; charset=UTF-8');
         // Tabla a tabla hacia el navegador, sin juntar antes el volcado entero.
         // Si algo falla a medias, la descarga ya ha empezado: el error va al
-        // final del fichero, para que nadie lo tome por un volcado completo
+        // final del fichero, y detrás una sentencia que ningún motor acepta,
+        // para que importarlo falle en vez de cargar media base sin avisar
+        $salida = static function (string $trozo): void {
+            echo $trozo;
+            flush();
+        };
         try {
-            self::volcado($base, $tablas, $triggers, $vistas, $indices, $dialecto, $cargar, static function (string $trozo): void {
-                echo $trozo;
-                flush();
-            });
+            if ($dialecto === 'json') {
+                self::volcadoJson($base, $tablas, $triggers, $vistas, $indices, $cargar, $salida);
+            } else {
+                self::volcado($base, $tablas, $triggers, $vistas, $indices, $dialecto, $cargar, $salida);
+            }
         } catch (Throwable $e) {
-            echo "\n-- " . t('ERROR: el volcado está incompleto: {error}', ['error' => $e->getMessage()]) . "\n";
+            echo self::incompleta($e->getMessage());
         }
         exit;
+    }
+
+    /**
+     * La base entera en JSON (2.9), lo que lee Importar::importarJsonBase():
+     * "estructura" y "despues" son el SQL del volcado de jsonSQLDB sin sus
+     * INSERT (el mismo que escribe volcado(), así que crea lo mismo), y en
+     * medio, "tablas": cada una con su "nombre" y sus "filas", una por línea,
+     * padres antes que hijos. Sale por partes, tabla a tabla.
+     */
+    private static function volcadoJson(string $base, array $tablas, array $triggers, array $vistas, array $indices,
+                                        callable $cargar, callable $salida): void
+    {
+        // Sin filas: el volcado SQL es solo la estructura. Un generador vacío,
+        // como las tablas que llegan por lotes, deja para el final las claves
+        // de una tabla hacia sí misma, que es lo que se carga aquí después.
+        // volcado() da un trozo por tabla y uno último con lo de después de
+        // las filas (claves en ciclo, vistas y triggers)
+        $trozos = [];
+        self::volcado($base, $tablas, $triggers, $vistas, $indices, 'sqlite',
+            static fn(): Generator => yield from [], static function (string $trozo) use (&$trozos): void { $trozos[] = $trozo; });
+        $despues = (string)array_pop($trozos);
+        $estructura = implode('', $trozos);
+        $salida("{\n\"formato\": \"jsonSQLDB\",\n\"base\": " . self::filaJson([$base]) . ",\n\"fecha\": \"" . date('Y-m-d H:i:s')
+            . "\",\n\"estructura\": " . substr(self::filaJson([$estructura]), 1, -1) . ",\n\"tablas\": [");
+        [$orden] = self::ordenar(array_column($tablas, null, 'tabla'));
+        foreach ($orden as $i => $nombre) {
+            $salida(($i === 0 ? "\n" : ",\n") . '{"nombre": ' . substr(self::filaJson([$nombre]), 1, -1) . ', "filas": [');
+            $primera = true;
+            foreach ($cargar($nombre) as $f) {
+                $salida(($primera ? "\n" : ",\n") . self::filaJson($f));
+                $primera = false;
+            }
+            $salida("\n]}");
+        }
+        $salida("\n],\n\"despues\": " . substr(self::filaJson([$despues]), 1, -1) . "\n}\n");
     }
 
     /**
@@ -219,15 +410,29 @@ final class Exportar
     }
 
     /** @var list<string> lo que la sintaxis ANSI-89 de Access no deja escribir en la sentencia que viene */
-    private static array $notasAccess = [];
+    private static array $notasDdl = [];
 
     /** Dialectos de volcado: 'sqlite' (que también es el de jsonSQLDB), 'mysql', 'postgresql', 'sqlserver', 'access'. */
     public const DIALECTOS = ['sqlite', 'mysql', 'postgresql', 'sqlserver', 'access'];
 
     /** El dialecto del volcado en curso. Solo cambia durante volcado(). */
     private static string $d = 'sqlite';
+    /** Caracteres NUL quitados de los textos, en los motores que no los admiten */
+    private static int $nulos = 0;
     /** @var array<string,true> nombres de restricciones e índices que se repiten en varias tablas */
     private static array $repetidos = [];
+
+    /**
+     * Las columnas de una clave o un índice de SHOW KEYS o SHOW INDEXES: van
+     * separadas por comas, y la que lleva una coma, entre comillas como en
+     * CSV (2.9: se partía en dos).
+     *
+     * @return list<string>
+     */
+    private static function columnasDe(?string $lista): array
+    {
+        return $lista === null || $lista === '' ? [] : str_getcsv($lista, ',', '"', '');
+    }
 
     /** Un nombre entre comillas: dobles en SQL estándar, invertidas en MySQL, corchetes en SQL Server. */
     private static function q(string $nombre): string
@@ -241,6 +446,58 @@ final class Exportar
     }
 
     /**
+     * La expresión de un CHECK (SQL de aquí) en el SQL del destino (2.9): los
+     * nombres con sus comillas, != como <>, LENGTH como cuenta caracteres
+     * allí, IFNULL como COALESCE. Null si usa algo que allí no significa lo
+     * mismo: || (en MySQL y SQL Server no concatena así), JSON_VALID fuera de
+     * MySQL y SQLite, una función desconocida o un nombre que no es columna.
+     *
+     * @param list<array> $columnas las de SHOW COLUMNS
+     */
+    private static function expresionCheck(string $sql, array $columnas): ?string
+    {
+        $cols = [];
+        foreach ($columnas as $c) {
+            $cols[strtolower((string)$c['columna'])] = (string)$c['columna'];
+        }
+        $palabras = ['AND', 'OR', 'NOT', 'IN', 'BETWEEN', 'IS', 'NULL', 'LIKE', 'ABS', 'LOWER', 'UPPER', 'COALESCE', 'ROUND', 'TRIM'];
+        $mal = false;
+        $out = preg_replace_callback(
+            '/\'(?:[^\']|\'\')*\'|\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|"((?:[^"]|"")*)"|([A-Za-z_][A-Za-z0-9_]*)|(\|\||!=)/',
+            static function (array $m) use ($cols, $palabras, &$mal): string {
+                if (($m[3] ?? '') !== '') {
+                    $mal = $mal || ($m[3] === '||' && in_array(self::$d, ['mysql', 'sqlserver'], true));
+                    return $m[3] === '!=' ? '<>' : $m[3];
+                }
+                $nombre = ($m[1] ?? '') !== '' ? str_replace('""', '"', $m[1]) : ($m[2] ?? '');
+                if ($nombre === '') {
+                    return $m[0];                               // un texto o un número
+                }
+                if (isset($cols[strtolower($nombre)])) {
+                    return self::q($cols[strtolower($nombre)]);
+                }
+                $w = strtoupper($nombre);
+                if (($m[1] ?? '') === '' && in_array($w, $palabras, true)) {
+                    return $m[0];
+                }
+                if ($w === 'LENGTH' || $w === 'CHAR_LENGTH') {
+                    return ['mysql' => 'CHAR_LENGTH', 'sqlserver' => 'LEN'][self::$d] ?? 'LENGTH';
+                }
+                if ($w === 'IFNULL') {
+                    return 'COALESCE';
+                }
+                if ($w === 'JSON_VALID' && in_array(self::$d, ['mysql', 'sqlite'], true)) {
+                    return $m[0];
+                }
+                $mal = true;
+                return $m[0];
+            },
+            $sql
+        );
+        return $mal ? null : $out;
+    }
+
+    /**
      * El nombre de una restricción o un índice. En SQLite, PostgreSQL y SQL
      * Server es de toda la base y aquí de cada tabla: si dos tablas usan el
      * mismo, se le antepone la tabla.
@@ -251,30 +508,30 @@ final class Exportar
     }
 
     /**
-     * El volcado de una base como texto. Se carga igual en jsonSQLDB (con la
-     * importación del panel) que en SQLite (`sqlite3 base.db < base.sql`):
-     * es la puerta de salida del proyecto, y por eso cada restricción va
-     * dentro de su CREATE TABLE, que es lo único que SQLite admite. Las tablas
-     * salen en el orden de sus claves foráneas, las referenciadas antes, y las
-     * filas de una tabla que se referencia a sí misma, cada padre antes que
-     * sus hijos. Solo si hay un ciclo entre tablas (o una fila que se apunta a
-     * sí misma) esa clave va al final con ALTER TABLE, que SQLite no acepta, y
-     * el volcado lo dice en un comentario.
+     * El volcado de una base, en el dialecto pedido. El de jsonSQLDB se carga
+     * igual en jsonSQLDB (con la importación del panel) que en SQLite (`sqlite3
+     * base.db < base.sql`): es la puerta de salida del proyecto, y por eso cada
+     * restricción va dentro de su CREATE TABLE, que es lo único que SQLite
+     * admite. Las tablas salen en el orden de sus claves foráneas, las
+     * referenciadas antes, y las filas de una tabla que se referencia a sí
+     * misma, cada padre antes que sus hijos. Solo si hay un ciclo entre tablas
+     * (o una fila que se apunta a sí misma) esa clave va al final con ALTER
+     * TABLE, que SQLite no acepta, y el volcado lo dice en un comentario.
+     *
+     * Las filas pueden venir ya en cada tabla ('filas') o pedirse tabla a tabla
+     * con $cargar(nombre), que devuelve un array o, si no cabe en memoria, un
+     * generador (ver Lotes); y el texto puede devolverse entero o entregarse
+     * por trozos a $salida (cada bloque de filas, ver bloques()). Con los dos,
+     * en memoria hay como mucho una tabla, o un lote si no cabe.
      *
      * @param array<int,array{tabla:string,columnas:array,claves:array,filas?:array,n?:int}> $tablas  las filas, o cuántas son si se cargan por tablas ($cargar)
-     */
-    /**
-     * El volcado de una base. Las filas pueden venir ya en cada tabla
-     * ('filas') o pedirse tabla a tabla con $cargar(nombre), que devuelve un
-     * array o, si no cabe en memoria, un generador (ver Lotes); y el texto puede
-     * devolverse entero o entregarse por trozos a $salida (cada 500 filas). Con
-     * los dos, en memoria hay como mucho una tabla, o un lote si no cabe.
      */
     public static function volcado(string $base, array $tablas, array $triggers, array $vistas = [],
                                    array $indices = [], string $dialecto = 'sqlite',
                                    ?callable $cargar = null, ?callable $salida = null): string
     {
         self::$d = in_array($dialecto, self::DIALECTOS, true) ? $dialecto : 'sqlite';
+        self::$nulos = 0;
         try {
             return self::componer($base, $tablas, $triggers, $vistas, $indices, $cargar, $salida);
         } finally {
@@ -307,14 +564,20 @@ final class Exportar
         }
         foreach ($tablas as $t) {
             foreach ($t['claves'] as $k) {
-                if ($k['tipo'] !== 'PRIMARY') { $usos[strtolower((string)$k['nombre'])][$t['tabla']] = true; }
+                if ($k['tipo'] !== 'PRIMARY' && $k['nombre'] !== '') { $usos[strtolower((string)$k['nombre'])][$t['tabla']] = true; }
             }
         }
         self::$repetidos = array_map(static fn(): bool => true, array_filter($usos, static fn(array $u): bool => count($u) > 1));
 
         $out  = '-- jsonSQLDB · ' . t("volcado de la base '{base}'", ['base' => $base]) . ' · ' . date('Y-m-d H:i:s') . "\n";
         $out .= '-- ' . t('{t} tabla(s), {f} fila(s)', ['t' => count($tablas), 'f' => $filas]) . "\n";
-        $out .= self::cabeceraDialecto($base);
+        $citext = false;                   // ¿alguna columna COLLATE NOCASE? En PostgreSQL es citext (2.9)
+        foreach ($tablas as $t) {
+            foreach ($t['columnas'] as $c) {
+                $citext = $citext || ($c['colacion'] ?? null) === 'NOCASE';
+            }
+        }
+        $out .= self::cabeceraDialecto($base, $citext);
         foreach ($orden as $nombre) {
             $t = $porNombre[$nombre];
             $filasT = $t['filas'] ?? ($cargar !== null ? $cargar($nombre) : []);
@@ -343,7 +606,7 @@ final class Exportar
             $enIndice = [];
             foreach ($propios as $i) {
                 if ($i['tabla'] === $nombre) {
-                    foreach (explode(',', (string)$i['columnas']) as $c) { $enIndice[$c] = true; }
+                    foreach (self::columnasDe($i['columnas']) as $c) { $enIndice[$c] = true; }
                 }
             }
             $out .= self::createTable($nombre, $t['columnas'], $t['claves'], $diferidas, $enIndice, $est);
@@ -378,7 +641,7 @@ final class Exportar
                     continue;
                 }
                 $out .= 'CREATE INDEX ' . self::q(self::nombreObjeto($nombre, (string)$i['indice'])) . ' ON ' . self::q($nombre)
-                      . ' (' . implode(', ', array_map(static fn($c) => self::q((string)$c), explode(',', (string)$i['columnas']))) . ");\n";
+                      . ' (' . implode(', ', array_map(static fn($c) => self::q((string)$c), self::columnasDe($i['columnas']))) . ");\n";
             }
             // Por trozos: esta tabla sale ya, y sus filas dejan sitio a la siguiente
             if ($salida !== null) {
@@ -394,22 +657,18 @@ final class Exportar
             $out .= "-- ------------------------------------------------------------\n";
             foreach ($diferidas as [$tabla, $k]) {
                 $sentencia = 'ALTER TABLE ' . self::q($tabla) . ' ADD ' . self::claveForanea($tabla, $k) . ";\n";
-                foreach (self::$notasAccess as $n) {
-                    $out .= '-- ' . $n . "\n";
+                foreach (self::$notasDdl as $n) {
+                    $out .= self::comentario($n);
                 }
-                self::$notasAccess = [];
+                self::$notasDdl = [];
                 $out .= $sentencia . (self::$d === 'access' ? "\n" : '');
             }
         }
-        // Vistas y triggers: tal cual en el volcado de jsonSQLDB y SQLite; en los
-        // demás, comentados, porque su SQL podría crearse sin error y hacer otra
-        // cosa (|| es un O lógico en MySQL; un trigger de PostgreSQL es una
-        // función; uno de SQL Server no tiene NEW ni OLD)
         // Vistas y triggers: tal cual para SQLite y jsonSQLDB; para los demás,
-        // traducidos a su SQL. Lo que no tiene ninguna forma de escribirse allí
-        // va comentado con el motivo, y se cuenta en la cabecera
-        // Lo que no se pueda escribir en el destino (o un aviso de PHP por algo
-        // inesperado) deja esa vista o ese trigger comentado, no el volcado a medias
+        // traducidos a su SQL (ver GeneradorSql). Lo que no tiene forma de
+        // escribirse allí (o un aviso de PHP por algo inesperado) deja esa vista
+        // o ese trigger comentado con el motivo, no el volcado a medias, y se
+        // cuenta en la cabecera
         set_error_handler(static function (int $n, string $msg): bool {
             throw new NoTraducible($msg);
         }, E_WARNING | E_NOTICE);                  // no los avisos de obsoleto de versiones nuevas de PHP
@@ -430,7 +689,7 @@ final class Exportar
                         $out .= $gen->vista((string)$v['vista'], (string)$v['sql']) . "\n";
                     } catch (Throwable $e) {
                         $sinTraducir[] = (string)$v['vista'];
-                        $out .= '-- ' . t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()]) . "\n-- " . str_replace("\n", "\n-- ", $sql) . "\n";
+                        $out .= self::comentario(t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()]) . "\n" . $sql);
                     }
                 }
             }
@@ -451,16 +710,16 @@ final class Exportar
                         $pk = [];
                         foreach ($t['claves'] ?? [] as $k) {
                             if ($k['tipo'] === 'PRIMARY') {
-                                $pk = array_map('trim', explode(',', (string)$k['columnas']));
+                                $pk = self::columnasDe($k['columnas']);
                             }
                         }
                         try {
-                            $out .= $gen->triggers($tabla, $lista, $t['columnas'] ?? [], $pk);
+                            $out .= $gen->triggers($tabla, $lista, $t['columnas'] ?? [], $pk, $t['claves'] ?? []);
                         } catch (Throwable $e) {
                             foreach ($lista as $trg) {
                                 $sinTraducir[] = (string)$trg['nombre'];
-                                $out .= '-- ' . t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()]) . "\n-- "
-                                      . str_replace("\n", "\n-- ", rtrim(trim((string)$trg['sql']), ';') . ';') . "\n";
+                                $out .= self::comentario(t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()])
+                                      . "\n" . rtrim(trim((string)$trg['sql']), ';') . ';');
                             }
                         }
                     }
@@ -470,10 +729,13 @@ final class Exportar
             restore_error_handler();
         }
         if ($sinTraducir !== []) {
-            $aviso = '-- ' . t('Sin traducir (van comentados al final): {lista}', ['lista' => implode(', ', $sinTraducir)]) . "\n";
+            $aviso = self::comentario(t('Sin traducir (van comentados al final): {lista}', ['lista' => implode(', ', $sinTraducir)]));
             // Por trozos, la cabecera ya ha salido: el aviso va aquí
             $out = $salida !== null ? "\n" . $aviso . $out
                 : str_replace('-- jsonsqldb-dialecto: ' . self::$d . "\n", '-- jsonsqldb-dialecto: ' . self::$d . "\n" . $aviso, $out);
+        }
+        if (self::$nulos > 0) {
+            $out .= "\n-- " . t('AVISO: {n} carácter(es) NUL (\\0) quitados de los textos: este motor no los admite dentro de un texto', ['n' => self::$nulos]) . "\n";
         }
         $out .= ['mysql' => "\nSET FOREIGN_KEY_CHECKS = 1;\n", 'postgresql' => "\nCOMMIT;\n",
                  'sqlserver' => "\nCOMMIT TRANSACTION;\n"][self::$d] ?? '';
@@ -489,25 +751,26 @@ final class Exportar
      * en el idioma del panel. La línea «-- jsonsqldb-dialecto:» no se traduce:
      * es la que mira el importador para saber de qué motor es.
      */
-    private static function cabeceraDialecto(string $base): string
+    private static function cabeceraDialecto(string $base, bool $citext): string
     {
-        $c = static fn(string $texto): string => '-- ' . $texto . "\n";
+        $c = static fn(string $texto): string => self::comentario($texto);
         $out = '-- jsonsqldb-dialecto: ' . self::$d . "\n";
         switch (self::$d) {
             case 'mysql':
                 // Modo estricto: un valor que no cabe es un error, no un número
                 // cambiado en silencio (sin él, MySQL recorta y sigue)
                 return $out . $c(t('Para MySQL 8 y MariaDB 10.3 o posteriores: {orden}', ['orden' => "mysql nombre_base < $base.mysql.sql"]))
-                     . $c(t('Enteros como BIGINT (los de PHP son de 64 bits), texto en utf8mb4_bin (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos, y así una clave única sigue admitiendo lo mismo). Las vistas y los triggers van comentados al final: su SQL es el de jsonSQLDB y hay que revisarlo antes de crearlos.'))
+                     . $c(t('Enteros como BIGINT (los de PHP son de 64 bits), texto en utf8mb4_bin (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos, y así una clave única sigue admitiendo lo mismo), y en utf8mb4_general_ci el de las columnas COLLATE NOCASE. Las vistas y los triggers van al final, traducidos al SQL de MySQL; el que no se puede escribir allí va comentado, con el motivo.'))
                      . "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS = 0;\n"
                      . "SET SQL_MODE = 'STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION';\n";
             case 'postgresql':
                 return $out . $c(t('Para PostgreSQL 10 o posterior: {orden}', ['orden' => "psql -v ON_ERROR_STOP=1 -d nombre_base -f $base.pg.sql"]))
-                     . $c(t('Todo va en una transacción: o se carga entero o no se carga nada. Enteros como BIGINT, fechas como TIMESTAMP(3), autoincremento como IDENTITY. Las vistas y los triggers van comentados al final.'))
-                     . "SET client_encoding = 'UTF8';\nBEGIN;\n";
+                     . $c(t('Todo va en una transacción: o se carga entero o no se carga nada. Enteros como BIGINT, fechas como TIMESTAMP(3), autoincremento como IDENTITY. Las vistas y los triggers van al final, traducidos (cada trigger con su función); el que no se puede escribir allí va comentado, con el motivo.'))
+                     . "SET client_encoding = 'UTF8';\nBEGIN;\n"
+                     . ($citext ? "CREATE EXTENSION IF NOT EXISTS citext;\n" : '');
             case 'sqlserver':
-                return $out . $c(t('Para SQL Server 2016 o posterior: {orden}, o ábrelo en SQL Server Management Studio. Todo va en una transacción.', ['orden' => "sqlcmd -d nombre_base -i $base.sqlserver.sql"]))
-                     . $c(t('Texto como NVARCHAR con cotejamiento binario (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos), enteros como BIGINT, fechas como DATETIME2(3), autoincremento como IDENTITY. Una clave foránea de una tabla hacia sí misma va sin ON DELETE/ON UPDATE: SQL Server no admite acciones en cadena que puedan formar un ciclo. Las vistas y los triggers van comentados.'))
+                return $out . $c(t('Para SQL Server 2017 o posterior: {orden}, o ábrelo en SQL Server Management Studio. Todo va en una transacción.', ['orden' => "sqlcmd -d nombre_base -i $base.sqlserver.sql"]))
+                     . $c(t('Texto como NVARCHAR con cotejamiento binario (las comparaciones de jsonSQLDB distinguen mayúsculas y acentos), o Latin1_General_100_CI_AS en las columnas COLLATE NOCASE, enteros como BIGINT, fechas como DATETIME2(3), autoincremento como IDENTITY. Una clave foránea de una tabla hacia sí misma va sin ON DELETE/ON UPDATE: SQL Server no admite acciones en cadena que puedan formar un ciclo. Las vistas y los triggers van al final, traducidos; el que no se puede escribir allí va comentado, con el motivo.'))
                      . "SET NOCOUNT ON;\nSET XACT_ABORT ON;\nSET ANSI_NULLS ON;\nSET QUOTED_IDENTIFIER ON;\nBEGIN TRANSACTION;\n";
             case 'access':
                 return $out . $c(t('Para Microsoft Access, en su sintaxis de siempre (ANSI-89), la de la vista SQL de una consulta. Access ejecuta una sola sentencia cada vez: copia cada una (sin las líneas que empiezan por --) en Crear → Diseño de consulta → Vista SQL y pulsa Ejecutar. Para cargar el fichero entero de una vez, usa el script access-to-jsonsqldb.ps1 (opción «Load an SQL file into Access»).'))
@@ -566,19 +829,21 @@ final class Exportar
     {
         $pk = null;
         foreach ($t['claves'] as $k) {
-            if ($k['tipo'] === 'PRIMARY' && strpos((string)$k['columnas'], ',') === false) {
-                $pk = (string)$k['columnas'];
+            $cols = self::columnasDe($k['columnas']);
+            if ($k['tipo'] === 'PRIMARY' && count($cols) === 1) {
+                $pk = $cols[0];
             }
         }
         foreach ($t['claves'] as $k) {
             if ($k['tipo'] !== 'FOREIGN' || (string)$k['tabla_destino'] !== $t['tabla']) {
                 continue;
             }
-            $col = (string)$k['columnas'];
-            if ($pk === null || strpos($col, ',') !== false || (string)$k['columnas_destino'] !== $pk) {
+            $cols = self::columnasDe($k['columnas']);
+            if ($pk === null || count($cols) !== 1 || self::columnasDe($k['columnas_destino']) !== [$pk]) {
                 $diferidas[] = [$t['tabla'], $k];
                 continue;
             }
+            $col   = $cols[0];
             $porPk = [];
             foreach ($t['filas'] as $i => $f) {
                 $porPk[(string)($f[$pk] ?? '')] = $i;
@@ -635,22 +900,38 @@ final class Exportar
         if (self::$d === 'access') {
             // La sintaxis ANSI-89 de Access no tiene ON DELETE ni ON UPDATE: la
             // relación se crea sin ellas y se dice qué hay que marcar a mano
+            // (SET DEFAULT, que Access no tiene, también se dice, 2.9)
             $acciones = '';
             foreach (['DELETE' => $k['on_delete'], 'UPDATE' => $k['on_update']] as $cuando => $accion) {
                 if (in_array($accion, ['CASCADE', 'SET NULL'], true)) {
-                    self::$notasAccess[] = '[' . (string)$k['nombre'] . "] ON $cuando $accion";
+                    self::$notasDdl[] = '[' . (string)$k['nombre'] . "] ON $cuando $accion";
+                } elseif ($accion === 'SET DEFAULT') {
+                    self::$notasDdl[] = '[' . (string)$k['nombre'] . "] ON $cuando SET DEFAULT: " . t('Access no lo tiene; la relación queda sin esa acción');
+                }
+            }
+        }
+        if (self::$d === 'mysql') {
+            // InnoDB acepta SET DEFAULT y lo guarda como RESTRICT sin avisar
+            // (2.9): se escribe NO ACTION, que es lo que hará allí, y se dice
+            foreach (['DELETE' => 'on_delete', 'UPDATE' => 'on_update'] as $cuando => $campo) {
+                if ($k[$campo] === 'SET DEFAULT') {
+                    $acciones = str_replace("ON $cuando SET DEFAULT", "ON $cuando NO ACTION", $acciones);
+                    self::$notasDdl[] = '`' . (string)$k['nombre'] . "` ON $cuando SET DEFAULT: " . t('MySQL (InnoDB) no lo tiene; queda NO ACTION, y borrar o cambiar la fila padre dará error');
                 }
             }
         }
         return 'CONSTRAINT ' . self::q(self::nombreObjeto($tabla, (string)$k['nombre']))
-             . ' FOREIGN KEY (' . implode(', ', array_map($q, array_filter(explode(',', (string)$k['columnas'])))) . ')'
+             . ' FOREIGN KEY (' . implode(', ', array_map($q, self::columnasDe($k['columnas']))) . ')'
              . ' REFERENCES ' . self::q((string)$k['tabla_destino'])
-             . ' (' . implode(', ', array_map($q, array_filter(explode(',', (string)$k['columnas_destino'])))) . ')'
+             . ' (' . implode(', ', array_map($q, self::columnasDe($k['columnas_destino']))) . ')'
              . $acciones;
     }
 
-    /** CREATE TABLE reconstruido a partir de la estructura, con sus restricciones dentro. */
-    /** @param array{filas:int,enteras:array<string,int>,largo:array<string,int>,fuera32:array<string,true>} $est ver estadisticas() */
+    /**
+     * CREATE TABLE reconstruido a partir de la estructura, con sus restricciones dentro.
+     *
+     * @param array{filas:int,enteras:array<string,int>,largo:array<string,int>,bytes:array<string,int>,fuera32:array<string,true>} $est ver estadisticas()
+     */
     private static function createTable(string $tabla, array $columnas, array $claves, array $diferidas,
                                         array $enIndice, array $est): string
     {
@@ -658,24 +939,38 @@ final class Exportar
         // Server un texto sin longitud no puede estar en uno
         $enClave = $enIndice;
         foreach ($claves as $k) {
-            foreach (explode(',', (string)$k['columnas']) as $c) { $enClave[$c] = true; }
+            foreach (self::columnasDe($k['columnas']) as $c) { $enClave[$c] = true; }
         }
         $pk = [];
         foreach ($claves as $k) {
             if ($k['tipo'] === 'PRIMARY') {
-                $pk = array_filter(explode(',', (string)$k['columnas']));
+                $pk = self::columnasDe($k['columnas']);
             }
         }
         $compuesta = count($pk) > 1;
         $sueltas = [];
 
+        $tipos = [];
+        foreach ($columnas as $c) {
+            $nombre = (string)$c['columna'];
+            $tipos[$nombre] = self::$d === 'sqlite' ? self::tipo($c) : self::tipoDestino($c, isset($enClave[$nombre]), $est);
+        }
+        if (self::$d === 'mysql') {
+            $tipos = self::filaMysql($tipos, $enClave, $est);
+            // ENUM (2.9): MySQL lo tiene; los demás, con un CHECK (abajo)
+            foreach ($columnas as $c) {
+                if (($c['valores'] ?? null) !== null) {
+                    $tipos[(string)$c['columna']] = 'ENUM(' . implode(', ', array_map([self::class, 'literal'], $c['valores'])) . ')';
+                }
+            }
+        }
         $partes = [];
         foreach ($columnas as $c) {
             $nombre = (string)$c['columna'];
-            $tipo   = self::$d === 'sqlite' ? self::tipo($c) : self::tipoDestino($c, isset($enClave[$nombre]), $est);
+            $tipo   = $tipos[$nombre];
             $esPk   = (int)$c['pk'] === 1 && !$compuesta;
             $auto   = (int)$c['auto'] === 1;
-            $d = self::q($nombre) . ' ' . $tipo;
+            $d = self::q($nombre) . ' ' . $tipo . self::colacion($c, $tabla);
             switch (self::$d) {
                 case 'sqlite':
                     // SQLite solo admite AUTOINCREMENT en INTEGER PRIMARY KEY; en otra
@@ -719,17 +1014,18 @@ final class Exportar
                 // 2.8: un DEFAULT que se calcula al insertar (CURRENT_TIMESTAMP, (expresión))
                 $expr = self::defectoCalculado((string)$calculado, $tipo);
                 if ($expr !== null && self::$d === 'access') {
-                    self::$notasAccess[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . $expr;
+                    self::$notasDdl[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . $expr;
                 } elseif ($expr !== null) {
                     $d .= ' DEFAULT ' . $expr;
                 }
             } elseif ($c['defecto'] !== null && self::$d === 'access') {
                 // La sintaxis ANSI-89 no tiene DEFAULT: se dice, para ponerlo a mano
-                self::$notasAccess[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . self::literal($c['defecto']);
+                self::$notasDdl[] = '[' . $tabla . '].[' . $nombre . '] DEFAULT ' . self::literal($c['defecto']);
             } elseif ($c['defecto'] !== null) {
-                // MySQL 8 solo admite el valor por defecto de un TEXT entre paréntesis
+                // MySQL 8 solo admite el valor por defecto de un TEXT entre paréntesis,
+                // también el de un MEDIUMTEXT o un LONGTEXT (2.9: ver textoMysql())
                 $lit = self::literal($c['defecto']);
-                $d  .= ' DEFAULT ' . (self::$d === 'mysql' && $tipo === 'TEXT' ? '(' . $lit . ')' : $lit);
+                $d  .= ' DEFAULT ' . (self::$d === 'mysql' && str_ends_with($tipo, 'TEXT') ? '(' . $lit . ')' : $lit);
             }
             $partes[] = $d;
         }
@@ -743,7 +1039,7 @@ final class Exportar
         }
         $despues = '';
         foreach ($claves as $k) {
-            $cols = array_values(array_filter(explode(',', (string)$k['columnas'])));
+            $cols = self::columnasDe($k['columnas']);
             if ($k['tipo'] === 'UNIQUE' && !(count($cols) === 1 && isset($sueltas[$cols[0]]) && self::$d !== 'sqlserver')) {
                 $nombreK = self::q(self::nombreObjeto($tabla, (string)$k['nombre']));
                 $lista = implode(', ', array_map(static fn($c) => self::q((string)$c), $cols));
@@ -757,15 +1053,30 @@ final class Exportar
                 $partes[] = self::claveForanea($tabla, $k);
             }
         }
-
-        $notas = '';
-        if (self::$d === 'access') {
-            // Lo que la sintaxis ANSI-89 no deja escribir, encima de la tabla
-            foreach (self::$notasAccess as $n) {
-                $notas .= '-- ' . $n . "\n";
+        // ENUM fuera de MySQL y CHECK (2.9). Lo que el destino no puede
+        // comprobar igual (o Access, que en su SQL no tiene CHECK) va como nota
+        // encima de la tabla, para ponerlo a mano
+        foreach ($columnas as $c) {
+            if (($c['valores'] ?? null) !== null && self::$d !== 'mysql') {
+                $ck = 'CHECK (' . self::q((string)$c['columna']) . ' IN (' . implode(', ', array_map([self::class, 'literal'], $c['valores'])) . '))';
+                if (self::$d === 'access') { self::$notasDdl[] = $ck; } else { $partes[] = $ck; }
             }
-            self::$notasAccess = [];
         }
+        foreach ($claves as $k) {
+            if ($k['tipo'] === 'CHECK') {
+                $expr = self::$d === 'access' ? null : self::expresionCheck((string)$k['expresion'], $columnas);
+                $ck = ($k['nombre'] !== '' ? 'CONSTRAINT ' . self::q(self::nombreObjeto($tabla, (string)$k['nombre'])) . ' ' : '')
+                    . 'CHECK (' . ($expr ?? $k['expresion']) . ')';
+                if ($expr === null) { self::$notasDdl[] = $ck; } else { $partes[] = $ck; }
+            }
+        }
+
+        // Lo que el motor de destino no deja escribir, encima de la tabla
+        $notas = '';
+        foreach (self::$notasDdl as $n) {
+            $notas .= self::comentario($n);
+        }
+        self::$notasDdl = [];
         return $notas . 'CREATE TABLE ' . self::q($tabla) . " (\n  " . implode(",\n  ", $partes) . "\n)"
              . (self::$d === 'mysql' ? ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin' : '') . ";\n" . $despues;
     }
@@ -786,11 +1097,17 @@ final class Exportar
         }
         $tipo = strtoupper((string)$c['tipo']);
         $ss   = self::$d === 'sqlserver';
-        $cot  = $ss ? ' COLLATE Latin1_General_100_BIN2' : '';
+        // Una columna COLLATE NOCASE (2.9): en SQL Server, con un cotejamiento
+        // que no distingue mayúsculas; en PostgreSQL, citext
+        $nocase = ($c['colacion'] ?? null) === 'NOCASE';
+        $cot  = $ss ? ($nocase ? ' COLLATE Latin1_General_100_CI_AS' : ' COLLATE Latin1_General_100_BIN2') : '';
+        if ($nocase && self::$d === 'postgresql' && $tipo === 'TEXT') {
+            return 'CITEXT';
+        }
         if ($c['longitud'] !== null) {
             $n = (int)$c['longitud'];
             if ($ss) { return ($n <= 4000 ? "NVARCHAR($n)" : 'NVARCHAR(MAX)') . $cot; }
-            return self::$d === 'mysql' && $n > 16383 ? 'MEDIUMTEXT' : "VARCHAR($n)";
+            return self::$d === 'mysql' && $n > 16383 ? self::textoMysql(max($n * 4, $est['bytes'][(string)$c['columna']] ?? 0)) : "VARCHAR($n)";
         }
         if ($c['escala'] !== null || $tipo === 'DECIMAL') {
             // Cifras: las que piden los datos, al menos 20 y como mucho las del
@@ -806,11 +1123,53 @@ final class Exportar
             case 'DATETIME': return ['postgresql' => 'TIMESTAMP(3)', 'sqlserver' => 'DATETIME2(3)'][self::$d] ?? 'DATETIME(3)';
         }
         if (!$enClave || self::$d === 'postgresql') {
+            if (self::$d === 'mysql') {
+                return self::textoMysql($est['bytes'][(string)$c['columna']] ?? 0);
+            }
             return $ss ? 'NVARCHAR(MAX)' . $cot : 'TEXT';
         }
         $max = max(191, $est['largo'][(string)$c['columna']] ?? 0);
         // En SQL Server la clave de un índice no pasa de 900 bytes (450 NVARCHAR)
         return $ss ? ($max <= 450 ? "NVARCHAR($max)" : 'NVARCHAR(MAX)') . $cot : 'VARCHAR(' . $max . ')';
+    }
+
+    /**
+     * El texto de MySQL donde caben $bytes (2.9): TEXT hasta 65.535 bytes,
+     * MEDIUMTEXT hasta 16 MB y LONGTEXT más. En bytes, no en caracteres: en
+     * utf8mb4 un carácter ocupa hasta cuatro. Antes era siempre TEXT, y un
+     * texto de 70.000 caracteres no se podía cargar allí.
+     */
+    private static function textoMysql(int $bytes): string
+    {
+        return $bytes <= 65535 ? 'TEXT' : ($bytes <= 16777215 ? 'MEDIUMTEXT' : 'LONGTEXT');
+    }
+
+    /**
+     * MySQL no admite filas de más de 65.535 bytes sin contar los TEXT y BLOB
+     * (2.9): si las columnas de una tabla pasan de eso (cuatro VARCHAR(16000)
+     * en utf8mb4), las VARCHAR más largas que no están en una clave pasan a
+     * TEXT, empezando por la mayor, hasta que cabe.
+     *
+     * @param array<string, string> $tipos columna => tipo de MySQL
+     * @param array<string, true>   $enClave
+     * @return array<string, string>
+     */
+    private static function filaMysql(array $tipos, array $enClave, array $est): array
+    {
+        $bytes = static fn(string $t): int => preg_match('/^VARCHAR\((\d+)\)/', $t, $m) ? (int)$m[1] * 4 + 2
+            : (preg_match('/^DECIMAL\((\d+)/', $t, $m) ? intdiv((int)$m[1], 2) + 1 : (str_ends_with($t, 'TEXT') ? 12 : 8));
+        $total = array_sum(array_map($bytes, $tipos));
+        $largas = array_filter($tipos, static fn(string $t, string $c): bool => !isset($enClave[$c]) && str_starts_with($t, 'VARCHAR('),
+            ARRAY_FILTER_USE_BOTH);
+        uasort($largas, static fn(string $a, string $b): int => $bytes($b) <=> $bytes($a));
+        foreach ($largas as $c => $t) {
+            if ($total <= 65535) {
+                break;
+            }
+            $tipos[$c] = self::textoMysql($est['bytes'][$c] ?? 0);
+            $total += $bytes($tipos[$c]) - $bytes($t);
+        }
+        return $tipos;
     }
 
     /**
@@ -858,7 +1217,7 @@ final class Exportar
      */
     private static function estadisticas(iterable $filas): array
     {
-        $est = ['filas' => 0, 'enteras' => [], 'largo' => [], 'fuera32' => []];
+        $est = ['filas' => 0, 'enteras' => [], 'largo' => [], 'bytes' => [], 'fuera32' => []];
         foreach ($filas as $f) {
             $est['filas']++;
             foreach ($f as $col => $v) {
@@ -867,8 +1226,9 @@ final class Exportar
                     if ($cifras > ($est['enteras'][$col] ?? 0)) { $est['enteras'][$col] = $cifras; }
                     if (is_int($v) && ($v > 2147483647 || $v < -2147483648)) { $est['fuera32'][$col] = true; }
                 } elseif (is_string($v)) {
-                    $largo = mb_strlen($v, 'UTF-8');
+                    $largo = largoUtf8($v);
                     if ($largo > ($est['largo'][$col] ?? 0)) { $est['largo'][$col] = $largo; }
+                    if (strlen($v) > ($est['bytes'][$col] ?? 0)) { $est['bytes'][$col] = strlen($v); }
                 }
             }
         }
@@ -876,7 +1236,10 @@ final class Exportar
     }
 
     /**
-     * Las filas en bloques de 500, para escribir la salida según se genera.
+     * Las filas en bloques de hasta 500, para escribir la salida según se
+     * genera; y de menos si sus textos pasan de 2 MB (2.9): con filas de
+     * cientos de KB, quinientas juntas y su texto SQL no cabían en la
+     * memoria del panel y el volcado moría a medias con un error fatal.
      *
      * @param iterable<array<string,mixed>> $filas
      * @return Generator<int,list<array<string,mixed>>>
@@ -884,16 +1247,47 @@ final class Exportar
     private static function bloques(iterable $filas): Generator
     {
         $bloque = [];
+        $bytes  = 0;
         foreach ($filas as $f) {
             $bloque[] = $f;
-            if (count($bloque) === 500) {
+            foreach ($f as $v) {
+                $bytes += is_string($v) ? strlen($v) : 8;
+            }
+            if (count($bloque) === 500 || $bytes > 2097152) {
                 yield $bloque;
                 $bloque = [];
+                $bytes  = 0;
             }
         }
         if ($bloque !== []) {
             yield $bloque;
         }
+    }
+
+    /**
+     * El COLLATE de una columna (2.9) que va detrás de su tipo: el mismo en
+     * SQLite, y en MySQL el más parecido a NOCASE, utf8mb4_general_ci. RTRIM
+     * no lo necesitan MySQL ni SQL Server, que al comparar ya no cuentan los
+     * espacios del final; PostgreSQL no tiene nada parecido, y va como nota.
+     * El NOCASE de SQL Server y PostgreSQL va en el tipo (ver tipoDestino()).
+     */
+    private static function colacion(array $c, string $tabla): string
+    {
+        $col = $c['colacion'] ?? null;
+        if ($col === null) {
+            return '';
+        }
+        if (self::$d === 'sqlite') {
+            return ' COLLATE ' . $col;
+        }
+        if (self::$d === 'mysql' && $col === 'NOCASE') {
+            return ' COLLATE utf8mb4_general_ci';
+        }
+        if (self::$d === 'postgresql' && $col === 'RTRIM') {
+            self::$notasDdl[] = t('{columna}: COLLATE RTRIM (sin contar los espacios del final al comparar) no existe en PostgreSQL',
+                ['columna' => self::q($tabla) . '.' . self::q((string)$c['columna'])]);
+        }
+        return '';
     }
 
     /** Declaración del tipo, con longitud o decimales si los tiene. */
@@ -929,7 +1323,7 @@ final class Exportar
             }
             echo "\n-- " . t('{n} fila(s)', ['n' => $n]) . "\n";
         } catch (Throwable $e) {
-            echo "\n-- " . t('ERROR: la exportación está incompleta: {error}', ['error' => $e->getMessage()]) . "\n";
+            echo self::incompleta($e->getMessage());
         }
         exit;
     }
@@ -961,7 +1355,6 @@ final class Exportar
         return $out;
     }
 
-    /** Un valor escrito como literal SQL. */
     /**
      * Un DEFAULT calculado en el SQL del dialecto: CURRENT_TIMESTAMP,
      * CURRENT_DATE y CURRENT_TIME tal cual donde existen; cualquier otra
@@ -992,11 +1385,12 @@ final class Exportar
                 return null;
             }
             return '(' . $m[1] . ')';
-        } catch (NoTraducible $e) {
+        } catch (NoTraducible) {
             return null;
         }
     }
 
+    /** Un valor escrito como literal SQL. */
     private static function literal($v): string
     {
         if ($v === null)    { return 'NULL'; }
@@ -1007,7 +1401,21 @@ final class Exportar
         if (is_float($v))   { return var_export($v, true); }
         // En MySQL la barra invertida también escapa dentro de una cadena; en
         // SQL Server, una cadena con N delante es Unicode
-        $s = self::$d === 'mysql' ? str_replace(['\\', "'"], ['\\\\', "''"], (string)$v) : str_replace("'", "''", (string)$v);
+        $s = self::$d === 'mysql' ? str_replace(['\\', "'", "\0"], ['\\\\', "''", '\\0'], (string)$v) : str_replace("'", "''", (string)$v);
+        // Un NUL dentro de un texto (2.9): ningún motor lo admite escrito tal
+        // cual en una cadena y el volcado no se podía cargar. MySQL lo escribe
+        // \0 (arriba); SQLite y SQL Server lo forman con char(0) / NCHAR(0);
+        // PostgreSQL y Access no lo guardan en un texto: se quita y se avisa
+        if (str_contains($s, "\0")) {
+            if (self::$d === 'postgresql' || self::$d === 'access') {
+                self::$nulos += substr_count($s, "\0");
+                $s = str_replace("\0", '', $s);
+            } else {
+                $n = self::$d === 'sqlserver' ? 'N' : '';
+                return implode(self::$d === 'sqlserver' ? ' + NCHAR(0) + ' : ' || char(0) || ',
+                    array_map(static fn(string $p): string => $n . "'" . $p . "'", explode("\0", $s)));
+            }
+        }
         if (self::$d === 'access' && strpbrk($s, "\r\n") !== false) {
             // En Access no hay forma de escribir un salto de línea dentro de un
             // texto: se une con Chr(13) y Chr(10). Así la sentencia cabe en una
@@ -1028,11 +1436,26 @@ final class Exportar
         $fichero = preg_replace('/[^A-Za-z0-9_.-]/', '_', $fichero) . '';
         $sello   = date('Ymd-Hi');
         $punto   = strrpos($fichero, '.');
+        if ($punto === false) {
+            $punto = strlen($fichero);                // sin extensión: el sello al final
+        }
         $fichero = substr($fichero, 0, $punto) . '-' . $sello . substr($fichero, $punto);
 
         while (ob_get_level() > 0) { ob_end_clean(); }
         header('Content-Type: ' . $tipo);
         header('Content-Disposition: attachment; filename="' . $fichero . '"');
         header('Cache-Control: no-store');
+        // Un error fatal de PHP (la memoria, el tiempo) a mitad de una descarga
+        // de texto no pasa por los catch: el fichero se quedaba cortado sin
+        // ninguna marca. Al cerrarse PHP se añade el aviso y la sentencia que
+        // impide importarlo (2.9)
+        if (str_starts_with($tipo, 'text/')) {
+            register_shutdown_function(static function (): void {
+                $e = errorFatal();
+                if ($e !== null) {
+                    echo self::incompleta($e['message']);
+                }
+            });
+        }
     }
 }

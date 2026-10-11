@@ -215,11 +215,26 @@ document.querySelectorAll('form[data-trozo]').forEach(function (form) {
             ? window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(clave)).then(function (b) {
                 return Array.prototype.map.call(new Uint8Array(b), function (x) { return ('0' + x.toString(16)).slice(-2); }).join('').slice(0, 32);
             })
-            : Promise.resolve(Array.prototype.map.call(window.crypto.getRandomValues(new Uint8Array(16)),
-                function (x) { return ('0' + x.toString(16)).slice(-2); }).join(''));
+            : Promise.resolve(fnv(clave));
         hash.then(function (h) { id = h; return peticion(-1, null); }).then(seguir).catch(fallo);
     });
 });
+
+// Identificador de una subida sin crypto.subtle (el panel por http:// fuera de
+// localhost, 2.9): cuatro FNV-1a de 32 bits de la clave, con semillas
+// distintas. No es criptografía; basta con que el mismo fichero dé el mismo
+// identificador, para poder reanudar (antes era al azar, y no se podía)
+function fnv(texto) {
+    var bytes = new TextEncoder().encode(texto), salida = '';
+    for (var s = 0; s < 4; s++) {
+        var h = (0x811c9dc5 ^ (s * 0x9e3779b9)) >>> 0;
+        for (var i = 0; i < bytes.length; i++) {
+            h = Math.imul(h ^ bytes[i], 0x01000193) >>> 0;
+        }
+        salida += ('0000000' + h.toString(16)).slice(-8);
+    }
+    return salida;
+}
 
 // Un bloque con data-visible-si="id=valor" solo se ve cuando ese desplegable
 // tiene ese valor; mientras no se ve, sus campos no se envían (sin JavaScript
@@ -249,3 +264,9 @@ document.querySelectorAll('[data-visible-si]').forEach(function (bloque) {
     fetch(window.location.pathname, { method: 'POST', body: datos, credentials: 'same-origin', keepalive: true })
         .catch(function () { /* la próxima visita lo vuelve a intentar */ });
 })();
+
+// Una ventana que tiene que abrirse al cargar la página (data-abrir): la de
+// ejemplos de importar, que se pide con un formulario GET (2.9)
+document.querySelectorAll('.modal[data-abrir]').forEach(function (m) {
+    bootstrap.Modal.getOrCreateInstance(m).show();
+});

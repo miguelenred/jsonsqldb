@@ -59,6 +59,18 @@ final class Instalador
     }
 
     /**
+     * Una ruta del servidor como se enseña antes de instalar, cuando aún no
+     * se sabe quién mira (2.9): desde la carpeta del proyecto, sin lo que hay
+     * por encima; si está fuera, solo su último nombre.
+     */
+    public static function rutaVisible(string $ruta): string
+    {
+        $ruta     = str_replace('\\', '/', $ruta);
+        $proyecto = str_replace('\\', '/', dirname(__DIR__, 2)) . '/';
+        return strncmp($ruta, $proyecto, strlen($proyecto)) === 0 ? substr($ruta, strlen($proyecto)) : '…/' . basename($ruta);
+    }
+
+    /**
      * Lo que se comprueba del servidor antes de instalar, para la columna
      * lateral: [estado, texto], con estado true (bien), false (mal) o null
      * (aviso, no impide instalar).
@@ -71,15 +83,15 @@ final class Instalador
         $dirConfig = dirname(self::rutaConfig());
         $https = util_https();
         return [
-            [PHP_VERSION_ID >= 80000 ? (PHP_VERSION_ID >= 80100 ? true : null) : false, 'PHP ' . PHP_VERSION
+            [PHP_VERSION_ID >= 80000 ? (PHP_VERSION_ID >= 80100 ? true : null) : false, 'PHP ' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION
                 . (PHP_VERSION_ID < 80000 ? ' ' . t('(hace falta 8.0 o posterior)')
                    : (PHP_VERSION_ID < 80100 ? ': ' . t('sin fsync(), un corte de luz puede perder unos 30 s de escrituras; se recomienda 8.1 o posterior') : ''))],
             [is_dir($datos) && is_writable($datos), is_dir($datos) && is_writable($datos)
                 ? t('Carpeta de usuarios y auditoría del panel con permiso de escritura')
-                : t('Carpeta de usuarios y auditoría del panel sin permiso de escritura: {ruta}', ['ruta' => $datos])],
+                : t('Carpeta de usuarios y auditoría del panel sin permiso de escritura: {ruta}', ['ruta' => self::rutaVisible($datos)])],
             [is_writable($dirConfig), is_writable($dirConfig)
                 ? t('Se puede escribir config.php')
-                : t('No se puede escribir config.php en {ruta}: dale permiso de escritura mientras instalas', ['ruta' => $dirConfig])],
+                : t('No se puede escribir config.php en {ruta}: dale permiso de escritura mientras instalas', ['ruta' => self::rutaVisible($dirConfig)])],
             [self::motorDetectado() !== '' ? true : null, self::motorDetectado() !== ''
                 ? t('Motor encontrado junto al panel')
                 : t('No hay motor junto al panel: solo servirá la conexión por API a otra máquina')],
@@ -104,9 +116,9 @@ final class Instalador
      */
     public static function instalar(array $d): array
     {
-        $modo     = (string)($d['conexion'] ?? '');
-        $usuario  = trim((string)($d['usuario'] ?? ''));
-        $clave    = (string)($d['clave'] ?? '');
+        $modo     = textoDe($d, 'conexion');
+        $usuario  = trim(textoDe($d, 'usuario'));
+        $clave    = textoDe($d, 'clave');
         $permitirHttp = !empty($d['http']);
 
         if (!in_array($modo, ['directa', 'api'], true)) {
@@ -116,12 +128,12 @@ final class Instalador
         // conservan y el asistente solo rehace la conexión
         $crearUsuario = !Auth::hayUsuarios();
         if ($crearUsuario) {
-            self::comprobarClaves($clave, (string)($d['clave2'] ?? ''));
+            self::comprobarClaves($clave, textoDe($d, 'clave2'));
             Auth::validarNuevo($usuario, $clave);
         }
         if (!is_writable(dirname(self::rutaConfig()))) {
             throw new RuntimeException(t('No se puede escribir {ruta}: da permiso de escritura a la carpeta del panel mientras instalas.',
-                ['ruta' => self::rutaConfig()]));
+                ['ruta' => self::rutaVisible(self::rutaConfig())]));
         }
 
         $valores = ['ADMIN_CONEXION' => $modo, 'ADMIN_EXIGIR_HTTPS' => !$permitirHttp];
@@ -129,7 +141,7 @@ final class Instalador
         $apiNueva = null;
 
         if ($modo === 'directa') {
-            $ruta = rtrim(str_replace('\\', '/', trim((string)($d['motor'] ?? ''))), '/');
+            $ruta = rtrim(str_replace('\\', '/', trim(textoDe($d, 'motor'))), '/');
             if ($ruta === '') {
                 $ruta = self::motorDetectado();
             }
@@ -141,7 +153,7 @@ final class Instalador
             $valores['ADMIN_HMAC_SECRET'] = '';
             $resumen = [t('Conexión') => t('Directa al motor'), t('Motor') => $ruta, t('Bases encontradas') => (string)$bases];
         } else {
-            $url      = trim((string)($d['api_url'] ?? ''));
+            $url      = trim(textoDe($d, 'api_url'));
             $generar  = !empty($d['api_generar']) && !is_file(self::rutaConfigApi());
             if ($generar) {
                 // La API de esta misma instalación, sin configurar todavía: se
@@ -151,8 +163,8 @@ final class Instalador
                 $secretoApi = bin2hex(random_bytes(32));
                 $apiNueva   = self::configApi($claveApi, $secretoApi, $permitirHttp);
             } else {
-                $claveApi   = trim((string)($d['api_key'] ?? ''));
-                $secretoApi = trim((string)($d['api_secret'] ?? ''));
+                $claveApi   = trim(textoDe($d, 'api_key'));
+                $secretoApi = trim(textoDe($d, 'api_secret'));
                 if ($claveApi === '' || $secretoApi === '') {
                     throw new RuntimeException(t('Indica la API key y el secreto HMAC de la cuenta de administración.'));
                 }
@@ -186,7 +198,6 @@ final class Instalador
         return $resumen;
     }
 
-    /** Solo crea el administrador: la configuración ya está hecha. */
     /** Fichero con el código de instalación: en datos/, que el servidor no sirve. */
     public const FICHERO_CODIGO = 'codigo-instalacion.txt';
 
@@ -204,7 +215,7 @@ final class Instalador
         if (!preg_match('/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/', $codigo)) {
             $codigo = implode('-', str_split(bin2hex(random_bytes(8)), 4));
             if (@file_put_contents($ruta, $codigo . "\n", LOCK_EX) === false) {
-                throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => $ruta]));
+                throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => self::rutaVisible($ruta)]));
             }
             @chmod($ruta, 0600);
         }
@@ -232,6 +243,7 @@ final class Instalador
         return Store::ruta(self::FICHERO_CODIGO);  // la carpeta de datos del panel (ADMIN_DATA_PATH)
     }
 
+    /** Solo crea el administrador: la configuración ya está hecha. */
     public static function crearAdmin(string $usuario, string $clave, string $repetida): string
     {
         self::comprobarClaves($clave, $repetida);
@@ -299,14 +311,14 @@ final class Instalador
     {
         $v = [];
         // --- Conexión
-        $modo = (string)($d['conexion'] ?? ADMIN_CONEXION);
+        $modo = textoDe($d, 'conexion', ADMIN_CONEXION);
         if (!in_array($modo, ['api', 'directa'], true)) {
             throw new RuntimeException(t('Conexión no válida.'));
         }
         $v['ADMIN_CONEXION'] = $modo;
-        $motor = rtrim(str_replace('\\', '/', trim((string)($d['motor'] ?? ''))), '/');
+        $motor = rtrim(str_replace('\\', '/', trim(textoDe($d, 'motor'))), '/');
         $v['ADMIN_MOTOR_RUTA'] = $motor === self::motorDetectado() ? '' : $motor;
-        $url = trim((string)($d['api_url'] ?? ''));
+        $url = trim(textoDe($d, 'api_url'));
         if ($url !== '' && !preg_match('#^https?://[^\s]+$#i', $url)) {
             throw new RuntimeException(t('La URL de la API tiene que empezar por http:// o https://.'));
         }
@@ -315,7 +327,7 @@ final class Instalador
         $v['ADMIN_API_URL'] = $url !== '' || $modo !== 'api' ? $url : Api::urlDeducida();
         foreach ([['api_key', 'ADMIN_API_KEY'], ['api_secret', 'ADMIN_HMAC_SECRET'],
                   ['lectura_key', 'ADMIN_API_KEY_LECTURA'], ['lectura_secret', 'ADMIN_HMAC_SECRET_LECTURA']] as [$campo, $c]) {
-            $nuevo = trim((string)($d[$campo] ?? ''));
+            $nuevo = trim(textoDe($d, $campo));
             $v[$c] = $nuevo !== '' ? $nuevo : (string)constant($c);
         }
         if (!empty($d['quitar_lectura'])) {
@@ -324,7 +336,7 @@ final class Instalador
         if (($v['ADMIN_API_KEY_LECTURA'] === '') !== ($v['ADMIN_HMAC_SECRET_LECTURA'] === '')) {
             throw new RuntimeException(t('La clave de solo lectura necesita también su secreto, o ninguno de los dos.'));
         }
-        $ca = trim((string)($d['ssl_ca'] ?? ''));
+        $ca = trim(textoDe($d, 'ssl_ca'));
         if ($ca !== '' && !is_file($ca)) {
             throw new RuntimeException(t('No existe el fichero del certificado: {ca}', ['ca' => $ca]));
         }
@@ -340,7 +352,7 @@ final class Instalador
             }
             $v[$c] = $n;
         }
-        $sep = (string)($d['csv_separador'] ?? ';');
+        $sep = textoDe($d, 'csv_separador', ';');
         if ($sep === 'tab') {
             $sep = "\t";
         }
@@ -351,7 +363,7 @@ final class Instalador
 
         // --- Seguridad: nada que deje fuera a quien lo está cambiando
         $ips = [];
-        foreach (preg_split('/[\s,]+/', trim((string)($d['ips'] ?? ''))) ?: [] as $ip) {
+        foreach (preg_split('/[\s,]+/', trim(textoDe($d, 'ips'))) ?: [] as $ip) {
             if ($ip === '') {
                 continue;
             }
@@ -417,23 +429,69 @@ final class Instalador
     }
 
     /**
-     * Pone valores en un config.php: sustituye el define() de cada constante,
-     * y si el fichero es de una versión que no la tenía, la añade al final.
+     * Pone valores en un config.php: sustituye el valor del define() de cada
+     * constante, y si el fichero es de una versión que no la tenía, la añade
+     * al final.
      */
     private static function fijar(string $texto, array $valores): string
     {
         foreach ($valores as $constante => $valor) {
-            $literal = is_array($valor)
-                ? '[' . implode(', ', array_map(static fn($x) => var_export($x, true), $valor)) . ']'
-                : var_export($valor, true);
-            $patron = "/define\\('" . $constante . "',\\s*(?:[^;]|\\n)*?\\);/";
-            $texto  = preg_replace_callback($patron,
-                static fn(): string => "define('" . $constante . "', " . $literal . ');', $texto, 1, $n) ?? $texto;
-            if ($n !== 1) {
-                $texto = rtrim($texto) . "\n\ndefined('" . $constante . "') || define('" . $constante . "', " . $literal . ");\n";
-            }
+            $tramo = self::valorDeDefine($texto, $constante);
+            $texto = $tramo === null
+                ? rtrim($texto) . "\n\ndefined('" . $constante . "') || define('" . $constante . "', " . self::literal($valor) . ");\n"
+                : substr($texto, 0, $tramo[0]) . self::literal($valor) . substr($texto, $tramo[1]);
         }
         return $texto;
+    }
+
+    /** Un valor escrito como PHP: una lista, en una línea. */
+    private static function literal($valor): string
+    {
+        return is_array($valor)
+            ? '[' . implode(', ', array_map(static fn($x) => var_export($x, true), $valor)) . ']'
+            : var_export($valor, true);
+    }
+
+    /**
+     * Dónde está el valor del define() de $constante en el texto de un
+     * config.php: [desde, hasta) en bytes, o null si no está. Con los tokens
+     * de PHP (2.9): con una expresión regular, un valor que llevaba «);» o
+     * «;» dentro se cortaba, y al guardarlo otra vez su resto quedaba como
+     * código fuera del texto.
+     *
+     * @return array{0: int, 1: int}|null
+     */
+    private static function valorDeDefine(string $texto, string $constante): ?array
+    {
+        $piezas = [];
+        $pos = 0;
+        foreach (token_get_all($texto) as $tk) {
+            $s = is_array($tk) ? $tk[1] : $tk;
+            if (!is_array($tk) || !in_array($tk[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                $piezas[] = [$s, $pos, is_array($tk) ? $tk[0] : null];
+            }
+            $pos += strlen($s);
+        }
+        $n = count($piezas);
+        for ($i = 0; $i + 4 < $n; $i++) {
+            if ($piezas[$i][2] !== T_STRING || strcasecmp($piezas[$i][0], 'define') !== 0 || $piezas[$i + 1][0] !== '('
+                || $piezas[$i + 2][2] !== T_CONSTANT_ENCAPSED_STRING || substr($piezas[$i + 2][0], 1, -1) !== $constante
+                || $piezas[$i + 3][0] !== ',') {
+                continue;
+            }
+            $nivel = 0;
+            for ($k = $i + 4; $k < $n; $k++) {
+                $s = $piezas[$k][0];
+                if ($s === '(' || $s === '[') {
+                    $nivel++;
+                } elseif (($s === ')' || $s === ']') && $nivel-- === 0) {
+                    $ultima = $piezas[$k - 1];
+                    return $k > $i + 4 ? [$piezas[$i + 4][1], $ultima[1] + strlen($ultima[0])] : null;
+                }
+            }
+            return null;
+        }
+        return null;
     }
 
     /**
@@ -458,27 +516,23 @@ final class Instalador
         if (Api::directa() && trim((string)ADMIN_MOTOR_RUTA) !== '') {
             return [null, t('no se puede comprobar: el motor está en otra carpeta que el panel')];
         }
-        $api = Api::directa() ? Api::urlDeducida() : Api::url();
+        // Solo con la URL de la API escrita en la configuración (2.9): sacada
+        // de la cabecera Host, que escribe quien pide, cualquiera, sin haber
+        // entrado, hacía que el servidor pidiera lo que quisiera a cualquier
+        // máquina y puerto de su red, solo con abrir el asistente
+        $api = trim((string)ADMIN_API_URL);
+        if ($api === '') {
+            return [null, t('sin comprobar hasta que la URL de la API (ADMIN_API_URL) esté en la configuración. Comprueba a mano que data/web.config no se puede descargar')];
+        }
         if (!preg_match('#^(https?://.+)/api/[^/?]+\.php$#i', $api, $m)) {
             return [null, t('no se puede comprobar: la API ({api}) no está en la carpeta api/ de la instalación', ['api' => $api])];
         }
-        $url  = $m[1] . '/data/web.config';
-        $codigo = null;
-        if (function_exists('curl_init')) {
-            $ch = curl_init($url);
-            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3, CURLOPT_CONNECTTIMEOUT => 3,
-                                    CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0, CURLOPT_FOLLOWLOCATION => false]);
-            if (curl_exec($ch) !== false) {
-                $codigo = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            }
-            curl_close($ch);
-        } else {
-            $ctx = stream_context_create(['http' => ['method' => 'GET', 'timeout' => 3, 'ignore_errors' => true],
-                                          'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]]);
-            if (@file_get_contents($url, false, $ctx) !== false && isset($http_response_header[0])
-                && preg_match('#\s(\d{3})\s#', (string)$http_response_header[0], $m)) {
-                $codigo = (int)$m[1];
-            }
+        $url = $m[1] . '/data/web.config';
+        try {
+            // Con el certificado comprobado como en las llamadas a la API (2.9: sin comprobar)
+            $codigo = Api::codigoHttp($url);
+        } catch (RuntimeException $e) {
+            return [null, $e->getMessage()];                // ADMIN_SSL_CA que no se puede leer
         }
         if ($codigo === 200) {
             return [false, t('DESCARGABLE: {url} responde. Cualquiera puede bajarse las bases. En nginx, añade las reglas de nginx/jsonsqldb.conf; en Apache, comprueba que se leen los .htaccess (AllowOverride)', ['url' => $url])];
@@ -520,12 +574,13 @@ final class Instalador
         $texto = (string)file_get_contents(dirname(__DIR__) . '/config.dist.php');
         $texto = preg_replace('/^\/\/ =+\n\/\/ PLANTILLA\..*?\n\/\/ =+\n/sm', '', $texto, 1) ?? $texto;
         foreach ($valores as $constante => $valor) {
-            $patron = "/define\\('" . $constante . "',\\s*(?:[^;]|\\n)*?\\);/";
-            $nuevo  = "define('" . $constante . "', " . var_export($valor, true) . ');';
-            $texto  = preg_replace($patron, $nuevo, $texto, 1, $n) ?? $texto;
-            if ($n !== 1) {
+            // Por los tokens, como fijar(): con preg_replace, un «$1» en una
+            // clave se tomaba por una referencia y desaparecía (2.9)
+            $tramo = self::valorDeDefine($texto, $constante);
+            if ($tramo === null) {
                 throw new RuntimeException(t('La plantilla config.dist.php no tiene {constante}: está incompleta.', ['constante' => $constante]));
             }
+            $texto = substr($texto, 0, $tramo[0]) . self::literal($valor) . substr($texto, $tramo[1]);
         }
         return $texto;
     }
@@ -563,7 +618,7 @@ final class Instalador
         $tmp = $ruta . '.' . getmypid() . '.tmp';
         if (@file_put_contents($tmp, $texto) === false || !@rename($tmp, $ruta)) {
             @unlink($tmp);
-            throw new RuntimeException(t('No se pudo escribir {ruta}. Comprueba los permisos de la carpeta.', ['ruta' => $ruta]));
+            throw new RuntimeException(t('No se pudo escribir {ruta}. Comprueba los permisos de la carpeta.', ['ruta' => self::rutaVisible($ruta)]));
         }
         // Contiene las claves de acceso: en un hosting compartido, los demás
         // usuarios de la máquina no deben poder leerlo

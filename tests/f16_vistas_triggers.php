@@ -26,6 +26,7 @@ use JsonSQLDB\Database;
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f16_' . getmypid();
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_DATA_PATH', $raiz);
+define('JSONSQLDB_LOG_PATH', JSONSQLDB_DATA_PATH . '/logs');
 require dirname(__DIR__) . '/engine/bootstrap.php';
 require dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php';
 foreach (['Idioma', 'Exportar'] as $clase) {
@@ -51,6 +52,22 @@ function borrarArbol(string $dir): void {
     foreach ($it as $f) { $f->isDir() ? rmdir($f->getPathname()) : unlink($f->getPathname()); }
     rmdir($dir);
 }
+
+chk('con la base por la API, sin el motor cargado, el panel escribe vistas y triggers con números y SET NEW (2.9)', function () {
+    // Otro proceso, que carga solo el panel: el analizador llega con el
+    // cargador de clases del motor. Con una lista de clases a mano, a la que
+    // le faltaba Valor, cualquier número de la SQL daba un error (también en
+    // la 2.8.0)
+    $panel = dirname(__DIR__) . '/jsonsqldbadmin/lib';
+    $codigo = 'foreach (["util", "Idioma", "GeneradorSql"] as $f) { require ' . var_export($panel, true) . ' . "/$f.php"; }'
+        . ' $motor = class_exists("JsonSQLDB\\Database", false);'
+        . ' $v = (new GeneradorSql("mysql"))->vista("v", "SELECT a FROM t WHERE a > 5 LIMIT 3");'
+        . ' [$b] = GeneradorSql::propiaFilaComoBefore("CREATE TRIGGER x AFTER INSERT ON t FOR EACH ROW BEGIN UPDATE t SET b = 2 WHERE id = NEW.id; END");'
+        . ' echo json_encode([$motor, $v, $b]);';
+    $r = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    return $r === json_encode([false, 'CREATE VIEW `v` AS SELECT `a` FROM `t` WHERE (`a` > 5) LIMIT 3;',
+                               'CREATE TRIGGER "x_antes" BEFORE INSERT ON "t" FOR EACH ROW BEGIN SET NEW."b" = 2;  END']) ?: $r;
+});
 
 borrarArbol($raiz);
 mkdir($raiz, 0775, true);
@@ -166,11 +183,11 @@ $escrituras = [
     ["INSERT INTO pedidos (cliente_id, total, estado, creado) VALUES (2, -7.5, NULL, NULL)", false],
 ];
 $errores = [];
-foreach ($escrituras as $i => [$sql, $vale]) {
+foreach ($escrituras as $i => [$sql]) {
     try {
         $bd->consultar($sql);
         $errores[$i] = false;
-    } catch (Throwable $e) {
+    } catch (Throwable) {
         $errores[$i] = true;
     }
 }
@@ -204,7 +221,6 @@ function comparable(array $filas, bool $ordenar): array {
 }
 /** Las diferencias entre lo de aquí y lo de allí, tabla a tabla y vista a vista. */
 function diferencias(array $aqui, callable $consultar): array {
-    global $vistas;
     $mal = [];
     foreach ($aqui as $nombre => $filas) {
         $alli = $consultar($nombre);
@@ -254,7 +270,7 @@ chk('en Access, todas salvo las que usan lo que Access no tiene (GROUP_CONCAT, O
     $g = new GeneradorSql('access');
     $no = [];
     foreach ($vistas as $n => $sql) {
-        try { $g->vista($n, $sql); } catch (NoTraducible $e) { $no[] = $n; }
+        try { $g->vista($n, $sql); } catch (NoTraducible) { $no[] = $n; }
     }
     return $no === ['v_grupos', 'v_offset'] ?: 'sin traducir: ' . implode(', ', $no);
 });
@@ -280,6 +296,114 @@ chk('SQL Server: fila a fila con un cursor, y los BEFORE como INSTEAD OF que hac
         && preg_match('/INSERT INTO \[pedidos\] \(\[cliente_id\], \[total\], \[estado\], \[creado\]\) VALUES \(@n1, @n2, @n3, @n4\)/', $s) === 1
         && str_contains($s, 'CREATE TRIGGER [pedidos_au] ON [pedidos] AFTER UPDATE AS')
         && str_contains($s, 'inserted AS i JOIN deleted AS d ON i.[id] = d.[id]') ?: 'no tiene la forma esperada';
+});
+chk('SQL Server: el BEFORE DELETE (o UPDATE) de una tabla con una clave foránea ON DELETE CASCADE (u ON UPDATE SET NULL) va comentado con el motivo, no como un INSTEAD OF que SQL Server rechaza (error 2113) y que paraba todo el volcado; sin cascada en ese evento, o hacia sí misma, sigue siendo INSTEAD OF (2.9)', function () use ($raiz) {
+    Database::crear('vt3', $raiz);
+    $b = new Database('vt3', $raiz);
+    foreach (['CREATE TABLE c (id INTEGER PRIMARY KEY, n TEXT)',
+              'CREATE TABLE p (id INTEGER PRIMARY KEY, cid INTEGER, estado TEXT, FOREIGN KEY (cid) REFERENCES c (id) ON DELETE CASCADE)',
+              'CREATE TABLE q (id INTEGER PRIMARY KEY, cid INTEGER, estado TEXT, FOREIGN KEY (cid) REFERENCES c (id) ON DELETE SET NULL)',
+              'CREATE TABLE r (id INTEGER PRIMARY KEY, cid INTEGER, n TEXT, FOREIGN KEY (cid) REFERENCES c (id) ON UPDATE SET NULL)',
+              'CREATE TABLE e (id INTEGER PRIMARY KEY, jefe INTEGER, FOREIGN KEY (jefe) REFERENCES e (id) ON DELETE CASCADE)',
+              "CREATE TRIGGER p_bd BEFORE DELETE ON p BEGIN SELECT RAISE(ABORT, 'no') WHERE OLD.estado = 'cerrado'; END",
+              'CREATE TRIGGER q_bu BEFORE UPDATE ON q BEGIN SET NEW.estado = UPPER(NEW.estado); END',
+              'CREATE TRIGGER r_bu BEFORE UPDATE ON r BEGIN SET NEW.n = UPPER(NEW.n); END',
+              "CREATE TRIGGER c_bd BEFORE DELETE ON c BEGIN SELECT RAISE(ABORT, 'no') WHERE OLD.n = 'x'; END",
+              "CREATE TRIGGER e_bd BEFORE DELETE ON e BEGIN SELECT RAISE(ABORT, 'no') WHERE OLD.id = 1; END"] as $q) {
+        $b->consultar($q);
+    }
+    [$tablas, $trgs, $vs, $ixs] = reunir($b);
+    $s = Exportar::volcado('vt3', $tablas, $trgs, $vs, $ixs, 'sqlserver');
+    unset($b);
+    Database::borrar('vt3', $raiz);
+    return str_contains($s, "-- Sin traducir: SQL Server no admite un trigger INSTEAD OF DELETE (el BEFORE DELETE de aquí) en 'p', que tiene la clave foránea")
+        && str_contains($s, '-- CREATE TRIGGER p_bd BEFORE DELETE ON p') && !str_contains($s, 'ON [p] INSTEAD OF DELETE')
+        && str_contains($s, "INSTEAD OF UPDATE (el BEFORE UPDATE de aquí) en 'r', que tiene la clave foránea") && str_contains($s, 'con ON UPDATE SET NULL')
+        && !str_contains($s, 'ON [r] INSTEAD OF UPDATE')
+        && str_contains($s, 'CREATE TRIGGER [q_bu] ON [q] INSTEAD OF UPDATE AS') && str_contains($s, 'CREATE TRIGGER [c_bd] ON [c] INSTEAD OF DELETE AS')
+        && str_contains($s, 'CREATE TRIGGER [e_bd] ON [e] INSTEAD OF DELETE AS') ?: $s;
+});
+chk('WITH RECURSIVE y las columnas con nombre de un WITH: RECURSIVE en MySQL y PostgreSQL, sin él y con el aviso de los 100 niveles en SQL Server; lo que no se puede escribir, sin traducir', function () {
+    $cnt = 'WITH RECURSIVE cnt(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM cnt WHERE n < 5) SELECT n FROM cnt';
+    $r = [];
+    foreach (['mysql', 'postgresql', 'sqlserver', 'access'] as $d) {
+        $g = new GeneradorSql($d);
+        foreach (['cnt' => $cnt, 'lim' => str_replace('WHERE n < 5', 'LIMIT 5', $cnt), 'uni' => str_replace('UNION ALL', 'UNION', $cnt),
+                  'col' => 'WITH x(a, b) AS (SELECT 1, 2) SELECT b, a FROM x'] as $n => $sql) {
+            try { $r["$d/$n"] = preg_replace('/\s+/', ' ', $g->vista("v_$n", $sql)); } catch (NoTraducible) { $r["$d/$n"] = 'no'; }
+        }
+    }
+    $mal = [];
+    foreach (['mysql/cnt' => 'WITH RECURSIVE `cnt` (`n`) AS (SELECT 1', 'postgresql/cnt' => 'WITH RECURSIVE "cnt" ("n") AS (SELECT 1',
+              'sqlserver/cnt' => 'MAXRECURSION 0) en la consulta que use la vista CREATE VIEW [v_cnt] AS WITH [cnt] ([n]) AS (SELECT 1',
+              'mysql/uni' => 'WITH RECURSIVE `cnt` (`n`) AS (SELECT 1 AS `1` UNION SELECT', 'postgresql/uni' => 'WITH RECURSIVE',
+              'mysql/col' => 'WITH `x` (`a`, `b`) AS', 'postgresql/col' => 'WITH "x" ("a", "b") AS', 'sqlserver/col' => 'WITH [x] ([a], [b]) AS'] as $k => $trozo) {
+        if (!str_contains($r[$k], $trozo)) { $mal[] = "$k: {$r[$k]}"; }
+    }
+    foreach (['mysql/lim', 'postgresql/lim', 'sqlserver/lim', 'sqlserver/uni', 'access/cnt', 'access/col'] as $k) {
+        if ($r[$k] !== 'no') { $mal[] = "$k traducido: {$r[$k]}"; }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk('funciones de ventana: OVER en MySQL, PostgreSQL (con NULLS FIRST / LAST, como aquí) y SQL Server; lo que alguno no tiene, sin traducir', function () {
+    $tipos = ['w' => [['columna' => 'id', 'tipo' => 'INTEGER', 'longitud' => null], ['columna' => 'g', 'tipo' => 'TEXT', 'longitud' => null], ['columna' => 'x', 'tipo' => 'INTEGER', 'longitud' => null]]];
+    $vistas = ['rn' => 'SELECT id, ROW_NUMBER() OVER (PARTITION BY g ORDER BY x DESC) AS rn FROM w',
+               'acu' => 'SELECT id, SUM(x) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s FROM w',
+               'grp' => 'SELECT id, SUM(x) OVER (ORDER BY x GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM w',
+               'fil' => 'SELECT id, COUNT(*) FILTER (WHERE x > 1) OVER () AS c FROM w',
+               'ran' => 'SELECT id, SUM(x) OVER (ORDER BY x RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING) AS c FROM w',
+               'win' => 'SELECT id, RANK() OVER v AS r FROM w WINDOW v AS (ORDER BY x)'];
+    $r = [];
+    foreach (['mysql', 'postgresql', 'sqlserver', 'access'] as $d) {
+        $g = (new GeneradorSql($d))->conTipos($tipos);
+        foreach ($vistas as $n => $sql) {
+            try { $r["$d/$n"] = preg_replace('/\s+/', ' ', $g->vista("v_$n", $sql)); } catch (NoTraducible) { $r["$d/$n"] = 'no'; }
+        }
+    }
+    $mal = [];
+    foreach (['mysql/rn' => 'ROW_NUMBER() OVER (PARTITION BY `g` ORDER BY `x` DESC) AS `rn`',
+              'postgresql/rn' => 'ROW_NUMBER() OVER (PARTITION BY "g" ORDER BY "x" DESC NULLS LAST) AS "rn"',
+              'sqlserver/rn' => 'ROW_NUMBER() OVER (PARTITION BY [g] ORDER BY [x] DESC) AS [rn]',
+              'mysql/acu' => 'SUM(`x`) OVER (ORDER BY `id` ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)',
+              'postgresql/grp' => 'GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW', 'postgresql/fil' => 'COUNT(*) FILTER (WHERE ("x" > 1)) OVER ()',
+              'mysql/ran' => 'RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING', 'sqlserver/win' => 'RANK() OVER (ORDER BY [x]) AS [r]'] as $k => $trozo) {
+        if (!str_contains($r[$k], $trozo)) { $mal[] = "$k: {$r[$k]}"; }
+    }
+    foreach (['mysql/grp', 'mysql/fil', 'sqlserver/grp', 'sqlserver/fil', 'sqlserver/ran', 'access/rn', 'access/win'] as $k) {
+        if ($r[$k] !== 'no') { $mal[] = "$k traducido: {$r[$k]}"; }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk('un trigger con lo que esas formas no llevan (upsert, RETURNING, otras tablas, alias, ORDER BY, LIMIT) va comentado y dice por qué, no traducido a medias', function () use ($raiz) {
+    Database::crear('vt2', $raiz);
+    $b = new Database('vt2', $raiz);
+    $b->consultar('CREATE TABLE a (id INTEGER PRIMARY KEY, n INTEGER)');
+    $b->consultar('CREATE TABLE r (id INTEGER PRIMARY KEY, aid INTEGER, n INTEGER)');
+    $cuerpos = ['INSERT OR IGNORE INTO r (id, aid, n) VALUES (NEW.id, NEW.id, 0)',
+                'INSERT INTO r (id, aid, n) VALUES (NEW.id, NEW.id, 0) ON CONFLICT (id) DO UPDATE SET n = n + 1',
+                'UPDATE r SET n = a.n FROM a WHERE a.id = r.aid AND a.id = NEW.id',
+                'UPDATE r JOIN a ON a.id = r.aid SET r.n = a.n WHERE a.id = NEW.id',
+                'DELETE FROM r USING a WHERE a.id = r.aid AND a.id = NEW.id',
+                'UPDATE r AS x SET n = 1 WHERE x.aid = NEW.id',
+                'DELETE FROM r WHERE aid = NEW.id ORDER BY id LIMIT 1'];
+    foreach ($cuerpos as $i => $c) {
+        $b->consultar("CREATE TRIGGER t$i AFTER INSERT ON a BEGIN $c; END");
+    }
+    [$tablas, $trgs] = reunir($b);
+    $mal = [];
+    // Uno a uno: el volcado comenta todos los de una tabla si falla uno
+    foreach (['mysql', 'postgresql', 'sqlserver'] as $d) {
+        $cols = array_column($tablas, 'columnas', 'tabla');
+        $g    = (new GeneradorSql($d))->conTipos($cols);
+        foreach ($trgs as $trg) {
+            try { $g->triggers('a', [$trg], $cols['a'], ['id']); $mal[] = "$d/{$trg['nombre']}: traducido"; }
+            catch (NoTraducible $e) { if (!str_contains($e->getMessage(), 'hay que escribirlo a mano')) { $mal[] = "$d/{$trg['nombre']}: " . $e->getMessage(); } }
+        }
+    }
+    $mal = count($trgs) === count($cuerpos) ? $mal : ['hay ' . count($trgs) . ' triggers'];
+    unset($b);
+    Database::borrar('vt2', $raiz);
+    return $mal === [] ?: implode(' | ', $mal);
 });
 
 // ---------------------------------------------------------------------
@@ -322,7 +446,7 @@ chk('las mismas escrituras dejan las mismas tablas y las mismas vistas, y fallan
     $mal = [];
     foreach ($escrituras as $i => [$sql]) {
         $fallo = !$m->query($sql);
-        if ($fallo !== $errores[$i]) { $mal[] = "«$sql» " . ($fallo ? 'falla allí: ' . $m->error : 'no falla allí'); }
+        if ($fallo !== $errores[$i]) { $mal[] = "«{$sql}» " . ($fallo ? 'falla allí: ' . $m->error : 'no falla allí'); }
     }
     $mal = array_merge($mal, diferencias($aqui, static function (string $n) use ($m) {
         $r = $m->query("SELECT * FROM `$n`" . (str_starts_with($n, 'v_') ? '' : ' ORDER BY id'));
@@ -355,7 +479,7 @@ chk('las mismas escrituras dejan las mismas tablas y las mismas vistas, y fallan
     $mal = [];
     foreach ($escrituras as $i => [$sql]) {
         $fallo = @pg_query($pg, $sql) === false;
-        if ($fallo !== $errores[$i]) { $mal[] = "«$sql» " . ($fallo ? 'falla allí: ' . pg_last_error($pg) : 'no falla allí'); }
+        if ($fallo !== $errores[$i]) { $mal[] = "«{$sql}» " . ($fallo ? 'falla allí: ' . pg_last_error($pg) : 'no falla allí'); }
     }
     $mal = array_merge($mal, diferencias($aqui, static function (string $n) use ($pg) {
         $r = @pg_query($pg, "SELECT * FROM \"$n\"" . (str_starts_with($n, 'v_') ? '' : ' ORDER BY id'));

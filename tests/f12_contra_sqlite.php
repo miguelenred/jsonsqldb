@@ -154,6 +154,14 @@ SELECT id FROM t ORDER BY 1 DESC LIMIT 3
 SELECT d, COUNT(*) AS n FROM t GROUP BY d ORDER BY 2 DESC, 1
 SELECT a, b FROM t WHERE a IS NOT NULL ORDER BY 2, 1 LIMIT 8
 SELECT a + d AS s, id FROM t ORDER BY 1, 2 LIMIT 6
+SELECT d, COUNT(*) AS n FROM t GROUP BY 1 ORDER BY 1
+SELECT d, a, COUNT(*) AS n FROM t GROUP BY 1, 2 ORDER BY 1, 2
+SELECT d, SUM(a) AS s FROM t GROUP BY 1 HAVING SUM(a) > 0 ORDER BY 1
+SELECT id FROM t ORDER BY id LIMIT 2 + 3
+SELECT id FROM t ORDER BY id LIMIT -1 OFFSET 40
+SELECT id FROM t ORDER BY id LIMIT 3 OFFSET -2
+SELECT id FROM t ORDER BY id LIMIT 38, -1
+SELECT id FROM t ORDER BY id DESC LIMIT '4';;
 SELECT id FROM t ORDER BY id LIMIT 0
 SELECT id FROM t ORDER BY id LIMIT 5 OFFSET 1000
 SELECT t.id AS ti, u.id AS ui FROM t JOIN u ON u.tid = t.id
@@ -181,6 +189,17 @@ SELECT id FROM t WHERE id NOT IN (SELECT tid FROM u WHERE tid IS NOT NULL)
 SELECT id FROM t WHERE id NOT IN (SELECT tid FROM u)
 SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid = t.id)
 SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.tid = t.id)
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid = t.id AND u.x > 3)
+SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE t.id = u.tid AND u.y = 'p')
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid = t.a)
+SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.x = t.a)
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.y = t.b)
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid = t.id + 1)
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid = t.id OR u.x = t.d)
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid = t.id AND u.x = t.d)
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u v WHERE v.tid = t.id AND v.y IS NOT NULL)
+SELECT COUNT(*) AS n FROM t WHERE EXISTS (SELECT u.tid FROM u WHERE u.tid = t.id GROUP BY u.tid HAVING COUNT(*) > 1)
+SELECT id, (SELECT COUNT(*) FROM u WHERE EXISTS (SELECT 1 FROM t WHERE t.id = u.tid AND t.a > 5)) AS n FROM t WHERE id < 5
 SELECT id FROM t WHERE a > (SELECT AVG(a) FROM t)
 SELECT id, (SELECT COUNT(*) FROM u WHERE u.tid = t.id) AS n FROM t ORDER BY id
 SELECT id FROM t WHERE a = (SELECT MAX(a) FROM t)
@@ -311,6 +330,42 @@ foreach ([false, true] as $indices) {
         return true;
     });
     unset($j);
+}
+
+echo "\n== Triggers que cambian o borran filas que la misma sentencia va a tocar (2.9) ==\n";
+// Como SQLite con recursive_triggers, que es como anidan aquí: cada fila
+// elegida al empezar se procesa como la dejaron las anteriores; si ya no
+// está, se salta. Tres partes de datos, para los caminos que escriben por partes
+$casos = [
+    ['AFTER UPDATE ON t WHEN NEW.id % 2 = 1 BEGIN UPDATE t SET w = w + 10 WHERE id = NEW.id + 1; END', 'UPDATE t SET v = v + 1'],
+    ['AFTER UPDATE ON t WHEN NEW.id % 2 = 1 BEGIN UPDATE t SET w = w + 10 WHERE id = NEW.id + 1; END', 'UPDATE t SET v = v + 1 WHERE w = 0'],
+    ['AFTER UPDATE ON t WHEN NEW.id % 2 = 1 BEGIN UPDATE t SET v = v + 100 WHERE id = NEW.id + 1; END', 'UPDATE t SET v = v + 1'],
+    ['AFTER UPDATE ON t WHEN NEW.id % 3 = 0 BEGIN DELETE FROM t WHERE id = NEW.id + 1; END', 'UPDATE t SET v = v + 1'],
+    ['BEFORE UPDATE ON t WHEN NEW.id % 2 = 1 BEGIN UPDATE t SET w = w + 10 WHERE id = NEW.id + 1; END', 'UPDATE t SET v = v + 1'],
+    ['AFTER DELETE ON t BEGIN UPDATE t SET w = 99 WHERE id = OLD.id + 1; END', 'DELETE FROM t WHERE id % 5 <> 0'],
+    ['AFTER DELETE ON t WHEN OLD.id % 4 = 1 BEGIN DELETE FROM t WHERE id = OLD.id + 2; END', 'DELETE FROM t WHERE id % 2 = 1'],
+    ['BEFORE DELETE ON t WHEN OLD.id % 2 = 0 BEGIN UPDATE t SET w = 7 WHERE id = OLD.id + 1; END', 'DELETE FROM t WHERE w = 0'],
+];
+foreach ($casos as $n => [$trigger, $sentencia]) {
+    chk("$sentencia, con $trigger", function () use ($raiz, $trigger, $sentencia, $n) {
+        borrarArbol($raiz);
+        mkdir($raiz, 0775, true);
+        Database::crear('g', $raiz);
+        $j = new Database('g', $raiz);
+        $s = new SQLite3(':memory:');
+        $s->enableExceptions(true);
+        $s->exec('PRAGMA recursive_triggers = ON');
+        $filas = implode(',', array_map(static fn(int $i): string => "($i, 0, 0)", range(1, 2500)));
+        foreach (['CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER, w INTEGER)', "INSERT INTO t VALUES $filas", "CREATE TRIGGER tr$n $trigger", $sentencia] as $q) {
+            $j->consultar($q);
+            $s->exec($q);
+        }
+        $a = comparable((new Database('g', $raiz))->consultar('SELECT * FROM t ORDER BY id'), true);   // lo que quedó en disco
+        $b = comparable(enSqlite($s, 'SELECT * FROM t ORDER BY id'), true);
+        $distinta = array_key_first(array_diff_assoc($a, $b));
+        return $a === $b ?: count($a) . ' filas aquí, ' . count($b) . ' en SQLite; la primera distinta: '
+            . ($a[$distinta ?? 0] ?? '-') . ' / ' . ($b[$distinta ?? 0] ?? '-');
+    });
 }
 
 borrarArbol($raiz);

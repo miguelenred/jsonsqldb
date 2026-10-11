@@ -143,13 +143,19 @@ final class Auth
      */
     public static function validarNuevo(string $usuario, string $clave): void
     {
-        if (!preg_match('/^[A-Za-z0-9_.@-]{3,32}$/', trim($usuario))) {
+        if (!self::nombreValido(trim($usuario))) {
             throw new RuntimeException(t('El usuario admite de 3 a 32 caracteres: letras, números y . _ - @'));
         }
         self::validarClave($clave);
         if (self::buscar(trim($usuario)) !== null) {
-            throw new RuntimeException("El usuario '" . trim($usuario) . "' ya existe");
+            throw new RuntimeException(t("El usuario '{usuario}' ya existe", ['usuario' => trim($usuario)]));
         }
+    }
+
+    /** ¿Puede ser el nombre de un usuario? De 3 a 32 caracteres: letras, números y . _ - @ */
+    private static function nombreValido(string $usuario): bool
+    {
+        return preg_match('/^[A-Za-z0-9_.@-]{3,32}$/', $usuario) === 1;
     }
 
     /** Crea un usuario. Devuelve el nombre normalizado. */
@@ -243,6 +249,11 @@ final class Auth
         if (strlen($clave) < 10) {
             throw new RuntimeException(t('La contraseña necesita al menos 10 caracteres'));
         }
+        // bcrypt no admite el carácter nulo (2.9): password_hash() lanzaba un
+        // ValueError sin traducir, y el asistente ya había escrito config.php
+        if (strpos($clave, "\0") !== false) {
+            throw new RuntimeException(t('La contraseña no puede llevar el carácter nulo'));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -256,20 +267,29 @@ final class Auth
      */
     public static function entrar(string $usuario, string $clave, string $ip): void
     {
-        $espera = self::bloqueoRestante($ip);
-        if ($espera > 0) {
-            throw new RuntimeException(t('Demasiados intentos fallidos. Prueba dentro de {espera} minuto(s).', ['espera' => $espera]));
-        }
+        // El intento se cuenta antes de comprobar la contraseña, y con el
+        // fichero bloqueado (2.9): antes se miraba sin bloquearlo y se contaba
+        // al fallar, y varios a la vez pasaban todos, más allá del límite.
+        // Un nombre que no puede ser de ningún usuario cuenta igual contra la
+        // IP, pero todos con la misma clave, '?' (2.9): entero, unos pocos de
+        // varios MB dejaban intentos.json en decenas de MB, que cada intento de
+        // entrar, desde cualquier IP, leía y reescribía entero. La respuesta y
+        // el tiempo, los de una contraseña equivocada
+        $valido = self::nombreValido($usuario);
+        $quien  = $valido ? strtolower($usuario) : '?';
+        self::contarIntento($ip, $quien);
 
-        $u = self::buscar($usuario);
-        // password_verify siempre, exista o no el usuario: mismo tiempo de respuesta
-        $hash = (string)($u['hash'] ?? '$2y$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
+        $u = $valido ? self::buscar($usuario) : null;
+        // password_verify siempre, exista o no el usuario: mismo tiempo de
+        // respuesta, también con el coste configurado (2.9: el de un usuario que
+        // no existía era siempre 10, y con 11 se le notaba la diferencia)
+        $hash = (string)($u['hash'] ?? sprintf('$2y$%02d$', max(4, min(31, (int)ADMIN_BCRYPT_COSTE)))
+            . 'invalidinvalidinvalidinvalidinvalidinvalidinvalidinva');     // 22 de sal y 31 de hash
         if (!password_verify($clave, $hash) || $u === null) {
-            self::apuntarFallo($ip);
             throw new RuntimeException(t('Usuario o contraseña incorrectos'));
         }
 
-        self::limpiarFallos($ip);
+        self::quitarFallos($ip, $quien);
         session_regenerate_id(true);
         $_SESSION['usuario'] = ['usuario' => $u['usuario'], 'rol' => $u['rol'], 'huella' => self::huella($u)];
         $_SESSION['visto']   = time();
@@ -286,37 +306,83 @@ final class Auth
         });
     }
 
+    /**
+     * Comprueba la contraseña de un usuario ya dentro, para cambiarla (2.9).
+     * Cuenta como un intento de entrar: con la IP bloqueada no se comprueba, y
+     * no se pueden probar contraseñas por aquí sin llegar al bloqueo.
+     *
+     * @throws RuntimeException si no es la suya
+     */
+    public static function comprobarClave(string $usuario, string $clave, string $ip): void
+    {
+        $quien = strtolower($usuario);
+        self::contarIntento($ip, $quien);
+        if (!password_verify($clave, (string)(self::buscar($usuario)['hash'] ?? ''))) {
+            throw new RuntimeException(t('La contraseña actual no es correcta.'));
+        }
+        self::quitarFallos($ip, $quien);
+    }
+
     /** Minutos que faltan para poder reintentar, 0 si no hay bloqueo. */
     public static function bloqueoRestante(string $ip): int
     {
-        $intentos = Store::leer(self::INTENTOS);
-        $e = $intentos[$ip] ?? null;
-        if (!is_array($e) || (int)$e['fallos'] < ADMIN_LOGIN_MAX_FALLOS) {
+        return self::restante(Store::leer(self::INTENTOS)[$ip] ?? null);
+    }
+
+    /** @param array{fallos:int,ultimo:int}|mixed $e los intentos de una IP */
+    private static function restante($e): int
+    {
+        if (!is_array($e) || (int)($e['fallos'] ?? 0) < ADMIN_LOGIN_MAX_FALLOS) {
             return 0;
         }
         $fin = (int)$e['ultimo'] + ADMIN_LOGIN_BLOQUEO_MIN * 60;
         return $fin > time() ? (int)ceil(($fin - time()) / 60) : 0;
     }
 
-    private static function apuntarFallo(string $ip): void
+    /**
+     * Cuenta el intento (ver apuntarIntento()), o lo rechaza si la IP está
+     * bloqueada.
+     *
+     * @throws RuntimeException con los minutos que faltan
+     */
+    private static function contarIntento(string $ip, string $quien): void
     {
-        // Con el fichero bloqueado: dos intentos a la vez no pueden contar uno
-        Store::actualizar(self::INTENTOS, static function (array $intentos) use ($ip): array {
-            return self::sumarFallo($intentos, $ip);
-        });
+        $espera = self::apuntarIntento($ip, $quien);
+        if ($espera > 0) {
+            throw new RuntimeException(t('Demasiados intentos fallidos. Prueba dentro de {espera} minuto(s).', ['espera' => $espera]));
+        }
     }
 
-    /** @param array<string,array{fallos:int,ultimo:int}> $intentos */
-    private static function sumarFallo(array $intentos, string $ip): array
+    /**
+     * Cuenta un intento de $quien desde $ip como fallido, si la IP no está
+     * bloqueada; si lo está, devuelve los minutos que faltan y no cuenta nada.
+     * Mirar y contar van con el fichero bloqueado: dos intentos a la vez no
+     * pueden contar uno, ni pasar los dos con el último hueco.
+     */
+    private static function apuntarIntento(string $ip, string $quien): int
+    {
+        $espera = 0;
+        Store::actualizar(self::INTENTOS, static function (array $intentos) use ($ip, $quien, &$espera): array {
+            $espera = self::restante($intentos[$ip] ?? null);
+            return $espera > 0 ? $intentos : self::sumarFallo($intentos, $ip, $quien);
+        });
+        return $espera;
+    }
+
+    /** @param array<string,array{fallos:int,ultimo:int,usuarios?:array<string,int>}> $intentos */
+    private static function sumarFallo(array $intentos, string $ip, string $quien): array
     {
         $e = $intentos[$ip] ?? ['fallos' => 0, 'ultimo' => 0];
 
-        // Si el bloqueo anterior ya expiró, se empieza a contar de nuevo
-        if ((int)$e['fallos'] >= ADMIN_LOGIN_MAX_FALLOS
-            && (int)$e['ultimo'] + ADMIN_LOGIN_BLOQUEO_MIN * 60 <= time()) {
+        // Pasado el tiempo del bloqueo desde el último fallo, se empieza a
+        // contar de nuevo, haya llegado al bloqueo o no (2.9: si no, los fallos
+        // no caducaban, y unos pocos despistes al mes acababan en un bloqueo)
+        if ((int)$e['ultimo'] + ADMIN_LOGIN_BLOQUEO_MIN * 60 <= time()) {
             $e = ['fallos' => 0, 'ultimo' => 0];
         }
-        $intentos[$ip] = ['fallos' => (int)$e['fallos'] + 1, 'ultimo' => time()];
+        $usuarios = (array)($e['usuarios'] ?? []);
+        $usuarios[$quien] = (int)($usuarios[$quien] ?? 0) + 1;
+        $intentos[$ip] = ['fallos' => (int)$e['fallos'] + 1, 'ultimo' => time(), 'usuarios' => $usuarios];
 
         // Poda de entradas viejas para que el fichero no crezca
         $corte = time() - ADMIN_LOGIN_BLOQUEO_MIN * 60 * 4;
@@ -326,14 +392,28 @@ final class Auth
         return $intentos;
     }
 
-    private static function limpiarFallos(string $ip): void
+    /**
+     * Al entrar, se quitan los intentos de ese usuario desde esa IP (también
+     * el de ahora), y solo esos (2.9): antes se borraban todos los de la IP,
+     * y quien tuviera una cuenta podía probar contraseñas de otra sin llegar
+     * nunca al bloqueo, entrando con la suya cada pocos intentos.
+     */
+    private static function quitarFallos(string $ip, string $quien): void
     {
-        if (isset(Store::leer(self::INTENTOS)[$ip])) {
-            Store::actualizar(self::INTENTOS, static function (array $intentos) use ($ip): array {
-                unset($intentos[$ip]);
+        Store::actualizar(self::INTENTOS, static function (array $intentos) use ($ip, $quien): array {
+            $e = $intentos[$ip] ?? null;
+            if (!is_array($e) || !isset($e['usuarios'][$quien])) {
                 return $intentos;
-            });
-        }
+            }
+            $e['fallos'] = (int)$e['fallos'] - (int)$e['usuarios'][$quien];
+            unset($e['usuarios'][$quien]);
+            if ($e['fallos'] <= 0) {
+                unset($intentos[$ip]);
+            } else {
+                $intentos[$ip] = $e;
+            }
+            return $intentos;
+        });
     }
 
     // ------------------------------------------------------------------
@@ -350,9 +430,20 @@ final class Auth
 
     public static function comprobarCsrf(): void
     {
-        $enviado = (string)($_POST['csrf'] ?? '');
+        $enviado = post('csrf');
         if ($enviado === '' || !hash_equals(self::csrf(), $enviado)) {
             throw new RuntimeException(t('Formulario caducado. Vuelve a intentarlo.'));
         }
+    }
+
+    /**
+     * El token de los enlaces del selector de idioma, que deja guardar el
+     * idioma en el usuario (2.9; ver index.php). Sacado del de CSRF, pero no
+     * es él: va en la dirección, que queda en el historial y en los registros
+     * del servidor, y solo sirve para esto.
+     */
+    public static function tokenIdioma(): string
+    {
+        return hash_hmac('sha256', 'idioma', self::csrf());
     }
 }

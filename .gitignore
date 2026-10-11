@@ -45,3 +45,6 @@ Desktop.ini
 # Temporary files
 *.tmp
 *.bak
+
+# Python: bytecode cache, if a client is imported as a module
+__pycache__/

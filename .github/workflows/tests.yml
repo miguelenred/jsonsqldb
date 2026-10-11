@@ -25,12 +25,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the tags of every version, for f24
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, zip, sqlite3, mysqli, pgsql
+          extensions: curl, zip, sqlite3, mysqli, pgsql, apcu
           coverage: none
 
       - name: Create configuration
@@ -62,6 +64,15 @@ jobs:
           php tests/f20_memoria.php
           php tests/f20_memoria.php --directa
 
+      - name: Panel in pure PHP (mbstring and cURL disabled)
+        run: php tests/f5_admin.php --php-puro
+
+      - name: Panel on a hosting with open_basedir (no system temp folder, PHP warnings shown)
+        run: |
+          php tests/f5_admin.php --open-basedir
+          php tests/f20_memoria.php --open-basedir
+          php tests/f20_memoria.php --directa --open-basedir
+
       - name: No runtime data in the repository
         run: |
           sobra=$(git ls-files data logs jsonsqldbadmin/datos | grep -vE '(\.htaccess|web\.config|\.gitkeep)$' || true)
@@ -69,6 +80,9 @@ jobs:
 
       - name: Same results as SQLite
         run: php tests/f12_contra_sqlite.php
+
+      - name: SQLite and MySQL compatibility
+        run: php tests/f21_compatibilidad.php
 
       - name: Panel translations
         run: php tests/f15_idiomas.php
@@ -82,6 +96,7 @@ jobs:
           php tests/f16_vistas_triggers.php
           php tests/f17_rutinas_importadas.php
           JSONSQLDB_TEST_PWSH_EXIGIR=1 php tests/f18_access.php
+          JSONSQLDB_TEST_PWSH_EXIGIR=1 php tests/f22_sqlserver.php
         env:
           JSONSQLDB_TEST_MYSQL: 127.0.0.1:root:root
           JSONSQLDB_TEST_MYSQL_EXIGIR: 1
@@ -109,3 +124,9 @@ jobs:
 
       - name: Incremental indexes
         run: php tests/f10_indices_incrementales.php
+
+      - name: Hand-edited and damaged files
+        run: php tests/f23_reparar.php
+
+      - name: Every earlier version upgraded by this engine
+        run: php tests/f24_versiones_anteriores.php

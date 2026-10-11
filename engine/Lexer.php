@@ -30,12 +30,15 @@ namespace JsonSQLDB;
  */
 final class Lexer
 {
-    private const OPS2 = ['<>', '!=', '<=', '>=', '||'];
-    private const OPS1 = ['=', '<', '>', '+', '-', '*', '/', '%'];
-    private const PUNC = ['(', ')', ',', '.', ';'];
+    private const CIFRAS = '0123456789';
+    /** Lo que puede ir dentro de un nombre sin comillas */
+    private const LETRAS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$';
+    // Como mapas, para buscar con isset() y no recorrer una lista (2.9)
+    private const OPS2 = ['<>' => 1, '!=' => 1, '<=' => 1, '>=' => 1, '||' => 1, '==' => 1, '<<' => 1, '>>' => 1];
+    private const OPS1 = ['=' => 1, '<' => 1, '>' => 1, '+' => 1, '-' => 1, '*' => 1, '/' => 1, '%' => 1, '&' => 1, '|' => 1, '~' => 1];
+    private const PUNC = ['(' => 1, ')' => 1, ',' => 1, '.' => 1, ';' => 1];
 
-    /** @return array<int,array> */
-    /** @return list<Token> */
+    /** @return list<array> cada token: ['t' => tipo, 'v' => valor, 'l' => línea, 'p' => posición, …] */
     public static function tokens(string $sql): array
     {
         $tokens = [];
@@ -47,10 +50,11 @@ final class Lexer
             $c   = $sql[$i];
             $ini = $i;
 
-            // Espacios y saltos de línea
+            // Espacios y saltos de línea: el tramo entero de una vez (2.9)
             if ($c === ' ' || $c === "\t" || $c === "\r" || $c === "\n") {
-                if ($c === "\n") { $linea++; }
-                $i++;
+                $k      = strspn($sql, " \t\r\n", $i);
+                $linea += substr_count($sql, "\n", $i, $k);
+                $i     += $k;
                 continue;
             }
 
@@ -74,19 +78,25 @@ final class Lexer
 
             // Cadena literal
             if ($c === "'") {
+                // De comilla en comilla, no de carácter en carácter (2.9): ''
+                // dentro es una comilla
                 $valor = '';
                 $i++;
                 while (true) {
-                    if ($i >= $n) {
+                    $fin = strpos($sql, "'", $i);
+                    if ($fin === false) {
+                        $linea += substr_count($sql, "\n", $i);
                         throw JsonSqlDbError::syntax("Cadena sin cerrar (línea $linea)");
                     }
-                    if ($sql[$i] === "'") {
-                        if ($i + 1 < $n && $sql[$i + 1] === "'") { $valor .= "'"; $i += 2; continue; }
-                        $i++;
-                        break;
+                    $linea += substr_count($sql, "\n", $i, $fin - $i);
+                    $valor .= substr($sql, $i, $fin - $i);
+                    if ($fin + 1 < $n && $sql[$fin + 1] === "'") {
+                        $valor .= "'";
+                        $i = $fin + 2;
+                        continue;
                     }
-                    if ($sql[$i] === "\n") { $linea++; }
-                    $valor .= $sql[$i++];
+                    $i = $fin + 1;
+                    break;
                 }
                 $tokens[] = ['t' => 'str', 'v' => $valor, 'l' => $linea, 'p' => $ini];
                 continue;
@@ -117,20 +127,19 @@ final class Lexer
             // Número
             if ($c >= '0' && $c <= '9'
                 || ($c === '.' && $i + 1 < $n && $sql[$i + 1] >= '0' && $sql[$i + 1] <= '9')) {
-                while ($i < $n && $sql[$i] >= '0' && $sql[$i] <= '9') { $i++; }
+                $i += strspn($sql, self::CIFRAS, $i);
                 $flotante = false;
                 if ($i < $n && $sql[$i] === '.') {
                     $flotante = true;
                     $i++;
-                    while ($i < $n && $sql[$i] >= '0' && $sql[$i] <= '9') { $i++; }
+                    $i += strspn($sql, self::CIFRAS, $i);
                 }
                 if ($i < $n && ($sql[$i] === 'e' || $sql[$i] === 'E')) {
                     $salto = $i + 1;
                     if ($salto < $n && ($sql[$salto] === '+' || $sql[$salto] === '-')) { $salto++; }
                     if ($salto < $n && $sql[$salto] >= '0' && $sql[$salto] <= '9') {
                         $flotante = true;
-                        $i = $salto;
-                        while ($i < $n && $sql[$i] >= '0' && $sql[$i] <= '9') { $i++; }
+                        $i = $salto + strspn($sql, self::CIFRAS, $salto);
                     }
                 }
                 $texto    = substr($sql, $ini, $i - $ini);
@@ -138,22 +147,14 @@ final class Lexer
                 // SQLite: (int) lo dejaba en PHP_INT_MAX sin avisar, y un
                 // 18446744073709551615 (BIGINT UNSIGNED) se guardaba cambiado.
                 // 9223372036854775808 con un - delante es PHP_INT_MIN: lo ve el analizador
-                $entero = !$flotante && Valor::cifrasCaben($texto);
+                $entero = !$flotante && self::cifrasCaben($texto);
                 $tokens[] = ['t' => 'num', 'v' => $entero ? (int)$texto : (float)$texto, 'l' => $linea, 'p' => $ini, 'texto' => $texto];
                 continue;
             }
 
             // Identificador / palabra clave
             if ($c === '_' || ($c >= 'a' && $c <= 'z') || ($c >= 'A' && $c <= 'Z')) {
-                while ($i < $n) {
-                    $d = $sql[$i];
-                    if ($d === '_' || $d === '$' || ($d >= 'a' && $d <= 'z')
-                        || ($d >= 'A' && $d <= 'Z') || ($d >= '0' && $d <= '9')) {
-                        $i++;
-                        continue;
-                    }
-                    break;
-                }
+                $i += strspn($sql, self::LETRAS, $i);
                 $texto    = substr($sql, $ini, $i - $ini);
                 $tokens[] = ['t' => 'id', 'v' => $texto, 'u' => strtoupper($texto), 'q' => false, 'l' => $linea, 'p' => $ini];
                 continue;
@@ -166,22 +167,31 @@ final class Lexer
                 continue;
             }
 
+            // <=> de MySQL (2.9), el = que trata NULL como un valor; ->> y -> de
+            // SQLite y MySQL, para sacar un trozo de un JSON
+            if (($c === '<' && substr($sql, $i, 3) === '<=>') || ($c === '-' && ($sql[$i + 1] ?? '') === '>')) {
+                $op = $c === '<' || ($sql[$i + 2] ?? '') === '>' ? substr($sql, $i, 3) : '->';
+                $tokens[] = ['t' => 'op', 'v' => $op, 'l' => $linea, 'p' => $ini];
+                $i += strlen($op);
+                continue;
+            }
+
             // Operadores de dos caracteres
-            if ($i + 1 < $n && in_array(substr($sql, $i, 2), self::OPS2, true)) {
-                $tokens[] = ['t' => 'op', 'v' => substr($sql, $i, 2), 'l' => $linea, 'p' => $ini];
+            if ($i + 1 < $n && isset(self::OPS2[$dos = $c . $sql[$i + 1]])) {
+                $tokens[] = ['t' => 'op', 'v' => $dos, 'l' => $linea, 'p' => $ini];
                 $i += 2;
                 continue;
             }
 
             // Operadores de un carácter
-            if (in_array($c, self::OPS1, true)) {
+            if (isset(self::OPS1[$c])) {
                 $tokens[] = ['t' => 'op', 'v' => $c, 'l' => $linea, 'p' => $ini];
                 $i++;
                 continue;
             }
 
             // Signos
-            if (in_array($c, self::PUNC, true)) {
+            if (isset(self::PUNC[$c])) {
                 $tokens[] = ['t' => 'punc', 'v' => $c, 'l' => $linea, 'p' => $ini];
                 $i++;
                 continue;
@@ -192,5 +202,13 @@ final class Lexer
 
         $tokens[] = ['t' => 'eof', 'v' => '', 'l' => $linea, 'p' => $n];
         return $tokens;
+    }
+
+    /** ¿Cabe en un entero de 64 bits este número escrito solo con cifras (y un signo)? */
+    public static function cifrasCaben(string $cifras, bool $negativo = false): bool
+    {
+        $cifras = ltrim($cifras, '0') ?: '0';
+        $limite = $negativo ? '9223372036854775808' : '9223372036854775807';
+        return strlen($cifras) < 19 || (strlen($cifras) === 19 && strcmp($cifras, $limite) <= 0);
     }
 }

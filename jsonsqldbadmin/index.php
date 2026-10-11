@@ -48,12 +48,25 @@ if (!Auth::revalidar()) {
     flash('warning', t('La sesión se ha cerrado: tu usuario ya no existe o su contraseña ha cambiado.'));
 }
 
-// Selector de idioma: ?idioma=en. Solo cambia el idioma (en la sesión y, si
-// alguien ha entrado, en su usuario) y vuelve a la misma página sin el parámetro
-if (isset($_GET['idioma']) && is_string($_GET['idioma'])) {
-    Idioma::elegir($_GET['idioma']);
+// Un formulario más grande que post_max_size llega vacío: PHP lo descarta
+// entero, y lo que se veía era «formulario caducado» o nada. Se dice qué ha
+// pasado y se vuelve a la página (2.9)
+$enviado = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && $_POST === [] && $_FILES === []
+    && bytesIni('post_max_size') > 0 && $enviado > bytesIni('post_max_size')) {
+    flash('danger', t('Lo enviado ocupa {n} KB y el servidor solo acepta {m} KB por petición (post_max_size de PHP): no se ha hecho nada. Envía menos de una vez, o sube ese límite.',
+        ['n' => intdiv($enviado, 1024), 'm' => intdiv(bytesIni('post_max_size'), 1024)]));
+    redirigir($_GET);
+}
+
+// Selector de idioma: ?idioma=en. Solo cambia el idioma y vuelve a la misma
+// página sin el parámetro. En la sesión, siempre; en el usuario que ha entrado,
+// solo con el token de los enlaces del selector (2.9): sin él, un enlace o una
+// imagen en otra página cambiaba el idioma guardado de quien la abriera
+if (isset($_GET['idioma'])) {
+    Idioma::elegir(get('idioma'), hash_equals(Auth::tokenIdioma(), get('token')));
     $params = $_GET;
-    unset($params['idioma']);
+    unset($params['idioma'], $params['token']);
     redirigir($params);
 }
 
@@ -76,8 +89,7 @@ if ($asistente || !Auth::hayUsuarios()) {
                 Instalador::borrarCodigo();
                 Audit::registrar('instalar', post('usuario'));
             } else {
-                $nombre = Instalador::crearAdmin(post('usuario'), (string)($_POST['clave'] ?? ''),
-                                                 (string)($_POST['clave2'] ?? ''));
+                $nombre = Instalador::crearAdmin(post('usuario'), textoDe($_POST, 'clave'), textoDe($_POST, 'clave2'));
                 Instalador::borrarCodigo();
                 Audit::registrar('instalar', $nombre);
                 flash('success', t('Administrador \'{nombre}\' creado. Ya puedes entrar.', ['nombre' => $nombre]));
@@ -104,7 +116,13 @@ if ($asistente || !Auth::hayUsuarios()) {
 // Cerrar sesión, solo por POST y con su token: un enlace o una imagen en otra
 // página no pueden cerrar la sesión de nadie
 if ($pagina === 'salir' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
-    Auth::comprobarCsrf();
+    try {
+        Auth::comprobarCsrf();
+    } catch (RuntimeException $e) {
+        // Sin token válido no se cierra nada: se avisa, en vez de un error fatal
+        flash('danger', $e->getMessage());
+        redirigir(['p' => 'bases']);
+    }
     Audit::registrar('salir');
     Auth::cerrar();
     redirigir();
@@ -117,15 +135,22 @@ if ($pagina === 'salir') {
 if (!Auth::identificado()) {
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $usuario = post('usuario');
+        $intento = false;                     // ¿se ha probado de verdad una contraseña?
         try {
             // También el acceso lleva su token: sin él, otra página podría hacer
             // entrar al navegador de alguien con una cuenta elegida por ella
             Auth::comprobarCsrf();
-            Auth::entrar($usuario, (string)($_POST['clave'] ?? ''), util_ip());
+            $intento = Auth::bloqueoRestante(util_ip()) === 0;
+            Auth::entrar($usuario, textoDe($_POST, 'clave'), util_ip());
             Audit::registrar('entrar');
             redirigir(['p' => 'bases']);
         } catch (Throwable $e) {
-            Audit::registrar('acceso_fallido', $usuario);
+            // Solo los intentos de verdad, que el bloqueo por IP limita, y el
+            // nombre recortado (2.9): sin token, o con la IP ya bloqueada, cada
+            // petición apuntaba lo que trajera, y cualquiera podía llenar el disco
+            if ($intento) {
+                Audit::registrar('acceso_fallido', substr((string)preg_replace('/[^\x20-\x7E]/', '?', $usuario), 0, 64));
+            }
             $error = $e->getMessage();
         }
     }
@@ -133,12 +158,14 @@ if (!Auth::identificado()) {
     exit;
 }
 
-// El script de PowerShell que vuelca una base de Access para importarla aquí
-if ($pagina === 'script_access') {
+// Los scripts de PowerShell que vuelcan una base de Access o de SQL Server
+// para importarla aquí, y cargan allí lo que se exporta para ellas
+$scripts = ['script_access' => 'access-to-jsonsqldb.ps1', 'script_sqlserver' => 'sqlserver-to-jsonsqldb.ps1'];
+if (isset($scripts[$pagina])) {
     header('Content-Type: text/plain; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="access-to-jsonsqldb.ps1"');
+    header('Content-Disposition: attachment; filename="' . $scripts[$pagina] . '"');
     header('X-Content-Type-Options: nosniff');
-    readfile(__DIR__ . '/herramientas/access-to-jsonsqldb.ps1');
+    readfile(__DIR__ . '/herramientas/' . $scripts[$pagina]);
     exit;
 }
 

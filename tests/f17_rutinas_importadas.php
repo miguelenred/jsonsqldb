@@ -20,6 +20,7 @@ use JsonSQLDB\Database;
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f17_' . getmypid();
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_DATA_PATH', $raiz);
+define('JSONSQLDB_LOG_PATH', JSONSQLDB_DATA_PATH . '/logs');
 define('ADMIN_CONEXION', 'directa');
 require dirname(__DIR__) . '/engine/bootstrap.php';
 require dirname(__DIR__) . '/jsonsqldbadmin/config.dist.php';
@@ -282,7 +283,7 @@ chk('las mismas escrituras dejan las mismas tablas y vistas que en MySQL, y fall
     $bd = new Database('desde_ss');
     $fallan = [];
     foreach ($escrituras as $i => $sql) {
-        try { $bd->consultar($sql); } catch (Throwable $e) { $fallan[] = $i; }
+        try { $bd->consultar($sql); } catch (Throwable) { $fallan[] = $i; }
     }
     $mal = [];
     if ($fallan !== [3, 6, 8]) {
@@ -381,6 +382,152 @@ chk('PostgreSQL: exportadas, volcadas con pg_dump e importadas, dan lo mismo', f
         . ' ' . escapeshellarg($bd) . ' > ' . escapeshellarg("$raiz/formas.pg.sql") . ' 2>/dev/null');
     @pg_query($admin, "DROP DATABASE IF EXISTS $bd");
     return $vuelta("$raiz/formas.pg.sql", 'formas_pg') ?: true;
+});
+
+// ---------------------------------------------------------------------
+echo "\n== Textos con puntuación y cuentas con fechas (2.9) ==\n";
+chk('un texto \'(\', \')\', \',\' o \';\' en una vista o un trigger es un texto, no puntuación: CONCAT(a, \' (\', b, \')\'), CONCAT_WS(\',\', …), SEPARATOR \')\' y el \'log (\' || NEW.id || \')\' de un trigger de PostgreSQL (2.9)', function () {
+    Database::crear('puntuacion');
+    $bd = new Database('puntuacion');
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT, n INTEGER)');
+    $bd->consultar("INSERT INTO t VALUES (1, 'x', 'y', 0), (2, 'p', 'q', 0)");
+    $my = new Traductor('mysql');
+    $vistas = [
+        "CREATE VIEW v1 AS select concat(`t`.`a`,' (',`t`.`b`,')') AS `x` from `t`" => [['x' => 'x (y)'], ['x' => 'p (q)']],
+        "CREATE VIEW v2 AS select concat_ws(',',`t`.`a`,`t`.`b`) AS `x` from `t`" => [['x' => 'x,y'], ['x' => 'p,q']],
+        "CREATE VIEW v3 AS select group_concat(`t`.`a` order by `t`.`id` ASC separator ')') AS `x` from `t`" => [['x' => 'x)p']],
+        "CREATE VIEW v4 AS select replace(`t`.`a`,'(',';') AS `x`,if((`t`.`b` = ';'),1,0) AS `y` from `t`" => [['x' => 'x', 'y' => 0], ['x' => 'p', 'y' => 0]],
+    ];
+    $mal = [];
+    foreach ($vistas as $sql => $esperado) {
+        foreach ($my->traducir($sql) as $s) { $bd->consultar($s); }
+        preg_match('/VIEW (\w+)/', $sql, $v);
+        $r = $bd->consultar("SELECT * FROM {$v[1]}");
+        if ($r !== $esperado) { $mal[] = "{$v[1]}: " . json_encode($r); }
+    }
+    // El trigger llama a una función plpgsql con '(' y ')' en sus textos
+    $pg = new Traductor('postgresql');
+    $pg->traducir("CREATE FUNCTION public.marcar() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN NEW.n := length('log (' || NEW.id || ')'); RETURN NEW; END \$\$;");
+    $pg->traducir('CREATE TRIGGER t_bi BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.marcar();');
+    foreach ($pg->triggers() as [, $s]) { $bd->consultar($s); }
+    $bd->consultar("INSERT INTO t (id, a) VALUES (3, 'z')");
+    $n = $bd->consultar('SELECT n FROM t WHERE id = 3');
+    return $mal === [] && $n === [['n' => 7]] && $my->avisos() === [] && $pg->avisos() === []
+        ?: json_encode([$mal, $n, $my->avisos(), $pg->avisos()], JSON_UNESCAPED_UNICODE);
+});
+chk('PostgreSQL: date - date son los días entre las dos y date ± n otra fecha, como allí; lo que da un intervalo (timestamp - timestamp) no se traduce y esa vista se salta con el motivo (2.9: se restaban como textos y daban otro número)', function () use ($pgConexion) {
+    // Como lo escribe pg_dump; los resultados, los de PostgreSQL 16
+    $volcado = "--\n-- PostgreSQL database dump\n--\nSET standard_conforming_strings = on;\n"
+        . "CREATE TABLE public.t (\n    id integer NOT NULL,\n    f date,\n    g date,\n    ts timestamp without time zone,\n    n integer\n);\n"
+        . "CREATE VIEW public.v1 AS\n SELECT id,\n    ('2026-01-01'::date - f) AS d1,\n    (f - g) AS d2,\n    ((ts)::date - g) AS d3\n   FROM public.t;\n"
+        . "CREATE VIEW public.v2 AS\n SELECT t.id,\n    (t.f - 7) AS antes,\n    (t.f + t.n) AS luego,\n    (n + f) AS luego2,\n    (g - (n * 2)) AS doble\n   FROM public.t;\n"
+        . "CREATE VIEW public.v3 AS\n SELECT id,\n    (n - 1) AS m,\n    ((n + 2) * 3) AS p\n   FROM public.t;\n"
+        . "CREATE VIEW public.v4 AS\n SELECT id,\n    (ts - (g)::timestamp without time zone) AS intervalo\n   FROM public.t;\n"
+        . "INSERT INTO public.t VALUES (1, '2023-01-15', '2020-02-29', '2024-03-01 10:00:00', 7);\n"
+        . "INSERT INTO public.t VALUES (2, '2024-12-31', '2024-01-01', NULL, 30);\n"
+        . "INSERT INTO public.t VALUES (3, NULL, '2001-05-05', '2020-01-01 00:00:00', -3);\n"
+        . "ALTER TABLE ONLY public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id);\n";
+    $f = JSONSQLDB_DATA_PATH . '/fechas.pg.sql';
+    file_put_contents($f, $volcado);
+    Database::crear('fechas_pg');
+    $resumen = Importar::sql($f, 'fechas_pg');
+    @unlink($f);
+    $bd = new Database('fechas_pg');
+    $aqui = static fn(string $v): array => $bd->consultar("SELECT * FROM $v ORDER BY id");
+    $mal = [];
+    $esperado = [
+        'v1' => [['id' => 1, 'd1' => 1082, 'd2' => 1051, 'd3' => 1462], ['id' => 2, 'd1' => 366, 'd2' => 365, 'd3' => null], ['id' => 3, 'd1' => null, 'd2' => null, 'd3' => 6815]],
+        'v2' => [['id' => 1, 'antes' => '2023-01-08', 'luego' => '2023-01-22', 'luego2' => '2023-01-22', 'doble' => '2020-02-15'],
+                 ['id' => 2, 'antes' => '2024-12-24', 'luego' => '2025-01-30', 'luego2' => '2025-01-30', 'doble' => '2023-11-02'],
+                 ['id' => 3, 'antes' => null, 'luego' => null, 'luego2' => null, 'doble' => '2001-05-11']],
+        'v3' => [['id' => 1, 'm' => 6, 'p' => 27], ['id' => 2, 'm' => 29, 'p' => 96], ['id' => 3, 'm' => -4, 'p' => -3]],
+    ];
+    foreach ($esperado as $v => $filas) {
+        if ($aqui($v) !== $filas) { $mal[] = "$v: " . json_encode($aqui($v)); }
+    }
+    if (!str_contains($resumen, "Vista 'v4' sin importar") || !str_contains($resumen, 'con fechas') || array_column($bd->consultar('SHOW VIEWS'), 'vista') !== ['v1', 'v2', 'v3']) {
+        $mal[] = $resumen;
+    }
+    // Y con un servidor, contra lo que da allí ahora mismo
+    if ($pgConexion !== '' && function_exists('pg_connect') && $mal === []) {
+        [$host, $usuario, $clave] = array_pad(explode(':', $pgConexion, 3), 3, '');
+        $admin = @pg_connect("host=$host user=$usuario password=$clave dbname=postgres");
+        if ($admin) {
+            $nombre = 'jsonsqldb_f17d_' . getmypid();
+            @pg_query($admin, "DROP DATABASE IF EXISTS $nombre");
+            pg_query($admin, "CREATE DATABASE $nombre");
+            $c = pg_connect("host=$host user=$usuario password=$clave dbname=$nombre");
+            if (@pg_query($c, $volcado) === false) {
+                $mal[] = pg_last_error($c);
+            } else {
+                $mal = diferencias(['v1', 'v2', 'v3'], ['v1', 'v2', 'v3'],
+                    static fn(string $v): array => pg_fetch_all(pg_query($c, "SELECT * FROM $v ORDER BY id")) ?: [], $aqui);
+            }
+            pg_close($c);
+            @pg_query($admin, "DROP DATABASE IF EXISTS $nombre");
+        }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
+chk('|| se une aquí antes que + - * / (como en SQLite), y en PostgreSQL y en el + de SQL Server después: el lado que es una cuenta va entre paréntesis, en las vistas y en los triggers; y el || de un trigger de MySQL es OR salvo con PIPES_AS_CONCAT (2.9)', function () use ($pgConexion) {
+    $esperado = [['id' => 1, 'a' => 'A6', 'b' => '10B', 'c' => 'C4D', 'd' => 'x11x', 'f' => '-5x'],
+                 ['id' => 2, 'a' => 'A-2', 'b' => '-6B', 'c' => 'C-4D', 'd' => 'y-5y', 'f' => '3x']];     // los de PostgreSQL 16
+    $tabla = 'CREATE TABLE public.t (id integer NOT NULL, n integer, s text);';
+    $vista = "CREATE VIEW public.v AS SELECT id, 'A' || t.n + 1 AS a, t.n * 2 || 'B' AS b, 'C' || t.n - 1 || 'D' AS c, s || n * 2 + 1 || s AS d, - n || 'x' AS f FROM public.t;";
+    $pg = new Traductor('postgresql');
+    $pg->observar($tabla);
+    $pg->traducir($tabla);
+    $v = $pg->traducir($vista)[0] ?? '';
+    $pg->traducir("CREATE FUNCTION public.f() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN NEW.s := 'A' || NEW.n + 1; RETURN NEW; END \$\$;");
+    $pg->traducir('CREATE TRIGGER t_bi BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.f();');
+    $trg = $pg->triggers()[0][1] ?? '';
+    $mal = [];
+    foreach (["'A' || ( t . n + 1 )", "( t . n * 2 ) || 'B'", "'C' || ( t . n - 1 ) || 'D'", "s || ( n * 2 + 1 ) || s", "- n || 'x'"] as $trozo) {
+        if (!str_contains($v, $trozo)) { $mal[] = "falta «{$trozo}» en $v"; }
+    }
+    if (!str_contains($trg, "SET NEW.\"s\" = 'A' || ( NEW . n + 1 )")) { $mal[] = $trg; }
+    // Lo traducido, en SQLite (que ya une || antes que + y *), da lo de PostgreSQL
+    if (class_exists('SQLite3') && $mal === []) {
+        $lite = new SQLite3(':memory:');
+        $lite->exec("CREATE TABLE t (id INTEGER, n INTEGER, s TEXT); INSERT INTO t VALUES (1, 5, 'x'), (2, -3, 'y')");
+        $r = $lite->query(substr($v, strpos($v, ' AS SELECT ') + 4) . ' ORDER BY id');
+        $filas = [];
+        while (($f = $r->fetchArray(SQLITE3_ASSOC)) !== false) { $filas[] = $f; }
+        if ($filas !== $esperado) { $mal[] = 'SQLite: ' . json_encode($filas); }
+    }
+    // Y con un servidor, que esos son sus resultados
+    if ($pgConexion !== '' && function_exists('pg_connect') && $mal === []) {
+        [$host, $usuario, $clave] = array_pad(explode(':', $pgConexion, 3), 3, '');
+        $c = @pg_connect("host=$host user=$usuario password=$clave dbname=postgres");
+        if ($c) {
+            $alli = pg_fetch_all(pg_query($c, "SELECT id, 'A' || t.n + 1 AS a, t.n * 2 || 'B' AS b, 'C' || t.n - 1 || 'D' AS c, s || n * 2 + 1 || s AS d, - n || 'x' AS f"
+                . " FROM (VALUES (1, 5, 'x'), (2, -3, 'y')) AS t (id, n, s) ORDER BY id")) ?: [];
+            pg_close($c);
+            if (array_map(static fn($f) => ['id' => (int)$f['id']] + $f, $alli) !== $esperado) { $mal[] = 'PostgreSQL: ' . json_encode($alli); }
+        }
+    }
+    // SQL Server: el + que concatena, entero entre paréntesis
+    $ss = new Traductor('sqlserver');
+    $tss = 'CREATE TABLE [dbo].[t]([id] [int] NOT NULL, [n] [int] NULL, [s] [nvarchar](20) NULL)';
+    $ss->observar($tss);
+    $ss->traducir($tss);
+    $vss = $ss->traducir("CREATE VIEW [dbo].[v] AS SELECT id, 'A' + CAST(n AS varchar(10)) + 'B' AS a, 'x' + s + 'y' AS c, n * 2 + 1 AS d FROM dbo.t")[0] ?? '';
+    if (!str_contains($vss, "(('A' || CAST(n AS TEXT)) || 'B') AS a") || !str_contains($vss, "(('x' || s) || 'y') AS c") || !str_contains($vss, 'n * 2 + 1 AS d')) {
+        $mal[] = $vss;
+    }
+    // MySQL: el sql_mode que mysqldump pone delante de cada trigger
+    $my = new Traductor('mysql');
+    foreach (["SET sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES'", 'CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW SET NEW.n = (NEW.a || NEW.b) + 10',
+              "SET sql_mode = 'PIPES_AS_CONCAT,ANSI_QUOTES'", "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW SET NEW.s = 'x' || NEW.a",
+              "SET sql_mode = 'ANSI_QUOTES'", 'CREATE TRIGGER t3 BEFORE INSERT ON t FOR EACH ROW SET NEW.n = NEW.a || NEW.b'] as $q) {
+        $my->traducir($q);
+    }
+    $trgs = array_column($my->triggers(), 1);
+    if (!str_contains($trgs[0] ?? '', '( NEW . a OR NEW . b ) + 10') || !str_contains($trgs[1] ?? '', "'x' || NEW . a") || !str_contains($trgs[2] ?? '', 'NEW . a OR NEW . b')) {
+        $mal[] = implode(' · ', $trgs);
+    }
+    return $mal === [] ?: implode(' | ', $mal);
 });
 
 borrarArbol($raiz);

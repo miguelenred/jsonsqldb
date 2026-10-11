@@ -31,7 +31,7 @@ $pasos    = $completo ? ($conUsuario ? ['1 ' . t('Conexión'), '2 ' . t('Segurid
       <a href="<?= h(url()) ?>" class="btn btn-primary"><?= h(t('Ir al panel →')) ?></a>
     </div>
   </div>
-  <div class="setup-foot"><?= t('jsonSQLDBadmin{1} · PHP {2} ·', [1 => version() !== '' ? ' v' . h(version()) : '', 2 => h(PHP_VERSION)]) ?>
+  <div class="setup-foot">jsonSQLDBadmin<?= version() !== '' ? ' v' . h(version()) : '' ?> ·
     <a href="https://miguelenred.es/jsonsqldb" target="_blank" rel="noopener">miguelenred.es/jsonsqldb</a></div>
 <?php return; endif; ?>
 
@@ -56,8 +56,8 @@ $pasos    = $completo ? ($conUsuario ? ['1 ' . t('Conexión'), '2 ' . t('Segurid
             <?= $bien === false ? '✕' : ($bien === true ? '✓' : '!') ?> <?= h($texto) ?></span>
         <?php endforeach; ?>
         <div class="kv">
-          <div><?= t('<b>Configuración</b> {1}', [1 => h(Instalador::rutaConfig())]) ?></div>
-          <div><?= t('<b>Usuarios del panel</b> {1}', [1 => h((string)ADMIN_DATA_PATH)]) ?></div>
+          <div><?= t('<b>Configuración</b> {1}', [1 => h(Instalador::rutaVisible(Instalador::rutaConfig()))]) ?></div>
+          <div><?= t('<b>Usuarios del panel</b> {1}', [1 => h(Instalador::rutaVisible((string)ADMIN_DATA_PATH))]) ?></div>
         </div>
       </div>
 
@@ -105,7 +105,7 @@ $pasos    = $completo ? ($conUsuario ? ['1 ' . t('Conexión'), '2 ' . t('Segurid
               <div class="extra">
                 <label class="form-label" for="motor"><?= h(t('Carpeta de jsonSQLDB')) ?></label>
                 <input class="form-control" id="motor" name="motor" value="<?= h(post('motor')) ?>"
-                       placeholder="<?= h(Instalador::motorDetectado() ?: '/ruta/a/jsonsqldb') ?>">
+                       placeholder="<?= h(Instalador::motorDetectado() !== '' ? Instalador::rutaVisible(Instalador::motorDetectado()) : '/ruta/a/jsonsqldb') ?>">
                 <div class="form-text"><?= t('La que contiene <code>engine/</code> y <code>config.php</code>. Vacía = la que está junto al panel.') ?></div>
               </div>
             </div>

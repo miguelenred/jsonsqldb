@@ -33,6 +33,8 @@ use JsonSQLDB\Catalog;
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageCambios;
+use JsonSQLDB\StorageEscritura;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f10';
 $ok = 0; $ko = 0;
@@ -134,7 +136,7 @@ function indicesRehechos(string $raiz): array
     $st->bloquear(true);
     $cat   = new Catalog($st);
     $meta  = $cat->meta('t');
-    $filas = $st->leerFilas('t', true);
+    $filas = StorageEscritura::leerFilas($st, 't', true);
     $st->desbloquear();
     unset($st, $cat);
 
@@ -444,6 +446,62 @@ chk('un UPDATE que no toca las columnas de un índice deja sus trozos como estab
     unset($bd);
     if ($antes === '' || $antes !== $despues) { return 'los trozos de ix_ciudad han cambiado'; }
     return cuadraConRehacerlo($raiz);
+});
+
+chk('con la última parte a medias, un UPDATE tampoco toca el último trozo; borrar la última fila, añadir y borrar en medio sí, y cuadra (2.9)', function () use ($raiz) {
+    // 123 filas en partes de 50: la última tiene 23. La cola de los índices
+    // solo se rehace si hay filas añadidas o que se mueven
+    $bd = preparar($raiz, 123);
+    $huella = static function () use ($raiz): string {
+        $h = '';
+        foreach (glob("$raiz/x/t.idx.ix_ciudad*") ?: [] as $f) { $h .= basename($f) . md5_file($f); }
+        return $h;
+    };
+    $antes = $huella();
+    $bd->consultar("UPDATE t SET v = 'cambiado' WHERE id = 10");
+    if ($antes === '' || $antes !== $huella()) { return 'un UPDATE de v ha tocado los trozos de ix_ciudad'; }
+    foreach (['DELETE FROM t WHERE id = 123', "INSERT INTO t VALUES (200, 'c200', 'Elche', 'v1')", 'DELETE FROM t WHERE id = 60'] as $q) {
+        $bd->consultar($q);
+        $r = cuadraConRehacerlo($raiz);
+        if ($r !== true) { return "tras $q: " . json_encode($r); }
+    }
+    return true;
+});
+
+chk('el menor y el mayor de texto guardados en la caché nunca esconden una fila cambiada después (2.9)', function () use ($raiz) {
+    // Un rango de texto guarda el menor y el mayor de cada trozo, con su
+    // revisión; si el trozo cambia, lo guardado deja de valer
+    $bd = preparar($raiz, 300);
+    $bd->consultar('CREATE INDEX ix_v ON t (v)');
+    $antes = $bd->consultar("SELECT id FROM t WHERE v > 'v5' ORDER BY id");     // guarda los límites
+    $bd->consultar("UPDATE t SET v = 'zz' WHERE id = 120");                       // fuera de los de su trozo
+    $r = [$bd->consultar("SELECT id FROM t WHERE v >= 'zz'"), $bd->consultar("SELECT id FROM t WHERE v > 'v5' ORDER BY id") === $bd->consultar("SELECT id FROM t WHERE v || '' > 'v5' ORDER BY id")];
+    unset($bd);
+    return $antes !== [] && $r[0] === [['id' => 120]] && $r[1] === true && cuadraConRehacerlo($raiz) === true ?: json_encode($r);
+});
+
+chk('una escritura por partes en una tabla sin rangos en su estado (de antes de la 2.7) deja cada rango en su trozo: una búsqueda por número no se salta el que la tiene (2.9)', function () use ($raiz) {
+    // Al juntar sus cambios, el rango del único trozo que reescribía quedaba
+    // el primero de la lista, y la búsqueda de un número del primer trozo lo
+    // descartaba por ese rango: ninguna fila
+    borrarArbol("$raiz/x");
+    Database::crear('x', $raiz);
+    $bd = new Database('x', $raiz);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_n ON t (n)');
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', array_map(static fn(int $i): string => "($i, $i)", range(1, 150))));
+    $f = "$raiz/x/t.rev.json";
+    $e = json_decode((string)file_get_contents($f), true);
+    unset($e['rangos']);
+    file_put_contents($f, json_encode($e, JSON_PRETTY_PRINT) . "\n");
+    touch($f, time() - 10);
+    $antes = StorageCambios::cuentaPartes()[0];
+    $bd = new Database('x', $raiz);
+    $bd->consultar('UPDATE t SET n = 500 WHERE id = 75');                        // la segunda parte, por partes
+    $r = [StorageCambios::cuentaPartes()[0] - $antes, $bd->consultar('SELECT id FROM t WHERE n = 10'),
+          $bd->consultar('SELECT id FROM t WHERE n = 500'), $bd->consultar('SELECT id FROM t WHERE n = 140')];
+    unset($bd);
+    return $r === [1, [['id' => 10]], [['id' => 75]], [['id' => 140]]] && cuadraConRehacerlo($raiz) === true ?: json_encode($r);
 });
 
 echo "\n== Un trozo de índice cortado (2.7.4) ==\n";

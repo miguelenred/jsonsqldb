@@ -27,6 +27,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageEscritura;
 use JsonSQLDB\Catalog;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_journal';
@@ -682,7 +683,7 @@ function conRevisionTocada(string $raiz, callable $tocar): bool|string
     $st->bloquear(true);
     $cat  = new Catalog($st);
     $meta = $cat->meta('t');
-    $st->guardarTabla('t', $st->leerFilas('t', true), null, Indexes::definiciones($meta));
+    StorageEscritura::guardarTabla($st, 't', StorageEscritura::leerFilas($st, 't', true), null, Indexes::definiciones($meta));
     $st->desbloquear();
     unset($st, $cat);
 
@@ -794,6 +795,72 @@ chk('con el tamaño de parte cambiado, UPDATE y DELETE por un texto sin índice 
     return $salida === 'ok' ?: $salida;
 });
 
+chk('con el tamaño de parte cambiado, CREATE INDEX, un trigger, un CHECK y VACUUM no pierden filas (2.9; la 2.8 borraba las partes que no cabían)', function () use ($raiz) {
+    $dir = "$raiz/cambiaparte3";
+    $mal = [];
+    $correr = static function (int $parte, string $codigo) use ($dir): string {
+        $c = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", ' . $parte . ');'
+           . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+           . '$bd = new JsonSQLDB\\Database("g", ' . var_export($dir, true) . ');' . $codigo;
+        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($c) . ' 2>&1'));
+    };
+    foreach ([[40, 80], [40, 20]] as [$antes, $ahora]) {
+        foreach (['CREATE INDEX ix2 ON t (v, id)', 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END', 'ALTER TABLE t ADD CHECK (id > 0)', 'VACUUM'] as $q) {
+            // Cada sentencia, sobre la tabla recién escrita con el tamaño de antes
+            borrarArbol($dir);
+            @mkdir($dir, 0775, true);
+            Database::crear('g', $dir);
+            $correr($antes, '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, v VARCHAR(20))"); $bd->consultar("CREATE INDEX ix_v ON t (v)");'
+                . '$v = []; for ($i = 1; $i <= 130; $i++) { $v[] = "($i, " . chr(39) . "f$i" . chr(39) . ")"; } $bd->consultar("INSERT INTO t VALUES " . implode(",", $v));');
+            if ($q === 'VACUUM') {
+                // Índices como los de la 2.8, sin filtro: VACUUM los rehace
+                foreach (glob("$dir/g/t.idx.*.json") as $f) {
+                    file_put_contents($f, preg_replace('/,"filtro":"[^"]*"(,"cubre":"[a-z]+")?(,"min":"[^"]*")?(,"max":"[^"]*")?/', '', (string)file_get_contents($f)));
+                }
+            }
+            $r = $correr($ahora, '$bd->consultar(' . var_export($q, true) . ');'
+                . 'echo json_encode([$bd->consultar("SELECT COUNT(*) AS n, MAX(id) AS m FROM t")[0], $bd->consultar("SELECT v FROM t WHERE id = 123")]);');
+            if ($r !== '[{"n":130,"m":130},[{"v":"f123"}]]') { $mal[] = "{$antes}→$ahora, $q: $r"; }
+        }
+    }
+    borrarArbol($dir);
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
+chk('una tabla llamada «manifiesto»: un lote deshecho la deja como estaba, y su journal no se toma por uno de antes de la 2.0 (2.9)', function () use ($raiz) {
+    $dir = "$raiz/manifiesto";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('j', $dir);
+    $bd = new Database('j', $dir);
+    $bd->consultar('CREATE TABLE manifiesto (id INTEGER PRIMARY KEY, n TEXT)');
+    $bd->consultar("INSERT INTO manifiesto VALUES (1, 'a'), (2, 'b')");
+    $bd->lote(["INSERT INTO manifiesto VALUES (3, 'c')", 'ROLLBACK']);
+    $tras = (new Database('j', $dir))->consultar('SELECT id FROM manifiesto ORDER BY id');
+    // Un corte con dos escrituras a medias: la de «manifiesto», con su journal en
+    // .tx/manifiesto.json, y la de otra tabla, que aún tiene que poner su parte nueva
+    $bd->consultar('CREATE TABLE otra (id INTEGER PRIMARY KEY, v TEXT)');
+    $bd->consultar("INSERT INTO otra VALUES (1, 'viejo')");
+    $b = "$dir/j";
+    $viejo = [file_get_contents("$b/otra.json"), file_get_contents("$b/otra.rev.json")];
+    $bd->consultar("UPDATE otra SET v = 'nuevo'");
+    copy("$b/otra.json", "$b/otra.json.4242.tmp");
+    copy("$b/otra.rev.json", "$b/otra.rev.json.4242.tmp");
+    file_put_contents("$b/otra.json", $viejo[0]);
+    file_put_contents("$b/otra.rev.json", $viejo[1]);
+    @mkdir("$b/.tx", 0775, true);
+    $redo = static fn(string $t, array $renombrar): string => json_encode(['tipo' => 'redo', 'operacion' => 'ESCRITURA', 'ambito' => $t, 'tablas' => [$t],
+        'renombrar' => (object)$renombrar, 'borrar' => [], 'regenerables' => []]);
+    file_put_contents("$b/.tx/manifiesto.json", $redo('manifiesto', []));
+    file_put_contents("$b/.tx/otra.json", $redo('otra', ['otra.json.4242.tmp' => 'otra.json', 'otra.rev.json.4242.tmp' => 'otra.rev.json']));
+    borrarArbol("$b/.cache");
+    $otra = (new Database('j', $dir))->consultar('SELECT v FROM otra');
+    $quedan = array_map('basename', (array)glob("$b/.tx/*"));
+    borrarArbol($dir);
+    return $tras === [['id' => 1], ['id' => 2]] && $otra === [['v' => 'nuevo']] && $quedan === []
+        ?: json_encode([$tras, $otra, $quedan], JSON_UNESCAPED_UNICODE);
+});
+
 chk('un recuento de filas que no cuadra no rompe la tabla', function () use ($raiz) {
     return conRevisionTocada($raiz, static function (array $j): array {
         $j['rows'] = 999999;
@@ -820,6 +887,42 @@ chk('un estado de las partes que no cuadra con los ficheros no rompe la tabla', 
         $j['parts'] = [1];                              // dice una parte y hay cinco
         return $j;
     });
+});
+
+chk('un diario o una transacción que no escribió el motor (un ZIP restaurado) no toca más que ficheros de la base (2.9)', function () use ($raiz) {
+    $dir = "$raiz/ajenos";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('a', $dir);
+    $bd = new Database('a', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)');
+    $bd->consultar("INSERT INTO t VALUES (1, 'x'), (2, 'y')");
+    unset($bd);
+    $b = "$dir/a";
+    file_put_contents("$b/otro.txt", 'mío');
+    file_put_contents("$b/payload.json", '{"rows":[]}');
+    $antes = array_map('md5_file', ['ht' => "$b/.htaccess", 'wc' => "$b/web.config", 'db' => "$b/_database.json", 'otro' => "$b/otro.txt", 't' => "$b/t.json"]);
+    // Un diario de la 2.5 en adelante que borra y reemplaza lo que no es suyo
+    @mkdir("$b/.tx", 0775, true);
+    file_put_contents("$b/.tx/_base.json", json_encode(['tipo' => 'redo', 'ambito' => null, 'tablas' => [],
+        'renombrar' => ['payload.json' => '_database.json'], 'borrar' => ['.htaccess', 'web.config', 'otro.txt'], 'regenerables' => []]));
+    (new Database('a', $dir))->consultar('SELECT COUNT(*) AS n FROM t');
+    $tras = array_map(static fn($f) => is_file($f) ? md5_file($f) : 'falta',
+        ['ht' => "$b/.htaccess", 'wc' => "$b/web.config", 'db' => "$b/_database.json", 'otro' => "$b/otro.txt", 't' => "$b/t.json"]);
+    // Uno de antes de la 2.5 con una tabla que es un comodín, y una transacción
+    // con nombres ajenos: pueden deshacer ficheros de la base, como lo haría
+    // uno de verdad, pero nada más de su carpeta
+    @mkdir("$b/.tx/_base", 0775, true);
+    file_put_contents("$b/.tx/_base/manifiesto.json", json_encode(['estado' => 'PENDIENTE', 'tablas' => ['*'], 'ficheros' => []]));
+    file_put_contents("$b/.tx/_base/.htaccess", 'Allow from all');
+    @mkdir("$b/.lote", 0775, true);
+    file_put_contents("$b/.lote/web.config", '<abierto/>');
+    file_put_contents("$b/.lote/manifiesto.lote", json_encode(['guardados' => ['web.config'], 'nuevos' => ['.htaccess', 'otro.txt']]));
+    $n = (new Database('a', $dir))->consultar('SELECT COUNT(*) AS n FROM t');
+    $despues = array_map(static fn($f) => is_file($f) ? md5_file($f) : 'falta',
+        ['ht' => "$b/.htaccess", 'wc' => "$b/web.config", 'otro' => "$b/otro.txt", 't' => "$b/t.json"]);
+    borrarArbol($dir);
+    return $tras === $antes && $despues === array_diff_key($antes, ['db' => 0]) && $n === [['n' => 2]] ?: json_encode([$antes, $tras, $despues, $n]);
 });
 
 echo "\n== Limpieza ==\n";

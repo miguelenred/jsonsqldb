@@ -7,8 +7,8 @@
 // cargar la configuración real, porque el patrón defined()||define() hace que
 // mande la primera definición.
 define('EXIGIR_HTTPS',       false);   // el servidor de pruebas es http://
-define('RATE_LIMIT_ACTIVO',  false);   // cientos de peticiones desde una IP
-define('ANTI_REPLAY_ACTIVO', false);   // se repiten peticiones a propósito
+defined('RATE_LIMIT_ACTIVO')  || define('RATE_LIMIT_ACTIVO',  false);   // cientos de peticiones desde una IP
+defined('ANTI_REPLAY_ACTIVO') || define('ANTI_REPLAY_ACTIVO', false);   // se repiten peticiones a propósito
 define('DEVOLVER_ERRORES',   true);    // las pruebas comprueban los mensajes
 
 require __DIR__ . '/../api/jsonsqldb_api_config.php';

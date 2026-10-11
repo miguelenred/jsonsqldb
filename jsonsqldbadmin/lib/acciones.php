@@ -45,7 +45,7 @@ function ejecutarAccion(string $accion): void
             $nombre  = identificador(post('nombre'), 'tabla');
             $activas = [];
             foreach ((array)($_POST['columnas'] ?? []) as $c) {
-                if (is_array($c) && trim((string)($c['nombre'] ?? '')) !== '') {
+                if (is_array($c) && trim(textoDe($c, 'nombre')) !== '') {
                     $activas[] = $c;
                 }
             }
@@ -56,7 +56,7 @@ function ejecutarAccion(string $accion): void
             // Clave primaria compuesta: va a nivel de tabla, no en cada columna
             $pk = [];
             foreach ($activas as $c) {
-                if (!empty($c['pk'])) { $pk[] = identificador(trim((string)$c['nombre']), 'columna'); }
+                if (!empty($c['pk'])) { $pk[] = identificador(trim(textoDe($c, 'nombre')), 'columna'); }
             }
             $compuesta = count($pk) > 1;
 
@@ -85,7 +85,7 @@ function ejecutarAccion(string $accion): void
             identificador($tabla, 'tabla');
             $r = Api::sql($base, 'DELETE FROM ' . cita($tabla));
             Audit::registrar('vaciar_tabla', $tabla, $base);
-            flash('success', t('Tabla \'{tabla}\' vaciada ({r} fila(s)).', ['tabla' => $tabla, 'r' => $r['filas']]));
+            flash('success', t('Tabla \'{tabla}\' vaciada ({r} fila(s)).', ['tabla' => $tabla, 'r' => (int)($r['filas'] ?? 0)]));
             redirigir(['p' => 'datos', 'db' => $base, 'tabla' => $tabla]);
 
         case 'renombrar_tabla':
@@ -200,16 +200,21 @@ function ejecutarAccion(string $accion): void
         // ---------------- Restaurar desde ZIP ----------------
         case 'importar_zip':
             Auth::exigirAdmin();
-            $nombre = identificador(post('nombre'), 'base de datos');
+            @set_time_limit(0);                    // como las demás importaciones
+            $nombre = nombreBase(post('nombre'));
 
             if (mismoHostQueLaApi() === false) {
                 throw new RuntimeException(t('Restaurar desde ZIP necesita que el panel y el motor estén en la misma máquina, porque escribe los ficheros directamente. Usa el volcado en SQL: se importa desde la página de la base y funciona entre máquinas distintas.'));
             }
             [$fichero, $original, $porTrozos] = Subidas::fichero('zip');
             try {
-                // rutaDeLaBase() ya comprueba que la carpeta existe y que el motor
+                // Escribe los ficheros sin pasar por la API: antes se le pregunta
+                // por la base, con las credenciales de quien restaura, para que una
+                // clave limitada a otras bases no pueda tocar esta (2.9). Y
+                // rutaDeLaBase() comprueba que la carpeta existe y que el motor
                 // está en esta máquina, y explica el motivo si no es así
-                $resumen = Importar::zip($fichero, $nombre, rutaDeLaBase($nombre));
+                Api::sql($nombre, 'SHOW TABLES');
+                $resumen = Importar::zip($fichero, rutaDeLaBase($nombre));
             } finally {
                 Subidas::borrar($fichero, $porTrozos);
             }
@@ -220,17 +225,23 @@ function ejecutarAccion(string $accion): void
         case 'importar_sql':
         case 'importar_csv':
         case 'importar_xlsx':
+        case 'importar_json':
             Auth::exigirAdmin();
             @set_time_limit(0);                    // un fichero grande tarda lo que tarda
             $nombre = nombreBase(post('db'));
             [$fichero, $original, $porTrozos] = Subidas::fichero('fichero');
             try {
-                // Con la carpeta de la base a mano (misma máquina), todo o nada
+                // Con la carpeta de la base a mano (misma máquina), todo o nada:
+                // en una transacción del motor (ver Importar::deshacible()). Solo
+                // si la API deja a quien importa llegar a esa base (2.9), como el ZIP
+                Api::sql($nombre, 'SHOW TABLES');
                 $ruta = rutaDeLaBaseSiSeAlcanza($nombre);
                 if ($accion === 'importar_sql') {
                     $resumen = Importar::sql($fichero, $nombre, (string)post('formato', 'auto'), $ruta);
                 } elseif ($accion === 'importar_csv') {
                     $resumen = Importar::csv($fichero, $nombre, identificador(post('tabla'), 'tabla'), $ruta);
+                } elseif ($accion === 'importar_json') {
+                    $resumen = Importar::json($fichero, $nombre, identificador(post('tabla'), 'tabla'), $ruta);
                 } else {
                     $resumen = Importar::xlsx($fichero, $nombre, identificador(post('tabla'), 'tabla'), $ruta);
                 }
@@ -240,6 +251,20 @@ function ejecutarAccion(string $accion): void
             Audit::registrar($accion, $resumen . ' (' . $original . ')', $nombre);
             flash('success', $resumen);
             redirigir(['p' => 'tablas', 'db' => $nombre]);
+
+        case 'plantilla_importar':
+            // Una plantilla para importar en una tabla (2.9): su cabecera y dos
+            // filas de ejemplo, en el mismo formato que exporta el panel
+            Auth::exigirAdmin();
+            identificador($tabla, 'tabla');
+            $filas = Importar::filasDeEjemplo(Api::sql($base, 'SHOW COLUMNS FROM ' . cita($tabla)));
+            $nombre = $tabla . '-' . t('plantilla');
+            match (post('formato')) {
+                'json'  => Exportar::json($filas, $nombre),
+                'xlsx'  => Exportar::xlsx($filas, $nombre),
+                default => Exportar::csv($filas, $nombre),
+            };
+            // Exportar termina la petición
 
         case 'subir_trozo':
             // Un trozo de un fichero que se sube por partes (ver Subidas): la
@@ -379,7 +404,7 @@ function ejecutarAccion(string $accion): void
                 throw new RuntimeException(t('Elige al menos una columna para el índice.'));
             }
             foreach ($cols as $i => $c) {
-                $cols[$i] = cita(identificador((string)$c, 'columna'));
+                $cols[$i] = cita(identificador(is_scalar($c) ? (string)$c : '', 'columna'));
             }
             Api::sql($base, 'CREATE INDEX ' . cita($nombre) . ' ON ' . cita($tabla)
                           . ' (' . implode(', ', $cols) . ')');
@@ -433,13 +458,16 @@ function ejecutarAccion(string $accion): void
             [$donde, $clave] = condicionClave();
             $r = Api::sql($base, 'DELETE FROM ' . cita($tabla) . ' WHERE ' . $donde, $clave);
             Audit::registrar('borrar_fila', $tabla, $base);
-            flash('success', t('{r} fila(s) borrada(s).', ['r' => $r['filas']]));
+            flash('success', t('{r} fila(s) borrada(s).', ['r' => (int)($r['filas'] ?? 0)]));
             redirigir(['p' => 'datos', 'db' => $base, 'tabla' => $tabla]);
 
         // ---------------- Exportación ----------------
         case 'exportar':
+            // Exportar y volcar es de administradores (2.9): concentra toda la
+            // base en un fichero, y el ZIP lee los ficheros del motor del disco
+            Auth::exigirAdmin();
             @set_time_limit(0);                    // una exportación grande tarda lo que tarda
-            $formato = post('formato') === 'sql' ? 'sql' : 'csv';
+            $formato = in_array(post('formato'), ['sql', 'json', 'xlsx'], true) ? post('formato') : 'csv';
             $sql     = post('sql');
 
             $params = [];
@@ -477,13 +505,21 @@ function ejecutarAccion(string $accion): void
             if ($formato === 'sql') {
                 Exportar::inserts($filas, $nombre);
             }
+            if ($formato === 'json') {
+                Exportar::json($filas, $nombre);
+            }
+            if ($formato === 'xlsx') {
+                // De una tabla se saben los tipos: solo las columnas DATETIME van como fecha
+                Exportar::xlsx($filas, $nombre, post('sql') === '' ? array_column(Api::sql($base, 'SHOW COLUMNS FROM ' . cita($tabla)), 'tipo', 'columna') : []);
+            }
             Exportar::csv($filas, $nombre);
             // Exportar termina la petición
 
         case 'exportar_base':
+            Auth::exigirAdmin();
             @set_time_limit(0);
             $nombre  = nombreBase(post('nombre'));
-            $formato = in_array(post('formato'), ['zip', 'mysql', 'postgresql', 'sqlserver', 'access'], true) ? post('formato') : 'sql';
+            $formato = in_array(post('formato'), ['zip', 'json', 'mysql', 'postgresql', 'sqlserver', 'access'], true) ? post('formato') : 'sql';
 
             if ($formato === 'zip') {
                 // El ZIP lee los ficheros directamente, sin pasar por la API: antes
@@ -516,7 +552,7 @@ function ejecutarAccion(string $accion): void
 
         case 'crear_usuario':
             Auth::exigirAdmin();
-            $nombre = Auth::crear(post('usuario'), (string)($_POST['clave'] ?? ''), post('rol'));
+            $nombre = Auth::crear(post('usuario'), textoDe($_POST, 'clave'), post('rol'));
             Audit::registrar('crear_usuario', $nombre);
             flash('success', t('Usuario \'{nombre}\' creado.', ['nombre' => $nombre]));
             redirigir(['p' => 'usuarios']);
@@ -537,8 +573,12 @@ function ejecutarAccion(string $accion): void
             $nombre = post('usuario', $propio);
             if (strcasecmp($nombre, $propio) !== 0) {
                 Auth::exigirAdmin();
+            } else {
+                // La propia, con la actual (2.9): si no, una sesión abierta un
+                // momento bastaba para quedarse con la cuenta
+                Auth::comprobarClave($propio, textoDe($_POST, 'actual'), util_ip());
             }
-            Auth::cambiarClave($nombre, (string)($_POST['clave'] ?? ''));
+            Auth::cambiarClave($nombre, textoDe($_POST, 'clave'));
             if (strcasecmp($nombre, $propio) === 0) {
                 Auth::renovarHuella();              // las demás sesiones de ese usuario sí caducan
             }
@@ -560,16 +600,26 @@ function ejecutarAccion(string $accion): void
  */
 function definicionColumna(array $c, bool $pkEnLinea = true): string
 {
-    $nombre = identificador(trim((string)($c['nombre'] ?? '')), 'columna');
-    $def    = cita($nombre) . ' ' . tipoSql(
-        (string)($c['tipo'] ?? 'TEXT'),
-        (string)($c['longitud'] ?? ''),
-        (string)($c['escala'] ?? '')
-    );
+    $nombre = identificador(trim(textoDe($c, 'nombre')), 'columna');
+    // Un ENUM (2.9) sigue siéndolo mientras su tipo siga siendo texto
+    $valores = json_decode(textoDe($c, 'valores'), true);
+    $def    = cita($nombre) . ' ' . (is_array($valores) && $valores !== [] && strtoupper(trim(textoDe($c, 'tipo'))) === 'TEXT'
+        ? 'ENUM(' . implode(', ', array_map(static fn($v) => "'" . str_replace("'", "''", (string)$v) . "'", $valores)) . ')'
+        : tipoSql(textoDe($c, 'tipo', 'TEXT'), textoDe($c, 'longitud'), textoDe($c, 'escala')));
+    // Lo que el formulario no muestra (2.9) tampoco se pierde al editar: el
+    // UNSIGNED de un número y el COLLATE de un texto, mientras lo sigan siendo
+    $tipo = strtoupper(trim(textoDe($c, 'tipo')));
+    if (!empty($c['sin_signo']) && in_array($tipo, ['INTEGER', 'DOUBLE', 'DECIMAL'], true)) {
+        $def .= ' UNSIGNED';
+    }
+    $colacion = strtoupper(trim(textoDe($c, 'colacion')));
+    if (in_array($colacion, ['NOCASE', 'RTRIM'], true) && $tipo === 'TEXT') {
+        $def .= ' COLLATE ' . $colacion;
+    }
 
     if (!empty($c['pk']) && $pkEnLinea) { $def .= ' PRIMARY KEY'; }
     if (!empty($c['auto'])) {
-        if (strtoupper(trim((string)($c['tipo'] ?? ''))) !== 'INTEGER') {
+        if (strtoupper(trim(textoDe($c, 'tipo'))) !== 'INTEGER') {
             throw new RuntimeException(t('AUTOINCREMENT solo vale en columnas INTEGER (\'{nombre}\').', ['nombre' => $nombre]));
         }
         if (empty($c['pk']) || !$pkEnLinea) {
@@ -580,10 +630,13 @@ function definicionColumna(array $c, bool $pkEnLinea = true): string
     if (!empty($c['notnull'])) { $def .= ' NOT NULL'; }
     if (!empty($c['unico']))   { $def .= ' UNIQUE'; }
 
-    $defecto = trim((string)($c['defecto'] ?? ''));
-    if ($defecto !== '') {
-        // El valor por defecto forma parte de la estructura: se admite solo un
-        // literal simple, nunca una expresión.
+    $defecto = trim(textoDe($c, 'defecto'));
+    if ($defecto !== '' && !empty($c['defecto_calculado'])) {
+        // Uno que se calcula al insertar (2.8), marcado como tal en el
+        // formulario: la fecha de ahora o una expresión, que el motor comprueba
+        $def .= ' DEFAULT ' . defectoCalculado($defecto);
+    } elseif ($defecto !== '') {
+        // Si no, un literal simple, nunca una expresión.
         if (is_numeric($defecto)) {
             $def .= ' DEFAULT ' . $defecto;
         } elseif (strcasecmp($defecto, 'NULL') === 0) {
@@ -642,16 +695,18 @@ function valoresDelFormulario(): array
     $autos   = (array)($_POST['auto'] ?? []);
     $tipos   = (array)($_POST['tipo'] ?? []);
     $noNulas = (array)($_POST['nn']   ?? []);
+    $saltosN = (array)($_POST['lf']   ?? []);     // un área de texto cuyos saltos eran \n (ver vistas/datos.php)
 
-    foreach ((array)($_POST['valor'] ?? []) as $col => $v) {
-        $col = identificador((string)$col, 'columna');
+    // Cada campo lleva su columna en hexadecimal (ver campo())
+    foreach ((array)($_POST['valor'] ?? []) as $clave => $v) {
+        $col = columnaDeCampo((string)$clave);
 
-        if (isset($autos[$col])) {
+        if (isset($autos[$clave])) {
             // Columna automática: la pone la base. Ni valor ni NULL.
             continue;
         }
-        if (isset($nulos[$col])) {
-            if (isset($noNulas[$col])) {
+        if (isset($nulos[$clave])) {
+            if (isset($noNulas[$clave])) {
                 throw new RuntimeException(t('La columna \'{col}\' no admite nulos.', ['col' => $col]));
             }
             $cols[] = $col;
@@ -661,8 +716,8 @@ function valoresDelFormulario(): array
         if (!is_scalar($v)) {
             continue;
         }
-        $texto = (string)$v;
-        if ($texto === '' && strtoupper((string)($tipos[$col] ?? 'TEXT')) !== 'TEXT') {
+        $texto = isset($saltosN[$clave]) ? str_replace("\r\n", "\n", (string)$v) : (string)$v;
+        if ($texto === '' && strtoupper(textoDe($tipos, (string)$clave, 'TEXT')) !== 'TEXT') {
             continue;                              // sin valor: que decida el motor
         }
         $cols[] = $col;
@@ -680,8 +735,8 @@ function condicionClave(): array
 {
     $partes = [];
     $vals   = [];
-    foreach ((array)($_POST['pk'] ?? []) as $col => $v) {
-        $col      = identificador((string)$col, 'columna');
+    foreach ((array)($_POST['pk'] ?? []) as $clave => $v) {
+        $col      = columnaDeCampo((string)$clave);
         $partes[] = cita($col) . ' = ?';
         $vals[]   = is_scalar($v) ? (string)$v : null;
     }

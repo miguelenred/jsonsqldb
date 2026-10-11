@@ -31,6 +31,26 @@ final class Integrity
     }
 
     /**
+     * Los ficheros JSON de una tabla, o de todas, estropeados a mano (2.9):
+     * CHECK TABLES los lista; REPAIR TABLES los repara, apartando las filas
+     * que no se pueden arreglar con seguridad (ver StorageMantenimiento::revisarFicheros()).
+     *
+     * @return list<array{tabla: string, fichero: string, problema: string, arreglo: string}>
+     */
+    public function ficheros(?string $tabla = null, bool $corregir = false): array
+    {
+        if ($tabla !== null && !$this->cat->existe($tabla)) {
+            throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
+        }
+        $st  = $this->cat->storage();
+        $out = [];
+        foreach ($tabla !== null ? [$tabla] : $this->cat->tablas() as $t) {
+            array_push($out, ...StorageMantenimiento::revisarFicheros($st, $t, $corregir ? $this->cat->indicesDe($t) : null, $corregir));
+        }
+        return $out;
+    }
+
+    /**
      * Revisa las claves foráneas y devuelve una fila por problema encontrado.
      *
      * @param string|null $tabla solo esa tabla; null = todas
@@ -51,14 +71,20 @@ final class Integrity
                 continue;
             }
 
-            $filas    = $this->cat->storage()->leerFilas($t, true);   // del disco, sin caché
-            $cambiada = false;
+            // Las hijas, del disco, sin caché, y sin juntarlas (2.9: la tabla
+            // entera en memoria): una pasada por clave foránea, y en memoria
+            // solo las filas que se corrigen y las claves del padre (ver clavesDe())
+            $cambios = [];
 
             foreach ($meta['foreign_keys'] as $fk) {
-                $padres = $this->clavesDe((string)$fk['table'], $fk['references']);
+                // Con la colación de las columnas del padre, como al escribir (2.9)
+                $plegar = $this->cat->existe((string)$fk['table'])
+                    ? Catalog::plegarDe($this->cat->meta((string)$fk['table']), $fk['references']) : [];
+                $padres = $this->clavesDe((string)$fk['table'], $fk['references'], $plegar);
 
-                foreach ($filas as $i => $fila) {
-                    $clave = self::clave($fila, $fk['columns']);
+                foreach ($this->cat->storage()->filas($t, true) as $i => $fila) {
+                    $fila  = $cambios[$i] ?? $fila;
+                    $clave = Indexes::claveFila($fila, $fk['columns'], $plegar);
                     if ($clave === null || isset($padres[$clave])) {
                         continue;                       // NULL o padre encontrado
                     }
@@ -81,9 +107,8 @@ final class Integrity
                         foreach ($fk['columns'] as $c) {
                             $fila[$c] = null;
                         }
-                        $filas[$i] = $fila;
-                        $cambiada  = true;
-                        $accion    = 'puesta a NULL';
+                        $cambios[$i] = $fila;
+                        $accion      = 'puesta a NULL';
                     } elseif ($corregir) {
                         $accion = 'no se puede corregir sola: la columna no admite NULL';
                     }
@@ -101,15 +126,13 @@ final class Integrity
                 }
             }
 
-            if ($cambiada) {
-                // Las definiciones van siempre: sin ellas, guardarFilas() da por
-                // hecho que la tabla no tiene índices y borra los ficheros de
-                // los que tenga. Los resultados seguirían siendo correctos
-                // —sin índice se recorre la tabla— pero reparar unas claves no
-                // tiene por qué dejar la tabla más lenta.
-                $this->cat->storage()->guardarFilas(
-                    $t, $filas, Indexes::definiciones($this->cat->meta($t))
-                );
+            if ($cambios !== []) {
+                // Las definiciones van siempre: sin ellas se daría por hecho que
+                // la tabla no tiene índices y se borrarían sus ficheros. Los
+                // resultados seguirían siendo correctos —sin índice se recorre
+                // la tabla— pero reparar unas claves no tiene por qué dejar la
+                // tabla más lenta.
+                StorageCambios::modificarFilas($this->cat->storage(), $t, $cambios, [], Indexes::definiciones($this->cat->meta($t)));
             }
         }
 
@@ -117,37 +140,29 @@ final class Integrity
     }
 
     /**
-     * Claves existentes en la tabla padre, para buscar en O(1).
+     * Claves existentes en la tabla padre, para buscar en O(1), con la misma
+     * igualdad que al escribir (2.9: '5' y '05' eran claves distintas, y
+     * REPAIR KEYS ponía a NULL una hija que sí tenía su fila). De sus filas,
+     * no de su índice, aunque con un padre mucho mayor que la hija el índice
+     * sería más rápido: no sabe de las ediciones a mano, que es lo que esto
+     * busca, y con una fila padre añadida a mano REPAIR KEYS anularía sus hijas.
      *
-     * @param string[] $columnas
+     * @param string[]            $columnas
+     * @param array<int, ?string> $plegar ver Catalog::plegarDe()
      * @return array<string,true>
      */
-    private function clavesDe(string $tabla, array $columnas): array
+    private function clavesDe(string $tabla, array $columnas, array $plegar): array
     {
         if (!$this->cat->existe($tabla)) {
             return [];                                  // sin padre, todo es huérfano
         }
         $out = [];
-        foreach ($this->cat->storage()->leerFilas($tabla, true) as $fila) {
-            $clave = self::clave($fila, $columnas);
+        foreach ($this->cat->storage()->filas($tabla, true) as $fila) {
+            $clave = Indexes::claveFila($fila, $columnas, $plegar);
             if ($clave !== null) {
                 $out[$clave] = true;
             }
         }
         return $out;
-    }
-
-    /** Clave comparable de una fila, o null si alguna columna es NULL. */
-    private static function clave(array $fila, array $columnas): ?string
-    {
-        $partes = [];
-        foreach ($columnas as $c) {
-            $v = $fila[$c] ?? null;
-            if ($v === null) {
-                return null;
-            }
-            $partes[] = is_string($v) ? 's:' . $v : 'n:' . $v;
-        }
-        return implode('|', $partes);
     }
 }

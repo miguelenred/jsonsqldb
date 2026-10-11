@@ -13,21 +13,16 @@
 // ============================================================
 
 // ------------------------------------------------------------
-// SECRETO HMAC
-// ------------------------------------------------------------
-// Cámbialo por uno propio antes de usarlo en producción.
-// Genera uno con: php -r "echo bin2hex(random_bytes(32));"
-// No reutilices el mismo secreto en otros hostings.
-// ------------------------------------------------------------
 // API KEYS
 // ------------------------------------------------------------
-// Cada clave define:
-//   nombre  → etiqueta que aparecerá en el log
-//   permiso → 'lectura'   : solo SELECT
-//             'escritura' : SELECT, INSERT, UPDATE, DELETE
+// Cada entrada es 'nombre' => [...]; el nombre es la etiqueta que sale en el log.
+//   key     → la API key que envía el cliente
+//   permiso → 'lectura'   : SELECT, SHOW, CHECK y EXPLAIN
+//             'escritura' : lo anterior más INSERT, UPDATE, DELETE y REPAIR
 //             'admin'     : todo, incluido CREATE / ALTER / DROP / TRIGGER
 //   bases   → bases de datos a las que puede acceder. ['*'] = todas
 //   hmac_secret → secreto con el que firma esta clave. OBLIGATORIO.
+// No reutilices claves ni secretos en otros hostings.
 //
 // SOBRE 'hmac_secret': uno distinto por clave, siempre. Si varias claves compartieran
 // secreto, cualquier aplicación que lo tuviera podría firmar peticiones
@@ -93,13 +88,14 @@ defined('IPS_PERMITIDAS') || define('IPS_PERMITIDAS', []);
 // saber la IP real del cliente y si la petición venía por HTTPS.
 // ACTÍVALO SOLO si delante hay un proxy o balanceador de confianza: si no,
 // cualquiera puede falsear su IP y saltarse IPS_PERMITIDAS y el rate limit.
+// Se toma la última IP de X-Forwarded-For, la que añade el proxy.
 defined('CONFIAR_EN_PROXY') || define('CONFIAR_EN_PROXY', false);
 
 // Anti-replay: impide que el mismo token se use más de una vez
 defined('ANTI_REPLAY_ACTIVO') || define('ANTI_REPLAY_ACTIVO', true);
 
 // Rate limiting por IP
-defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     true);  // local: desactivado
+defined('RATE_LIMIT_ACTIVO') || define('RATE_LIMIT_ACTIVO',     true);
 defined('RATE_LIMIT_MAX') || define('RATE_LIMIT_MAX',        150);    // máximo de peticiones por IP en la ventana
 defined('RATE_LIMIT_SECONDS') || define('RATE_LIMIT_SECONDS',    86400);  // ventana de tiempo (24 horas)
 defined('RATE_TIMESTAMP_DIFF') || define('RATE_TIMESTAMP_DIFF',   300);    // desfase máximo del timestamp (5 min)
@@ -130,7 +126,7 @@ defined('TIME_LIMIT') || define('TIME_LIMIT',   60);     // segundos
 // true  = devuelve el detalle del error (útil mientras desarrollas)
 // false = devuelve solo un mensaje genérico (recomendado en producción)
 // A true, el cliente recibe el error del motor: cómodo mientras desarrollas y
-// demasiado hablador después. Local: true.
+// demasiado hablador después. En tu máquina puedes ponerlo a true.
 defined('DEVOLVER_ERRORES') || define('DEVOLVER_ERRORES', false);
 
 // ------------------------------------------------------------

@@ -32,6 +32,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Database;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageEscritura;
 
 $raiz    = sys_get_temp_dir() . '/jsonsqldb_test_cortes';
 $INTENTOS = 12;          // muertes que se provocan
@@ -314,8 +315,8 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
     //    que devuelve el motor con lo que hay de verdad en los ficheros.
     $st = new Storage($raiz, 'cortes');
     $st->bloquear(false);
-    $conCache = $st->leerFilas('particionada');
-    $sinCache = $st->leerFilas('particionada', true);
+    $conCache = StorageEscritura::leerFilas($st, 'particionada');
+    $sinCache = StorageEscritura::leerFilas($st, 'particionada', true);
     $st->desbloquear();
     unset($st);
     if ($conCache !== $sinCache) {
@@ -714,7 +715,7 @@ chk('sin manifiesto no se toca nada: los temporales sobran', function () use ($r
 });
 
 chk('un journal se termina al abrir: temporales en su sitio y sobrantes fuera', function () use ($raiz) {
-    [$jd, $bueno] = baseConJournal($raiz, null);
+    baseConJournal($raiz, null);
     $bd = new Database('cortes', $raiz);
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
         && !hayJournal("$raiz/cortes") && glob("$raiz/cortes/*.tmp") === []
@@ -724,7 +725,7 @@ chk('un journal se termina al abrir: temporales en su sitio y sobrantes fuera', 
 chk('un manifiesto que señala un temporal perdido se detecta y no se sigue', function () use ($raiz) {
     // Un temporal que no está y cuyo destino tampoco: el journal no es de fiar
     // y lo único seguro es pararse y conservarlo para revisarlo a mano
-    [$jd, $bueno] = baseConJournal($raiz, null);
+    [$jd] = baseConJournal($raiz, null);
     @unlink("$raiz/cortes/art.rev.json.999999.tmp");
     @unlink("$raiz/cortes/art.rev.json");
 
@@ -774,14 +775,14 @@ chk('un manifiesto COMMITTED de una versión anterior no deshace nada', function
 });
 
 chk('un journal de tabla se termina sin el exclusivo de la base', function () use ($raiz) {
-    [$jd, $bueno] = baseConJournal($raiz, 'art');
+    baseConJournal($raiz, 'art');
     $bd = new Database('cortes', $raiz);           // una lectura basta
     return (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'] === 0
         && !hayJournal("$raiz/cortes");
 });
 
 chk('la recuperación es idempotente: repetirla no rompe nada', function () use ($raiz) {
-    [$jd, $bueno] = baseConJournal($raiz, 'art');
+    baseConJournal($raiz, 'art');
     // Un corte a mitad de la propia recuperación: se reabre tres veces
     for ($i = 0; $i < 3; $i++) {
         $bd = new Database('cortes', $raiz);
@@ -793,7 +794,7 @@ chk('la recuperación es idempotente: repetirla no rompe nada', function () use 
 });
 
 chk('journals de dos tablas a la vez se terminan los dos', function () use ($raiz) {
-    [$jd, $bueno] = baseConJournal($raiz, 'art');
+    baseConJournal($raiz, 'art');
     $dir = "$raiz/cortes";
     file_put_contents("$dir/otra.json.999999.tmp", "{\n  \"table\": \"otra\",\n  \"rows\": [\n    {\"id\":1,\"x\":\"a\"}\n  ]\n}\n");
     file_put_contents("$dir/otra.meta.json.999999.tmp", json_encode(['table' => 'otra',

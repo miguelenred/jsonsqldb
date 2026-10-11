@@ -12,6 +12,10 @@ biblioteca estándar: sin pip, sin requests, sin dependencias.
 
     filas = cli.consultar("SELECT * FROM clientes WHERE ciudad = ?", ["Madrid"])
 
+    # Varias sentencias como una transacción, todas o ninguna (2.9)
+    cli.lote([("UPDATE cuentas SET saldo = saldo - ? WHERE id = ?", [50, 1]),
+              ("UPDATE cuentas SET saldo = saldo + ? WHERE id = ?", [50, 2])])
+
 EL SECRETO ES EL DE LA CLAVE: el campo 'hmac_secret' de esa misma entrada de
 $API_KEYS en api/jsonsqldb_api_config.php. Cada cuenta tiene el suyo, distinto
 del de las demás.
@@ -28,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 import ssl
 import time
 import urllib.error
@@ -104,35 +109,31 @@ class JsonSqlDbCliente:
                 list(parametros), ensure_ascii=False, separators=(",", ":")
             )
 
-        timestamp = str(int(time.time()))
-        mensaje = f"+{self.api_key}|{self.base}|{timestamp}|{sql}{params}\u00bf"
-        # HMAC-SHA256 sobre el mensaje. Los analizadores estáticos a veces marcan
-        # esto como "hash débil para contraseñas": no lo es. Aquí no se almacena
-        # ninguna contraseña; se firma un mensaje con una clave compartida, que es
-        # justo para lo que sirve HMAC-SHA256 y lo que recomienda el estándar.
-        # Las contraseñas del panel sí usan bcrypt, que es lo que corresponde.
-        token = hmac.new(  # noqa: S324  (no es hashing de contraseñas)
-            self.hmac_secret.encode("utf-8"),
-            mensaje.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        return self._pedir({"sql": sql, "params": params}, sql + params)
 
-        cuerpo = urllib.parse.urlencode(
-            {
-                "api_key": self.api_key,
-                "db": self.base,
-                "sql": sql,
-                "params": params,
-                "timestamp": timestamp,
-                "token": token,
-            }
-        ).encode("utf-8")
+    def lote(self, sentencias: Sequence[Union[str, Sequence[Any]]]) -> List[Resultado]:
+        """
+        Varias sentencias en una transacción (2.9): se ejecutan todas, o
+        ninguna si una falla, y cada una ve lo que hicieron las anteriores.
+        Cada sentencia es un texto SQL o (sql, parámetros). Devuelve el
+        resultado de cada una, en orden.
 
-        datos = self._enviar(cuerpo)
+            cli.lote([
+                ("UPDATE cuentas SET saldo = saldo - ? WHERE id = ?", [50, 1]),
+                ("UPDATE cuentas SET saldo = saldo + ? WHERE id = ?", [50, 2]),
+            ])
 
-        if isinstance(datos, dict) and "error" in datos:
-            raise JsonSqlDbError(str(datos["error"]))
-        return datos
+        Si la API devuelve un error, lanza JsonSqlDbError y no se ha hecho nada.
+        """
+        lista = [
+            {"sql": s, "params": []} if isinstance(s, str)
+            else {"sql": s[0], "params": list(s[1]) if len(s) > 1 else []}
+            for s in sentencias
+        ]
+        # En la firma, el texto del lote tal como se envía ocupa el lugar de sql y params
+        lote = json.dumps(lista, ensure_ascii=False, separators=(",", ":"))
+        datos = self._pedir({"lote": lote}, lote)
+        return datos if isinstance(datos, list) else [datos]
 
     def valor(self, sql: str, parametros: Sequence[Any] = ()) -> Any:
         """Primer valor de la primera fila, o None si no hay filas."""
@@ -153,6 +154,35 @@ class JsonSqlDbCliente:
     # ------------------------------------------------------------------
     # Interno
     # ------------------------------------------------------------------
+
+    def _pedir(self, campos: Dict[str, str], firmado: str) -> Any:
+        """La petición firmada: campos (sql y params, o lote) y lo que de ellos entra en la firma."""
+        timestamp = str(int(time.time()))
+        # Al azar en cada petición: dos consultas iguales en el mismo segundo
+        # tendrían si no el mismo token, y la API rechazaría la segunda
+        nonce = secrets.token_hex(8)
+        mensaje = f"+{self.api_key}|{self.base}|{timestamp}|{nonce}|{firmado}\u00bf"
+        # HMAC-SHA256 sobre el mensaje. Los analizadores estáticos a veces marcan
+        # esto como "hash débil para contraseñas": no lo es. Aquí no se almacena
+        # ninguna contraseña; se firma un mensaje con una clave compartida, que es
+        # justo para lo que sirve HMAC-SHA256 y lo que recomienda el estándar.
+        # Las contraseñas del panel sí usan bcrypt, que es lo que corresponde.
+        token = hmac.new(  # noqa: S324  (no es hashing de contraseñas)
+            self.hmac_secret.encode("utf-8"),
+            mensaje.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        cuerpo = urllib.parse.urlencode(
+            {"api_key": self.api_key, "db": self.base, **campos,
+             "timestamp": timestamp, "nonce": nonce, "token": token}
+        ).encode("utf-8")
+
+        datos = self._enviar(cuerpo)
+
+        if isinstance(datos, dict) and "error" in datos:
+            raise JsonSqlDbError(str(datos["error"]))
+        return datos
 
     def _enviar(self, cuerpo: bytes) -> Resultado:
         peticion = urllib.request.Request(
@@ -234,6 +264,10 @@ if __name__ == "__main__":
     #               ["A1", "Ana", 10.55])
     # cli.consultar("UPDATE clientes SET saldo = saldo + ? WHERE id = ?", [25.40, 7])
     # cli.consultar("DELETE FROM clientes WHERE id = ?", [7])
+
+    # --- Transacción: todas o ninguna ---
+    # cli.lote([("UPDATE clientes SET saldo = saldo - ? WHERE id = ?", [25.40, 7]),
+    #           ("UPDATE clientes SET saldo = saldo + ? WHERE id = ?", [25.40, 8])])
 
     # --- Bases de datos: db vacío ---
     # print(cli.bases())

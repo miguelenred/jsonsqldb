@@ -23,7 +23,7 @@ final class LectorXlsx
     private $textos = null;
     /** Dónde empieza cada texto compartido en $textos, empaquetado (pack 'N') */
     private string $inicios = '';
-    /** @var array<int,bool> qué estilos de celda (índice de cellXfs) son de fecha */
+    /** @var array<int,int> qué estilos de celda (índice de cellXfs) son de fecha: 1, sin hora; 2, con hora (2.9) */
     private array $esFecha = [];
     private bool $fecha1904 = false;
     private string $hoja;
@@ -33,7 +33,7 @@ final class LectorXlsx
     public function __construct(string $fichero)
     {
         if (strpos($fichero, '#') !== false) {
-            $copia = tempnam(sys_get_temp_dir(), 'jsonsqldb_xlsx_');
+            $copia = ficheroTemporal('jsonsqldb_xlsx_');
             if ($copia === false || !@copy($fichero, $copia)) {
                 if ($copia !== false) { @unlink($copia); }
                 throw new RuntimeException(t('No se puede leer el fichero subido.'));
@@ -133,17 +133,21 @@ final class LectorXlsx
             return $v;
         }
         if (!empty($this->esFecha[$estilo])) {
-            return $this->fecha((float)$v);
+            return $this->fecha((float)$v, $this->esFecha[$estilo] === 2);
         }
         return preg_match('/^-?\d+$/', $v) ? (int)$v : (float)$v;
     }
 
-    /** Un número de serie de Excel como fecha, y con hora si la tiene. */
-    private function fecha(float $serie): string
+    /**
+     * Un número de serie de Excel como fecha, y con hora si la tiene o si el
+     * formato de la celda la muestra (2.9: una fecha y hora a medianoche,
+     * 2024-01-01 00:00:00, volvía como 2024-01-01).
+     */
+    private function fecha(float $serie, bool $conHora): string
     {
         // 25569 días entre el 30-12-1899 de Excel y el 01-01-1970; 24107 con el sistema de 1904
         $segundos = (int)round(($serie - ($this->fecha1904 ? 24107 : 25569)) * 86400);
-        return gmdate($segundos % 86400 === 0 ? 'Y-m-d' : 'Y-m-d H:i:s', $segundos);
+        return gmdate($conHora || $segundos % 86400 !== 0 ? 'Y-m-d H:i:s' : 'Y-m-d', $segundos);
     }
 
     /** Columna de una referencia 'AB12' (A = 0); sin referencia, la siguiente. */
@@ -189,7 +193,11 @@ final class LectorXlsx
         return 'xl/worksheets/sheet1.xml';
     }
 
-    /** Qué estilos de celda son de fecha: los formatos de fecha de Excel y los propios con d, m, y, h o s. */
+    /**
+     * Qué estilos de celda son de fecha: los formatos de fecha de Excel y los
+     * propios con d, m, y, h o s; y cuáles llevan la hora (2.9): los de Excel
+     * del 18 al 22 y del 45 al 47, y los propios con h o s.
+     */
     private function leerEstilos(): void
     {
         if ($this->zip->locateName('xl/styles.xml') === false) {
@@ -203,12 +211,12 @@ final class LectorXlsx
             if ($xml->nodeType === XMLReader::ELEMENT && $xml->localName === 'numFmt') {
                 // Sin lo que va entre comillas o corchetes ([Red], "kg"): ahí una d o una m no es fecha
                 $codigo = (string)preg_replace('/"[^"]*"|\[[^\]]*\]/', '', (string)$xml->getAttribute('formatCode'));
-                $propios[(int)$xml->getAttribute('numFmtId')] = (bool)preg_match('/[dmyhs]/i', $codigo);
+                $propios[(int)$xml->getAttribute('numFmtId')] = preg_match('/[hs]/i', $codigo) ? 2 : (preg_match('/[dmy]/i', $codigo) ? 1 : 0);
             } elseif ($xml->localName === 'cellXfs') {
                 $enXfs = $xml->nodeType === XMLReader::ELEMENT && !$xml->isEmptyElement;
             } elseif ($enXfs && $xml->nodeType === XMLReader::ELEMENT && $xml->localName === 'xf') {
                 $fmt = (int)$xml->getAttribute('numFmtId');
-                $this->esFecha[$i++] = ($fmt >= 14 && $fmt <= 22) || ($fmt >= 45 && $fmt <= 47) || ($propios[$fmt] ?? false);
+                $this->esFecha[$i++] = ($fmt >= 18 && $fmt <= 22) || ($fmt >= 45 && $fmt <= 47) ? 2 : ($fmt >= 14 && $fmt <= 17 ? 1 : ($propios[$fmt] ?? 0));
             }
         }
         $xml->close();

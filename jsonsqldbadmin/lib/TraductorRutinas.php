@@ -49,7 +49,7 @@ final class TraductorRutinas
         $k = $this->tras($t, 'VIEW');
         $nombre = $t[$k]['v'] ?? '';
         $k++;
-        if (($t[$k]['v'] ?? '') === '(') {
+        if (self::esOp($t[$k] ?? [], '(')) {
             throw new NoTraducible(t('una vista con la lista de columnas delante del AS'));
         }
         if (strtoupper($t[$k]['v'] ?? '') !== 'AS') {
@@ -61,7 +61,7 @@ final class TraductorRutinas
         if ($n >= 3 && strtoupper($consulta[$n - 2]['v']) === 'CHECK' && strtoupper($consulta[$n - 1]['v']) === 'OPTION') {
             $consulta = array_slice($consulta, 0, $n - (in_array(strtoupper($consulta[$n - 3]['v']), ['CASCADED', 'LOCAL'], true) ? 4 : 3));
         }
-        while ($consulta !== [] && end($consulta)['v'] === ';') {
+        while ($consulta !== [] && self::esOp(end($consulta), ';')) {
             array_pop($consulta);
         }
         return 'CREATE VIEW ' . $this->tr->nombreTabla($nombre) . ' AS ' . $this->consulta($consulta);
@@ -94,7 +94,7 @@ final class TraductorRutinas
                 continue;
             }
             // LIMIT desde, cuántas → LIMIT cuántas OFFSET desde
-            if ($u === 'LIMIT' && ($t[$k + 2]['v'] ?? '') === ',') {
+            if ($u === 'LIMIT' && self::esOp($t[$k + 2] ?? [], ',')) {
                 $out[] = ['k' => 'id', 'v' => 'LIMIT'];
                 $out[] = $t[$k + 3];
                 $out[] = ['k' => 'id', 'v' => 'OFFSET'];
@@ -122,10 +122,10 @@ final class TraductorRutinas
         for ($k = 0, $n = count($t); $k < $n; $k++) {
             $x = $t[$k];
             $u = $this->palabra($x);
-            if ($x['v'] === '(') { $nivel++; }
-            if ($x['v'] === ')') { $nivel--; }
+            if (self::esOp($x, '(')) { $nivel++; }
+            if (self::esOp($x, ')')) { $nivel--; }
             if ($nivel === 0 && $u === 'TOP' && $this->palabra($t[$k - 1] ?? []) !== '' ) {
-                $paren = ($t[$k + 1]['v'] ?? '') === '(';
+                $paren = self::esOp($t[$k + 1] ?? [], '(');
                 $valor = $t[$k + ($paren ? 2 : 1)];
                 $k += $paren ? 3 : 1;
                 if ($this->palabra($t[$k + 1] ?? []) === 'PERCENT') {
@@ -144,7 +144,7 @@ final class TraductorRutinas
                 }
                 continue;
             }
-            if ($u === 'WITH' && ($t[$k + 1]['v'] ?? '') === '(' && in_array($this->palabra($t[$k + 2] ?? []), ['NOLOCK', 'READUNCOMMITTED', 'ROWLOCK', 'UPDLOCK', 'HOLDLOCK', 'NOWAIT', 'READPAST', 'INDEX'], true)) {
+            if ($u === 'WITH' && self::esOp($t[$k + 1] ?? [], '(') && in_array($this->palabra($t[$k + 2] ?? []), ['NOLOCK', 'READUNCOMMITTED', 'ROWLOCK', 'UPDLOCK', 'HOLDLOCK', 'NOWAIT', 'READPAST', 'INDEX'], true)) {
                 $k = $this->cierre($t, $k + 1);
                 continue;
             }
@@ -175,7 +175,7 @@ final class TraductorRutinas
             $nivel = 0;
             $conOn = false;
             for ($j = $k + 1; $j < $n; $j++) {
-                $v = $t[$j]['v'];
+                $v = $t[$j]['k'] === 'op' ? $t[$j]['v'] : '';        // un texto '(' no abre nada (2.9)
                 if ($v === '(') { $nivel++; }
                 if ($v === ')') { if ($nivel === 0) { break; } $nivel--; }
                 if ($nivel > 0) { continue; }
@@ -208,8 +208,8 @@ final class TraductorRutinas
         $nivel = 0;
         for ($k = 0, $n = count($t); $k < $n; $k++) {
             $x = $t[$k];
-            if ($x['v'] === '(') { $nivel++; }
-            if ($x['v'] === ')') { $nivel--; }
+            if (self::esOp($x, '(')) { $nivel++; }
+            if (self::esOp($x, ')')) { $nivel--; }
             $u = $nivel === 0 ? $this->palabra($x) : '';
             if ($u === 'LIMIT' && isset($t[$k + 1])) {
                 $limite = $t[++$k];
@@ -248,7 +248,7 @@ final class TraductorRutinas
         $quitar = [];
         $n = count($t);
         for ($k = 0; $k < $n; $k++) {
-            if (($t[$k]['v'] ?? '') !== '(' || isset($quitar[$k])) {
+            if (!self::esOp($t[$k] ?? [], '(') || isset($quitar[$k])) {
                 continue;
             }
             $antes = $k - 1;
@@ -302,7 +302,7 @@ final class TraductorRutinas
             $k += 2;
         }
         $cuerpo = array_slice($t, $k);
-        while ($cuerpo !== [] && end($cuerpo)['v'] === ';') {
+        while ($cuerpo !== [] && self::esOp(end($cuerpo), ';')) {
             array_pop($cuerpo);
         }
         if ($this->palabra($cuerpo[0] ?? []) === 'BEGIN') {
@@ -451,7 +451,7 @@ final class TraductorRutinas
             }
         }
         $cuerpo = array_slice($t, $k + 1);
-        while ($cuerpo !== [] && end($cuerpo)['v'] === ';') {
+        while ($cuerpo !== [] && self::esOp(end($cuerpo), ';')) {
             array_pop($cuerpo);
         }
         if ($this->palabra($cuerpo[0] ?? []) === 'BEGIN' && $this->finBloque($cuerpo, 0) === count($cuerpo) - 1) {
@@ -492,7 +492,7 @@ final class TraductorRutinas
         $lanzado = false;                           // un RAISERROR/THROW antes del ROLLBACK
         for ($k = 0, $n = count($t); $k < $n;) {
             $u = $this->palabra($t[$k]);
-            if ($t[$k]['v'] === ';') {
+            if (self::esOp($t[$k], ';')) {
                 $k++;
                 continue;
             }
@@ -536,8 +536,8 @@ final class TraductorRutinas
         $nivel = 0;
         $caso = 0;
         for ($n = count($t); $j < $n; $j++) {
-            if ($t[$j]['v'] === '(') { $nivel++; }
-            if ($t[$j]['v'] === ')') { $nivel--; }
+            if (self::esOp($t[$j], '(')) { $nivel++; }
+            if (self::esOp($t[$j], ')')) { $nivel--; }
             if ($this->palabra($t[$j]) === 'CASE') { $caso++; }
             if ($caso > 0 && $this->palabra($t[$j]) === 'END') { $caso--; continue; }
             if ($nivel === 0 && $caso === 0 && $j > $k + 1 && in_array($this->palabra($t[$j]), self::INICIOS_SS, true)
@@ -584,7 +584,7 @@ final class TraductorRutinas
         $nivel = 0;
         $caso = 0;                                  // CASE … END: su ELSE y su END no acaban nada
         for ($j = $k + 1, $n = count($t); $j < $n; $j++) {
-            $v = $t[$j]['v'];
+            $v = $t[$j]['k'] === 'op' ? $t[$j]['v'] : '';            // un texto ';' no acaba nada (2.9)
             if ($v === '(') { $nivel++; }
             if ($v === ')') { $nivel--; }
             if ($this->palabra($t[$j]) === 'CASE') { $caso++; continue; }
@@ -614,7 +614,7 @@ final class TraductorRutinas
         $u = $this->palabra($s[0]);
         switch ($u) {
             case 'SET':
-                if (($s[1]['v'] ?? '') === '@') {
+                if (self::esOp($s[1] ?? [], '@')) {
                     $this->ssVars['@' . strtolower((string)$s[2]['v'])] = '(' . $this->exprSs(array_slice($s, 4)) . ')';
                 }
                 return '';                          // SET NOCOUNT ON y demás opciones: nada que hacer aquí
@@ -622,13 +622,13 @@ final class TraductorRutinas
                 foreach ($this->separar(array_slice($s, 1)) as $d) {
                     $igual = null;
                     foreach ($d as $i => $x) {
-                        if ($x['v'] === '=') { $igual = $i; break; }
+                        if (self::esOp($x, '=')) { $igual = $i; break; }
                     }
                     $this->ssVars['@' . strtolower((string)($d[1]['v'] ?? ''))] = $igual !== null ? '(' . $this->exprSs(array_slice($d, $igual + 1)) . ')' : 'NULL';
                 }
                 return '';
             case 'SELECT':
-                if (($s[1]['v'] ?? '') === '@') {
+                if (self::esOp($s[1] ?? [], '@')) {
                     $this->asignarDesdeConsulta($s);
                 }
                 return '';                          // un SELECT que no carga variables no hace nada
@@ -706,12 +706,11 @@ final class TraductorRutinas
         $desde = null;
         $nivel = 0;
         for ($k = ($set ?? 2) + 1, $n = count($s); $k < $n; $k++) {
-            if ($s[$k]['v'] === '(') { $nivel++; }
-            if ($s[$k]['v'] === ')') { $nivel--; }
+            if (self::esOp($s[$k], '(')) { $nivel++; }
+            if (self::esOp($s[$k], ')')) { $nivel--; }
             if ($nivel === 0 && $this->palabra($s[$k]) === 'FROM') { $desde = $k; break; }
         }
         $finSet = $desde ?? ($this->buscarOpcional($s, 'WHERE') ?? count($s));
-        $donde = null;
         if ($desde === null) {
             $w = $this->buscarOpcional($s, 'WHERE');
             $donde = $w !== null ? array_slice($s, $w + 1) : null;
@@ -742,7 +741,7 @@ final class TraductorRutinas
     {
         $out = [];
         for ($k = 0, $n = count($t); $k < $n; $k++) {
-            if (($t[$k]['k'] ?? '') === 'id' && ($t[$k + 1]['v'] ?? '') === '.' && in_array(strtolower((string)$t[$k]['v']), [strtolower($alias), strtolower($tabla)], true)) {
+            if (($t[$k]['k'] ?? '') === 'id' && self::esOp($t[$k + 1] ?? [], '.') && in_array(strtolower((string)$t[$k]['v']), [strtolower($alias), strtolower($tabla)], true)) {
                 $k++;
                 continue;
             }
@@ -765,8 +764,8 @@ final class TraductorRutinas
         $desde = null;
         $nivel = 0;
         foreach ($t as $k => $x) {
-            if ($x['v'] === '(') { $nivel++; }
-            if ($x['v'] === ')') { $nivel--; }
+            if (self::esOp($x, '(')) { $nivel++; }
+            if (self::esOp($x, ')')) { $nivel--; }
             if ($nivel === 0 && $this->palabra($x) === 'FROM') { $desde = $k; break; }
         }
         if ($desde === null) {
@@ -776,8 +775,8 @@ final class TraductorRutinas
         $fin = count($t);
         $nivel = 0;
         for ($k = $desde + 1, $n = count($t); $k < $n; $k++) {
-            if ($t[$k]['v'] === '(') { $nivel++; }
-            if ($t[$k]['v'] === ')') { $nivel--; }
+            if (self::esOp($t[$k], '(')) { $nivel++; }
+            if (self::esOp($t[$k], ')')) { $nivel--; }
             if ($nivel === 0 && in_array($this->palabra($t[$k]), ['WHERE', 'GROUP', 'ORDER', 'HAVING'], true)) { $fin = $k; break; }
         }
         // Las tablas del FROM, con su JOIN y su ON
@@ -787,13 +786,13 @@ final class TraductorRutinas
         for ($k = $desde + 1; $k < $fin; $k++) {
             $x = $t[$k];
             $p = $this->palabra($x);
-            if ($x['v'] === '(') { $nivel++; }
-            if ($x['v'] === ')') { $nivel--; }
-            if ($nivel === 0 && ($x['v'] === ',' || in_array($p, ['JOIN', 'INNER', 'LEFT', 'RIGHT', 'CROSS', 'FULL'], true))) {
+            if (self::esOp($x, '(')) { $nivel++; }
+            if (self::esOp($x, ')')) { $nivel--; }
+            if ($nivel === 0 && (self::esOp($x, ',') || in_array($p, ['JOIN', 'INNER', 'LEFT', 'RIGHT', 'CROSS', 'FULL'], true))) {
                 $origenes[] = $actual;
                 $j = $k;
-                while ($this->palabra($t[$j] ?? []) !== 'JOIN' && $t[$j]['v'] !== ',') { $j++; }
-                $actual = ['join' => $x['v'] === ',' ? ',' : implode(' ', array_map(fn($y) => $y['v'], array_slice($t, $k, $j - $k + 1))), 'tokens' => [], 'on' => null];
+                while ($this->palabra($t[$j] ?? []) !== 'JOIN' && !self::esOp($t[$j], ',')) { $j++; }
+                $actual = ['join' => self::esOp($x, ',') ? ',' : implode(' ', array_map(fn($y) => $y['v'], array_slice($t, $k, $j - $k + 1))), 'tokens' => [], 'on' => null];
                 $k = $j;
                 continue;
             }
@@ -842,15 +841,15 @@ final class TraductorRutinas
             $out = [];
             for ($k = 0, $n = count($x); $k < $n; $k++) {
                 $tk = $x[$k];
-                if ($tk['k'] === 'id' && ($x[$k + 1]['v'] ?? '') === '.' && isset($pseudo[strtolower((string)$tk['v'])])) {
+                if ($tk['k'] === 'id' && self::esOp($x[$k + 1] ?? [], '.') && isset($pseudo[strtolower((string)$tk['v'])])) {
                     $out[] = ['k' => 'id', 'v' => $pseudo[strtolower((string)$tk['v'])]];
                     continue;
                 }
-                if ($tk['k'] === 'id' && ($x[$k + 1]['v'] ?? '') === '.' && in_array(strtolower((string)$tk['v']), $objetivo, true)) {
+                if ($tk['k'] === 'id' && self::esOp($x[$k + 1] ?? [], '.') && in_array(strtolower((string)$tk['v']), $objetivo, true)) {
                     $k++;                           // c.saldo → saldo
                     continue;
                 }
-                if ($soloPseudo !== null && $tk['k'] === 'id' && ($x[$k - 1]['v'] ?? '') !== '.' && ($x[$k + 1]['v'] ?? '') !== '('
+                if ($soloPseudo !== null && $tk['k'] === 'id' && !self::esOp($x[$k - 1] ?? [], '.') && !self::esOp($x[$k + 1] ?? [], '(')
                     && isset($this->ssColumnas[strtolower((string)$tk['v'])])) {
                     array_push($out, ['k' => 'id', 'v' => $soloPseudo], ['k' => 'op', 'v' => '.']);
                 }
@@ -864,8 +863,8 @@ final class TraductorRutinas
             // WHERE … [GROUP/ORDER…]: lo de después del WHERE va aparte
             $nivel = 0;
             foreach ($where as $i => $x) {
-                if ($x['v'] === '(') { $nivel++; }
-                if ($x['v'] === ')') { $nivel--; }
+                if (self::esOp($x, '(')) { $nivel++; }
+                if (self::esOp($x, ')')) { $nivel--; }
                 if ($nivel === 0 && in_array($this->palabra($x), ['GROUP', 'ORDER', 'HAVING'], true)) {
                     $cola = array_slice($where, $i);
                     $where = array_slice($where, 0, $i);
@@ -884,7 +883,7 @@ final class TraductorRutinas
             return [(string)$tk[0]['v'], (string)end($tk)['v'], $cond, $cambiar];
         }
         $lista = array_slice($t, 0, $desde);
-        if ($quedan === [] && count($lista) === 2 && $lista[1]['v'] === '*') {
+        if ($quedan === [] && count($lista) === 2 && self::esOp($lista[1], '*')) {
             $lista[1] = ['k' => 'num', 'v' => '1'];  // SELECT * FROM inserted → SELECT 1
         }
         $sql = $this->exprSs($cambiar($lista));
@@ -912,8 +911,8 @@ final class TraductorRutinas
         for ($k = 0, $n = count($t); $k < $n; $k++) {
             $x = $t[$k];
             // @variable y @@ROWCOUNT
-            if ($x['v'] === '@') {
-                $doble = ($t[$k + 1]['v'] ?? '') === '@';
+            if (self::esOp($x, '@')) {
+                $doble = self::esOp($t[$k + 1] ?? [], '@');
                 $nombre = '@' . ($doble ? '@' : '') . strtolower((string)($t[$k + ($doble ? 2 : 1)]['v'] ?? ''));
                 $valor = $this->ssVars[strtoupper($nombre)] ?? $this->ssVars[$nombre] ?? null;
                 if ($valor === null) {
@@ -924,7 +923,7 @@ final class TraductorRutinas
                 continue;
             }
             // UPDATE(col): en INSERT, siempre; en UPDATE, si ha cambiado
-            if ($this->palabra($x) === 'UPDATE' && ($t[$k + 1]['v'] ?? '') === '(' && $k > 0) {
+            if ($this->palabra($x) === 'UPDATE' && self::esOp($t[$k + 1] ?? [], '(') && $k > 0) {
                 $col = $this->tr->nombre((string)$t[$k + 2]['v']);
                 $out[] = ['k' => 'raw', 'v' => $this->ssEvento === 'UPDATE'
                     ? "((OLD.$col <> NEW.$col) OR (OLD.$col IS NULL AND NEW.$col IS NOT NULL) OR (OLD.$col IS NOT NULL AND NEW.$col IS NULL))"
@@ -933,7 +932,7 @@ final class TraductorRutinas
                 continue;
             }
             // (SELECT …) con inserted/deleted
-            if ($x['v'] === '(' && $this->palabra($t[$k + 1] ?? []) === 'SELECT') {
+            if (self::esOp($x, '(') && $this->palabra($t[$k + 1] ?? []) === 'SELECT') {
                 $cierre = $this->cierre($t, $k);
                 $sub = $this->consultaSs(array_slice($t, $k + 1, $cierre - $k - 1));
                 $existe = $this->palabra($t[$k - 1] ?? []) === 'EXISTS';
@@ -988,7 +987,7 @@ final class TraductorRutinas
         $n = count($t);
         for ($k = 0; $k < $n;) {
             $u = $this->palabra($t[$k]);
-            if ($t[$k]['v'] === ';') {
+            if (self::esOp($t[$k], ';')) {
                 $k++;
                 continue;
             }
@@ -1056,7 +1055,7 @@ final class TraductorRutinas
         $nivel = 0;
         $anid = 0;
         for ($n = count($t); $k < $n; $k++) {
-            $v = $t[$k]['v'];
+            $v = $t[$k]['k'] === 'op' ? $t[$k]['v'] : '';            // un texto '(' no abre nada (2.9)
             if ($v === '(') { $nivel++; continue; }
             if ($v === ')') { $nivel--; continue; }
             if ($nivel > 0) { continue; }
@@ -1075,7 +1074,7 @@ final class TraductorRutinas
     {
         $nivel = 0;
         for ($n = count($t); $k < $n; $k++) {
-            $v = $t[$k]['v'];
+            $v = $t[$k]['k'] === 'op' ? $t[$k]['v'] : '';            // un texto ';' no acaba nada (2.9)
             if ($v === '(') { $nivel++; }
             if ($v === ')') { $nivel--; }
             if ($v === ';' && $nivel === 0) {
@@ -1097,10 +1096,10 @@ final class TraductorRutinas
                         return '';
                     }
                     $op = 3;
-                    if (($s[1]['v'] ?? '') !== '.' || !in_array($s[$op]['v'] ?? '', [':=', ':', '='], true)) {
+                    if (!self::esOp($s[1] ?? [], '.') || !in_array($s[$op]['v'] ?? '', [':=', ':', '='], true)) {
                         throw new NoTraducible(t('asignación sin ='));
                     }
-                    $desde = ($s[$op]['v'] === ':' && ($s[$op + 1]['v'] ?? '') === '=') ? $op + 2 : $op + 1;
+                    $desde = (self::esOp($s[$op], ':') && self::esOp($s[$op + 1] ?? [], '=')) ? $op + 2 : $op + 1;
                     return 'SET NEW.' . $this->tr->nombre($s[2]['v']) . ' = ' . $this->expr(array_slice($s, $desde));
                 case 'RAISE':
                     $nivel = $this->palabra($s[1] ?? []);
@@ -1108,7 +1107,7 @@ final class TraductorRutinas
                         return '';                  // un mensaje, sin efecto en los datos
                     }
                     $textos = array_values(array_filter($s, static fn($x) => $x['k'] === 'str'));
-                    if (count(array_filter($s, static fn($x) => $x['v'] === ',')) > 0) {
+                    if (count(array_filter($s, static fn($x) => self::esOp($x, ','))) > 0) {
                         $this->tr->avisar(t('Mensajes de error compuestos en triggers: se importa solo su texto fijo'));
                     }
                     return 'SELECT RAISE(ABORT, ' . $this->tr->texto([$textos[0] ?? ['k' => 'str', 'v' => 'Error']]) . ')';
@@ -1149,7 +1148,7 @@ final class TraductorRutinas
     {
         $partes = [];
         foreach ($this->separar(array_slice($s, 1)) as $a) {
-            if ($this->palabra($a[0] ?? []) !== 'NEW' || ($a[1]['v'] ?? '') !== '.') {
+            if ($this->palabra($a[0] ?? []) !== 'NEW' || !self::esOp($a[1] ?? [], '.')) {
                 throw new NoTraducible(t('SET a una variable: aquí solo se puede cambiar NEW.columna'));
             }
             $igual = 3;
@@ -1223,7 +1222,7 @@ final class TraductorRutinas
                 $k++;
                 continue;
             }
-            if ($u === '' && $this->d === 'postgresql' && $x['k'] === 'id' && !empty($x['q']) && ($t[$k + 1]['v'] ?? '') === '('
+            if ($u === '' && $this->d === 'postgresql' && $x['k'] === 'id' && !empty($x['q']) && self::esOp($t[$k + 1] ?? [], '(')
                 && in_array(strtoupper($x['v']), ['SUBSTRING', 'LEFT', 'RIGHT', 'POSITION', 'TRIM', 'OVERLAY'], true)) {
                 $u = strtoupper($x['v']);
             }
@@ -1236,7 +1235,7 @@ final class TraductorRutinas
                 $k = $finGrupo;
                 continue;
             }
-            if ($u !== '' && ($t[$k + 1]['v'] ?? '') === '(' && !in_array($u, ['IN', 'EXISTS', 'AS', 'ON', 'AND', 'OR', 'NOT', 'VALUES', 'INTO', 'WHERE', 'FROM', 'JOIN', 'USING', 'OVER', 'THEN', 'ELSE', 'WHEN'], true)
+            if ($u !== '' && self::esOp($t[$k + 1] ?? [], '(') && !in_array($u, ['IN', 'EXISTS', 'AS', 'ON', 'AND', 'OR', 'NOT', 'VALUES', 'INTO', 'WHERE', 'FROM', 'JOIN', 'USING', 'OVER', 'THEN', 'ELSE', 'WHEN'], true)
                 && ($this->palabra($t[$k - 1] ?? []) !== 'INTO')) {
                 $cierre = $this->cierre($t, $k + 1);
                 $out[] = $this->funcion($u, $x['v'], array_slice($t, $k + 2, $cierre - $k - 2));
@@ -1254,6 +1253,9 @@ final class TraductorRutinas
                     throw new NoTraducible(t('el operador XOR'));
             }
             if ($x['k'] === 'op' && $x['v'] === '&&') { $out[] = 'AND'; continue; }
+            // En MySQL || es OR, salvo con PIPES_AS_CONCAT (2.9: siempre se tomaba por
+            // una concatenación); con ella se une como aquí, antes que * y +
+            if ($x['k'] === 'op' && $x['v'] === '||' && $this->d === 'mysql' && !$this->tr->tuberiasConcatenan()) { $out[] = 'OR'; continue; }
             if ($x['k'] === 'op' && $x['v'] === '!' ) { $out[] = 'NOT'; continue; }
             $out[] = $this->tr->texto([$x]);
         }
@@ -1282,7 +1284,7 @@ final class TraductorRutinas
             $u = $this->palabra($x);
             $esIntervalo = $x['k'] === 'op' && in_array($x['v'], ['+', '-'], true) && $this->palabra($t[$k + 1] ?? []) === 'INTERVAL';
             // a MOD b y a DIV b (MOD(a, b) es una función, no esto)
-            $infijo = in_array($u, ['MOD', 'DIV'], true) && ($t[$k + 1]['v'] ?? '') !== '(';
+            $infijo = in_array($u, ['MOD', 'DIV'], true) && !self::esOp($t[$k + 1] ?? [], '(');
             if (!$esIntervalo && !$infijo && !($x['k'] === 'op' && $x['v'] === '<=>')) {
                 continue;
             }
@@ -1312,7 +1314,8 @@ final class TraductorRutinas
     /**
      * En SQL Server, + también concatena: es || cuando uno de los dos lados es
      * texto (una cadena, una columna de texto, una función que da texto o un
-     * CAST a texto).
+     * CAST a texto). Allí ese + se une después que * / %, y aquí || antes
+     * (2.9): a + b * 2 pasa a (a || (b * 2)), entero entre paréntesis.
      */
     private function concatenarSs(array $t): array
     {
@@ -1320,10 +1323,15 @@ final class TraductorRutinas
             if (!($t[$k]['k'] === 'op' && $t[$k]['v'] === '+')) {
                 continue;
             }
-            $ini = $this->inicioOperando($t, $k - 1);
-            $fin = $this->finOperando($t, $k + 1);
-            if ($this->esTextoSs(array_slice($t, $ini, $k - $ini)) || $this->esTextoSs(array_slice($t, $k + 1, $fin - $k))) {
-                $t[$k] = ['k' => 'op', 'v' => '||'];
+            $ini = $this->inicioCuenta($t, $k - 1, ['*', '/', '%']);
+            $fin = $this->finCuenta($t, $k + 1, ['*', '/', '%']);
+            $izq = array_slice($t, $ini, $k - $ini);
+            $der = array_slice($t, $k + 1, $fin - $k);
+            if ($this->esTextoSs($izq) || $this->esTextoSs($der)) {
+                $lado = fn(array $x, bool $cuenta): string => $cuenta ? '(' . $this->expr($x) . ')' : $this->expr($x);
+                $texto = '(' . $lado($izq, $ini < $this->inicioOperando($t, $k - 1)) . ' || ' . $lado($der, $fin > $this->finOperando($t, $k + 1)) . ')';
+                array_splice($t, $ini, $fin - $ini + 1, [['k' => 'raw', 'v' => $texto, 'texto' => true]]);
+                $k = $ini;
             }
         }
         return $t;
@@ -1338,7 +1346,8 @@ final class TraductorRutinas
             return true;
         }
         if (($op[0]['k'] ?? '') === 'raw') {
-            return (bool)preg_match("/^\(?'|^\(?(UPPER|LOWER|SUBSTR|TRIM|LTRIM|RTRIM|REPLACE|STRFTIME|COALESCE\(CAST)|AS TEXT\)\)?$/", (string)$op[0]['v']);
+            return !empty($op[0]['texto'])         // un + que ya concatena (ver concatenarSs())
+                || (bool)preg_match("/^\(?'|^\(?(UPPER|LOWER|SUBSTR|TRIM|LTRIM|RTRIM|REPLACE|STRFTIME|COALESCE\(CAST)|AS TEXT\)\)?$/", (string)$op[0]['v']);
         }
         $f = $this->palabra($op[0]);
         if (in_array($f, ['UPPER', 'LOWER', 'LEFT', 'RIGHT', 'SUBSTRING', 'LTRIM', 'RTRIM', 'TRIM', 'REPLACE', 'CONCAT', 'FORMAT', 'STR'], true)) {
@@ -1475,9 +1484,9 @@ final class TraductorRutinas
             $nivel = 0;
             for (; $ini >= 0; $ini--) {
                 $x = $t[$ini];
-                if ($x['v'] === ')') { $nivel++; continue; }
-                if ($x['v'] === '(') { if ($nivel === 0) { break; } $nivel--; continue; }
-                if ($nivel === 0 && ($x['v'] === ',' || in_array($this->palabra($x),
+                if (self::esOp($x, ')')) { $nivel++; continue; }
+                if (self::esOp($x, '(')) { if ($nivel === 0) { break; } $nivel--; continue; }
+                if ($nivel === 0 && (self::esOp($x, ',') || in_array($this->palabra($x),
                         ['AND', 'OR', 'NOT', 'WHERE', 'ON', 'HAVING', 'WHEN', 'THEN', 'ELSE', 'SELECT', 'DISTINCT'], true))) {
                     break;
                 }
@@ -1497,6 +1506,9 @@ final class TraductorRutinas
     private const NO_FUNCIONES = ['AND', 'OR', 'NOT', 'WHEN', 'THEN', 'ELSE', 'SELECT', 'WHERE', 'ON', 'IN', 'BY', 'AS', 'FROM',
         'DISTINCT', 'ORDER', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'CASE', 'IS', 'LIKE', 'BETWEEN', 'EXISTS', 'ALL', 'ANY', 'SOME',
         'RETURN', 'SET', 'VALUES', 'INTO', 'JOIN', 'USING', 'IF', 'ELSEIF', 'ELSIF', 'END', 'UNION', 'EXCEPT', 'INTERSECT', 'WITH'];
+
+    /** Los operadores de una cuenta de PostgreSQL, que allí se unen antes que || */
+    private const CUENTA = ['+', '-', '*', '/', '%', '^'];
 
     /** Palabras que forman los tipos de PostgreSQL detrás de :: */
     private const TIPOS_PG = ['INTEGER', 'INT', 'INT2', 'INT4', 'INT8', 'BIGINT', 'SMALLINT', 'NUMERIC', 'DECIMAL', 'TEXT',
@@ -1524,14 +1536,14 @@ final class TraductorRutinas
                 while (in_array($this->palabra($t[$fin + 1] ?? []), self::TIPOS_PG, true)) {
                     $tipo .= ' ' . $this->palabra($t[++$fin]);
                 }
-                if ($tipo !== '' && ($t[$fin + 1]['v'] ?? '') === '(') {
+                if ($tipo !== '' && self::esOp($t[$fin + 1] ?? [], '(')) {
                     $fin = $this->cierre($t, $fin + 1);
                     continue;
                 }
                 break;
             }
             $esLista = false;
-            while (($t[$fin + 1]['v'] ?? '') === '[' && ($t[$fin + 2]['v'] ?? '') === ']') {
+            while (self::esOp($t[$fin + 1] ?? [], '[') && self::esOp($t[$fin + 2] ?? [], ']')) {
                 $fin += 2;                          // ::text[]
                 $esLista = true;
             }
@@ -1569,6 +1581,24 @@ final class TraductorRutinas
             array_splice($t, $ini, $fin - $ini + 1, [$nuevo]);
             $k = $ini;
         }
+        // a || b + 1: allí || se une después que + - * / % ^, y aquí antes (como
+        // en SQLite, 2.9): el lado de un || que es una cuenta va entre paréntesis
+        for ($k = 1; $k < count($t); $k++) {
+            if (!self::esOp($t[$k], '||')) {
+                continue;
+            }
+            $fin = $this->finCuenta($t, $k + 1, self::CUENTA);
+            if ($fin > $this->finOperando($t, $k + 1)) {
+                array_splice($t, $fin + 1, 0, [['k' => 'op', 'v' => ')']]);
+                array_splice($t, $k + 1, 0, [['k' => 'op', 'v' => '(']]);
+            }
+            $ini = $this->inicioCuenta($t, $k - 1, self::CUENTA);
+            if ($ini < $this->inicioOperando($t, $k - 1)) {
+                array_splice($t, $k, 0, [['k' => 'op', 'v' => ')']]);
+                array_splice($t, $ini, 0, [['k' => 'op', 'v' => '(']]);
+                $k += 2;
+            }
+        }
         for ($k = 1; $k < count($t); $k++) {
             $x = $t[$k];
             // x + '1 day'::interval
@@ -1578,6 +1608,13 @@ final class TraductorRutinas
                     $this->modificadoresIntervalo((string)$t[$k + 1]['v']));
                 $texto = 'DATETIME(' . $this->expr(array_slice($t, $ini, $k - $ini)) . ', ' . implode(', ', $mods) . ')';
                 array_splice($t, $ini, $k + 2 - $ini, [['k' => 'raw', 'v' => $texto]]);
+                $k = $ini;
+                continue;
+            }
+            // date - date y date ± n (2.9)
+            if ($x['k'] === 'op' && in_array($x['v'], ['+', '-'], true) && ($cuenta = $this->cuentaConFechas($t, $k)) !== null) {
+                [$ini, $fin, $texto] = $cuenta;
+                array_splice($t, $ini, $fin - $ini + 1, [['k' => 'raw', 'v' => $texto]]);
                 $k = $ini;
                 continue;
             }
@@ -1596,7 +1633,7 @@ final class TraductorRutinas
             }
             // x = ANY (ARRAY[…]) / x <> ALL (ARRAY[…]) / x = ANY (SELECT …)
             if ($x['k'] === 'op' && in_array($x['v'], ['=', '<>', '!='], true) && in_array($this->palabra($t[$k + 1] ?? []), ['ANY', 'ALL'], true)
-                && ($t[$k + 2]['v'] ?? '') === '(') {
+                && self::esOp($t[$k + 2] ?? [], '(')) {
                 $cuantos = $this->palabra($t[$k + 1]);
                 if (($x['v'] === '=') !== ($cuantos === 'ANY')) {
                     throw new NoTraducible(t('{op} {c} (…)', ['op' => $x['v'], 'c' => $cuantos]));
@@ -1604,7 +1641,7 @@ final class TraductorRutinas
                 $ini = $this->inicioOperando($t, $k - 1);
                 $cierre = $this->cierre($t, $k + 2);
                 $dentro = array_slice($t, $k + 3, $cierre - $k - 3);
-                while (($dentro[0]['v'] ?? '') === '(' && $this->cierre($dentro, 0) === count($dentro) - 1) {
+                while (self::esOp($dentro[0] ?? [], '(') && $this->cierre($dentro, 0) === count($dentro) - 1) {
                     $dentro = array_slice($dentro, 1, -1);      // ((ARRAY[…]))
                 }
                 if ($this->palabra($dentro[0] ?? []) === 'ARRAY') {
@@ -1617,19 +1654,19 @@ final class TraductorRutinas
                 continue;
             }
             // ~~ (LIKE), ~~* (ILIKE), ~ y ~* (expresiones regulares), con ! delante si es NOT
-            if ($x['k'] === 'op' && ($x['v'] === '~' || ($x['v'] === '!' && ($t[$k + 1]['v'] ?? '') === '~'))) {
+            if ($x['k'] === 'op' && ($x['v'] === '~' || ($x['v'] === '!' && self::esOp($t[$k + 1] ?? [], '~')))) {
                 $no = $x['v'] === '!';
                 $j = $k + ($no ? 1 : 0);
-                $like = ($t[$j + 1]['v'] ?? '') === '~';
+                $like = self::esOp($t[$j + 1] ?? [], '~');
                 $j += $like ? 1 : 0;
-                $sinCaja = ($t[$j + 1]['v'] ?? '') === '*';
+                $sinCaja = self::esOp($t[$j + 1] ?? [], '*');
                 $j += $sinCaja ? 1 : 0;
                 $ini = $this->inicioOperando($t, $k - 1);
                 $fin = $this->finOperando($t, $j + 1);
                 $izq = $this->expr(array_slice($t, $ini, $k - $ini));
                 $der = array_slice($t, $j + 1, $fin - $j);
                 // LIKE … ESCAPE lo guarda PostgreSQL como ~~ like_escape(patrón, escape)
-                if ($like && strtoupper((string)($der[0]['v'] ?? '')) === 'LIKE_ESCAPE' && ($der[1]['v'] ?? '') === '(') {
+                if ($like && strtoupper((string)($der[0]['v'] ?? '')) === 'LIKE_ESCAPE' && self::esOp($der[1] ?? [], '(')) {
                     $args = $this->separar(array_slice($der, 2, -1));
                     $escape = $args[1][0]['v'] ?? null;
                     $der = $args[0] ?? $der;
@@ -1641,6 +1678,95 @@ final class TraductorRutinas
             }
         }
         return $t;
+    }
+
+    /**
+     * a - b y a + b de PostgreSQL con fechas (2.9): date - date son los días
+     * que van de una a otra, y date ± n, la fecha n días después o antes.
+     * Aquí una fecha es un texto, y se restaba como un número: CURRENT_DATE -
+     * f::date daba la diferencia de los años. Lo que da un intervalo
+     * (timestamp - timestamp) o lleva algo que no se sabe si es una fecha no
+     * tiene traducción: mejor saltar la vista que dar otro número. Null si
+     * ningún lado es una fecha (o es a - INTERVAL '…', que va aparte).
+     *
+     * @return array{0: int, 1: int, 2: string}|null desde, hasta y lo que va en su lugar
+     */
+    private function cuentaConFechas(array $t, int $k): ?array
+    {
+        if (!$this->acabaOperando($t[$k - 1]) || $this->palabra($t[$k + 1] ?? []) === 'INTERVAL') {
+            return null;                            // -x, o x - INTERVAL '1 day'
+        }
+        $ini = $this->inicioOperando($t, $k - 1);
+        $fin = $this->finCuenta($t, $k + 1, ['*', '/', '%']);   // CURRENT_DATE - n * 7: la multiplicación va antes
+        $izq = array_slice($t, $ini, $k - $ini);
+        $der = array_slice($t, $k + 1, $fin - $k);
+        $a = $this->tipoPg($izq);
+        $b = $this->tipoPg($der);
+        if (!in_array($a, ['fecha', 'momento'], true) && !in_array($b, ['fecha', 'momento'], true)) {
+            return null;
+        }
+        $resta = $t[$k]['v'] === '-';
+        if ($resta && $a === 'fecha' && $b === 'fecha') {
+            return [$ini, $fin, 'CAST(JULIANDAY(' . $this->expr($izq) . ') - JULIANDAY(' . $this->expr($der) . ') AS INTEGER)'];
+        }
+        if (($a === 'fecha' && $b === 'numero') || (!$resta && $a === 'numero' && $b === 'fecha')) {
+            [$fecha, $dias] = $a === 'fecha' ? [$izq, $der] : [$der, $izq];
+            $intervalo = array_merge([['k' => 'id', 'v' => 'INTERVAL']], $dias, [['k' => 'id', 'v' => 'DAY']]);
+            return [$ini, $fin, 'DATE(' . $this->sumarFecha($resta ? 'DATE_SUB' : 'DATE_ADD', [$fecha, $intervalo]) . ')'];
+        }
+        throw new NoTraducible(t('{a} {op} {b}: con fechas, aquí solo se traduce date - date (los días entre las dos) y date ± días',
+            ['a' => $this->expr($izq), 'op' => $t[$k]['v'], 'b' => $this->expr($der)]));
+    }
+
+    /**
+     * Lo que es un operando de PostgreSQL, para cuentaConFechas(): 'fecha'
+     * (date), 'momento' (timestamp), 'numero', o '' si no se sabe. Una
+     * columna, por su tipo en el volcado (ver Traductor::tiposDeColumna()).
+     */
+    private function tipoPg(array $op): string
+    {
+        while (count($op) > 2 && self::esOp($op[0], '(') && $this->cierre($op, 0) === count($op) - 1) {
+            $op = array_slice($op, 1, -1);          // (t.f)
+        }
+        $n = count($op);
+        $fin = $this->finOperando($op, 0);
+        if ($fin < $n - 1) {
+            // Una cuenta (n * 2): un número si lo es cada uno de sus operandos
+            for ($j = 0; $j < $n; $j = $fin + 2) {
+                $fin = $this->finOperando($op, $j);
+                $sig = ($op[$fin + 1]['k'] ?? '') === 'op' ? $op[$fin + 1]['v'] : '';
+                if ($this->tipoPg(array_slice($op, $j, $fin - $j + 1)) !== 'numero'
+                    || ($fin + 1 < $n && !in_array($sig, ['+', '-', '*', '/', '%'], true))) {
+                    return '';
+                }
+            }
+            return 'numero';
+        }
+        $x = $op[0] ?? ['k' => '', 'v' => ''];
+        if ($x['k'] === 'raw') {
+            // Lo ya traducido: x::date, x::timestamp, una de estas cuentas, x::integer
+            return str_starts_with($x['v'], 'DATE(') ? 'fecha' : (str_starts_with($x['v'], 'DATETIME(') ? 'momento'
+                : (preg_match('/^CAST\(.* AS (INTEGER|DOUBLE|DECIMAL\(\d+,\d+\))\)$/s', $x['v']) ? 'numero' : ''));
+        }
+        if (($n === 1 && $x['k'] === 'num') || ($n === 2 && (self::esOp($x, '-') || self::esOp($x, '+')) && $op[1]['k'] === 'num')) {
+            return 'numero';
+        }
+        $u = $this->palabra($x);
+        if ($n === 1 && $u === 'CURRENT_DATE') {
+            return 'fecha';
+        }
+        if (($n === 1 && in_array($u, ['CURRENT_TIMESTAMP', 'LOCALTIMESTAMP'], true)) || ($u === 'NOW' && $n === 3)) {
+            return 'momento';
+        }
+        // Una columna, sola o con su tabla (o su alias) delante
+        if ($x['k'] !== 'id' || !($n === 1 || ($n === 3 && self::esOp($op[1], '.') && $op[2]['k'] === 'id'))) {
+            return '';
+        }
+        $clases = array_unique(array_map(static fn(string $tipo): string => preg_match('/^DATE\b/', $tipo) ? 'fecha'
+            : (str_starts_with($tipo, 'TIMESTAMP') ? 'momento'
+            : (preg_match('/^(SMALLINT|INT|BIGINT|NUMERIC|DECIMAL|REAL|DOUBLE|FLOAT|SMALLSERIAL|SERIAL|BIGSERIAL)/', $tipo) ? 'numero' : '')),
+            $this->tr->tiposDeColumna((string)$op[$n - 1]['v'], $n === 3 ? (string)$x['v'] : '')));
+        return count($clases) === 1 ? (string)reset($clases) : '';
     }
 
     /**
@@ -1702,34 +1828,64 @@ final class TraductorRutinas
     /** Dónde empieza el operando que acaba en $k: un nombre (a.b), una llamada f(…), un (…) o un valor. */
     private function inicioOperando(array $t, int $k): int
     {
-        if (($t[$k]['v'] ?? '') === ')' && ($t[$k]['k'] ?? '') === 'op') {
+        if (self::esOp($t[$k] ?? [], ')')) {
             $nivel = 0;
             for (; $k >= 0; $k--) {
-                if ($t[$k]['v'] === ')') { $nivel++; }
-                if ($t[$k]['v'] === '(' && --$nivel === 0) { break; }
+                if (self::esOp($t[$k], ')')) { $nivel++; }
+                if (self::esOp($t[$k], '(') && --$nivel === 0) { break; }
             }
             return $k > 0 && $t[$k - 1]['k'] === 'id' && empty($t[$k - 1]['q']) && $this->palabra($t[$k - 1]) !== ''
                 && !in_array($this->palabra($t[$k - 1]), self::NO_FUNCIONES, true) ? $k - 1 : $k;
         }
-        while ($k >= 2 && ($t[$k - 1]['v'] ?? '') === '.' && ($t[$k - 2]['k'] ?? '') === 'id') {
+        while ($k >= 2 && self::esOp($t[$k - 1] ?? [], '.') && ($t[$k - 2]['k'] ?? '') === 'id') {
             $k -= 2;
         }
         return $k;
     }
 
+    /** ¿Acaba un operando en el token $x? (un -, un + o un AND delante de algo, no) */
+    private function acabaOperando(array $x): bool
+    {
+        return $x['k'] === 'op' ? $x['v'] === ')' : !in_array($this->palabra($x), self::NO_FUNCIONES, true);
+    }
+
+    /**
+     * Dónde empieza la cuenta sin paréntesis (a * b + c, con los operadores
+     * $ops) que acaba en $k, y dónde acaba la que empieza en $k (finCuenta()):
+     * los operandos de un || o de un + que concatena, que se unen después
+     * que ella (2.9).
+     */
+    private function inicioCuenta(array $t, int $k, array $ops): int
+    {
+        $ini = $this->inicioOperando($t, $k);
+        while ($ini >= 2 && ($t[$ini - 1]['k'] ?? '') === 'op' && in_array($t[$ini - 1]['v'], $ops, true) && $this->acabaOperando($t[$ini - 2])) {
+            $ini = $this->inicioOperando($t, $ini - 2);
+        }
+        return $ini;
+    }
+
+    private function finCuenta(array $t, int $k, array $ops): int
+    {
+        $fin = $this->finOperando($t, $k);
+        while (($t[$fin + 1]['k'] ?? '') === 'op' && in_array($t[$fin + 1]['v'], $ops, true) && isset($t[$fin + 2])) {
+            $fin = $this->finOperando($t, $fin + 2);
+        }
+        return $fin;
+    }
+
     /** Dónde acaba el operando que empieza en $k. */
     private function finOperando(array $t, int $k): int
     {
-        if (($t[$k]['k'] ?? '') === 'op' && $t[$k]['v'] === '-') {
-            $k++;                                   // -5
+        if (self::esOp($t[$k] ?? [], '-') || self::esOp($t[$k] ?? [], '+')) {
+            $k++;                                   // -5, y +2 (2.9: INTERVAL +2 HOUR, como lo escribe el volcado para MySQL)
         }
-        if (($t[$k]['v'] ?? '') === '(') {
+        if (self::esOp($t[$k] ?? [], '(')) {
             return $this->cierre($t, $k);
         }
-        if (($t[$k]['k'] ?? '') === 'id' && ($t[$k + 1]['v'] ?? '') === '(') {
+        if (($t[$k]['k'] ?? '') === 'id' && self::esOp($t[$k + 1] ?? [], '(')) {
             return $this->cierre($t, $k + 1);
         }
-        while (($t[$k + 1]['v'] ?? '') === '.' && ($t[$k + 2]['k'] ?? '') === 'id') {
+        while (self::esOp($t[$k + 1] ?? [], '.') && ($t[$k + 2]['k'] ?? '') === 'id') {
             $k += 2;
         }
         return $k;
@@ -1957,7 +2113,7 @@ final class TraductorRutinas
                 $partes = $this->separar($args);
                 $cant = $partes[1];
                 $signo = '+';
-                if (count($cant) === 2 && $cant[0]['v'] === '-' && $cant[1]['k'] === 'num') {
+                if (count($cant) === 2 && self::esOp($cant[0], '-') && $cant[1]['k'] === 'num') {
                     $signo = '-';
                     $cant = [$cant[1]];
                 }
@@ -2001,7 +2157,7 @@ final class TraductorRutinas
                 $estilo = (int)($partes[2][0]['v'] ?? -1);
                 $base = $this->palabra($tipo[0] ?? []);
                 if (in_array($base, ['VARCHAR', 'NVARCHAR', 'CHAR', 'NCHAR'], true) && in_array($estilo, [120, 121, 20, 21, 23, 126], true)) {
-                    $largo = ($tipo[1]['v'] ?? '') === '(' ? (int)$tipo[2]['v'] : 30;
+                    $largo = self::esOp($tipo[1] ?? [], '(') ? (int)$tipo[2]['v'] : 30;
                     return "SUBSTR(STRFTIME('%Y-%m-%d %H:%M:%S', $x), 1, $largo)";
                 }
                 return $this->conversion($x, $tipo);
@@ -2024,7 +2180,7 @@ final class TraductorRutinas
                 if (!preg_match('/^\d+$/', trim($a[0]))) {
                     throw new NoTraducible(t('Chr() con un código calculado'));
                 }
-                return $this->tr->texto([['k' => 'str', 'v' => mb_chr((int)$a[0], 'UTF-8')]]);
+                return $this->tr->texto([['k' => 'str', 'v' => caracterUtf8((int)$a[0])]]);
             case 'IIF':     return "(CASE WHEN {$a[0]} THEN {$a[1]} ELSE {$a[2]} END)";
             case 'ISNULL':  return "({$a[0]} IS NULL)";
             case 'MID':     return 'SUBSTR(' . implode(', ', $a) . ')';
@@ -2156,8 +2312,9 @@ final class TraductorRutinas
         [$mult, $nombre] = ['SECOND' => [1, 'seconds'], 'MINUTE' => [1, 'minutes'], 'HOUR' => [1, 'hours'], 'DAY' => [1, 'days'],
                             'WEEK' => [7, 'days'], 'MONTH' => [1, 'months'], 'QUARTER' => [3, 'months'], 'YEAR' => [1, 'years']][$unidad]
             ?? throw new NoTraducible(t("INTERVAL en '{u}'", ['u' => $unidad]));
-        if (count($cant) === 2 && $cant[0]['v'] === '-' && $cant[1]['k'] === 'num') {
-            $signo = $signo === '+' ? '-' : '+';      // INTERVAL -2 HOUR
+        if (count($cant) === 2 && (self::esOp($cant[0], '-') || self::esOp($cant[0], '+')) && $cant[1]['k'] === 'num') {
+            // INTERVAL -2 HOUR, e INTERVAL +2 HOUR (2.9), como lo escribe el volcado para MySQL
+            $signo = $cant[0]['v'] === '+' ? $signo : ($signo === '+' ? '-' : '+');
             $cant = [$cant[1]];
         }
         if (count($cant) === 1 && $cant[0]['k'] === 'num') {
@@ -2220,6 +2377,15 @@ final class TraductorRutinas
     // Utilidades
     // ------------------------------------------------------------------
 
+    /**
+     * ¿Es el token el signo de puntuación $v? Un texto '(', ',' o ';' no lo
+     * es (2.9): se tomaba por él, y CONCAT(a, ' (', b, ')') se partía mal.
+     */
+    public static function esOp(array $x, string $v): bool
+    {
+        return ($x['k'] ?? '') === 'op' && $x['v'] === $v;
+    }
+
     /** La palabra (sin comillas) de un token, en mayúsculas; '' si no lo es. */
     private function palabra(array $x): string
     {
@@ -2236,7 +2402,7 @@ final class TraductorRutinas
     {
         try {
             return $this->buscar($t, 0, [$p]);
-        } catch (NoTraducible $e) {
+        } catch (NoTraducible) {
             return null;
         }
     }
@@ -2246,8 +2412,8 @@ final class TraductorRutinas
     {
         $nivel = 0;
         for ($n = count($t); $k < $n; $k++) {
-            if ($t[$k]['v'] === '(') { $nivel++; }
-            if ($t[$k]['v'] === ')' && --$nivel === 0) {
+            if (self::esOp($t[$k], '(')) { $nivel++; }
+            if (self::esOp($t[$k], ')') && --$nivel === 0) {
                 return $k;
             }
         }
@@ -2261,9 +2427,9 @@ final class TraductorRutinas
         $actual = [];
         $nivel = 0;
         foreach ($t as $x) {
-            if ($x['v'] === '(') { $nivel++; }
-            if ($x['v'] === ')') { $nivel--; }
-            if ($x['v'] === ',' && $nivel === 0) {
+            if (self::esOp($x, '(')) { $nivel++; }
+            if (self::esOp($x, ')')) { $nivel--; }
+            if (self::esOp($x, ',') && $nivel === 0) {
                 $partes[] = $actual;
                 $actual = [];
                 continue;

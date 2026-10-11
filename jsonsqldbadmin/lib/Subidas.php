@@ -93,6 +93,9 @@ final class Subidas
         $de = fopen((string)$trozo['tmp_name'], 'rb');
         $a  = fopen($fichero, 'ab');
         if ($de === false || $a === false || !flock($a, LOCK_EX)) {
+            foreach ([$de, $a] as $h) {
+                if ($h !== false) { fclose($h); }
+            }
             throw new RuntimeException(t('No se puede escribir en la carpeta \'{dir}\'.', ['dir' => dirname($fichero)]));
         }
         try {

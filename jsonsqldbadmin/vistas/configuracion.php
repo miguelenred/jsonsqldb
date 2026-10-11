@@ -58,7 +58,7 @@ $numero   = static function (string $campo, string $texto, string $ayuda = '') u
     <div><span class="text-body-secondary small"><?= h(t('Conexión')) ?></span><br><strong><?= $directa ? t('Directa al motor') : t('Por la API') ?></strong></div>
     <div><span class="text-body-secondary small"><?= h(t('Respuesta del motor')) ?></span><br>
       <?php if ($prueba === null): ?>
-        <?= t('<strong class="text-success">{1} {2} en {3} ms</strong>', [1 => $bases, 2 => $bases === 1 ? 'base' : 'bases', 3 => sprintf('%.1f', $ms)]) ?>
+        <?= t('<strong class="text-success">{1} {2} en {3} ms</strong>', [1 => $bases, 2 => $bases === 1 ? t('base') : t('bases'), 3 => sprintf('%.1f', $ms)]) ?>
       <?php else: ?>
         <?= t('<strong class="text-danger">no responde</strong>') ?> <span class="small"><?= h($prueba) ?></span>
       <?php endif; ?>

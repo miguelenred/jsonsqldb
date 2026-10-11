@@ -30,30 +30,27 @@ agree on the approach before code exists than after.
 No dependencies, no setup beyond the configuration files:
 
 ```bash
-cp api/jsonsqldb_api_config.dist.php api/jsonsqldb_api_config.php
-cp jsonsqldbadmin/config.dist.php    jsonsqldbadmin/config.php
-
+php configurar.php --local      # both configuration files, with random keys, allowing HTTP
+composer test                   # all 26 suites; or one by one:
 php tests/f1_nucleo.php
-php tests/f2_parser.php
-php tests/f2_select.php
 php tests/f3_escrituras.php
-php tests/f4_api.php
-php tests/f5_esquema.php
 php tests/f5_admin.php
 ```
 
-All seven must end with `FALLOS: 0`. They use temporary directories and never
-touch `data/`.
+Every suite must end with `FALLOS: 0`. They use temporary directories and never
+touch `data/`. The ones that load dumps into MySQL or PostgreSQL, run
+PowerShell scripts or open earlier versions from the git tags check more where
+those are available, and say what they skip; CI has them all.
 
 `f4_api.php` reads the API keys from your configuration file, so it keeps working
-after you change them — which you should. `f5_admin.php` needs the cURL
-extension.
+after you change them — which you should. `f5_admin.php`, `f11_asistente.php`
+and `f20_memoria.php` need the cURL extension.
 
 ## What a pull request should look like
 
 - **Tests for the change.** Every suite is a plain PHP file with `chk()` calls;
   follow the surrounding style and add cases to the file that fits.
-- **All seven suites green**, and update the expected counts in the README and in
+- **All 26 suites green**, and update the expected counts in the README and in
   `docs/` if you added checks.
 - **Documentation updated.** `docs/` is part of the project, not an afterthought.
 - **No new dependencies.** Not needing Composer, extensions or a database server
@@ -70,8 +67,10 @@ Before proposing these, know that they were considered and rejected:
 
 - **Changing `AUTOINCREMENT` on an existing table.** It requires rebuilding the
   table; doing it silently would be worse than refusing.
-- **`CHECK` constraints.** Use a `BEFORE` trigger with `RAISE(ABORT, '…')`.
-- **Secondary indexes.** Lookups are linear over an in-memory array; an index
-  layer would add a large amount of state to keep consistent for a gain that only
-  shows up at sizes this engine is not built for.
-- **`CONCAT()`.** Use `||`, as in SQLite.
+- **Transactions that span requests** (`BEGIN` in one call, `COMMIT` in
+  another). A client that hangs in between would leave the database locked for
+  everyone; a transaction is one `lote` or one `transaccion()`.
+- **`INSTEAD OF` triggers and `UPDATE OF columns`.**
+- **`WITHOUT ROWID`, `ZEROFILL`, `ON UPDATE CURRENT_TIMESTAMP`, `FULLTEXT` and
+  `SPATIAL`.** Each one is an error that says it is not supported, rather than
+  something silently ignored.

@@ -44,7 +44,7 @@
         </form>
 
         <p class="text-body-secondary mt-4 mb-0" style="font-size:11.5px;text-align:center">
-            <?= t('{1}PHP {2} ·', [1 => version() !== '' ? 'v' . h(version()) . ' · ' : '', 2 => h(PHP_VERSION)]) ?>
+            <?= version() !== '' ? 'v' . h(version()) . ' ·' : '' ?>
             <a href="https://miguelenred.es/jsonsqldb" target="_blank" rel="noopener">miguelenred.es/jsonsqldb</a>
         </p>
     </div>

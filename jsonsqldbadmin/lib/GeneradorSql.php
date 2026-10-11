@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/NoTraducible.php';
 
 use JsonSQLDB\Parser;
+use JsonSQLDB\ParserEscritura;
 use JsonSQLDB\Select;
 
 /**
@@ -41,6 +42,8 @@ final class GeneradorSql
     private bool $enTrigger = false;
     /** @var array<string,array> los WITH, que en Access se escriben dentro del FROM */
     private array $con = [];
+    /** ¿Ha salido una consulta recursiva del WITH? (SQL Server la corta a los 100 niveles; ver vista()) */
+    private bool $recursivo = false;
     /** @var array<string,array<string,string>> tipo de cada columna de cada tabla, en minúsculas */
     private array $tipos = [];
     /** @var array<string,string> las tablas de los FROM que se están escribiendo: alias → tabla */
@@ -69,20 +72,26 @@ final class GeneradorSql
         return $this;
     }
 
-    /** Las clases del motor que hacen falta para analizar: solo el analizador. */
+    /**
+     * El analizador del motor, cuando el panel trabaja por la API y el motor
+     * no está cargado: su cargador de clases, que trae solo lo que se use.
+     * Antes se cargaba una lista de clases a mano, y le faltaban las que el
+     * analizador usa por dentro (Valor, con cualquier número de la SQL).
+     */
     public static function cargarAnalizador(): void
     {
-        if (class_exists(Parser::class, false)) {
+        if (class_exists(Parser::class)) {
             return;
         }
-        $motor = defined('ADMIN_MOTOR_RUTA') && is_dir((string)ADMIN_MOTOR_RUTA . '/engine')
-            ? (string)ADMIN_MOTOR_RUTA . '/engine' : dirname(__DIR__, 2) . '/engine';
-        foreach (['JsonSqlDbError', 'Lexer', 'Parser', 'Select', 'Collation'] as $clase) {
-            if (!is_file("$motor/$clase.php")) {
-                throw new NoTraducible(t('No se encuentra el analizador del motor en {ruta}', ['ruta' => $motor]));
-            }
-            require_once "$motor/$clase.php";
+        // Una ruta vacía (lo normal: el motor junto al panel) no se mira: «/engine»
+        // está fuera de open_basedir en un hosting, y el aviso de PHP salía en
+        // medio de la respuesta
+        $ruta  = defined('ADMIN_MOTOR_RUTA') ? rtrim(trim((string)ADMIN_MOTOR_RUTA), '/\\') : '';
+        $motor = $ruta !== '' && is_dir($ruta . '/engine') ? $ruta . '/engine' : dirname(__DIR__, 2) . '/engine';
+        if (!is_file("$motor/bootstrap.php")) {
+            throw new NoTraducible(t('No se encuentra el analizador del motor en {ruta}', ['ruta' => $motor]));
         }
+        require_once "$motor/bootstrap.php";
     }
 
     // ------------------------------------------------------------------
@@ -93,11 +102,14 @@ final class GeneradorSql
     public function vista(string $nombre, string $sql): string
     {
         $ast = Parser::analizar($sql);
+        $this->recursivo = false;
         $cuerpo = $this->consulta($ast, true);
         switch ($this->d) {
             case 'sqlserver':
-                // CREATE VIEW tiene que ir solo en su lote
-                return "GO\nCREATE VIEW " . $this->q($nombre) . " AS\n" . $cuerpo . ";\nGO";
+                // CREATE VIEW tiene que ir solo en su lote. Una vista no puede
+                // llevar OPTION (MAXRECURSION), así que se avisa
+                return "GO\n" . ($this->recursivo ? '-- ' . t('SQL Server corta la recursión a los 100 niveles: si hacen falta más, OPTION (MAXRECURSION 0) en la consulta que use la vista') . "\n" : '')
+                    . 'CREATE VIEW ' . $this->q($nombre) . " AS\n" . $cuerpo . ";\nGO";
             default:
                 return 'CREATE VIEW ' . $this->q($nombre) . ' AS ' . $cuerpo . ';';
         }
@@ -127,7 +139,7 @@ final class GeneradorSql
                 foreach (self::tablasUsadas(Parser::analizar((string)$por[$n]['sql'])) as $t) {
                     $visitar($t);
                 }
-            } catch (\Throwable $e) {
+            } catch (\Throwable) {
                 // una vista que no se analiza va donde caiga; ya dará su error
             }
             $orden[] = $por[$n];
@@ -164,8 +176,9 @@ final class GeneradorSql
      * @param list<array> $triggers   lo que da SHOW TRIGGERS: nombre y su sql
      * @param list<array> $columnas   las columnas de la tabla (SHOW COLUMNS)
      * @param list<string> $pk        las columnas de la clave primaria
+     * @param list<array> $claves     sus claves (SHOW KEYS), por las foráneas en cascada de SQL Server (2.9)
      */
-    public function triggers(string $tabla, array $triggers, array $columnas, array $pk): string
+    public function triggers(string $tabla, array $triggers, array $columnas, array $pk, array $claves = []): string
     {
         $defs = [];
         foreach ($triggers as $trg) {
@@ -175,7 +188,7 @@ final class GeneradorSql
         switch ($this->d) {
             case 'mysql':      return $this->triggersMysql($tabla, $defs, $pk);
             case 'postgresql': return $this->triggersPg($tabla, $defs);
-            case 'sqlserver':  return $this->triggersSqlServer($tabla, $defs, $columnas, $pk);
+            case 'sqlserver':  return $this->triggersSqlServer($tabla, $defs, $columnas, $pk, $claves);
         }
         throw new NoTraducible(t('Access no tiene triggers: ni su SQL ni OLEDB pueden crearlos. Las macros de datos de un .accdb se hacen a mano en Access.'));
     }
@@ -362,8 +375,14 @@ final class GeneradorSql
      * SQL Server: un trigger por cada AFTER, y uno INSTEAD OF por evento que
      * reúne los BEFORE (solo se admite uno). Cada uno recorre sus filas con un
      * cursor y deja NEW y OLD en variables.
+     *
+     * SQL Server no admite un INSTEAD OF DELETE (o UPDATE) en una tabla con una
+     * clave foránea que actúa en cascada en ese evento (CASCADE, SET NULL o SET
+     * DEFAULT; error 2113): ese BEFORE no tiene traducción (2.9: se escribía, y
+     * el volcado entero fallaba al cargarlo). La de una tabla hacia sí misma
+     * va sin acciones (ver Exportar::claveForanea()).
      */
-    private function triggersSqlServer(string $tabla, array $defs, array $columnas, array $pk): string
+    private function triggersSqlServer(string $tabla, array $defs, array $columnas, array $pk, array $claves): string
     {
         $porEvento = [];
         $out = '';
@@ -375,6 +394,13 @@ final class GeneradorSql
             }
         }
         foreach ($porEvento as $evento => $lista) {
+            foreach ($claves as $k) {
+                $accion = $evento === 'INSERT' ? '' : (string)($k['on_' . strtolower($evento)] ?? '');
+                if ($k['tipo'] === 'FOREIGN' && (string)$k['tabla_destino'] !== $tabla && in_array($accion, ['CASCADE', 'SET NULL', 'SET DEFAULT'], true)) {
+                    throw new NoTraducible(t("SQL Server no admite un trigger INSTEAD OF {evento} (el BEFORE {evento} de aquí) en '{tabla}', que tiene la clave foránea '{clave}' con ON {evento} {accion}",
+                        ['evento' => $evento, 'tabla' => $tabla, 'clave' => (string)$k['nombre'], 'accion' => $accion]));
+                }
+            }
             $nombre = count($lista) === 1 ? $lista[0]['name'] : $tabla . '_antes_' . strtolower($evento);
             $out .= $this->triggerSqlServer($nombre, 'INSTEAD OF', $evento, $tabla, $lista, $columnas, $pk);
         }
@@ -483,7 +509,7 @@ final class GeneradorSql
                 continue;
             }
             if (strncasecmp(ltrim($paso), 'SET', 3) === 0) {
-                foreach (Parser::analizarSetNew($paso)['asig'] as [$col, $e]) {
+                foreach (ParserEscritura::analizarSetNew($paso)['asig'] as [$col, $e]) {
                     $valor = $this->expr($e);
                     switch ($this->d) {
                         case 'mysql':      $out .= $pre . 'SET NEW.' . $this->q($col) . " = $valor;\n"; break;
@@ -609,6 +635,13 @@ final class GeneradorSql
     /** INSERT, UPDATE o DELETE. */
     private function escritura(array $ast): string
     {
+        // Lo que estas formas no llevan, mejor sin traducir que traducido a
+        // medias: un upsert, RETURNING y, desde la 2.9, un alias, otras tablas,
+        // ORDER BY o LIMIT
+        if (($ast['conflicto'] ?? null) !== null || ($ast['returning'] ?? null) !== null || ($ast['alias'] ?? null) !== null
+            || isset($ast['desde']) || ($ast['order'] ?? []) !== [] || ($ast['limit'] ?? null) !== null) {
+            throw new NoTraducible(t('Un INSERT con OR IGNORE, OR REPLACE u ON CONFLICT, o un UPDATE o DELETE con alias, otras tablas, ORDER BY o LIMIT, o cualquiera con RETURNING, no se traduce dentro de un trigger: hay que escribirlo a mano'));
+        }
         $t = $this->q($ast['tabla']);
         switch ($ast['k']) {
             case 'insert':
@@ -638,13 +671,33 @@ final class GeneradorSql
         $conAntes = $this->con;
         if (!empty($ast['with'])) {
             if ($this->d === 'access') {
+                foreach ($ast['with'] as $sel) {
+                    if (isset($sel['columnas']) || isset($sel['recursiva'])) {
+                        throw new NoTraducible(t('Access no tiene WITH: una consulta del WITH con lista de columnas o que se nombra a sí misma no se puede escribir'));
+                    }
+                }
                 $this->con = array_change_key_case($ast['with'], CASE_LOWER) + $this->con;
             } else {
-                $partes = [];
+                // WITH RECURSIVE y las listas de columnas (2.9). SQL Server no
+                // lleva RECURSIVE y solo admite UNION ALL; LIMIT en una
+                // recursiva no tiene la misma forma en ninguno
+                $partes    = [];
+                $recursiva = false;
                 foreach ($ast['with'] as $nombre => $sel) {
-                    $partes[] = $this->q((string)$nombre) . ' AS (' . $this->consulta($sel) . ')';
+                    if (isset($sel['recursiva'])) {
+                        if ($sel['limit'] !== null || $sel['offset'] !== null) {
+                            throw new NoTraducible(t('LIMIT en una consulta del WITH que se nombra a sí misma no tiene traducción'));
+                        }
+                        if ($this->d === 'sqlserver' && in_array('UNION', $sel['ops'], true)) {
+                            throw new NoTraducible(t('SQL Server solo admite UNION ALL en una consulta recursiva del WITH'));
+                        }
+                        $recursiva = true;
+                    }
+                    $cols     = isset($sel['columnas']) ? ' (' . implode(', ', array_map([$this, 'q'], $sel['columnas'])) . ')' : '';
+                    $partes[] = $this->q((string)$nombre) . $cols . ' AS (' . $this->consulta($sel) . ')';
                 }
-                $prefijo = 'WITH ' . implode(', ', $partes) . ' ';
+                $this->recursivo = $this->recursivo || $recursiva;
+                $prefijo = 'WITH ' . ($recursiva && $this->d !== 'sqlserver' ? 'RECURSIVE ' : '') . implode(', ', $partes) . ' ';
             }
         }
         try {
@@ -767,7 +820,10 @@ final class GeneradorSql
     private function ordenarPor(array $o, array $cols): string
     {
         $e = $o['expr'];
-        $dir = $o['dir'] === 'DESC' ? ' DESC' : '';
+        // NULL va primero de menor a mayor y último de mayor a menor, como aquí;
+        // PostgreSQL lo hace al revés si no se le dice (2.9)
+        $dir = ($o['dir'] === 'DESC' ? ' DESC' : '')
+            . ($this->d === 'postgresql' ? ($o['dir'] === 'DESC' ? ' NULLS LAST' : ' NULLS FIRST') : '');
         $real = $e;
         if ($e['k'] === 'lit' && is_int($e['v'])) {
             $real = $cols[$e['v'] - 1]['expr'] ?? $e;
@@ -947,6 +1003,7 @@ final class GeneradorSql
             case 'un':
                 return $n['op'] === 'NOT' ? 'NOT (' . $this->expr($n['e'], true) . ')' : '-(' . $this->expr($n['e']) . ')';
             case 'fn':      return $this->funcion($n);
+            case 'ventana': return $this->ventana($n);
             case 'case':    return $this->caso($n);
             case 'in':
                 $dentro = $n['select'] !== null ? $this->consulta($n['select'])
@@ -1187,9 +1244,65 @@ final class GeneradorSql
     // Funciones
     // ------------------------------------------------------------------
 
+    /**
+     * Una función de ventana (2.9). MySQL 8 y SQL Server no tienen GROUPS,
+     * EXCLUDE ni FILTER; SQL Server tampoco NTH_VALUE ni RANGE con una
+     * distancia; Access no tiene ventanas. De los agregados, los que se
+     * escriben igual con OVER en los tres.
+     */
+    private function ventana(array $n): string
+    {
+        $d = $this->d;
+        $m = $n['def']['marco'];
+        $motor = ['mysql' => 'MySQL', 'postgresql' => 'PostgreSQL', 'sqlserver' => 'SQL Server', 'access' => 'Access'][$d] ?? $d;
+        $propias = ['ROW_NUMBER', 'RANK', 'DENSE_RANK', 'PERCENT_RANK', 'CUME_DIST', 'NTILE', 'LAG', 'LEAD', 'FIRST_VALUE', 'LAST_VALUE', 'NTH_VALUE'];
+        $falta = null;
+        if ($d === 'jsonsqldb') {
+            // El SQL de aquí: tal cual
+        } elseif ($d === 'access') {
+            throw new NoTraducible(t('Access no tiene funciones de ventana (OVER)'));
+        } elseif (!in_array($n['nombre'], array_merge($propias, ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX']), true)
+            || ($d === 'sqlserver' && $n['nombre'] === 'NTH_VALUE')) {
+            $falta = $n['nombre'] . '() OVER';
+        } elseif ($d !== 'postgresql') {
+            if ($n['filtro'] !== null) {
+                $falta = 'FILTER';
+            } elseif ($m !== null && ($m['tipo'] === 'GROUPS' || $m['excluir'] !== 'NO OTHERS')) {
+                $falta = $m['tipo'] === 'GROUPS' ? 'GROUPS' : 'EXCLUDE';
+            } elseif ($d === 'sqlserver' && $m !== null && $m['tipo'] === 'RANGE' && (isset($m['inicio']['n']) || isset($m['fin']['n']))) {
+                $falta = 'RANGE … PRECEDING / FOLLOWING';
+            }
+        }
+        if ($falta !== null) {
+            throw new NoTraducible(t('{motor} no tiene {que} en una función de ventana', ['motor' => $motor, 'que' => $falta]));
+        }
+        $f = in_array($n['nombre'], $propias, true)
+            ? $n['nombre'] . '(' . implode(', ', array_map(fn($x) => $this->expr($x), $n['args'])) . ')'
+            : $this->funcion(['k' => 'fn', 'nombre' => $n['nombre'], 'args' => $n['args'], 'star' => $n['star'], 'distinct' => false]);
+        if ($n['filtro'] !== null) {
+            $f .= ' FILTER (WHERE ' . $this->expr($n['filtro'], true) . ')';
+        }
+        $partes = [];
+        if ($n['def']['particion'] !== []) {
+            $partes[] = 'PARTITION BY ' . implode(', ', array_map(fn($e) => $this->expr($e), $n['def']['particion']));
+        }
+        if ($n['def']['orden'] !== []) {
+            $partes[] = 'ORDER BY ' . implode(', ', array_map(fn($o) => $this->ordenarPor($o, []), $n['def']['orden']));
+        }
+        if ($m !== null) {
+            $limite = static fn(array $l): string => isset($l['n']) ? $l['n'] . ' ' . $l['k'] : $l['k'];
+            $partes[] = $m['tipo'] . ' BETWEEN ' . $limite($m['inicio']) . ' AND ' . $limite($m['fin'])
+                . ($m['excluir'] !== 'NO OTHERS' ? ' EXCLUDE ' . $m['excluir'] : '');
+        }
+        return $f . ' OVER (' . implode(' ', $partes) . ')';
+    }
+
     private function funcion(array $n): string
     {
         $f = strtoupper((string)$n['nombre']);
+        if ($f === 'COLLATE' || $f === 'PLEGAR') {
+            return $this->colacion($f, $this->expr($n['args'][0]), (string)$n['args'][1]['v']);
+        }
         $a = array_map(fn($x) => $this->expr($x), $n['args']);
         $d = $this->d;
         $distinto = $n['distinct'] ? 'DISTINCT ' : '';
@@ -1293,6 +1406,35 @@ final class GeneradorSql
                 return $this->strftime($n['args']);
         }
         throw new NoTraducible(t("Función sin traducción: {f}()", ['f' => $f]));
+    }
+
+    /**
+     * x COLLATE NOCASE | RTRIM | BINARY (2.9). El analizador pone PLEGAR(x)
+     * en lo que compara u ordena con una colación escrita (ver
+     * Parser::plegar()): en MySQL y SQL Server basta con su COLLATE, el más
+     * parecido; en PostgreSQL, que no tiene uno que no distinga mayúsculas
+     * sin crearlo antes, es PLEGAR el que pasa a LOWER o RTRIM; Access ya
+     * compara sin distinguirlas, y no tiene cómo distinguirlas.
+     */
+    private function colacion(string $f, string $x, string $c): string
+    {
+        switch ($this->d) {
+            case 'jsonsqldb':
+                return $f === 'COLLATE' ? "$x COLLATE $c" : $x;
+            case 'mysql':
+                return $f === 'COLLATE' ? "$x COLLATE " . ($c === 'NOCASE' ? 'utf8mb4_general_ci' : 'utf8mb4_bin') : $x;
+            case 'sqlserver':
+                return $f === 'COLLATE' ? "$x COLLATE " . ($c === 'NOCASE' ? 'Latin1_General_100_CI_AS' : 'Latin1_General_100_BIN2') : $x;
+            case 'postgresql':
+                if ($f === 'COLLATE') {
+                    return $c === 'BINARY' ? "$x COLLATE \"C\"" : $x;
+                }
+                return $c === 'NOCASE' ? "LOWER($x)" : "RTRIM($x)";
+        }
+        if ($f === 'COLLATE' && $c === 'BINARY') {
+            throw new NoTraducible(t('Access compara los textos sin distinguir mayúsculas y no tiene cómo distinguirlas: COLLATE BINARY no se puede escribir'));
+        }
+        return $f === 'PLEGAR' && $c === 'RTRIM' ? "RTrim($x)" : $x;
     }
 
     /** MIN/MAX de varios valores: NULL si alguno lo es, como aquí. */

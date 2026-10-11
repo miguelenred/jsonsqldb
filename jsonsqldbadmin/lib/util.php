@@ -2,15 +2,11 @@
 declare(strict_types=1);
 
 /**
- * Versión del proyecto.
- *
- * La dice el motor, que es de donde sale. El panel no lo carga —habla con él por
- * HTTP— así que si no está disponible se lee el mismo fichero directamente. Lo
- * que no puede haber son dos sitios que sepan la versión por su cuenta: así es
- * como el índice de la documentación se quedó tres versiones atrás.
+ * Funciones comunes del panel.
  *
  * https://miguelenred.es/jsonsqldb
  */
+
 /**
  * La dirección de un fichero de assets/ con la fecha del fichero detrás
  * (?v=…): al actualizar el panel, el navegador pide el nuevo en vez de seguir
@@ -21,6 +17,14 @@ function recurso(string $fichero): string
     return 'assets/' . $fichero . '?v=' . (string)@filemtime(dirname(__DIR__) . '/assets/' . $fichero);
 }
 
+/**
+ * Versión del proyecto.
+ *
+ * La dice el motor, que es de donde sale. El panel no lo carga —habla con él por
+ * HTTP— así que si no está disponible se lee el mismo fichero directamente. Lo
+ * que no puede haber son dos sitios que sepan la versión por su cuenta: así es
+ * como el índice de la documentación se quedó tres versiones atrás.
+ */
 function version(): string
 {
     static $v = null;
@@ -41,7 +45,6 @@ function h($valor): string
     return htmlspecialchars((string)$valor, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
-/** Campo oculto con el token CSRF. */
 /** El nonce de esta respuesta para los <script> de la página (ver la CSP en index.php). */
 function nonce(): string
 {
@@ -49,6 +52,7 @@ function nonce(): string
     return $nonce ??= base64_encode(random_bytes(16));
 }
 
+/** Campo oculto con el token CSRF. */
 function csrf(): string
 {
     return '<input type="hidden" name="csrf" value="' . h(Auth::csrf()) . '">';
@@ -61,11 +65,15 @@ function csrf(): string
 function util_ip(): string
 {
     if (ADMIN_CONFIAR_EN_PROXY) {
+        // La última de la lista, la que pone el proxy (2.9): la primera la
+        // escribe el cliente, y con ella se saltaba la lista de IPs
+        // permitidas y el bloqueo por intentos, o bloqueaba la IP de otro
         $reenviada = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
         if ($reenviada !== '') {
-            $primera = trim(explode(',', $reenviada)[0]);
-            if (filter_var($primera, FILTER_VALIDATE_IP) !== false) {
-                return $primera;
+            $lista  = explode(',', $reenviada);
+            $ultima = trim((string)end($lista));
+            if (filter_var($ultima, FILTER_VALIDATE_IP) !== false) {
+                return $ultima;
             }
         }
     }
@@ -150,14 +158,16 @@ function redirigir(array $params = []): void
 
 /**
  * El selector de idioma: un enlace por idioma a la página en la que se está,
- * con ?idioma=xx (ver index.php).
+ * con ?idioma=xx (ver index.php). Con alguien dentro, el enlace lleva además
+ * el token que deja guardar el idioma en su usuario (2.9).
  */
 function selectorIdioma(): string
 {
+    $token = Auth::identificado() ? ['token' => Auth::tokenIdioma()] : [];
     $out = '<nav class="lang-switch" aria-label="' . h(t('Idioma')) . '">';
     foreach (Idioma::DISPONIBLES as $codigo => $nombre) {
         $actual = Idioma::actual() === $codigo;
-        $out .= '<a href="' . h(url(['idioma' => $codigo] + $_GET)) . '" hreflang="' . $codigo . '" lang="' . $codigo . '"'
+        $out .= '<a href="' . h(url(['idioma' => $codigo] + $token + $_GET)) . '" hreflang="' . $codigo . '" lang="' . $codigo . '"'
               . ' title="' . h($nombre) . '"' . ($actual ? ' class="active" aria-current="true"' : '') . '>'
               . strtoupper($codigo) . '</a>';
     }
@@ -182,18 +192,29 @@ function flashes(): array
     return $f;
 }
 
+/**
+ * Un campo de un formulario ($_POST, $_GET o una de sus listas) como texto,
+ * tal cual, sin quitar espacios (las contraseñas van así); $defecto si falta
+ * o no es un valor simple (2.9): con (string), uno enviado como lista
+ * (campo[]=x) daba el aviso «Array to string conversion» y valía «Array», y
+ * se llegaba a programar una copia de la base «Array».
+ */
+function textoDe(array $datos, string $nombre, string $defecto = ''): string
+{
+    $v = $datos[$nombre] ?? $defecto;
+    return is_scalar($v) ? (string)$v : $defecto;
+}
+
 /** Valor de $_POST como texto. */
 function post(string $nombre, string $defecto = ''): string
 {
-    $v = $_POST[$nombre] ?? $defecto;
-    return is_scalar($v) ? trim((string)$v) : $defecto;
+    return trim(textoDe($_POST, $nombre, $defecto));
 }
 
 /** Valor de $_GET como texto. */
 function get(string $nombre, string $defecto = ''): string
 {
-    $v = $_GET[$nombre] ?? $defecto;
-    return is_scalar($v) ? trim((string)$v) : $defecto;
+    return trim(textoDe($_GET, $nombre, $defecto));
 }
 
 /** Comprueba un identificador de tabla, columna o restricción. */
@@ -207,6 +228,22 @@ function identificador(string $valor, string $que): string
         throw new RuntimeException(t('Nombre de {que} no válido: \'{valor}\'', ['que' => t($que), 'valor' => $valor]));
     }
     return $valor;
+}
+
+/**
+ * Una columna como clave de un campo de formulario (name="valor[...]"), en
+ * hexadecimal (2.9): PHP corta esa clave en el primer «]», y una columna
+ * llamada «id]x» llegaba como «id», otra columna.
+ */
+function campo(string $columna): string
+{
+    return bin2hex($columna);
+}
+
+/** La columna de la clave de un campo de formulario (ver campo()); una que no está en hexadecimal no vale. */
+function columnaDeCampo(string $clave): string
+{
+    return identificador(preg_match('/^(?:[0-9a-f]{2})+$/', $clave) === 1 ? (string)hex2bin($clave) : '', 'columna');
 }
 
 /** Comprueba un nombre de base de datos. */
@@ -240,6 +277,45 @@ function celda($valor): string
         return '<span title="' . h($texto) . '">' . h($corte) . '…</span>';
     }
     return h($texto);
+}
+
+/**
+ * Un DEFAULT que se calcula al insertar, como va detrás de DEFAULT: la fecha
+ * de ahora tal cual (CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIME) y una
+ * expresión entre paréntesis, sin ponerle otros si ya los tiene.
+ */
+function defectoCalculado(string $sql): string
+{
+    $sql = trim($sql);
+    if (preg_match('/^CURRENT_(TIMESTAMP|DATE|TIME)$/i', $sql)) {
+        return strtoupper($sql);
+    }
+    // ¿El primer paréntesis cierra al final? Sin contar los de dentro de un texto
+    $nivel = 0;
+    $n     = strlen($sql);
+    for ($i = 0; $i < $n; $i++) {
+        $ch = $sql[$i];
+        if ($ch === "'" || $ch === '"') {
+            $fin = strpos($sql, $ch, $i + 1);
+            while ($fin !== false && ($sql[$fin + 1] ?? '') === $ch) {      // '' dentro de un texto
+                $fin = strpos($sql, $ch, $fin + 2);
+            }
+            if ($fin === false) {
+                break;
+            }
+            $i = $fin;
+            continue;
+        }
+        if ($ch === '(') {
+            $nivel++;
+        } elseif ($ch === ')' && --$nivel === 0 && $i < $n - 1) {
+            break;
+        }
+        if ($nivel === 0 && $i === 0) {
+            break;
+        }
+    }
+    return $i === $n && $nivel === 0 && ($sql[0] ?? '') === '(' ? $sql : '(' . $sql . ')';
 }
 
 /** Declaración de tipo a partir de los campos del formulario. */
@@ -279,10 +355,6 @@ function condicionFiltro(array $columnas, string $filtro): array
 }
 
 /**
- * Carpeta en disco de una base de datos, comprobada.
- * Solo la usa la copia en ZIP.
- */
-/**
  * Ejecuta $fn con el bloqueo exclusivo de una base: el mismo que coge el motor
  * (engine/Storage.php, los ficheros .turno y .lock de su carpeta), así que
  * mientras dura no hay ninguna consulta ni escritura en ella, y las que llegan
@@ -320,7 +392,8 @@ function conBaseBloqueada(string $ruta, callable $fn)
 /** ¿Es un fichero de bloqueo del motor (.lock, .turno, .tabla.lock)? No se copian ni se borran. */
 function esFicheroDeBloqueo(string $nombre): bool
 {
-    return $nombre === '.turno' || (str_starts_with($nombre, '.') && str_ends_with($nombre, '.lock'));
+    // .turno de la base y .<tabla>.turno de cada tabla, y los .lock
+    return str_starts_with($nombre, '.') && (str_ends_with($nombre, '.turno') || str_ends_with($nombre, '.lock'));
 }
 
 /** La carpeta de una base si el panel la alcanza (misma máquina que el motor), o null. */
@@ -328,11 +401,15 @@ function rutaDeLaBaseSiSeAlcanza(string $base): ?string
 {
     try {
         return rutaDeLaBase($base);
-    } catch (Throwable $e) {
+    } catch (Throwable) {
         return null;
     }
 }
 
+/**
+ * Carpeta en disco de una base de datos, comprobada: para la copia en ZIP,
+ * su restauración y la transacción en la que va una importación.
+ */
 function rutaDeLaBase(string $base): string
 {
     // Antes de mirar el disco: si la API está en otra máquina, los ficheros del
@@ -361,7 +438,7 @@ function rutaDeLaBase(string $base): string
     if (!is_dir($ruta)) {
         throw new RuntimeException(
             t("No se encuentra la carpeta de la base '{base}' en {ruta}. Indica la ruta de la carpeta data/ del motor en ADMIN_RUTA_DATOS_MOTOR, o usa el volcado en SQL, que va por la API y no necesita acceso al disco.",
-              ['base' => $base, 'ruta' => $raiz])
+              ['base' => $base, 'ruta' => $ruta])
         );
     }
     return $ruta;
@@ -474,3 +551,124 @@ function campoImportacion(string $campo, string $accept, string $id = ''): strin
     }
     return $html;
 }
+
+/**
+ * Un fichero temporal nuevo y vacío. En la carpeta temporal del sistema y, si
+ * no se puede (un hosting con open_basedir que no la incluye), en la de datos
+ * del panel. False si no se puede en ninguna.
+ *
+ * @return string|false
+ */
+function ficheroTemporal(string $prefijo)
+{
+    $f = @tempnam(sys_get_temp_dir(), $prefijo);
+    if ($f === false || !is_writable($f)) {
+        $f = @tempnam(rtrim(str_replace('\\', '/', (string)ADMIN_DATA_PATH), '/'), $prefijo);
+    }
+    return $f;
+}
+
+// ----------------------------------------------------------------------
+// Texto UTF-8 en PHP puro (2.9): el panel no necesita mbstring
+// ----------------------------------------------------------------------
+
+/**
+ * El error fatal con que se está cerrando PHP (la memoria, el tiempo), o null.
+ * Para las funciones de cierre que avisan de una descarga o una importación
+ * que se ha cortado, porque esos errores no pasan por ningún catch.
+ *
+ * @return array{type: int, message: string, file: string, line: int}|null
+ */
+function errorFatal(): ?array
+{
+    $e = error_get_last();
+    return $e !== null && in_array($e['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true) ? $e : null;
+}
+
+/** array_is_list() de PHP 8.1, para PHP 8.0: claves 0, 1, 2… en orden */
+function array_is_list_compat(array $a): bool
+{
+    $i = 0;
+    foreach ($a as $k => $_) {
+        if ($k !== $i++) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** ¿Es UTF-8 válido? */
+function utf8Valido(string $s): bool
+{
+    return $s === '' || preg_match('//u', $s) === 1;
+}
+
+/** Caracteres (no bytes) de un texto UTF-8 válido. */
+function largoUtf8(string $s): int
+{
+    return strlen($s) - (int)preg_match_all('/[\x80-\xBF]/', $s);
+}
+
+/** El carácter UTF-8 de un código Unicode. */
+function caracterUtf8(int $c): string
+{
+    if ($c < 0 || $c > 0x10FFFF) { return ''; }
+    if ($c < 0x80) { return chr($c); }
+    if ($c < 0x800) { return chr(0xC0 | ($c >> 6)) . chr(0x80 | ($c & 0x3F)); }
+    if ($c < 0x10000) { return chr(0xE0 | ($c >> 12)) . chr(0x80 | (($c >> 6) & 0x3F)) . chr(0x80 | ($c & 0x3F)); }
+    return chr(0xF0 | ($c >> 18)) . chr(0x80 | (($c >> 12) & 0x3F)) . chr(0x80 | (($c >> 6) & 0x3F)) . chr(0x80 | ($c & 0x3F));
+}
+
+/**
+ * Windows-1252 (y Latin-1, que es su parte de 0xA0 a 0xFF) a UTF-8. Los cinco
+ * bytes que Windows-1252 deja sin carácter pasan al control del mismo código.
+ *
+ * @return array<string,string> byte => carácter UTF-8, de 0x80 a 0xFF
+ */
+function tablaCp1252(): array
+{
+    static $tabla = null;
+    if ($tabla === null) {
+        $propios = [0x80 => 0x20AC, 0x82 => 0x201A, 0x83 => 0x0192, 0x84 => 0x201E, 0x85 => 0x2026, 0x86 => 0x2020,
+                    0x87 => 0x2021, 0x88 => 0x02C6, 0x89 => 0x2030, 0x8A => 0x0160, 0x8B => 0x2039, 0x8C => 0x0152,
+                    0x8E => 0x017D, 0x91 => 0x2018, 0x92 => 0x2019, 0x93 => 0x201C, 0x94 => 0x201D, 0x95 => 0x2022,
+                    0x96 => 0x2013, 0x97 => 0x2014, 0x98 => 0x02DC, 0x99 => 0x2122, 0x9A => 0x0161, 0x9B => 0x203A,
+                    0x9C => 0x0153, 0x9E => 0x017E, 0x9F => 0x0178];
+        $tabla = [];
+        for ($b = 0x80; $b <= 0xFF; $b++) {
+            $tabla[chr($b)] = caracterUtf8($propios[$b] ?? $b);
+        }
+    }
+    return $tabla;
+}
+
+function cp1252AUtf8(string $s): string
+{
+    return strtr($s, tablaCp1252());
+}
+
+/** De UTF-8 a Windows-1252; lo que no tiene byte en Windows-1252, '?' */
+function utf8ACp1252(string $s): string
+{
+    static $inversa = null;
+    $inversa ??= array_flip(tablaCp1252());
+    return (string)preg_replace_callback('/[^\x00-\x7F]/u', static fn(array $m): string => $inversa[$m[0]] ?? '?', $s);
+}
+
+/** UTF-16 (LE o BE, con los pares sustitutos completos) a UTF-8. */
+function utf16AUtf8(string $s, bool $bigEndian): string
+{
+    $unidades = array_values((array)unpack($bigEndian ? 'n*' : 'v*', substr($s, 0, strlen($s) - strlen($s) % 2)));
+    $out = '';
+    for ($i = 0, $n = count($unidades); $i < $n; $i++) {
+        $u = $unidades[$i];
+        if ($u >= 0xD800 && $u <= 0xDBFF && $i + 1 < $n && $unidades[$i + 1] >= 0xDC00 && $unidades[$i + 1] <= 0xDFFF) {
+            $u = 0x10000 + (($u - 0xD800) << 10) + ($unidades[++$i] - 0xDC00);
+        } elseif ($u >= 0xD800 && $u <= 0xDFFF) {
+            $u = 0xFFFD;                              // medio par suelto
+        }
+        $out .= caracterUtf8($u);
+    }
+    return $out;
+}
+

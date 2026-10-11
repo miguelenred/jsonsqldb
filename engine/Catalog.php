@@ -28,17 +28,18 @@ namespace JsonSQLDB;
  *   "created_at": "...", "updated_at": "..."
  * }
  *
+ * Aquí, lo que necesitan las consultas; los cambios de estructura, en
+ * CatalogDdl, que solo se carga cuando hace falta (2.9).
+ *
  * https://miguelenred.es/jsonsqldb
  */
 final class Catalog
 {
-    private const ACCIONES_FK = ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'];
-    private const TIMINGS     = ['BEFORE', 'AFTER'];
-    private const EVENTOS     = ['INSERT', 'UPDATE', 'DELETE'];
-
     private Storage $st;
     /** @var array<string,array> caché de metas normalizadas dentro de la misma petición */
     private array $memo = [];
+    /** @var array<string, array{0: string, 1: array}> base y tabla => [huella, meta normalizada], la última del proceso (ver meta()) */
+    private static array $normalizadas = [];
 
     public function __construct(Storage $storage)
     {
@@ -68,8 +69,6 @@ final class Catalog
     {
         return $this->memoTablas ??= $this->st->tablas();
     }
-
-    public function existe(string $tabla): bool { return $this->st->existe($tabla); }
 
     /**
      * Todas las tablas que una escritura sobre $tabla puede llegar a tocar.
@@ -154,14 +153,6 @@ final class Catalog
     }
 
     /**
-     * Sobre qué tabla escribe una sentencia de trigger.
-     *
-     * Cadena vacía si no escribe en ninguna (un SELECT), y null si no se puede
-     * saber, que obliga a bloquear la base entera. Se analiza de verdad en vez
-     * de mirar el texto: una SQL con un nombre de tabla dentro de una cadena
-     * engañaría a cualquier expresión regular.
-     */
-    /**
      * Los textos de las sentencias de un cuerpo de trigger, entrando en los
      * bloques IF, y sus condiciones (que pueden leer de otras tablas).
      *
@@ -185,6 +176,14 @@ final class Catalog
         return $todas;
     }
 
+    /**
+     * Sobre qué tabla escribe una sentencia de trigger.
+     *
+     * Cadena vacía si no escribe en ninguna (un SELECT), y null si no se puede
+     * saber, que obliga a bloquear la base entera. Se analiza de verdad en vez
+     * de mirar el texto: una SQL con un nombre de tabla dentro de una cadena
+     * engañaría a cualquier expresión regular.
+     */
     private static function tablaDeLaSentencia(string $sql): ?string
     {
         // SET NEW.col = … solo cambia la fila que se está escribiendo
@@ -193,22 +192,24 @@ final class Catalog
         }
         try {
             $ast = Parser::analizar($sql);
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
             return null;
         }
+        // Lo que lee de otras tablas también habría que bloquearlo: un SELECT
+        // con FROM o con subconsultas, un INSERT … SELECT, y desde la 2.9 las
+        // subconsultas, UPDATE … FROM y DELETE … USING (ver
+        // Database::leeOtras()), que se leían sin bloqueo
         if (in_array($ast['k'], ['select', 'union'], true)) {
-            return '';                             // solo lee
+            return $ast['k'] === 'select' && ($ast['from'] ?? []) === [] && empty($ast['subconsultas']) ? '' : null;
         }
-        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true) || Database::leeOtras($ast)) {
             return null;                           // cualquier otra cosa, a la base
-        }
-        // INSERT ... SELECT lee de otras tablas, que también habría que bloquear
-        if (($ast['select'] ?? null) !== null) {
-            return null;
         }
         $tabla = $ast['tabla'] ?? null;
         return is_string($tabla) && $tabla !== '' ? $tabla : null;
     }
+
+    public function existe(string $tabla): bool { return $this->st->existe($tabla); }
 
     // ------------------------------------------------------------------
     // Vistas
@@ -236,63 +237,20 @@ final class Catalog
         return null;
     }
 
-    /**
-     * Crea una vista: un SELECT guardado con nombre.
-     *
-     * Se comprueba que la consulta se analiza y que no choca con una tabla.
-     * No se ejecuta: una vista puede apuntar a datos que aún no existen.
-     */
-    /** Corta la operación si ya hay una vista con ese nombre. */
-    public function exigirNombreLibreDeVista(string $nombre): void
-    {
-        if ($this->esVista($nombre)) {
-            throw JsonSqlDbError::schema("Ya existe una vista llamada '$nombre'");
-        }
-    }
-
-    public function crearVista(string $nombre, string $sql, bool $siNoExiste = false): bool
-    {
-        Storage::validarTabla($nombre);
-
-        if ($this->existe($nombre)) {
-            throw JsonSqlDbError::schema("Ya existe una tabla llamada '$nombre'");
-        }
-        if ($this->esVista($nombre)) {
-            if ($siNoExiste) {
-                return false;
-            }
-            throw JsonSqlDbError::schema("La vista '$nombre' ya existe");
-        }
-
-        $vistas = $this->vistas();
-        $vistas[$nombre] = ['sql' => $sql, 'created_at' => date('Y-m-d H:i:s')];
-        $this->st->guardarVistas($vistas);
-        return true;
-    }
-
-    public function borrarVista(string $nombre, bool $siExiste = false): bool
-    {
-        $vistas = $this->vistas();
-        foreach ($vistas as $n => $v) {
-            if (strcasecmp((string)$n, $nombre) === 0) {
-                unset($vistas[$n]);
-                $this->st->guardarVistas($vistas);
-                return true;
-            }
-        }
-        if ($siExiste) {
-            return false;
-        }
-        throw JsonSqlDbError::schema("La vista '$nombre' no existe");
-    }
-
     /** Estructura normalizada de una tabla. */
     public function meta(string $tabla): array
     {
         if (isset($this->memo[$tabla])) {
             return $this->memo[$tabla];
         }
-        $meta = $this->st->leerMeta($tabla);
+        $meta = $this->st->leerMeta($tabla, $huella);
+        // La misma estructura que la última vez en este proceso: ya está
+        // normalizada (2.9). Normalizarla en cada consulta era el 6 % de una
+        // búsqueda por clave
+        $ultima = self::$normalizadas[$this->st->dir() . "\0" . $tabla] ?? null;
+        if ($huella !== null && $ultima !== null && $ultima[0] === $huella) {
+            return $this->memo[$tabla] = $ultima[1];
+        }
 
         $meta['table']        = $meta['table'] ?? $tabla;
         $meta['columns']      = array_map([self::class, 'normalizarColumna'], $meta['columns'] ?? []);
@@ -300,6 +258,7 @@ final class Catalog
         $meta['foreign_keys'] = $meta['foreign_keys'] ?? [];
         $meta['triggers']     = $meta['triggers']     ?? [];
         $meta['indexes']      = $meta['indexes']      ?? [];
+        $meta['checks']       = $meta['checks']       ?? [];
         $meta['autoincrement'] = $meta['autoincrement'] ?? null;
 
         // Un índice sobre una columna que ya no existe es basura de un ALTER
@@ -323,30 +282,13 @@ final class Catalog
             $meta['autoincrement'] = null;
         }
 
+        if ($huella !== null) {
+            if (count(self::$normalizadas) >= 32) {
+                self::$normalizadas = [];             // las de las tablas que se están usando
+            }
+            self::$normalizadas[$this->st->dir() . "\0" . $tabla] = [$huella, $meta];
+        }
         return $this->memo[$tabla] = $meta;
-    }
-
-    /**
-     * Guarda datos y estructura en una sola escritura.
-     *
-     * Juntas y no una detrás de otra: cada escritura sube la revisión de la
-     * tabla y reconstruye sus índices, así que separarlas sería hacer ese
-     * trabajo dos veces y dejar un instante con los datos nuevos y la
-     * estructura vieja.
-     */
-    private function guardarTodo(string $tabla, array $filas, array $meta): void
-    {
-        $this->st->guardarTabla($tabla, $filas, self::compactar($meta), Indexes::definiciones($meta));
-        unset($this->memo[$tabla]);
-    }
-
-    /** Guarda la estructura (compactada) e invalida la caché de la petición. */
-    private function guardar(string $tabla, array $meta): void
-    {
-        // Las definiciones van siempre: un ALTER puede añadir o quitar una
-        // PRIMARY KEY o un UNIQUE, y con ellos el índice automático que llevan.
-        $this->st->guardarMeta($tabla, self::compactar($meta), Indexes::definiciones($meta));
-        unset($this->memo[$tabla]);
     }
 
     /** Olvida lo memorizado (tras un rollback o un cambio externo). */
@@ -402,9 +344,40 @@ final class Catalog
             'autoincrement' => !empty($col['autoincrement']),
             'unique'        => !empty($col['unique']),
         ];
+        // UNSIGNED de MySQL (2.9): solo se guarda si se declara, para que las
+        // estructuras de antes no cambien
+        if (!empty($col['unsigned'])) {
+            if (!in_array($tipo['type'], [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
+                throw JsonSqlDbError::schema("UNSIGNED solo es válido en columnas numéricas ('$nombre')");
+            }
+            $out['unsigned'] = true;
+        }
 
         if ($out['type'] === Types::DECIMAL && $out['scale'] === null) {
             $out['scale'] = 2;
+        }
+        // COLLATE NOCASE o RTRIM (2.9); BINARY es lo de siempre y no se guarda
+        if (isset($col['collate']) && strtoupper((string)$col['collate']) !== 'BINARY') {
+            $c = strtoupper((string)$col['collate']);
+            if (!in_array($c, ['NOCASE', 'RTRIM'], true)) {
+                throw JsonSqlDbError::schema("COLLATE $c no está soportado: NOCASE, RTRIM o BINARY ('$nombre')");
+            }
+            if ($out['type'] !== Types::TEXT) {
+                throw JsonSqlDbError::schema("COLLATE solo vale en columnas de texto ('$nombre')");
+            }
+            $out['collate'] = $c;
+        }
+        // ENUM de MySQL (2.9): un texto con su lista de valores; con NOT NULL y
+        // sin DEFAULT, el primero, como allí
+        if (isset($col['enum'])) {
+            $valores = array_values(array_map('strval', (array)$col['enum']));
+            if ($valores === [] || $out['type'] !== Types::TEXT) {
+                throw JsonSqlDbError::schema("ENUM necesita al menos un valor ('$nombre')");
+            }
+            $out['enum'] = $valores;
+            if ($out['notnull'] && $out['default'] === null && $out['default_expr'] === null) {
+                $out['default'] = $valores[0];
+            }
         }
         if ($out['autoincrement']) {
             if ($out['type'] !== Types::INTEGER) {
@@ -451,616 +424,94 @@ final class Catalog
     /** Conjuntos de columnas con restricción de unicidad (PK incluida). */
     public static function conjuntosUnicos(array $meta): array
     {
+        // Las colaciones, en la misma vuelta que las UNIQUE de columna: esto
+        // se llama en cada fila que se escribe
+        $por     = [];
+        $sueltas = [];
+        foreach ($meta['columns'] as $col) {
+            if (isset($col['collate'])) {
+                $por[strtolower((string)$col['name'])] = $col['collate'];
+            }
+            if ($col['unique'] && !$col['pk']) {
+                $sueltas[] = $col['name'];
+            }
+        }
         $out = [];
         $pk  = self::clavePrimaria($meta);
         if ($pk !== []) {
-            $out[] = ['name' => 'PRIMARY', 'columns' => $pk];
+            $out[] = ['name' => 'PRIMARY', 'columns' => $pk, 'plegar' => self::plegarCon($por, $pk)];
         }
-        foreach ($meta['columns'] as $col) {
-            if ($col['unique'] && !$col['pk']) {
-                $out[] = ['name' => 'uq_' . $meta['table'] . '_' . $col['name'], 'columns' => [$col['name']]];
-            }
+        foreach ($sueltas as $c) {
+            $out[] = ['name' => 'uq_' . $meta['table'] . '_' . $c, 'columns' => [$c], 'plegar' => self::plegarCon($por, [$c])];
         }
         foreach ($meta['unique'] as $uq) {
-            $out[] = ['name' => $uq['name'] ?? 'uq', 'columns' => $uq['columns']];
+            $out[] = ['name' => $uq['name'] ?? 'uq', 'columns' => $uq['columns'], 'plegar' => self::plegarCon($por, $uq['columns'])];
         }
         return $out;
     }
 
-    // ------------------------------------------------------------------
-    // Tablas
-    // ------------------------------------------------------------------
-
     /**
-     * Crea una tabla.
-     * $def = ['columns'=>[...], 'unique'=>[...], 'foreign_keys'=>[...]]
-     */
-    /** @param list<array<string,mixed>> $filas  filas iniciales, en el orden de las columnas (CREATE TABLE … AS SELECT) */
-    public function crearTabla(string $tabla, array $def, array $filas = []): void
-    {
-        Storage::validarTabla($tabla);
-
-        $columnas = array_map([self::class, 'normalizarColumna'], $def['columns'] ?? []);
-        if ($columnas === []) {
-            throw JsonSqlDbError::schema("La tabla '$tabla' no tiene columnas");
-        }
-        $vistos = [];
-        foreach ($columnas as $col) {
-            $clave = strtolower($col['name']);
-            if (isset($vistos[$clave])) {
-                throw JsonSqlDbError::schema("Columna duplicada '{$col['name']}' en '$tabla'");
-            }
-            $vistos[$clave] = true;
-        }
-
-        $meta = [
-            'table'         => $tabla,
-            'columns'       => $columnas,
-            'unique'        => [],
-            'foreign_keys'  => [],
-            'triggers'      => [],
-            'indexes'       => [],
-            'autoincrement' => null,
-            'created_at'    => date('Y-m-d H:i:s'),
-        ];
-
-        // AUTOINCREMENT: una sola columna por tabla
-        foreach ($columnas as $col) {
-            if ($col['autoincrement']) {
-                if ($meta['autoincrement'] !== null) {
-                    throw JsonSqlDbError::schema("Solo se admite un AUTOINCREMENT por tabla ('$tabla')");
-                }
-                $meta['autoincrement'] = ['column' => $col['name'], 'next' => 1];
-            }
-        }
-
-        foreach ($def['unique'] ?? [] as $uq) {
-            $meta['unique'][] = $this->normalizarUnico($tabla, $meta, $uq);
-        }
-        foreach ($def['foreign_keys'] ?? [] as $fk) {
-            $meta['foreign_keys'][] = $this->normalizarFk($tabla, $meta, $fk);
-        }
-
-        foreach ($filas as $i => $f) {
-            $nueva = [];
-            foreach (array_values($f) as $j => $v) {
-                $nueva[$columnas[$j]['name']] = Types::cast($v, $columnas[$j]);
-            }
-            $filas[$i] = $nueva;
-        }
-        $this->st->crearTabla($tabla, self::compactar($meta), Indexes::definiciones($meta), $filas);
-        unset($this->memo[$tabla]);
-        $this->memoTablas = null;          // hay una tabla más
-    }
-
-    public function borrarTabla(string $tabla): void
-    {
-        if (!$this->existe($tabla)) {
-            throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
-        }
-        foreach ($this->st->tablas() as $otra) {
-            if ($otra === $tabla) continue;
-            foreach ($this->meta($otra)['foreign_keys'] as $fk) {
-                if (strcasecmp($fk['table'], $tabla) === 0) {
-                    throw JsonSqlDbError::constraint("'$otra' tiene una clave foránea hacia '$tabla'");
-                }
-            }
-        }
-        $this->st->borrarTabla($tabla);
-        unset($this->memo[$tabla]);
-        $this->memoTablas = null;          // hay una tabla menos
-    }
-
-    public function renombrarTabla(string $desde, string $hasta): void
-    {
-        $meta = $this->meta($desde);
-        $meta['table'] = $hasta;
-        $this->st->renombrarTabla($desde, $hasta, Indexes::definiciones($meta));
-        foreach ($this->st->tablas() as $t) {
-            $meta    = $this->meta($t);
-            $cambia  = false;
-            foreach ($meta['foreign_keys'] as $i => $fk) {
-                if (strcasecmp($fk['table'], $desde) === 0) {
-                    $meta['foreign_keys'][$i]['table'] = $hasta;
-                    $cambia = true;
-                }
-            }
-            if ($cambia) {
-                $this->guardar($t, $meta);
-            }
-        }
-        unset($this->memo[$desde], $this->memo[$hasta]);
-        $this->memoTablas = null;          // ha cambiado un nombre
-    }
-
-    // ------------------------------------------------------------------
-    // ALTER TABLE
-    // ------------------------------------------------------------------
-
-    public function anadirColumna(string $tabla, array $spec): void
-    {
-        $meta = $this->meta($tabla);
-        $col  = self::normalizarColumna($spec);
-
-        if (self::columna($meta, $col['name']) !== null) {
-            throw JsonSqlDbError::schema("La columna '{$col['name']}' ya existe en '$tabla'");
-        }
-        if ($col['autoincrement']) {
-            throw JsonSqlDbError::schema('No se puede añadir una columna AUTOINCREMENT a una tabla existente');
-        }
-
-        $hayFilas = $this->st->contarFilas($tabla) > 0;
-        if ($col['default_expr'] !== null && $hayFilas) {
-            // Como SQLite: el valor de las filas que ya están no se puede inventar
-            throw JsonSqlDbError::schema("No se puede añadir la columna '{$col['name']}' con un DEFAULT calculado: la tabla tiene datos");
-        }
-        if ($col['notnull'] && $col['default'] === null && $hayFilas) {
-            throw JsonSqlDbError::schema("La columna '{$col['name']}' es NOT NULL y necesita DEFAULT: la tabla tiene datos");
-        }
-        $meta['columns'][] = $col;
-
-        // Por bloques de texto: la columna nueva, con su valor, al final de
-        // cada fila (donde la pondría PHP al añadirla al array)
-        $par = Storage::claveJson($col['name']) . Storage::valorJson($col['default']);
-        $porLinea = static fn(string $l): string => $l === '{}' ? '{' . $par . '}' : substr($l, 0, -1) . ',' . $par . '}';
-        if ($this->st->reescribirLineas($tabla, $porLinea, self::compactar($meta), Indexes::definiciones($meta))) {
-            unset($this->memo[$tabla]);
-            return;
-        }
-        $filas = $this->st->leerFilas($tabla);
-        foreach ($filas as $i => $fila) {
-            $fila[$col['name']] = $col['default'];
-            $filas[$i] = $fila;
-        }
-        $this->guardarTodo($tabla, $filas, $meta);
-    }
-
-    /**
-     * Cambia el tipo y las restricciones de una columna que ya existe.
+     * La colación de cada una de esas columnas (NOCASE o RTRIM; null la
+     * binaria), por posición; [] si ninguna la tiene (2.9). Es con lo que se
+     * calculan sus claves: de un índice, de un UNIQUE, y de una clave foránea
+     * que apunta a ellas.
      *
-     * Convierte los datos que hay al tipo nuevo y comprueba que cumplen lo que
-     * se le pide antes de guardar nada: si algún valor no se puede convertir,
-     * si queda un NULL en una columna NOT NULL o si hay repetidos en una UNIQUE,
-     * la operación falla y la tabla se queda como estaba.
+     * @param list<string> $columnas
+     * @return array<int, ?string>
+     */
+    public static function plegarDe(array $meta, array $columnas): array
+    {
+        return self::plegarCon(self::colaciones($meta), $columnas);
+    }
+
+    /**
+     * Como plegarDe(), con las colaciones de la tabla ya sacadas (ver colaciones()).
      *
-     * No toca la clave primaria ni el autoincremento: eso obliga a recrear la
-     * tabla.
+     * @param array<string, string> $por
+     * @param list<string>          $columnas
+     * @return array<int, ?string>
      */
-    public function modificarColumna(string $tabla, array $spec): void
+    public static function plegarCon(array $por, array $columnas): array
     {
-        $meta   = $this->meta($tabla);
-        $nueva  = self::normalizarColumna($spec);
-        $actual = self::columna($meta, $nueva['name']);
-
-        if ($actual === null) {
-            throw JsonSqlDbError::schema("La columna '{$nueva['name']}' no existe en '$tabla'");
+        if ($por === []) {
+            return [];
         }
-        if ($nueva['autoincrement'] !== $actual['autoincrement']) {
-            throw JsonSqlDbError::schema('No se puede añadir ni quitar AUTOINCREMENT: hay que recrear la tabla');
+        $out = [];
+        foreach (array_values($columnas) as $i => $c) {
+            $out[$i] = $por[strtolower((string)$c)] ?? null;
         }
-        // La clave primaria se conserva tal cual estaba
-        $nueva['pk'] = $actual['pk'];
-        if ($actual['pk'] && !$nueva['notnull']) {
-            $nueva['notnull'] = true;
-        }
-
-        // Conversión de los datos, sobre una copia
-        $filas = $this->st->leerFilas($tabla);
-        $vistos = [];
-        foreach ($filas as $i => $fila) {
-            $valor = $fila[$nueva['name']] ?? null;
-
-            if ($valor === null && $nueva['default'] !== null) {
-                $valor = $nueva['default'];
-            }
-            if ($valor === null) {
-                if ($nueva['notnull']) {
-                    throw JsonSqlDbError::constraint(
-                        "'$tabla.{$nueva['name']}' tiene valores nulos: no puede ser NOT NULL sin un DEFAULT"
-                    );
-                }
-            } else {
-                try {
-                    $valor = Types::cast($valor, $nueva);
-                } catch (JsonSqlDbError $e) {
-                    throw JsonSqlDbError::type(
-                        "El valor " . json_encode($fila[$nueva['name']] ?? null, JSON_UNESCAPED_UNICODE)
-                        . " de '$tabla.{$nueva['name']}' no se puede convertir a {$nueva['type']}"
-                    );
-                }
-                if ($nueva['unique'] || $actual['pk']) {
-                    $clave = is_string($valor) ? 's:' . $valor : 'n:' . $valor;
-                    if (isset($vistos[$clave])) {
-                        throw JsonSqlDbError::constraint(
-                            "'$tabla.{$nueva['name']}' tiene valores repetidos: no puede ser UNIQUE"
-                        );
-                    }
-                    $vistos[$clave] = true;
-                }
-            }
-
-            $fila[$nueva['name']] = $valor;
-            $filas[$i] = $fila;
-        }
-
-        foreach ($meta['columns'] as $i => $c) {
-            if (strcasecmp($c['name'], $nueva['name']) === 0) {
-                $meta['columns'][$i] = $nueva;
-            }
-        }
-
-        $this->guardarTodo($tabla, $filas, $meta);
+        return array_filter($out) === [] ? [] : $out;
     }
 
-    public function borrarColumna(string $tabla, string $nombre): void
+    /** @return array<string, string> las columnas (en minúsculas) de una tabla con COLLATE, y la suya (2.9) */
+    public static function colaciones(array $meta): array
     {
-        $meta = $this->meta($tabla);
-        $col  = self::columna($meta, $nombre);
-        if ($col === null) {
-            throw JsonSqlDbError::schema("La columna '$nombre' no existe en '$tabla'");
-        }
-        if (count($meta['columns']) === 1) {
-            throw JsonSqlDbError::schema("No se puede borrar la única columna de '$tabla'");
-        }
-        $this->exigirColumnaLibre($tabla, $meta, $col['name']);
-
-        $meta['columns'] = array_values(array_filter(
-            $meta['columns'],
-            static fn(array $c): bool => strcasecmp($c['name'], $col['name']) !== 0
-        ));
-
-        // El autoincremento se va con su columna
-        if (($meta['autoincrement']['column'] ?? null) !== null
-            && strcasecmp((string)$meta['autoincrement']['column'], $col['name']) === 0) {
-            $meta['autoincrement'] = null;
-        }
-
-        // Y los índices que la usaban: un índice acelera, no restringe, así que
-        // se va sin más en vez de impedir el ALTER
-        $meta['indexes'] = array_values(array_filter(
-            $meta['indexes'],
-            static function (array $idx) use ($col): bool {
-                foreach ($idx['columns'] as $c) {
-                    if (strcasecmp((string)$c, $col['name']) === 0) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-        ));
-
-        // Por bloques de texto, salvo si era parte de la clave primaria (hay
-        // que comprobar que la que queda sigue siendo única, y eso pide las filas)
-        if (!$col['pk']) {
-            $porLinea = static function (string $l) use ($col): ?string {
-                $quitada = self::quitarDeLinea($l, $col['name']);
-                return $quitada === null ? null : $quitada[0];
-            };
-            if ($this->st->reescribirLineas($tabla, $porLinea, self::compactar($meta), Indexes::definiciones($meta))) {
-                unset($this->memo[$tabla]);
-                return;
+        $out = [];
+        foreach ($meta['columns'] as $c) {
+            if (isset($c['collate'])) {
+                $out[strtolower((string)$c['name'])] = $c['collate'];
             }
         }
-
-        $filas = $this->st->leerFilas($tabla);
-        foreach ($filas as $i => $fila) {
-            unset($fila[$col['name']]);
-            $filas[$i] = $fila;
-        }
-
-        // Si la columna formaba parte de una clave primaria compuesta, la que
-        // queda tiene que seguir siendo única
-        if ($col['pk']) {
-            $resto = self::clavePrimaria($meta);
-            if ($resto !== []) {
-                $vistos = [];
-                foreach ($filas as $fila) {
-                    $partes = [];
-                    foreach ($resto as $n) {
-                        $v = $fila[$n] ?? null;
-                        $partes[] = is_string($v) ? 's:' . $v : 'n:' . $v;
-                    }
-                    $clave = implode('|', $partes);
-                    if (isset($vistos[$clave])) {
-                        throw JsonSqlDbError::constraint(
-                            "Al quitar '{$col['name']}' la clave primaria (" . implode(', ', $resto)
-                            . ") quedaría repetida en '$tabla'"
-                        );
-                    }
-                    $vistos[$clave] = true;
-                }
-            }
-        }
-
-        $this->guardarTodo($tabla, $filas, $meta);
+        return $out;
     }
 
-    public function renombrarColumna(string $tabla, string $desde, string $hasta): void
+    /** Nombre de columna, solo o con la tabla delante, en minúsculas => su nombre (para Evaluator::resolver()) */
+    public static function mapaColumnas(string $tabla, array $columnas): array
     {
-        $meta = $this->meta($tabla);
-        $col  = self::columna($meta, $desde);
-        if ($col === null) {
-            throw JsonSqlDbError::schema("La columna '$desde' no existe en '$tabla'");
-        }
-        self::exigirNombreColumna($hasta);
-        if (self::columna($meta, $hasta) !== null) {
-            throw JsonSqlDbError::schema("La columna '$hasta' ya existe en '$tabla'");
-        }
-        $this->exigirColumnaLibre($tabla, $meta, $col['name']);
-
-        foreach ($meta['columns'] as $i => $c) {
-            if (strcasecmp($c['name'], $col['name']) === 0) {
-                $meta['columns'][$i]['name'] = $hasta;
+        $mapa = [];
+        foreach ($columnas as $c) {
+            $mapa[strtolower($c['name'])] = $c['name'];
+            $mapa[strtolower($tabla . '.' . $c['name'])] = $c['name'];
+            if (isset($c['collate'])) {
+                $mapa["\0c:" . $c['name']] = $c['collate'];    // su colación (ver Evaluator::resolver())
             }
         }
-        // Los índices siguen a la columna: si no, se quedarían apuntando a un
-        // nombre que ya no existe y se perderían sin avisar
-        foreach ($meta['indexes'] as $i => $idx) {
-            foreach ($idx['columns'] as $j => $c) {
-                if (strcasecmp((string)$c, $col['name']) === 0) {
-                    $meta['indexes'][$i]['columns'][$j] = $hasta;
-                }
-            }
-        }
-        if (($meta['autoincrement']['column'] ?? null) !== null
-            && strcasecmp($meta['autoincrement']['column'], $col['name']) === 0) {
-            $meta['autoincrement']['column'] = $hasta;
-        }
-
-        // Por bloques de texto: el par sale de su sitio y vuelve con el nombre
-        // nuevo al final de la fila (donde lo deja PHP al renombrar la clave)
-        $porLinea = static function (string $l) use ($col, $hasta): ?string {
-            $quitada = self::quitarDeLinea($l, $col['name']);
-            if ($quitada === null) {
-                return null;
-            }
-            [$resto, $valor] = $quitada;
-            return ($resto === '{}' ? '{' : substr($resto, 0, -1) . ',') . Storage::claveJson($hasta) . $valor . '}';
-        };
-        if ($this->st->reescribirLineas($tabla, $porLinea, self::compactar($meta), Indexes::definiciones($meta))) {
-            unset($this->memo[$tabla]);
-            return;
-        }
-
-        $filas = $this->st->leerFilas($tabla);
-        foreach ($filas as $i => $fila) {
-            if (array_key_exists($col['name'], $fila)) {
-                $fila[$hasta] = $fila[$col['name']];
-                unset($fila[$col['name']]);
-                $filas[$i] = $fila;
-            }
-        }
-
-        $this->guardarTodo($tabla, $filas, $meta);
-    }
-
-    /**
-     * Quita el par "columna":valor del JSON de una fila, sin decodificarla:
-     * [la fila sin él, el valor tal como estaba escrito]. Null si la fila no
-     * lo tiene una vez exactamente, o el valor no es un escalar de JSON (y
-     * entonces se hace decodificando). "columna": solo puede aparecer como
-     * clave: dentro de un texto, una comilla va escapada (\").
-     *
-     * @return array{0: string, 1: string}|null
-     */
-    private static function quitarDeLinea(string $linea, string $columna): ?array
-    {
-        $aguja = Storage::claveJson($columna);
-        $donde = strpos($linea, $aguja);
-        if ($donde === false || $donde === 0 || !in_array($linea[$donde - 1], ['{', ','], true)
-            || strpos($linea, $aguja, $donde + 1) !== false) {
-            return null;
-        }
-        $desde = $donde + strlen($aguja);
-        if (!preg_match('/\G(?:"(?:[^"\\\\]|\\\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/', $linea, $m, 0, $desde)) {
-            return null;
-        }
-        $valor = $m[0];
-        $tras  = $desde + strlen($valor);
-        $sigue = $linea[$tras] ?? '';
-        if ($sigue !== ',' && $sigue !== '}') {
-            return null;
-        }
-        $antes = substr($linea, 0, $donde - 1);          // sin el { o la , de delante
-        $abre  = $linea[$donde - 1];
-        if ($abre === '{') {
-            // Era la primera: lo que sigue (tras su coma, si la hay) empieza la fila
-            $resto = '{' . ($sigue === ',' ? substr($linea, $tras + 1) : '}');
-        } else {
-            $resto = $antes . substr($linea, $tras);
-        }
-        return [$resto, $valor];
-    }
-
-    /** Impide tocar una columna usada por UNIQUE compuesto o por una FK (propia o ajena). */
-    private function exigirColumnaLibre(string $tabla, array $meta, string $columna): void
-    {
-        foreach ($meta['unique'] as $uq) {
-            foreach ($uq['columns'] as $c) {
-                if (strcasecmp($c, $columna) === 0) {
-                    throw JsonSqlDbError::constraint("'$columna' forma parte del UNIQUE '{$uq['name']}'");
-                }
-            }
-        }
-        foreach ($meta['foreign_keys'] as $fk) {
-            foreach ($fk['columns'] as $c) {
-                if (strcasecmp($c, $columna) === 0) {
-                    throw JsonSqlDbError::constraint("'$columna' forma parte de la clave foránea '{$fk['name']}'");
-                }
-            }
-        }
-        foreach ($meta['triggers'] as $trg) {
-            $sql = (string)($trg['sql'] ?? '');
-            if ($sql !== '' && preg_match('/\\b' . preg_quote($columna, '/') . '\\b/i', $sql) === 1) {
-                throw JsonSqlDbError::constraint(
-                    "'$columna' se usa en el trigger '{$trg['name']}': bórralo antes"
-                );
-            }
-        }
-        foreach ($this->st->tablas() as $otra) {
-            if ($otra === $tabla) continue;
-            foreach ($this->meta($otra)['foreign_keys'] as $fk) {
-                if (strcasecmp($fk['table'], $tabla) !== 0) continue;
-                foreach ($fk['references'] as $c) {
-                    if (strcasecmp($c, $columna) === 0) {
-                        throw JsonSqlDbError::constraint("'$otra.{$fk['name']}' referencia '$tabla.$columna'");
-                    }
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Restricciones
-    // ------------------------------------------------------------------
-
-    // ------------------------------------------------------------------
-    // Restricciones sobre una tabla ya creada
-    // ------------------------------------------------------------------
-
-    /**
-     * Añade una clave única. Comprueba antes que los datos actuales la cumplen.
-     * Devuelve el nombre de la restricción.
-     */
-    public function anadirUnico(string $tabla, array $uq): string
-    {
-        $meta = $this->metaExistente($tabla);
-        $nuevo = $this->normalizarUnico($tabla, $meta, $uq);
-        $this->exigirNombreLibre($meta, $nuevo['name']);
-
-        $vistos = [];
-        foreach ($this->st->leerFilas($tabla) as $fila) {
-            $clave = self::claveDeFila($fila, $nuevo['columns']);
-            if ($clave === null) {
-                continue;                                   // con NULL no aplica la unicidad
-            }
-            if (isset($vistos[$clave])) {
-                throw JsonSqlDbError::constraint(
-                    "Los datos de '$tabla' repiten el valor " . $clave . " en (" . implode(', ', $nuevo['columns']) . ')'
-                );
-            }
-            $vistos[$clave] = true;
-        }
-
-        $meta['unique'][] = $nuevo;
-        $this->guardar($tabla, $meta);
-        return $nuevo['name'];
-    }
-
-    /**
-     * Añade una clave foránea. Comprueba antes que las filas actuales apuntan
-     * a filas existentes de la tabla destino. Devuelve el nombre.
-     */
-    public function anadirFk(string $tabla, array $fk): string
-    {
-        $meta  = $this->metaExistente($tabla);
-        $nuevo = $this->normalizarFk($tabla, $meta, $fk);
-        $this->exigirNombreLibre($meta, $nuevo['name']);
-
-        $padres = [];
-        foreach ($this->st->leerFilas($nuevo['table']) as $fila) {
-            $clave = self::claveDeFila($fila, $nuevo['references']);
-            if ($clave !== null) { $padres[$clave] = true; }
-        }
-        foreach ($this->st->leerFilas($tabla) as $fila) {
-            $clave = self::claveDeFila($fila, $nuevo['columns']);
-            if ($clave !== null && !isset($padres[$clave])) {
-                throw JsonSqlDbError::constraint(
-                    "Los datos de '$tabla' apuntan a " . $clave . " y no existe en '{$nuevo['table']}'"
-                );
-            }
-        }
-
-        $meta['foreign_keys'][] = $nuevo;
-        $this->guardar($tabla, $meta);
-        return $nuevo['name'];
+        return $mapa;
     }
 
     // ------------------------------------------------------------------
     // Índices
     // ------------------------------------------------------------------
-
-    /**
-     * Crea un índice sobre una o varias columnas.
-     *
-     * @param string[] $columnas
-     * @return bool false si ya existía y se pidió IF NOT EXISTS
-     */
-    public function crearIndice(string $tabla, string $nombre, array $columnas, bool $siNoExiste = false): bool
-    {
-        Indexes::validarNombre($nombre);
-        $meta = $this->metaExistente($tabla);
-
-        $cols  = [];
-        $vistas = [];
-        foreach ($columnas as $c) {
-            $col = self::columna($meta, (string)$c);
-            if ($col === null) {
-                throw JsonSqlDbError::schema("Índice sobre columna inexistente '$c' en '$tabla'");
-            }
-            if (isset($vistas[strtolower($col['name'])])) {
-                throw JsonSqlDbError::schema("La columna '{$col['name']}' se repite en el índice '$nombre'");
-            }
-            $vistas[strtolower($col['name'])] = true;
-            $cols[] = $col['name'];
-        }
-        if ($cols === []) {
-            throw JsonSqlDbError::schema("El índice '$nombre' no indica columnas");
-        }
-
-        // El nombre acaba siendo parte de un nombre de fichero, y hay sistemas
-        // que no distinguen mayúsculas: la comparación tampoco
-        foreach ($this->indicesDe($tabla) as $idx) {
-            if (strcasecmp($idx['name'], $nombre) === 0) {
-                if ($siNoExiste) {
-                    return false;
-                }
-                throw JsonSqlDbError::schema(
-                    $idx['auto']
-                        ? "'$nombre' es el índice automático de una PRIMARY KEY o un UNIQUE de '$tabla'"
-                        : "El índice '$nombre' ya existe en '$tabla'"
-                );
-            }
-        }
-
-        $meta['indexes'][] = ['name' => $nombre, 'columns' => $cols];
-        $this->guardar($tabla, $meta);
-        return true;
-    }
-
-    /**
-     * Borra un índice creado a mano. Devuelve la tabla a la que pertenecía, o
-     * null si no existía y se pidió IF EXISTS.
-     */
-    public function borrarIndice(?string $tabla, string $nombre, bool $siExiste = false): ?string
-    {
-        foreach ($tabla === null ? $this->tablas() : [$tabla] as $t) {
-            $meta = $this->metaExistente($t);
-            foreach ($meta['indexes'] as $i => $idx) {
-                if (strcasecmp((string)$idx['name'], $nombre) !== 0) {
-                    continue;
-                }
-                array_splice($meta['indexes'], $i, 1);
-                $this->guardar($t, $meta);
-                return $t;
-            }
-            // Un índice automático no se borra suelto: se va con su restricción
-            foreach (Indexes::definiciones($meta) as $def) {
-                if ($def['auto'] && strcasecmp($def['name'], $nombre) === 0) {
-                    throw JsonSqlDbError::schema(
-                        "'$nombre' es el índice automático de una PRIMARY KEY o un UNIQUE de '$t': "
-                        . 'quita la restricción con ALTER TABLE si no lo quieres'
-                    );
-                }
-            }
-        }
-        if ($siExiste) {
-            return null;
-        }
-        throw JsonSqlDbError::schema(
-            "El índice '$nombre' no existe" . ($tabla === null ? '' : " en '$tabla'")
-        );
-    }
 
     /**
      * Índices efectivos de una tabla, los creados a mano y los automáticos.
@@ -1072,319 +523,9 @@ final class Catalog
         return Indexes::definiciones($this->meta($tabla));
     }
 
-    /** Borra una clave única o foránea por su nombre. */
-    public function borrarRestriccion(string $tabla, string $nombre): void
-    {
-        $meta = $this->metaExistente($tabla);
-
-        foreach ($meta['unique'] as $i => $uq) {
-            if (strcasecmp((string)($uq['name'] ?? ''), $nombre) === 0) {
-                array_splice($meta['unique'], $i, 1);
-                $this->guardar($tabla, $meta);
-                return;
-            }
-        }
-        foreach ($meta['foreign_keys'] as $i => $fk) {
-            if (strcasecmp((string)($fk['name'] ?? ''), $nombre) === 0) {
-                array_splice($meta['foreign_keys'], $i, 1);
-                $this->guardar($tabla, $meta);
-                return;
-            }
-        }
-        throw JsonSqlDbError::schema("La tabla '$tabla' no tiene la restricción '$nombre'");
-    }
-
-    /**
-     * Crea la clave primaria de una tabla que todavía no la tiene.
-     *
-     * Comprueba antes que los datos la aguantan: sin nulos y sin combinaciones
-     * repetidas. Si falla, la tabla se queda como estaba.
-     *
-     * Cambiar una clave primaria que ya existe obliga a recrear la tabla: hay
-     * que borrar la anterior primero.
-     *
-     * @param string[] $columnas
-     */
-    public function anadirClavePrimaria(string $tabla, array $columnas): void
-    {
-        $meta = $this->metaExistente($tabla);
-
-        if (self::clavePrimaria($meta) !== []) {
-            throw JsonSqlDbError::schema(
-                "La tabla '$tabla' ya tiene clave primaria. Bórrala antes con "
-                . "ALTER TABLE \"$tabla\" DROP PRIMARY KEY"
-            );
-        }
-        if ($columnas === []) {
-            throw JsonSqlDbError::schema('La clave primaria necesita al menos una columna');
-        }
-
-        $nombres = [];
-        foreach ($columnas as $c) {
-            $col = self::columna($meta, $c);
-            if ($col === null) {
-                throw JsonSqlDbError::schema("La columna '$c' no existe en '$tabla'");
-            }
-            if (isset($nombres[strtolower($col['name'])])) {
-                throw JsonSqlDbError::schema("La columna '{$col['name']}' está repetida en la clave primaria");
-            }
-            $nombres[strtolower($col['name'])] = $col['name'];
-        }
-        $nombres = array_values($nombres);
-
-        $vistos = [];
-        foreach ($this->st->leerFilas($tabla) as $fila) {
-            $partes = [];
-            foreach ($nombres as $n) {
-                $v = $fila[$n] ?? null;
-                if ($v === null) {
-                    throw JsonSqlDbError::constraint(
-                        "'$tabla.$n' tiene valores nulos: no puede formar parte de la clave primaria"
-                    );
-                }
-                $partes[] = is_string($v) ? 's:' . $v : 'n:' . $v;
-            }
-            $clave = implode('|', $partes);
-            if (isset($vistos[$clave])) {
-                throw JsonSqlDbError::constraint(
-                    "Los datos de '$tabla' repiten el valor $clave en (" . implode(', ', $nombres) . ')'
-                );
-            }
-            $vistos[$clave] = true;
-        }
-
-        foreach ($meta['columns'] as $i => $c) {
-            if (in_array($c['name'], $nombres, true)) {
-                $meta['columns'][$i]['pk']      = true;
-                $meta['columns'][$i]['notnull'] = true;
-            }
-        }
-        $this->guardar($tabla, $meta);
-    }
-
-    /** Quita la clave primaria. Las columnas siguen siendo NOT NULL. */
-    public function borrarClavePrimaria(string $tabla): void
-    {
-        $meta = $this->metaExistente($tabla);
-
-        if (self::clavePrimaria($meta) === []) {
-            throw JsonSqlDbError::schema("La tabla '$tabla' no tiene clave primaria");
-        }
-        if (self::columnaAutoincremento($meta) !== null) {
-            throw JsonSqlDbError::schema(
-                "La clave primaria de '$tabla' es AUTOINCREMENT: para quitarla hay que recrear la tabla"
-            );
-        }
-
-        foreach ($meta['columns'] as $i => $c) {
-            if ($c['pk']) {
-                $meta['columns'][$i]['pk'] = false;
-            }
-        }
-        $this->guardar($tabla, $meta);
-    }
-
-    private function metaExistente(string $tabla): array
-    {
-        if (!$this->existe($tabla)) {
-            throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
-        }
-        return $this->meta($tabla);
-    }
-
-    private function exigirNombreLibre(array $meta, string $nombre): void
-    {
-        foreach (array_merge($meta['unique'], $meta['foreign_keys']) as $r) {
-            if (strcasecmp((string)($r['name'] ?? ''), $nombre) === 0) {
-                throw JsonSqlDbError::schema("Ya existe una restricción llamada '$nombre' en '{$meta['table']}'");
-            }
-        }
-    }
-
-    /** Clave comparable de una fila, o null si alguna columna es NULL. */
-    private static function claveDeFila(array $fila, array $columnas): ?string
-    {
-        $partes = [];
-        foreach ($columnas as $c) {
-            $v = $fila[$c] ?? null;
-            if ($v === null) { return null; }
-            $partes[] = is_string($v) ? 's:' . $v : 'n:' . $v;
-        }
-        return implode('|', $partes);
-    }
-
-    private function normalizarUnico(string $tabla, array $meta, array $uq): array
-    {
-        $cols = [];
-        foreach ($uq['columns'] ?? [] as $c) {
-            $col = self::columna($meta, (string)$c);
-            if ($col === null) {
-                throw JsonSqlDbError::schema("UNIQUE sobre columna inexistente '$c' en '$tabla'");
-            }
-            $cols[] = $col['name'];
-        }
-        if ($cols === []) {
-            throw JsonSqlDbError::schema("UNIQUE sin columnas en '$tabla'");
-        }
-        return [
-            'name'    => (string)($uq['name'] ?? ('uq_' . $tabla . '_' . implode('_', $cols))),
-            'columns' => $cols,
-        ];
-    }
-
-    private function normalizarFk(string $tabla, array $meta, array $fk): array
-    {
-        $cols = [];
-        foreach ($fk['columns'] ?? [] as $c) {
-            $col = self::columna($meta, (string)$c);
-            if ($col === null) {
-                throw JsonSqlDbError::schema("FOREIGN KEY sobre columna inexistente '$c' en '$tabla'");
-            }
-            $cols[] = $col['name'];
-        }
-        $destino = (string)($fk['table'] ?? '');
-        Storage::validarTabla($destino);
-
-        // Autorreferencia: la tabla aún no está en disco al crearla
-        $metaDestino = strcasecmp($destino, $tabla) === 0 ? $meta : null;
-        if ($metaDestino === null) {
-            if (!$this->existe($destino)) {
-                throw JsonSqlDbError::schema("FOREIGN KEY hacia una tabla inexistente: '$destino'");
-            }
-            $metaDestino = $this->meta($destino);
-        }
-
-        $refs = [];
-        foreach ($fk['references'] ?? [] as $c) {
-            $col = self::columna($metaDestino, (string)$c);
-            if ($col === null) {
-                throw JsonSqlDbError::schema("FOREIGN KEY hacia columna inexistente '$destino.$c'");
-            }
-            $refs[] = $col['name'];
-        }
-        if ($refs === [] || count($refs) !== count($cols)) {
-            throw JsonSqlDbError::schema("FOREIGN KEY con número de columnas distinto en '$tabla'");
-        }
-
-        $onDelete = strtoupper(trim((string)($fk['on_delete'] ?? 'NO ACTION')));
-        $onUpdate = strtoupper(trim((string)($fk['on_update'] ?? 'NO ACTION')));
-        foreach ([$onDelete, $onUpdate] as $accion) {
-            if (!in_array($accion, self::ACCIONES_FK, true)) {
-                throw JsonSqlDbError::schema("Acción de clave foránea no soportada: '$accion'");
-            }
-        }
-
-        return [
-            'name'       => (string)($fk['name'] ?? ('fk_' . $tabla . '_' . implode('_', $cols))),
-            'columns'    => $cols,
-            'table'      => $metaDestino['table'],
-            'references' => $refs,
-            'on_delete'  => $onDelete,
-            'on_update'  => $onUpdate,
-        ];
-    }
-
-    // ------------------------------------------------------------------
-    // Triggers
-    // ------------------------------------------------------------------
-
-    public function crearTrigger(string $tabla, array $trg): void
-    {
-        $meta   = $this->meta($tabla);
-        $nombre = trim((string)($trg['name'] ?? ''));
-        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $nombre)) {
-            throw JsonSqlDbError::schema("Nombre de trigger no válido: '$nombre'");
-        }
-        foreach ($meta['triggers'] as $t) {
-            if (strcasecmp($t['name'], $nombre) === 0) {
-                throw JsonSqlDbError::schema("El trigger '$nombre' ya existe");
-            }
-        }
-        $timing = strtoupper(trim((string)($trg['timing'] ?? 'AFTER')));
-        $evento = strtoupper(trim((string)($trg['event'] ?? '')));
-        if (!in_array($timing, self::TIMINGS, true)) {
-            throw JsonSqlDbError::schema("Momento de trigger no soportado: '$timing'");
-        }
-        if (!in_array($evento, self::EVENTOS, true)) {
-            throw JsonSqlDbError::schema("Evento de trigger no soportado: '$evento'");
-        }
-        // Cada paso es el texto de una sentencia o un bloque IF (un array, ver
-        // Parser::cuerpoTrigger()); los textos vacíos sobran
-        $cuerpo = array_values(array_filter(
-            array_map(static fn($p) => is_string($p) ? trim($p) : $p, (array)($trg['body'] ?? [])),
-            static fn($p): bool => $p !== ''
-        ));
-        if ($cuerpo === []) {
-            throw JsonSqlDbError::schema("El trigger '$nombre' no tiene cuerpo");
-        }
-
-        $meta['triggers'][] = [
-            'name'   => $nombre,
-            'timing' => $timing,
-            'event'  => $evento,
-            'when'   => isset($trg['when']) && trim((string)$trg['when']) !== '' ? trim((string)$trg['when']) : null,
-            'body'   => $cuerpo,
-            'sql'    => (string)($trg['sql'] ?? ''),
-        ];
-        $this->guardar($tabla, $meta);
-    }
-
-    /** Borra un trigger por nombre. Devuelve la tabla a la que pertenecía. */
-    public function borrarTrigger(string $nombre): string
-    {
-        foreach ($this->st->tablas() as $tabla) {
-            $meta = $this->meta($tabla);
-            foreach ($meta['triggers'] as $i => $t) {
-                if (strcasecmp($t['name'], $nombre) === 0) {
-                    unset($meta['triggers'][$i]);
-                    $meta['triggers'] = array_values($meta['triggers']);
-                    $this->guardar($tabla, $meta);
-                    return $tabla;
-                }
-            }
-        }
-        throw JsonSqlDbError::schema("El trigger '$nombre' no existe");
-    }
-
-    /** Triggers aplicables a un evento concreto, en orden de definición. */
-    public function triggers(string $tabla, string $timing, string $evento): array
-    {
-        $out = [];
-        foreach ($this->meta($tabla)['triggers'] as $t) {
-            if ($t['timing'] === $timing && $t['event'] === $evento) {
-                $out[] = $t;
-            }
-        }
-        return $out;
-    }
-
     // ------------------------------------------------------------------
     // Autoincremento
     // ------------------------------------------------------------------
-
-    /** Reserva y devuelve el siguiente valor de autoincremento de la tabla. */
-    public function siguienteAutoincremento(string $tabla): int
-    {
-        $meta = $this->meta($tabla);
-        if ($meta['autoincrement'] === null) {
-            throw JsonSqlDbError::schema("La tabla '$tabla' no tiene columna AUTOINCREMENT");
-        }
-        $valor = (int)$meta['autoincrement']['next'];
-        $meta['autoincrement']['next'] = $valor + 1;
-        $this->guardar($tabla, $meta);
-        return $valor;
-    }
-
-    /** Ajusta el contador cuando se inserta un valor explícito mayor que el actual. */
-    public function ajustarAutoincremento(string $tabla, int $valor): void
-    {
-        $meta = $this->meta($tabla);
-        if ($meta['autoincrement'] === null || $valor < (int)$meta['autoincrement']['next']) {
-            return;
-        }
-        $meta['autoincrement']['next'] = $valor + 1;
-        $this->guardar($tabla, $meta);
-    }
 
     /** Columna de autoincremento de la tabla, o null. */
     public static function columnaAutoincremento(array $meta): ?string
@@ -1393,39 +534,127 @@ final class Catalog
     }
 
     // ------------------------------------------------------------------
-    // Serialización compacta (ficheros .meta.json legibles)
+    // Cambios de estructura: en CatalogDdl, que solo se carga para ellos
     // ------------------------------------------------------------------
 
-    public static function compactar(array $meta): array
+    /** Ver CatalogDdl::exigirNombreLibreDeVista() */
+    public function exigirNombreLibreDeVista(string $nombre): void
     {
-        $cols = [];
-        foreach ($meta['columns'] as $col) {
-            $c = ['name' => $col['name'], 'type' => $col['type']];
-            foreach (['length', 'scale', 'default', 'default_expr'] as $k) {
-                if (($col[$k] ?? null) !== null) {
-                    $c[$k] = $col[$k];
-                }
-            }
-            foreach (['notnull', 'pk', 'autoincrement', 'unique'] as $k) {
-                if (!empty($col[$k])) {
-                    $c[$k] = true;
-                }
-            }
-            $cols[] = $c;
-        }
-
-        $out = ['table' => $meta['table'], 'columns' => $cols];
-        foreach (['unique', 'foreign_keys', 'triggers', 'indexes'] as $k) {
-            if (!empty($meta[$k])) {
-                $out[$k] = $meta[$k];
-            }
-        }
-        if (!empty($meta['autoincrement'])) {
-            $out['autoincrement'] = $meta['autoincrement'];
-        }
-        if (!empty($meta['created_at'])) {
-            $out['created_at'] = $meta['created_at'];
-        }
-        return $out;
+        CatalogDdl::exigirNombreLibreDeVista($this, $nombre);
     }
+
+    /** Ver CatalogDdl::crearVista() */
+    public function crearVista(string $nombre, string $sql, bool $siNoExiste = false): bool
+    {
+        return CatalogDdl::crearVista($this, $nombre, $sql, $siNoExiste);
+    }
+
+    /** Ver CatalogDdl::borrarVista() */
+    public function borrarVista(string $nombre, bool $siExiste = false): bool
+    {
+        return CatalogDdl::borrarVista($this, $nombre, $siExiste);
+    }
+
+    /** Ver CatalogDdl::crearTabla() */
+    public function crearTabla(string $tabla, array $def): void
+    {
+        CatalogDdl::crearTabla($this, $tabla, $def);
+    }
+
+    /** Ver CatalogDdl::borrarTabla() */
+    public function borrarTabla(string $tabla): void
+    {
+        CatalogDdl::borrarTabla($this, $tabla);
+    }
+
+    /** Ver CatalogDdl::renombrarTabla() */
+    public function renombrarTabla(string $desde, string $hasta): void
+    {
+        CatalogDdl::renombrarTabla($this, $desde, $hasta);
+    }
+
+    /** Ver CatalogDdl::anadirColumna() */
+    public function anadirColumna(string $tabla, array $spec): void
+    {
+        CatalogDdl::anadirColumna($this, $tabla, $spec);
+    }
+
+    /** Ver CatalogDdl::modificarColumna() */
+    public function modificarColumna(string $tabla, array $spec, ?string $desde = null): void
+    {
+        CatalogDdl::modificarColumna($this, $tabla, $spec, $desde);
+    }
+
+    /** Ver CatalogDdl::borrarColumna() */
+    public function borrarColumna(string $tabla, string $nombre): void
+    {
+        CatalogDdl::borrarColumna($this, $tabla, $nombre);
+    }
+
+    /** Ver CatalogDdl::renombrarColumna() */
+    public function renombrarColumna(string $tabla, string $desde, string $hasta): void
+    {
+        CatalogDdl::renombrarColumna($this, $tabla, $desde, $hasta);
+    }
+
+    /** Ver CatalogDdl::anadirUnico() */
+    public function anadirUnico(string $tabla, array $uq): string
+    {
+        return CatalogDdl::anadirUnico($this, $tabla, $uq);
+    }
+
+    /** Ver CatalogDdl::anadirCheck() */
+    public function anadirCheck(string $tabla, array $ck): string
+    {
+        return CatalogDdl::anadirCheck($this, $tabla, $ck);
+    }
+
+    /** Ver CatalogDdl::anadirFk() */
+    public function anadirFk(string $tabla, array $fk): string
+    {
+        return CatalogDdl::anadirFk($this, $tabla, $fk);
+    }
+
+    /** Ver CatalogDdl::crearIndice() */
+    public function crearIndice(string $tabla, string $nombre, array $columnas, bool $siNoExiste = false): bool
+    {
+        return CatalogDdl::crearIndice($this, $tabla, $nombre, $columnas, $siNoExiste);
+    }
+
+    /** Ver CatalogDdl::borrarIndice() */
+    public function borrarIndice(?string $tabla, string $nombre, bool $siExiste = false): ?string
+    {
+        return CatalogDdl::borrarIndice($this, $tabla, $nombre, $siExiste);
+    }
+
+    /** Ver CatalogDdl::borrarRestriccion() */
+    public function borrarRestriccion(string $tabla, string $nombre): void
+    {
+        CatalogDdl::borrarRestriccion($this, $tabla, $nombre);
+    }
+
+    /** Ver CatalogDdl::anadirClavePrimaria() */
+    public function anadirClavePrimaria(string $tabla, array $columnas): void
+    {
+        CatalogDdl::anadirClavePrimaria($this, $tabla, $columnas);
+    }
+
+    /** Ver CatalogDdl::borrarClavePrimaria() */
+    public function borrarClavePrimaria(string $tabla): void
+    {
+        CatalogDdl::borrarClavePrimaria($this, $tabla);
+    }
+
+    /** Ver CatalogDdl::crearTrigger() */
+    public function crearTrigger(string $tabla, array $trg): void
+    {
+        CatalogDdl::crearTrigger($this, $tabla, $trg);
+    }
+
+    /** Ver CatalogDdl::borrarTrigger() */
+    public function borrarTrigger(string $nombre): string
+    {
+        return CatalogDdl::borrarTrigger($this, $nombre);
+    }
+
 }

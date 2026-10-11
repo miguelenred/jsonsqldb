@@ -3,10 +3,12 @@ declare(strict_types=1);
 
 /**
  * Exportar e importar una base mayor que la memoria de PHP, y las copias
- * programadas. Ejecutar: php tests/f20_memoria.php [--directa]
+ * programadas. Ejecutar: php tests/f20_memoria.php [--directa] [--open-basedir]
  *
  * Con --directa, el panel usa la conexión directa: el motor trabaja dentro
- * del mismo proceso y con la misma memoria.
+ * del mismo proceso y con la misma memoria. Con --open-basedir, el panel y la
+ * API solo pueden tocar el proyecto y sus datos, como en muchos hostings, y
+ * cualquier aviso de PHP sale en la respuesta.
  *
  * El panel y la API corren con memory_limit = 32M y la base ocupa varias
  * veces eso como array de PHP: si algo la cargara entera, la petición
@@ -63,6 +65,7 @@ function puertosLibres(): array {
 
 borrarArbol($raizDatos);
 @mkdir($raizDatos . '/admin', 0775, true);
+@mkdir($raizDatos . '/subidas_php', 0775, true);
 [$puertoPanel, $puertoApi] = puertosLibres();
 $url     = "http://127.0.0.1:$puertoPanel/jsonsqldbadmin/index.php";
 $cookies = $raizDatos . '/cookies.txt';
@@ -71,6 +74,9 @@ $prepend = $raizDatos . '/_prepend.php';
 file_put_contents($prepend, "<?php\n"
     . "define('JSONSQLDB_DATA_PATH', " . var_export($raizDatos, true) . ");\n"
     . "define('JSONSQLDB_LOG_PATH', "  . var_export($raizDatos . '/logs', true) . ");\n"
+    // Todo al registro, también las lecturas (por defecto, desde 2.9, solo
+    // escrituras y errores): una prueba de abajo mira en él la consulta del panel
+    . "define('JSONSQLDB_LOG_NIVEL', 'todo');\n"
     . "define('API_ESTADO_PATH', "     . var_export($raizDatos . '/api', true) . ");\n"
     . "define('ADMIN_DATA_PATH', "     . var_export($raizDatos . '/admin', true) . ");\n"
     . "define('ADMIN_API_URL', "       . var_export("http://127.0.0.1:$puertoApi/api/jsonsqldb_api.php", true) . ");\n"
@@ -87,9 +93,18 @@ file_put_contents($prepend, "<?php\n"
 
 $servidores = [];
 foreach ([$puertoPanel, $puertoApi] as $p) {
-    $cmd = escapeshellarg(PHP_BINARY) . ' -d memory_limit=' . MEMORIA . ' -d max_execution_time=0'
+    // Con --open-basedir, como en un hosting que lo limita al proyecto y a sus
+    // datos: la carpeta temporal del sistema queda fuera, y las subidas van a
+    // una carpeta propia (upload_tmp_dir), como hay que configurar allí
+    $limitado = in_array('--open-basedir', $argv, true)
+        ? ' -d open_basedir=' . escapeshellarg($raizProyecto . PATH_SEPARATOR . $raizDatos)
+          . ' -d upload_tmp_dir=' . escapeshellarg($raizDatos . '/subidas_php') . ' -d error_reporting=-1 -d display_errors=1'
+        : '';
+    $cmd = escapeshellarg(PHP_BINARY) . ' -d memory_limit=' . MEMORIA . ' -d max_execution_time=0' . $limitado
          . ' -d auto_prepend_file=' . escapeshellarg($prepend) . " -S 127.0.0.1:$p -t " . escapeshellarg($raizProyecto);
-    $proc = proc_open($cmd, [1 => ['file', $raizDatos . '/server.log', 'a'], 2 => ['file', $raizDatos . '/server.log', 'a']], $t);
+    // Con exec, el shell se convierte en el servidor: si no, proc_terminate()
+    // mata el shell y el servidor se queda funcionando, huérfano
+    $proc = proc_open((PHP_OS_FAMILY === 'Windows' ? '' : 'exec ') . $cmd, [1 => ['file', $raizDatos . '/server.log', 'a'], 2 => ['file', $raizDatos . '/server.log', 'a']], $t);
     if (!is_resource($proc)) {
         echo "No se pudo arrancar el servidor de pruebas en el puerto $p.\n";
         exit(1);
@@ -127,7 +142,7 @@ function peticion(string $query, ?array $post, ?string $fichero = null): string 
     }
     $r = curl_exec($ch);
     if ($r === false) { throw new RuntimeException('cURL: ' . curl_error($ch)); }
-    curl_close($ch);
+    unset($ch);                                 // suelta el fichero antes de cerrarlo (curl_close(), obsoleta en PHP 8.5)
     if ($f !== null) { fclose($f); }
     return is_string($r) ? $r : '';
 }
@@ -216,6 +231,29 @@ chk('la tabla en CSV sale entera', function () use ($raizDatos) {
     @unlink($f);
     return $n === FILAS + 2 ?: "$n líneas";
 });
+chk('la tabla en JSON y en Excel sale entera, y el JSON se vuelve a cargar en otra tabla (2.9)', function () use ($raizDatos) {
+    $j = $raizDatos . '/admin/importar/fila.json';
+    @mkdir(dirname($j), 0775, true);
+    peticion('p=datos&db=grande&tabla=fila', ['csrf' => csrf('p=datos&db=grande&tabla=fila'), 'accion' => 'exportar',
+        'formato' => 'json', 'db' => 'grande', 'tabla' => 'fila'], $j);
+    $filasJson = lineas($j, '{"id":');
+    $x = $raizDatos . '/fila.xlsx';
+    peticion('p=datos&db=grande&tabla=fila', ['csrf' => csrf('p=datos&db=grande&tabla=fila'), 'accion' => 'exportar',
+        'formato' => 'xlsx', 'db' => 'grande', 'tabla' => 'fila'], $x);
+    $zip = new ZipArchive();
+    $hoja = $zip->open($x) === true ? (string)$zip->getFromName('xl/worksheets/sheet1.xml') : '';
+    $zip->close();
+    @unlink($x);
+    $ultima = preg_match_all('/<row r="(\d+)"/', $hoja, $m) ? (int)end($m[1]) : 0;
+    // Y de vuelta: el JSON en una tabla nueva, desde la carpeta de importar
+    (new JsonSQLDB\Database('grande', $raizDatos))->consultar('CREATE TABLE fila_json AS SELECT * FROM fila WHERE 0');
+    $html = peticion('p=tablas&db=grande', ['csrf' => csrf('p=tablas&db=grande'), 'accion' => 'importar_json', 'db' => 'grande',
+        'tabla' => 'fila_json', 'servidor' => 'fila.json']);
+    @unlink($j);
+    $cargadas = contar('grande', 'fila_json');
+    (new JsonSQLDB\Database('grande', $raizDatos))->consultar('DROP TABLE fila_json');
+    return $filasJson === FILAS + 1 && $ultima === FILAS + 2 && $cargadas === FILAS + 1 ?: "JSON $filasJson, Excel hasta la fila $ultima, cargadas $cargadas: " . substr(strip_tags($html), 0, 200);
+});
 chk('la tabla filtrada sale entera, y por lotes con LIMIT, sin rehacer la consulta entera en cada lote', function () use ($raizDatos) {
     $f = $raizDatos . '/filtrada.csv';
     peticion('p=datos&db=grande&tabla=fila', ['csrf' => csrf('p=datos&db=grande&tabla=fila'), 'accion' => 'exportar',
@@ -242,13 +280,26 @@ chk('el resultado de una consulta del editor en INSERT sale entero, con su orden
     @unlink($f);
     return $n === FILAS / 10 && str_contains($primera, 'VALUES (' . (FILAS / 10) . ', ' . (FILAS / 10 - 1) . ')') ?: "$n · $primera";
 });
-// Con conexión directa el motor ordena en la memoria del propio panel
-if (in_array('--directa', $argv, true)) chk('una consulta ordenada que no cabe en la memoria del motor lo explica, sin dar el fichero por completo', function () {
-    $r = peticion('p=sql&db=grande', ['csrf' => csrf('p=sql&db=grande'), 'accion' => 'exportar', 'formato' => 'sql', 'db' => 'grande',
-        'sql' => 'SELECT id, n FROM fila ORDER BY n DESC']);
-    // O no empieza (el aviso, en el panel) o acaba con el error en la última línea
-    return str_contains($r, 'MEMORIA:') && (!str_contains($r, 'INSERT INTO') || str_contains($r, '-- ERROR:'))
-        && !str_contains($r, '-- ' . FILAS . ' fila(s)') ?: substr(strip_tags($r), -300);
+chk('una consulta ordenada de toda la tabla, que no cabe en la memoria, sale entera ordenando en disco (2.9)', function () use ($raizDatos) {
+    $f = $raizDatos . '/ordenada.sql';
+    peticion('p=sql&db=grande', ['csrf' => csrf('p=sql&db=grande'), 'accion' => 'exportar', 'formato' => 'sql', 'db' => 'grande',
+        'sql' => 'SELECT id, n FROM fila ORDER BY n DESC'], $f);
+    $n = lineas($f, 'INSERT INTO');
+    $primera = '';
+    foreach (new SplFileObject($f) as $l) {
+        if (str_starts_with((string)$l, 'INSERT')) { $primera = (string)$l; break; }
+    }
+    $error = lineas($f, '-- ERROR');
+    @unlink($f);
+    return $n === FILAS + 1 && $error === 0 && str_contains($primera, 'VALUES (' . FILAS . ', ' . (FILAS - 1) . ')') ?: "$n · $error · $primera";
+});
+chk('una consulta que acaba en un comentario también sale por lotes (el LIMIT no queda dentro del comentario)', function () use ($raizDatos) {
+    $f = $raizDatos . '/comentario.sql';
+    peticion('p=sql&db=grande', ['csrf' => csrf('p=sql&db=grande'), 'accion' => 'exportar', 'formato' => 'sql', 'db' => 'grande',
+        'sql' => "SELECT id, n FROM fila -- todas las filas"], $f);
+    $n = lineas($f, 'INSERT INTO');
+    @unlink($f);
+    return $n === FILAS + 1 ?: "$n filas";
 });
 chk('la copia ZIP sale entera', function () use ($raizDatos) {
     $f = $raizDatos . '/grande.zip';
@@ -306,6 +357,36 @@ chk('una subida incompleta no se importa', function () use ($id) {
         'formato' => 'auto', 'subida' => $id, 'subida_tamano' => '999', 'subida_nombre' => 'x.sql']);
     return str_contains($html, 'no ha llegado entero');
 });
+chk('una copia ZIP mayor que ' . MEMORIA . ' se sube por trozos y se restaura entera, con el panel en ' . MEMORIA, function () use ($raizDatos) {
+    // Textos al azar en base64, que comprimidos siguen ocupando: el ZIP pasa de la memoria
+    JsonSQLDB\Database::crear('zipgrande', $raizDatos);
+    $bd = new JsonSQLDB\Database('zipgrande', $raizDatos);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, b TEXT)');
+    for ($k = 0; $k < 100; $k++) {
+        $v = [];
+        for ($i = 1; $i <= 500; $i++) { $v[] = '(' . ($k * 500 + $i) . ", '" . base64_encode(random_bytes(750)) . "')"; }
+        $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    }
+    $f = $raizDatos . '/zipgrande.zip';
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'exportar_base', 'formato' => 'zip', 'nombre' => 'zipgrande'], $f);
+    $tam = (int)filesize($f);
+    if ($tam <= 32 * 1048576) { @unlink($f); return "el ZIP ocupa $tam bytes: no pasa de " . MEMORIA; }
+    // Se estropea la base y se restaura con el ZIP subido por trozos de 1 MB
+    $bd->consultar('DELETE FROM t WHERE id > 100');
+    $id = str_repeat('cd', 16);
+    $fh = fopen($f, 'rb');
+    for ($desde = 0; ($datos = (string)fread($fh, 1048576)) !== ''; $desde += strlen($datos)) {
+        $r = trozo($id, $desde, $datos);
+        if (($r['recibido'] ?? null) !== $desde + strlen($datos)) { fclose($fh); @unlink($f); return $r; }
+    }
+    fclose($fh);
+    $html = peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'importar_zip', 'nombre' => 'zipgrande',
+        'subida' => $id, 'subida_tamano' => (string)$tam, 'subida_nombre' => 'zipgrande.zip']);
+    @unlink($f);
+    $n = contar('zipgrande', 't');
+    $quedan = array_merge((array)glob($raizDatos . "/admin/importar/.subidas/$id*"), (array)glob($raizDatos . '/zipgrande.antes-de-restaurar'));
+    return str_contains($html, 'restaurada') && $n === 50000 && $quedan === [] ?: [round($tam / 1048576, 1) . ' MB', strip_tags(substr($html, 0, 300)), $n, $quedan];
+});
 chk('un fichero dejado en la carpeta de importar se ofrece y se importa sin subirlo', function () use ($volcado, $raizDatos) {
     @mkdir($raizDatos . '/admin/importar', 0775, true);
     rename($volcado, $raizDatos . '/admin/importar/volcado.sql');
@@ -315,10 +396,105 @@ chk('un fichero dejado en la carpeta de importar se ofrece y se importa sin subi
         'formato' => 'auto', 'servidor' => 'volcado.sql']);
     return contar('copia2', 'fila') === FILAS + 1 && is_file($raizDatos . '/admin/importar/volcado.sql') ?: 'faltan filas';
 });
+chk('un volcado de PostgreSQL con un COPY de 120.000 filas se importa: el COPY va por tandas (2.9)', function () use ($raizDatos) {
+    $f = $raizDatos . '/admin/importar/pg.sql';
+    $h = fopen($f, 'wb');
+    fwrite($h, "CREATE TABLE public.datos (id integer NOT NULL, texto text);\nCOPY public.datos (id, texto) FROM stdin;\n");
+    for ($i = 1; $i <= FILAS; $i++) {
+        fwrite($h, "$i\ttexto de la fila $i, con algo de relleno para que pese\n");
+    }
+    fwrite($h, "\\.\n");
+    fclose($h);
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'crear_base', 'nombre' => 'pgcopia']);
+    $html = peticion('p=tablas&db=pgcopia', ['csrf' => csrf('p=tablas&db=pgcopia'), 'accion' => 'importar_sql', 'db' => 'pgcopia',
+        'formato' => 'postgresql', 'servidor' => 'pg.sql']);
+    @unlink($f);
+    return contar('pgcopia', 'datos') === FILAS ?: substr(strip_tags($html), 0, 300);
+});
+chk('una sentencia que no cabe en la memoria se explica, con su línea, y no se cambia nada (2.9)', function () use ($raizDatos) {
+    $f = $raizDatos . '/admin/importar/enorme.sql';
+    file_put_contents($f, "CREATE TABLE previa (id INTEGER);\nINSERT INTO previa VALUES (1);\n\nINSERT INTO previa VALUES (2), ('" . str_repeat('z', 20000000) . "');\n");
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'crear_base', 'nombre' => 'enorme']);
+    $html = peticion('p=tablas&db=enorme', ['csrf' => csrf('p=tablas&db=enorme'), 'accion' => 'importar_sql', 'db' => 'enorme',
+        'formato' => 'auto', 'servidor' => 'enorme.sql']);
+    @unlink($f);
+    $tablas = peticion('p=tablas&db=enorme', null);
+    return str_contains($html, 'empieza en la línea 4') && !str_contains($tablas, 'previa') ?: substr(strip_tags($html), 0, 400);
+});
+chk('la base entera en JSON sale y se vuelve a cargar en otra, por partes (2.9)', function () use ($raizDatos) {
+    $f = $raizDatos . '/admin/importar/grande.json';
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'exportar_base', 'formato' => 'json', 'nombre' => 'grande'], $f);
+    $filas = lineas($f, '{"id":');
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'crear_base', 'nombre' => 'grandejson']);
+    $html = peticion('p=tablas&db=grandejson', ['csrf' => csrf('p=tablas&db=grandejson'), 'accion' => 'importar_sql', 'db' => 'grandejson',
+        'formato' => 'auto', 'servidor' => 'grande.json']);
+    @unlink($f);
+    return $filas >= FILAS + 1 && contar('grandejson', 'fila') === FILAS + 1 && contar('grandejson', 'padre') === 2
+        ?: "$filas filas en el JSON: " . substr(strip_tags($html), 0, 300);
+});
 chk('no se puede salir de la carpeta de importar', function () {
     $html = peticion('p=tablas&db=copia2', ['csrf' => csrf('p=tablas&db=copia2'), 'accion' => 'importar_sql', 'db' => 'copia2',
         'formato' => 'auto', 'servidor' => '../usuarios.json']);
     return str_contains($html, 'no está en la carpeta de importar');
+});
+
+echo "\n== Con open_basedir (hosting) ==\n";
+chk('con open_basedir sin la carpeta temporal del sistema: temporales en los datos del panel, ordenar en disco y escribir sin avisos', function () use ($raizDatos, $raizProyecto) {
+    $codigo = 'define("ADMIN_DATA_PATH", ' . var_export($raizDatos . '/admin', true) . '); define("ADMIN_CONEXION", "directa");'
+        . ' define("ADMIN_MOTOR_RUTA", ' . var_export($raizProyecto, true) . '); define("JSONSQLDB_DATA_PATH", ' . var_export($raizDatos, true) . ');'
+        . ' define("JSONSQLDB_LOG_PATH", ' . var_export($raizDatos . '/logs', true) . ');'
+        . ' require ' . var_export($raizProyecto . '/jsonsqldbadmin/lib/arranque.php', true) . '; Api::cargarMotor();'
+        . ' $t = ficheroTemporal("jsonsqldb_"); echo dirname((string)$t), "|"; @unlink((string)$t);'
+        . ' $b = new JsonSQLDB\\Database("grande", ' . var_export($raizDatos, true) . ');'
+        . ' $b->consultar("UPDATE padre SET nombre = \'otra\' WHERE id = 2");'
+        . ' $n = 0; $r = $b->consultarPorFilas("SELECT id FROM fila ORDER BY texto DESC, id", [], null, function () use (&$n) { $n++; });'
+        . ' echo is_array($r) ? count($r) : $n, "|", count(glob(' . var_export($raizDatos . '/grande/.orden/*', true) . ') ?: []);';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=' . MEMORIA . ' -d error_reporting=-1 -d display_errors=1'
+        . ' -d open_basedir=' . escapeshellarg($raizProyecto . PATH_SEPARATOR . $raizDatos) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    return $salida === $raizDatos . '/admin|' . (FILAS + 1) . '|0' ?: $salida;
+});
+
+echo "\n== Filas muy anchas, y una tabla que no cabe ==\n";
+chk('una tabla de 30 filas de 400 KB se vuelca entera con 32 MB por la API (lotes y bloques medidos en bytes, 2.9); con conexión directa, donde el motor comparte la memoria del panel, se dice que no cabe', function () use ($raizDatos) {
+    JsonSQLDB\Database::crear('ancha', $raizDatos);
+    $bd = new JsonSQLDB\Database('ancha', $raizDatos);
+    $bd->consultar('CREATE TABLE antes (id INTEGER PRIMARY KEY, x TEXT)');
+    $bd->consultar("INSERT INTO antes VALUES (1, 'a'), (2, 'b')");
+    $bd->consultar('CREATE TABLE monstruos (id INTEGER PRIMARY KEY, x TEXT)');
+    for ($i = 1; $i <= 30; $i++) {
+        $bd->consultar('INSERT INTO monstruos VALUES (?, ?)', [$i, str_repeat('m', 400000)]);
+    }
+    $bd->consultar('CREATE TABLE zeta (id INTEGER PRIMARY KEY)');
+    unset($bd);
+    $f = $raizDatos . '/ancha.sql';
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'exportar_base', 'formato' => 'sql', 'nombre' => 'ancha'], $f);
+    $n = lineas($f, 'INSERT INTO "monstruos"');
+    $roto = lineas($f, 'INCOMPLETE_DUMP');
+    $tablas = lineas($f, 'CREATE TABLE');
+    $html = (string)file_get_contents($f);
+    @unlink($f);
+    if (in_array('--directa', $GLOBALS['argv'], true)) {
+        return str_contains($html, 'No se puede volcar la base') && str_contains($html, 'monstruos') && $tablas === 0
+            ?: substr(strip_tags($html), 0, 300);
+    }
+    return $n === 30 && $roto === 0 && $tablas === 3 ?: "$n filas, $tablas tablas, marca $roto";
+});
+chk('una base con una tabla que no se puede leer no se vuelca: el panel dice cuál, y no se descarga nada (2.9)', function () use ($raizDatos) {
+    // Tres filas de 12 MB: su parte de datos no se puede leer con 32 MB
+    JsonSQLDB\Database::crear('rota', $raizDatos);
+    $bd = new JsonSQLDB\Database('rota', $raizDatos);
+    $bd->consultar('CREATE TABLE antes (id INTEGER PRIMARY KEY, x TEXT)');
+    $bd->consultar('CREATE TABLE monstruos (id INTEGER PRIMARY KEY, x TEXT)');
+    for ($i = 1; $i <= 3; $i++) {
+        $bd->consultar('INSERT INTO monstruos VALUES (?, ?)', [$i, str_repeat('m', 12000000)]);
+    }
+    unset($bd);
+    $f = $raizDatos . '/rota.sql';
+    peticion('p=bases', ['csrf' => csrf('p=bases'), 'accion' => 'exportar_base', 'formato' => 'sql', 'nombre' => 'rota'], $f);
+    $html = (string)file_get_contents($f);
+    @unlink($f);
+    return str_contains($html, 'No se puede volcar la base') && str_contains($html, 'monstruos')
+        && !str_contains($html, 'CREATE TABLE') ?: substr(strip_tags($html), 0, 300);
 });
 
 echo "\n== Copias programadas ==\n";
@@ -339,7 +515,18 @@ chk('cuándo toca una copia diaria, semanal o cada N horas', function () {
     foreach ($casos as $i => [$r, $esperado]) {
         if ($r !== $esperado) { return "caso $i"; }
     }
-    return true;
+    // El día del cambio de hora tiene 25 horas: restando 86.400 segundos para
+    // ir al día anterior salía una copia de más a medianoche
+    $zona = date_default_timezone_get();
+    date_default_timezone_set('Europe/Madrid');
+    $dst = [
+        Copias::toca(['frecuencia' => 'diaria', 'hora' => 1, 'ultima' => '2026-10-25T01:00:00+02:00'], $t('2026-10-26 00:00:00')),
+        Copias::toca(['frecuencia' => 'diaria', 'hora' => 1, 'ultima' => '2026-10-25T01:00:00+02:00'], $t('2026-10-26 01:00:00')),
+        Copias::toca(['frecuencia' => 'semanal', 'dia' => 7, 'hora' => 2, 'ultima' => '2026-10-25T02:00:00+02:00'], $t('2026-10-26 00:00:00')),
+        Copias::toca(['frecuencia' => 'diaria', 'hora' => 3, 'ultima' => '2026-10-24T03:00:00+02:00'], $t('2026-10-25 00:30:00')),
+    ];
+    date_default_timezone_set($zona);
+    return $dst === [false, true, false, false] ?: json_encode($dst);
 });
 chk('dos copias del mismo segundo no se pisan: la segunda lleva -2', function () use ($raizDatos) {
     $dir = $raizDatos . '/nombres';

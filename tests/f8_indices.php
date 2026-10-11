@@ -22,7 +22,9 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
+use JsonSQLDB\IndexesBusqueda;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageEscritura;
 use JsonSQLDB\Valor;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_indices';
@@ -174,7 +176,7 @@ esperaError('índice sobre columna inexistente', 'SCHEMA',
     fn() => $bd->consultar('CREATE INDEX idx_no ON gente (no_existe)'));
 esperaError('el prefijo auto_ está reservado', 'SCHEMA',
     fn() => $bd->consultar('CREATE INDEX auto_cosa ON gente (edad)'));
-esperaError('CREATE UNIQUE INDEX se rechaza con explicación', 'SYNTAX',
+esperaError('CREATE UNIQUE INDEX sobre datos repetidos no se crea (2.9: es una clave única)', 'CONSTRAINT',
     fn() => $bd->consultar('CREATE UNIQUE INDEX u ON gente (edad)'));
 esperaError('columna repetida en el índice', 'SCHEMA',
     fn() => $bd->consultar('CREATE INDEX idx_rep ON gente (edad, edad)'));
@@ -210,6 +212,23 @@ chk('combinación con IN en las dos', fn() => igual($bd,
     "SELECT id FROM gente WHERE ciudad IN ('Elche','Madrid') AND edad IN (25,26) ORDER BY id",
     "SELECT id FROM gente WHERE ciudad + 0 <> 1 AND (ciudad LIKE 'Elche' OR ciudad LIKE 'Madrid')
                             AND edad + 0 IN (25,26) ORDER BY id"));
+
+chk('LIMIT con un WHERE que el índice cubre entero da las mismas filas, en el mismo orden, que recorriendo, y deja de mirar trozos en cuanto las tiene (2.9)', function () use ($bd) {
+    // Con LIMIT y OFFSET, una clave, IN, las dos columnas del índice, y una
+    // condición de más (que no cubre: el WHERE la aplica después, sin cortar)
+    $casos = ["ciudad = 'Elche' LIMIT 5", "ciudad = 'Elche' LIMIT 7 OFFSET 20", "ciudad IN ('Elche', 'Rojales') LIMIT 50",
+              "ciudad = 'Madrid' AND edad = 30 LIMIT 3", "ciudad = 'Elche' AND edad > 60 LIMIT 4", "dni IN ('D0500', 'D0003', 'D0100') LIMIT 2",
+              "ciudad = 'Elche' AND ciudad = 'Elche' LIMIT 3", "ciudad = 'Nadie' LIMIT 3", "ciudad = 'Elche' LIMIT 0", "ciudad = 'Elche' LIMIT 1000"];
+    foreach ($casos as $c) {
+        $sin = preg_replace("/\\b(ciudad|dni|edad) /", "\$1 || '' ", $c);
+        $a = $bd->consultar("SELECT id FROM gente WHERE $c");
+        $b = $bd->consultar("SELECT id FROM gente WHERE $sin");
+        if ($a !== $b) { return "$c: " . json_encode(array_column($a, 'id')) . ' / ' . json_encode(array_column($b, 'id')); }
+    }
+    // 600 filas en partes de 100: Elche está en todas; con LIMIT 5 solo hay que leer el primer trozo y 5 filas
+    $e = $bd->consultar("EXPLAIN SELECT id FROM gente WHERE ciudad = 'Elche' LIMIT 5")[0];
+    return (int)$e['filas'] <= 25 && $e['indice'] !== null ?: $e;
+});
 
 echo "\n== Igualdad del motor, no la de PHP ==\n";
 chk('buscar un número encuentra la fila que guarda el texto', function () use ($bd) {
@@ -589,8 +608,8 @@ chk('UPDATE y DELETE por índice dan lo mismo que recorriendo la tabla', functio
         if ($r1 !== $r2) { return "tras '$op' la clave primaria indexada y el escaneo no coinciden"; }
         $st = new Storage($dir, 'p');
         $st->bloquear(false);
-        $conCache = $st->leerFilas('ci');
-        $sinCache = $st->leerFilas('ci', true);
+        $conCache = StorageEscritura::leerFilas($st, 'ci');
+        $sinCache = StorageEscritura::leerFilas($st, 'ci', true);
         $st->desbloquear();
         if ($conCache !== $sinCache) { return "tras '$op' la caché no coincide con el disco"; }
     }
@@ -677,6 +696,109 @@ chk('el rango numérico de cada trozo acota la búsqueda sin perder claves movid
     return true;
 });
 
+chk('una clave se encuentra en su trozo de índice esté donde esté (en orden, desordenada, con huecos, repetida, negativa, con decimales) y no se confunde con otra que la lleva en su texto (2.9)', function () use ($raiz) {
+    // Una clave numérica se busca desde donde caería si el trozo va en orden
+    // (ver Storage::buscarClave()); en uno desordenado, o lejos de donde
+    // caería, tiene que encontrarse igual, y no confundirse con una que la
+    // contiene
+    $dir = $raiz . '/donde';
+    @mkdir($dir, 0775, true);
+    Database::crear('d', $dir);
+    $bd = new Database('d', $dir);
+    $bd->consultar('CREATE TABLE desord (id INTEGER PRIMARY KEY, n INTEGER, f DOUBLE, s VARCHAR(30))');
+    $bd->consultar('CREATE TABLE enorden (id INTEGER PRIMARY KEY, n INTEGER, f DOUBLE, s VARCHAR(30))');
+    foreach (['desord', 'enorden'] as $t) {
+        $bd->consultar("CREATE INDEX ix_{$t}_n ON $t (n)");
+        $bd->consultar("CREATE INDEX ix_{$t}_f ON $t (f)");
+        $bd->consultar("CREATE INDEX ix_{$t}_ns ON $t (n, s)");
+        $bd->consultar("CREATE INDEX ix_{$t}_s ON $t (s)");
+    }
+    mt_srand(29);
+    $ids = range(1, 400);
+    shuffle($ids);
+    // En orden, con huecos: de 3 en 3, un salto grande y negativos al final
+    $orden = array_merge(range(3, 900, 3), range(100000, 100060), range(-40, -1));
+    // En el primer trozo, filas cuyo texto lleva dentro la clave de otra: en
+    // el índice (n, s), «"n1:3t1:y» queda justo antes del final de su clave,
+    // "n1:7t10:z\"n1:3t1:y":, y lo mismo «"t1:w» en el índice de s. Unas
+    // antes de donde empieza la búsqueda y otras después, delante de la buena
+    $trampas = [5 => [3, 'y'], 7 => [7, 'z"n1:3t1:y'], 30 => [7, 'z"n1:1t1:v'], 40 => [1, 'v'], 25 => [7, 'q"t1:w'], 45 => [7, 'w']];
+    $filas = static function (array $ids) use ($trampas): array {
+        $v = [];
+        foreach ($ids as $k => $id) {
+            [$n, $s] = $trampas[$k] ?? [$id % 13, 's' . ($k % 5)];
+            $v[] = sprintf("(%d, %d, %s, '%s')", $id, $n, $id * 0.37 - 50, str_replace("'", "''", $s));
+        }
+        return $v;
+    };
+    $bd->consultar('INSERT INTO desord VALUES ' . implode(',', $filas($ids)));
+    $bd->consultar('INSERT INTO enorden VALUES ' . implode(',', $filas($orden)));
+    $mal = [];
+    foreach (['desord' => $ids, 'enorden' => $orden] as $t => $lista) {
+        $buscar = array_merge($lista, [0, 2, 4, 401, 99999, 100061, -41, 1000000]);
+        foreach ($buscar as $id) {
+            if ($bd->consultar("SELECT id FROM $t WHERE id = ?", [$id]) !== $bd->consultar("SELECT id FROM $t WHERE id + 0 = ?", [$id])) {
+                $mal[] = "$t id = $id";
+            }
+        }
+        foreach (range(0, 12) as $n) {
+            if ($bd->consultar("SELECT id FROM $t WHERE n = ? ORDER BY id", [$n]) !== $bd->consultar("SELECT id FROM $t WHERE n + 0 = ? ORDER BY id", [$n])) {
+                $mal[] = "$t n = $n";
+            }
+        }
+        foreach (array_slice($lista, 0, 60) as $id) {
+            $f = $id * 0.37 - 50;
+            if ($bd->consultar("SELECT id FROM $t WHERE f = ?", [$f]) !== $bd->consultar("SELECT id FROM $t WHERE f + 0 = ?", [$f])) {
+                $mal[] = "$t f = $f";
+            }
+        }
+        for ($i = 0; $i < 20; $i++) {
+            $en = implode(',', array_map(static fn() => $lista[mt_rand(0, count($lista) - 1)] + mt_rand(0, 1), range(1, 30)));
+            if ($bd->consultar("SELECT id FROM $t WHERE id IN ($en) ORDER BY id") !== $bd->consultar("SELECT id FROM $t WHERE id + 0 IN ($en) ORDER BY id")) {
+                $mal[] = "$t id IN ($en)";
+            }
+        }
+        foreach (["n = 3 AND s = 'y'", "n = 1 AND s = 'v'", "s = 'w'"] as $cond) {
+            $a = $bd->consultar("SELECT id FROM $t WHERE $cond");
+            if ($a !== $bd->consultar("SELECT id FROM $t WHERE " . str_replace(['n =', 's ='], ['n + 0 =', "s || '' ="], $cond)) || count($a) !== 1) {
+                $mal[] = "$t $cond: " . json_encode($a);
+            }
+        }
+    }
+    unset($bd);
+    Database::borrar('d', $dir);
+    @rmdir($dir);
+    return $mal === [] ?: implode(' | ', array_slice($mal, 0, 5)) . ' (' . count($mal) . ')';
+});
+
+chk('COUNT(*) de una igualdad sobre un índice cuenta las posiciones sin juntarlas y da lo que contar las filas: listas, claves sueltas, IN con repetidas y filas borradas (2.9)', function () use ($raiz) {
+    $dir = $raiz . '/cuenta';
+    @mkdir($dir, 0775, true);
+    Database::crear('k', $dir);
+    $bd = new Database('k', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, ciudad VARCHAR(20), cod VARCHAR(10))');
+    $bd->consultar('CREATE INDEX ix_ciudad ON t (ciudad)');
+    $bd->consultar('CREATE INDEX ix_cod ON t (cod)');
+    $v = [];
+    for ($i = 1; $i <= 400; $i++) {
+        // Ciudades en todos los trozos (listas largas), una en uno solo y un código distinto por fila (claves sueltas)
+        $v[] = sprintf("(%d, '%s', 'k%d')", $i, $i === 77 ? 'Única' : ['Elche', 'Murcia', 'Alicante', 'Orihuela'][$i % 4], $i);
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    $bd->consultar('DELETE FROM t WHERE id IN (4, 8, 120, 333, 399)');      // huecos: ni están ni se cuentan
+    $mal = [];
+    foreach (["ciudad = 'Elche'", "ciudad = 'Murcia'", "ciudad = 'Única'", "ciudad = 'Nadie'", "cod = 'k5'", "cod = 'k8'",
+              "ciudad IN ('Elche', 'Murcia', 'Elche')", "cod IN ('k1', 'k2', 'k1', 'k400')", "ciudad IN ('Única', 'Nadie')"] as $cond) {
+        $a = $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE $cond")[0]['n'];
+        $b = $bd->consultar('SELECT COUNT(*) AS n FROM t WHERE ' . preg_replace('/^(\w+)/', "$1 || ''", $cond))[0]['n'];
+        if ($a !== $b) { $mal[] = "$cond: $a / $b"; }
+    }
+    unset($bd);
+    Database::borrar('k', $dir);
+    @rmdir($dir);
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
 esperaError('UPDATE por índice que viola la clave primaria', 'CONSTRAINT', function () use ($raiz) {
     $dir = $raiz . '/parcial3';
     @mkdir($dir, 0775, true);
@@ -711,16 +833,621 @@ chk('con dos índices que cubren una columna cada uno, gana el único: «id = ? 
         ['name' => 'auto_id', 'columns' => ['id'], 'auto' => true, 'unico' => true],
         ['name' => 'ix_ciudad_edad', 'columns' => ['ciudad', 'edad'], 'auto' => false, 'unico' => false],
     ];
-    $a = Indexes::candidatos($defs, ['id' => [5], 'ciudad' => ['Oslo']]);
-    $b = Indexes::candidatos($defs, ['ciudad' => ['Oslo'], 'edad' => [30]]);
+    $a = IndexesBusqueda::candidatos($defs, ['id' => [5], 'ciudad' => ['Oslo']]);
+    $b = IndexesBusqueda::candidatos($defs, ['ciudad' => ['Oslo'], 'edad' => [30]]);
     // 600 claves numéricas sí (cada una se busca en un solo trozo); 5.000, no
-    $c = Indexes::candidatos($defs, ['id' => range(1, 5000), 'ciudad' => ['Oslo']]);
-    $d = Indexes::candidatos($defs, ['id' => range(1, 600), 'ciudad' => ['Oslo']]);
+    $c = IndexesBusqueda::candidatos($defs, ['id' => range(1, 5000), 'ciudad' => ['Oslo']]);
+    $d = IndexesBusqueda::candidatos($defs, ['id' => range(1, 600), 'ciudad' => ['Oslo']]);
     $nombres = static fn($l) => implode(',', array_map(static fn($x) => $x['def']['name'], $l));
     return $nombres($a) === 'auto_id,ix_ciudad,ix_ciudad_edad' && $nombres($b) === 'ix_ciudad_edad,ix_ciudad'
         && $nombres($c) === 'ix_ciudad,ix_ciudad_edad' && $nombres($d) === 'auto_id,ix_ciudad,ix_ciudad_edad'
         ?: $nombres($a) . ' | ' . $nombres($b) . ' | ' . $nombres($c) . ' | ' . $nombres($d);
 });
+
+echo "\n== MIN y MAX por índice (2.9) ==\n";
+
+chk('MIN y MAX de columnas con índice salen de los rangos del índice y coinciden con recorrer la tabla, escritura tras escritura', function () use ($raiz) {
+    $dir = "$raiz/mm";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('m', $dir);
+    $bd = new Database('m', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, e INTEGER, d DOUBLE, p DECIMAL(10,2), s TEXT)');
+    $bd->consultar('CREATE INDEX ie ON t (e)');
+    $bd->consultar('CREATE INDEX idd ON t (d, s)');      // la primera columna es la que cuenta
+    $bd->consultar('CREATE INDEX ip ON t (p)');
+    mt_srand(7);
+    $consulta = 'SELECT MIN(e) AS a, MAX(e) AS b, MIN(d) AS c, MAX(d), MIN(p) AS f, MAX(p) AS g, MAX(id) AS h, MIN(id) FROM t';
+    for ($ronda = 0; $ronda < 30; $ronda++) {
+        $v = [];
+        for ($i = 0; $i < 20; $i++) {
+            $v[] = '(' . (mt_rand(0, 5) ? mt_rand(-1000, 1000) : 'NULL') . ', ' . (mt_rand(0, 5) ? mt_rand(-99999, 99999) / 7 : 'NULL')
+                 . ', ' . (mt_rand(0, 5) ? mt_rand(-50000, 50000) / 100 : 'NULL') . ", 'x')";
+        }
+        $bd->consultar('INSERT INTO t (e, d, p, s) VALUES ' . implode(', ', $v));
+        // Borrar el máximo y el mínimo cambia los extremos: los rangos tienen que seguirlo
+        $bd->consultar('DELETE FROM t WHERE e = (SELECT MAX(e) FROM t WHERE 1 = 1) OR d = (SELECT MIN(d) FROM t WHERE 1 = 1)');
+        $bd->consultar('UPDATE t SET p = ' . mt_rand(-900, 900) . ' WHERE id % 13 = ' . mt_rand(0, 12));
+        $rapida  = $bd->consultar($consulta);
+        $lenta   = $bd->consultar($consulta . ' WHERE 1 = 1');    // con WHERE no hay atajo: recorre la tabla
+        if ($rapida !== $lenta) {
+            return "ronda $ronda: " . json_encode($rapida) . ' / ' . json_encode($lenta);
+        }
+    }
+    // Y de verdad no lee la tabla: con sus ficheros de datos ilegibles, sigue
+    // contestando (recorrerla daría «Datos ilegibles»)
+    $copia = "$raiz/mm2";
+    borrarArbol($copia);
+    @mkdir("$copia/m", 0775, true);
+    foreach (glob("$dir/m/*") as $f) {
+        file_put_contents("$copia/m/" . basename($f), preg_match('/^t(\.part\d+)?\.json$/', basename($f)) ? 'roto' : file_get_contents($f));
+    }
+    $sinDatos = (new Database('m', $copia))->consultar($consulta);
+    $vacia = (new Database('m', $dir));
+    $vacia->consultar('DELETE FROM t');
+    $nulos = $vacia->consultar('SELECT MIN(e) AS a, MAX(p) AS b FROM t');
+    borrarArbol($dir);
+    borrarArbol($copia);
+    return $sinDatos === $lenta && $nulos === [['a' => null, 'b' => null]] ?: json_encode([$sinDatos, $nulos]);
+});
+
+echo "\n== Rangos y comparaciones por índice (2.9) ==\n";
+
+chk('COUNT(*) y SELECT con rangos, BETWEEN e igualdades sobre fechas, textos y números dan lo mismo que sin índice', function () use ($raiz) {
+    $dir = "$raiz/rg";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('r', $dir);
+    $bd = new Database('r', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, f DATETIME, s TEXT, x TEXT, n INTEGER, d DOUBLE)');
+    foreach (['f', 's', 'x', 'n', 'd'] as $c) {
+        $bd->consultar("CREATE INDEX i_$c ON t ($c)");
+    }
+    mt_srand(11);
+    $pal = ['ana', 'Ávila', 'bea', 'Bea', 'zoe', 'z', 'm-1', 'm.0', '', 'ñu'];
+    // x mezcla textos con textos que parecen números: el índice guarda estos como número
+    $raros = ['05', ' 5 ', '5.0', 'abc', '-3', '1e2', 'x9'];
+    for ($ronda = 0; $ronda < 6; $ronda++) {
+        $v = [];
+        for ($i = 0; $i < 60; $i++) {
+            // Las fechas crecen con la inserción (como un alta) y a veces se repiten o faltan
+            $f = mt_rand(0, 9) ? "'" . date('Y-m-d H:i:s', 1767225600 + ($ronda * 60 + $i) * 3600 * mt_rand(1, 3)) . "'" : 'NULL';
+            $v[] = "($f, " . (mt_rand(0, 9) ? "'" . $pal[mt_rand(0, 9)] . "'" : 'NULL') . ", '" . $raros[mt_rand(0, 6)] . "', "
+                 . (mt_rand(0, 9) ? mt_rand(-50, 50) : 'NULL') . ', ' . (mt_rand(0, 9) ? mt_rand(-5000, 5000) / 100 : 'NULL') . ')';
+        }
+        $bd->consultar('INSERT INTO t (f, s, x, n, d) VALUES ' . implode(', ', $v));
+        $bd->consultar('DELETE FROM t WHERE id % 17 = ' . mt_rand(0, 16));
+    }
+    $condiciones = [
+        "f BETWEEN '2026-01-03' AND '2026-01-09'", "f >= '2026-01-20 10:00:00'", "f < '2026-01-02'", "'2026-01-05' < f AND f <= '2026-01-06T12:00'",
+        "s > 'b'", "s <= 'Bea'", "s BETWEEN 'a' AND 'z'", "s = 'zoe'", "s > 'm-'", "s < 'm.1'",
+        "x > 'a'", "x < '5'", "x = '05'", "x BETWEEN '0' AND '9'", "x > '0x'", "x < '0x'", "x > '!'",
+        'n < 10', "f < '2026-01-01 05:00:00'", "f > '2026-01-01 05:00:00'",
+        'n > 10', 'n BETWEEN -5 AND 5', 'n = 0', '-10 >= n', 'n > 2.5', "n > '3'",
+        'd < 0', 'd BETWEEN 1.5 AND 20', 'd >= -0.5 AND d < 0.5', 'n >= 0 AND n <= 3',
+    ];
+    foreach ($condiciones as $c) {
+        // El mismo WHERE con cada columna envuelta en un CASE: igual valor, sin índice
+        $sinIndice = preg_replace('/\b([fsxnd])\b/', 'CASE WHEN 1 THEN $1 END', $c);
+        foreach (['SELECT COUNT(*) AS c FROM t WHERE ', 'SELECT * FROM t WHERE '] as $q) {
+            $a = $bd->consultar($q . $c);
+            $b = $bd->consultar($q . $sinIndice);
+            if ($a !== $b) {
+                return "$q$c: " . json_encode(array_slice($a, 0, 3)) . ' / ' . json_encode(array_slice($b, 0, 3)) . ' (' . count($a) . '/' . count($b) . ')';
+            }
+        }
+    }
+    borrarArbol($dir);
+    return true;
+});
+
+echo "\n== Filtro de las claves de texto en cada trozo (2.9) ==\n";
+
+chk('con el filtro de cada trozo, una clave de texto se encuentra siempre, UNIQUE se respeta y solo se lee su trozo', function () use ($raiz) {
+    $dir = "$raiz/flt";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('f', $dir);
+    $bd = new Database('f', $dir);
+    $bd->consultar('CREATE TABLE u (id INTEGER PRIMARY KEY AUTOINCREMENT, email VARCHAR(40) UNIQUE, n INTEGER)');
+    mt_srand(5);
+    $vivos = [];
+    for ($ronda = 0; $ronda < 12; $ronda++) {
+        $v = [];
+        for ($i = 0; $i < 60; $i++) {
+            $e = 'p' . $ronda . '_' . $i . '@x.es';
+            $v[] = "('$e', $i)";
+            $vivos[$e] = true;
+        }
+        $bd->consultar('INSERT INTO u (email, n) VALUES ' . implode(', ', $v));
+        // Cambiar y borrar claves en trozos ya escritos
+        $todas = array_keys($vivos);
+        $viejo = $todas[mt_rand(0, count($todas) - 1)];
+        $bd->consultar('UPDATE u SET email = ? WHERE email = ?', ["cambiado$ronda@x.es", $viejo]);
+        unset($vivos[$viejo]);
+        $vivos["cambiado$ronda@x.es"] = true;
+        $borrado = $todas[mt_rand(0, count($todas) - 1)];
+        if (isset($vivos[$borrado])) {
+            $bd->consultar('DELETE FROM u WHERE email = ?', [$borrado]);
+            unset($vivos[$borrado]);
+        }
+        foreach (array_rand($vivos, 20) as $e) {
+            if (count($bd->consultar('SELECT id FROM u WHERE email = ?', [$e])) !== 1) { return "ronda $ronda: no se encuentra $e"; }
+        }
+        if ($bd->consultar('SELECT id FROM u WHERE email = ?', ["nadie$ronda@x.es"]) !== []) { return 'encuentra una que no está'; }
+        try {
+            $bd->consultar('INSERT INTO u (email, n) VALUES (?, 0)', [array_rand($vivos)]);
+            return "ronda $ronda: dejó repetir una clave única";
+        } catch (JsonSQLDB\JsonSqlDbError $e) {
+            if ($e->sqlState !== 'CONSTRAINT') { return $e->getMessage(); }
+        }
+    }
+    // Solo se lee el trozo de la fila: con las claves de todos los demás
+    // estropeadas (la cabecera y el filtro intactos) y las demás partes de
+    // datos ilegibles, la búsqueda contesta. Sin filtro iría a leer esos
+    // trozos, los vería rotos y recorrería la tabla: «Datos ilegibles»
+    // Una tabla escrita solo con INSERT, para que todos sus trozos tengan filtro
+    // (un DELETE en medio los reescribe sin él, y entonces se leen enteros)
+    $bd->consultar('CREATE TABLE v (id INTEGER PRIMARY KEY AUTOINCREMENT, email VARCHAR(40) UNIQUE, n INTEGER)');
+    $bd->consultar('INSERT INTO v (email, n) SELECT email, n FROM u');
+    $e = array_keys($vivos)[300];
+    $pos = array_search($e, array_column($bd->consultar('SELECT email FROM v'), 'email'), true);
+    $suya = intdiv((int)$pos, 50) + 1;
+    $copia = "$raiz/flt2";
+    borrarArbol($copia);
+    @mkdir("$copia/f", 0775, true);
+    foreach (glob("$dir/f/*") as $f) {
+        $b = basename($f);
+        $texto = (string)file_get_contents($f);
+        $esParte = preg_match('/^v(?:\.part(\d+))?\.json$/', $b, $m) && (int)($m[1] ?? 1) !== $suya;
+        // Se estropean los trozos cuyo filtro dice que la clave no está (los
+        // demás pueden dar un falso positivo, ~1 %, y entonces se leen enteros)
+        $esTrozo = preg_match('/^v\.idx\.auto_email(?:\.part(\d+))?\.json$/', $b, $t) && (int)($t[1] ?? 1) !== $suya
+            && preg_match('/,"filtro":"([^"]*)"/', $texto, $fl)
+            && !JsonSQLDB\IndexesBusqueda::puedeEstar((string)JsonSQLDB\Indexes::filtro(['filtro' => $fl[1]]), (string)JsonSQLDB\Indexes::clave([$e]));
+        if ($esParte) {
+            $texto = "roto \"$e\"";                      // con la clave dentro: buscar su texto obligaría a decodificarla
+        } elseif ($esTrozo) {
+            $texto = substr($texto, 0, (int)strpos($texto, '"keys":{')) . '"keys":{ roto';
+        }
+        file_put_contents("$copia/f/$b", $texto);
+    }
+    $r = (new Database('f', $copia))->consultar('SELECT email FROM v WHERE email = ?', [$e]);
+    borrarArbol($dir);
+    borrarArbol($copia);
+    return $r === [['email' => $e]] ?: json_encode($r);
+});
+
+chk('un índice con números repartidos por toda la tabla lleva filtro de números («cubre»: «todo»), que encuentra cada clave leyendo solo sus trozos (2.9)', function () use ($raiz) {
+    $dir = "$raiz/flt4";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('f', $dir);
+    $bd = new Database('f', $dir);
+    $bd->consultar('CREATE TABLE p (id INTEGER PRIMARY KEY AUTOINCREMENT, cid INTEGER)');
+    $bd->consultar('CREATE INDEX ix_cid ON p (cid)');
+    mt_srand(7);
+    $v = $veces = [];
+    for ($i = 0; $i < 600; $i++) {
+        $c = mt_rand(1, 100000);                        // el rango de cada trozo abarca toda la tabla
+        $v[] = "($c)";
+        $veces[$c] = ($veces[$c] ?? 0) + 1;
+    }
+    $bd->consultar('INSERT INTO p (cid) VALUES ' . implode(', ', $v));
+    $trozos = glob("$dir/f/p.idx.ix_cid*.json");
+    if (count($trozos) < 4) { return 'pocos trozos: ' . count($trozos); }
+    foreach ($trozos as $f) {
+        if (!str_contains((string)file_get_contents($f), '"filtro":"') || !str_contains((string)file_get_contents($f), ',"cubre":"todo"')) { return basename($f) . ' no cubre los números'; }
+    }
+    // Una clave que está una sola vez: su fila va en una parte. Como en la
+    // prueba del filtro de texto, con las claves de los demás trozos y las
+    // demás partes ilegibles, la búsqueda contesta igual; sin filtro de
+    // números leería esos trozos y, rotos, recorrería la tabla: «Datos ilegibles»
+    $cid   = (int)array_search(1, $veces, true);
+    $pos   = array_search($cid, array_column($bd->consultar('SELECT cid FROM p'), 'cid'), true);
+    $suya  = intdiv((int)$pos, 50) + 1;
+    $clave = (string)JsonSQLDB\Indexes::clave([$cid]);
+    $copia = "$raiz/flt5";
+    borrarArbol($copia);
+    @mkdir("$copia/f", 0775, true);
+    foreach (glob("$dir/f/*") as $f) {
+        $b = basename($f);
+        $texto = (string)file_get_contents($f);
+        if (preg_match('/^p(?:\.part(\d+))?\.json$/', $b, $m) && (int)($m[1] ?? 1) !== $suya) {
+            $texto = "roto $cid";
+        } elseif (preg_match('/^p\.idx\.ix_cid(?:\.part(\d+))?\.json$/', $b, $t) && (int)($t[1] ?? 1) !== $suya
+            && preg_match('/,"filtro":"([^"]*)","cubre":"([a-z]+)"/', $texto, $fl)
+            && !JsonSQLDB\IndexesBusqueda::puedeEstar((string)JsonSQLDB\Indexes::filtro(['filtro' => $fl[1], 'cubre' => $fl[2]]), $clave)) {
+            $texto = substr($texto, 0, (int)strpos($texto, '"keys":{')) . '"keys":{ roto';
+        }
+        file_put_contents("$copia/f/$b", $texto);
+    }
+    $r = (new Database('f', $copia))->consultar('SELECT cid FROM p WHERE cid = ?', [$cid]);
+    $ninguna = $bd->consultar('SELECT cid FROM p WHERE cid = ?', [100001]);
+    borrarArbol($dir);
+    borrarArbol($copia);
+    return $r === [['cid' => $cid]] && $ninguna === [] ?: json_encode([$r, $ninguna]);
+});
+
+chk('un trozo sin filtro (escrito por una versión anterior) se sigue leyendo entero y bien', function () use ($raiz) {
+    $dir = "$raiz/flt3";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('f', $dir);
+    $bd = new Database('f', $dir);
+    $bd->consultar('CREATE TABLE u (id INTEGER PRIMARY KEY AUTOINCREMENT, email VARCHAR(40) UNIQUE)');
+    $v = [];
+    for ($i = 0; $i < 200; $i++) { $v[] = "('c$i@x')"; }
+    $bd->consultar('INSERT INTO u (email) VALUES ' . implode(', ', $v));
+    // Se quita el filtro de los trozos, como los escribe la 2.8
+    foreach (glob("$dir/f/u.idx.auto_email*.json") as $f) {
+        file_put_contents($f, preg_replace('/,"filtro":"[^"]*"(,"cubre":"[a-z]+")?/', '', (string)file_get_contents($f)));
+    }
+    $otra = new Database('f', $dir);
+    $r = $otra->consultar("SELECT email FROM u WHERE email = 'c150@x'");
+    try {
+        $otra->consultar("INSERT INTO u (email) VALUES ('c42@x')");
+        $repetida = true;
+    } catch (JsonSQLDB\JsonSqlDbError) {
+        $repetida = false;
+    }
+    $otra->consultar("INSERT INTO u (email) VALUES ('nueva@x')");
+    $n = $otra->consultar("SELECT COUNT(*) AS n FROM u WHERE email = 'nueva@x'");
+    borrarArbol($dir);
+    return $r === [['email' => 'c150@x']] && !$repetida && $n === [['n' => 1]] ?: json_encode([$r, $repetida, $n]);
+});
+
+chk('VACUUM rehace con filtro los índices escritos por una versión anterior, sin tocar las partes, y una segunda vez no toca nada (2.9)', function () use ($raiz) {
+    $dir = "$raiz/flt4";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('f', $dir);
+    $bd = new Database('f', $dir);
+    $bd->consultar('CREATE TABLE u (id INTEGER PRIMARY KEY AUTOINCREMENT, email VARCHAR(40) UNIQUE)');
+    $v = [];
+    for ($i = 0; $i < 3000; $i++) { $v[] = "('c$i@x')"; }
+    $bd->consultar('INSERT INTO u (email) VALUES ' . implode(', ', $v));
+    // Los trozos como los escribe la 2.8: sin filtro, ni menor ni mayor texto
+    $trozos = glob("$dir/f/u.idx.*.json");
+    foreach ($trozos as $f) {
+        file_put_contents($f, preg_replace('/,"filtro":"[^"]*"(,"cubre":"[a-z]+")?(,"min":"[^"]*")?(,"max":"[^"]*")?/', '', (string)file_get_contents($f)));
+    }
+    $sinFiltro = static fn(): int => count(array_filter(glob("$dir/f/u.idx.*.json"), static fn($f) => !str_contains((string)file_get_contents($f), '"filtro":"')));
+    $partes = static fn(): array => array_map('md5_file', glob("$dir/f/u.part*.json") ?: glob("$dir/f/u.json"));
+    $antes  = [$sinFiltro(), $partes()];
+    $otra   = new Database('f', $dir);
+    $r1     = $otra->consultar('VACUUM');
+    $tras   = [$sinFiltro(), $partes()];
+    $r2     = $otra->consultar('VACUUM');
+    $busca  = $otra->consultar("SELECT id FROM u WHERE email = 'c2500@x'");
+    borrarArbol($dir);
+    return count($trozos) > 1 && $antes[0] === count($trozos) && $tras[0] === 0 && $tras[1] === $antes[1]
+        && str_contains($r1['mensaje'], 'índices de 1 tabla') && str_contains($r2['mensaje'], 'no había')
+        && $busca === [['id' => 2501]] ?: json_encode([count($trozos), $antes[0], $tras[0], $r1['mensaje'], $r2['mensaje'], $busca]);
+});
+chk('el barrido de la caché de cada 32 revisiones conserva el recuento de las partes y, de cada índice, el veredicto, los filtros y el menor y el mayor de sus trozos (2.9)', function () use ($raiz) {
+    // Llevan dentro la revisión de cada parte o trozo. Antes se barrían, y la
+    // búsqueda siguiente de un texto volvía a abrir la cabecera de cada trozo
+    $dir = "$raiz/flt5";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('f', $dir);
+    $bd = new Database('f', $dir);
+    $bd->consultar('CREATE TABLE u (id INTEGER PRIMARY KEY, email VARCHAR(40), n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_email ON u (email)');
+    $v = [];
+    for ($i = 1; $i <= 200; $i++) { $v[] = "($i, 'c$i@x', 0)"; }
+    $bd->consultar('INSERT INTO u VALUES ' . implode(', ', $v));
+    foreach (glob("$dir/f/u*.json") ?: [] as $f) { touch($f, time() - 60); }      // el recuento no guarda una parte de este mismo segundo
+    $rev = static fn(): int => json_decode((string)file_get_contents("$dir/f/u.rev.json"), true)['rev'];
+    while ($rev() % 32 !== 31) { $bd->consultar('UPDATE u SET n = n + 1 WHERE id = 1'); }
+    $bd->consultar('SELECT COUNT(*) FROM u');                                       // el recuento
+    $bd->consultar("SELECT id FROM u WHERE email = 'c150@x'");                      // los filtros
+    $bd->consultar("SELECT COUNT(*) FROM u WHERE email > 'c5'");                    // el menor y el mayor
+    $hay = static fn(): array => array_map(static fn(string $t): int => count(glob("$dir/f/.cache/*.$t-0.cache") ?: []), ['n', 'fix_email', 'vix_email', 'lix_email']);
+    $antes = $hay();
+    $bd->consultar('UPDATE u SET n = n + 1 WHERE id = 1');                          // la revisión 32: barre
+    $tras = [$rev(), $hay()];
+    borrarArbol($dir);
+    return $antes === [1, 1, 1, 1] && $tras === [32, [1, 1, 1, 1]] ?: json_encode([$antes, $tras]);
+});
+
+echo "\n== ORDER BY … LIMIT por índice (2.9) ==\n";
+
+chk('dos claves únicas con el mismo índice automático ((a, b) y (a_b)): no se pueden crear, y en una tabla así de antes las consultas y la unicidad van bien (2.9)', function () use ($raiz) {
+    Database::crear('choque', $raiz);
+    $b = new Database('choque', $raiz);
+    try { $b->consultar('CREATE TABLE t (a INTEGER, b INTEGER, a_b INTEGER, UNIQUE (a, b), UNIQUE (a_b))'); $crear = 'pasó'; } catch (\JsonSQLDB\JsonSqlDbError $e) { $crear = $e->getMessage(); }
+    // Igual con una coma en un nombre: ("x y,z") y ("x y", z) se tomaban por la misma lista (2.9)
+    try { $b->consultar('CREATE TABLE w (id INTEGER PRIMARY KEY, "x y,z" TEXT, "x y" TEXT, z TEXT, UNIQUE ("x y,z"), UNIQUE ("x y", z))'); $coma = 'pasó'; } catch (\JsonSQLDB\JsonSqlDbError $e) { $coma = $e->getMessage(); }
+    // Una tabla así, hecha por una versión anterior: x pasa a llamarse a_b en los ficheros
+    $b->consultar('CREATE TABLE v (a INTEGER, b INTEGER, x INTEGER, UNIQUE (a, b), UNIQUE (x))');
+    $b->consultar('INSERT INTO v VALUES (1, 2, 10), (1, 3, 11)');
+    unset($b);
+    $d = $raiz . '/choque';
+    foreach (['v.meta.json', 'v.json'] as $f) {
+        file_put_contents("$d/$f", str_replace('"x"', '"a_b"', (string)file_get_contents("$d/$f")));
+    }
+    @unlink("$d/v.idx.auto_x.json");
+    $b = new Database('choque', $raiz);
+    $b->consultar('INSERT INTO v VALUES (7, 7, 77)');            // una escritura: escribe sus índices
+    $fila = array_merge($b->consultar('SELECT a_b FROM v WHERE a = 1 AND b = 2'), $b->consultar('SELECT b FROM v WHERE a_b = 11'),
+                        $b->consultar('SELECT a FROM v WHERE a_b = 77'));
+    $dup = [];
+    foreach (['INSERT INTO v VALUES (1, 2, 12)', 'INSERT INTO v VALUES (5, 5, 10)'] as $q) {
+        try { $b->consultar($q); $dup[] = 'pasó'; } catch (\JsonSQLDB\JsonSqlDbError $e) { $dup[] = $e->sqlState; }
+    }
+    unset($b);
+    Database::borrar('choque', $raiz);
+    return str_contains($crear, "mismo índice, 'auto_a_b'") && $fila === [['a_b' => 10], ['b' => 3], ['a' => 7]] && $dup === ['CONSTRAINT', 'CONSTRAINT']
+        && str_contains($coma, 'mismo índice') ?: json_encode([$crear, $fila, $dup, $coma], JSON_UNESCAPED_UNICODE);
+});
+chk('ORDER BY col [DESC] LIMIT n con índice da lo mismo que ordenar la tabla entera, con empates, NULL y OFFSET', function () use ($raiz) {
+    $dir = "$raiz/ord";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('o', $dir);
+    $bd = new Database('o', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, a INTEGER, d DOUBLE, nn INTEGER NOT NULL, s TEXT)');
+    foreach (['a', 'd', 'nn'] as $c) {
+        $bd->consultar("CREATE INDEX i_$c ON t ($c)");
+    }
+    mt_srand(9);
+    $consultas = [
+        'SELECT * FROM t ORDER BY a DESC LIMIT 7', 'SELECT id, a FROM t ORDER BY a DESC LIMIT 5 OFFSET 13',
+        'SELECT * FROM t ORDER BY d DESC LIMIT 20', 'SELECT * FROM t ORDER BY nn LIMIT 9', 'SELECT * FROM t ORDER BY nn DESC LIMIT 30',
+        'SELECT * FROM t ORDER BY id DESC LIMIT 3', 'SELECT s, nn AS x FROM t ORDER BY nn ASC LIMIT 4 OFFSET 2',
+        'SELECT * FROM t ORDER BY a LIMIT 5',                 // con NULL: va por el camino de siempre
+        'SELECT nn * -1 AS nn FROM t ORDER BY nn LIMIT 5',    // el alias manda (2.9, como SQLite): tampoco
+    ];
+    for ($ronda = 0; $ronda < 8; $ronda++) {
+        $v = [];
+        for ($i = 0; $i < 50; $i++) {
+            // Pocos valores distintos: muchos empates en el corte
+            $v[] = '(' . (mt_rand(0, 6) ? mt_rand(-20, 20) : 'NULL') . ', ' . (mt_rand(0, 6) ? mt_rand(-400, 400) / 8 : 'NULL')
+                 . ', ' . mt_rand(0, 15) . ", 'x$i')";
+        }
+        $bd->consultar('INSERT INTO t (a, d, nn, s) VALUES ' . implode(', ', $v));
+        $bd->consultar('DELETE FROM t WHERE a = (SELECT MAX(a) FROM t WHERE 1 = 1)');
+        $bd->consultar('UPDATE t SET nn = ' . mt_rand(0, 15) . ' WHERE id % 11 = ' . mt_rand(0, 10));
+        foreach ($consultas as $q) {
+            // El mismo orden envuelto en un CASE: igual valor, sin índice (con el
+            // alias, su expresión: dentro de una expresión, nn es la columna)
+            $sinIndice = str_contains($q, ' AS nn ') ? str_replace('ORDER BY nn', 'ORDER BY -nn', $q)
+                : preg_replace('/ORDER BY (\w+)/', 'ORDER BY CASE WHEN 1 THEN $1 END', $q);
+            $a = $bd->consultar($q);
+            $b = $bd->consultar($sinIndice);
+            if ($a !== $b) {
+                return "ronda $ronda, $q: " . json_encode($a) . ' / ' . json_encode($b);
+            }
+        }
+    }
+    borrarArbol($dir);
+    return true;
+});
+
+echo "\n== DISTINCT sin juntar la tabla (2.9) ==\n";
+
+chk('SELECT DISTINCT descarta las repetidas según llegan: con 16 MB de memoria contesta sobre una tabla que no cabe', function () use ($raiz) {
+    $dir = "$raiz/dist";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('d', $dir);
+    $bd = new Database('d', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, c TEXT, relleno TEXT)');
+    $relleno = str_repeat('x', 200);
+    for ($k = 0; $k < 30; $k++) {
+        $v = [];
+        for ($i = 0; $i < 1000; $i++) { $v[] = "('c" . ($i % 7) . "', '$relleno')"; }
+        $bd->consultar('INSERT INTO t (c, relleno) VALUES ' . implode(', ', $v));
+    }
+    unset($bd);
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0);'
+            . ' define("JSONSQLDB_FILAS_POR_PARTE", 50);'
+            . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . ' $bd = new JsonSQLDB\Database("d", ' . var_export($dir, true) . ');'
+            . ' echo json_encode(array_column($bd->consultar("SELECT DISTINCT c FROM t ORDER BY c"), "c"));';
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=16M -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    borrarArbol($dir);
+    return $salida === '["c0","c1","c2","c3","c4","c5","c6"]' ?: substr($salida, 0, 300);
+});
+
+echo "\n== ORDER BY en disco cuando no cabe (2.9) ==\n";
+
+chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale igual que con memoria de sobra, sin dejar temporales', function () use ($raiz) {
+    $dir = "$raiz/ext";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('e', $dir);
+    $bd = new Database('e', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER, d DOUBLE, s TEXT, relleno TEXT)');
+    mt_srand(3);
+    $pal = ['ana', 'Ávila', 'bea', 'Bea', 'zoe', 'ñu', 'm', ''];
+    for ($k = 0; $k < 40; $k++) {
+        $v = [];
+        for ($i = 0; $i < 1000; $i++) {
+            $v[] = '(' . (mt_rand(0, 9) ? mt_rand(-50, 50) : 'NULL') . ', ' . (mt_rand(0, 9) ? mt_rand(-999, 999) / 4 : 'NULL') . ", '"
+                 . $pal[mt_rand(0, 7)] . "', '" . str_repeat('r', 120) . "')";
+        }
+        $bd->consultar('INSERT INTO t (n, d, s, relleno) VALUES ' . implode(', ', $v));
+    }
+    unset($bd);
+    $consultas = [
+        'SELECT id, n, s FROM t ORDER BY n DESC, s, id',          // empates, NULL, colación
+        'SELECT id, d * 2 AS x FROM t ORDER BY x',                // por expresión
+        'SELECT id, s FROM t ORDER BY s DESC LIMIT 50 OFFSET 30000', // un listado por páginas, hacia el final
+        'SELECT * FROM t ORDER BY d',
+    ];
+    $correr = static function (string $memoria, string $q) use ($dir): string {
+        // Las filas salen por el sumidero y se resumen en un md5: el resultado
+        // no tiene que caber, solo la ordenación
+        $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0); define("JSONSQLDB_CACHE_ACTIVA", false);'
+                . ' define("JSONSQLDB_FILAS_POR_PARTE", 1000);'
+                . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+                . ' $bd = new JsonSQLDB\Database("e", ' . var_export($dir, true) . '); $h = hash_init("md5"); $n = 0; $tramos = 0;'
+                // Cuántos tramos había al salir la primera fila, cuando ya se han escrito todos
+                . ' $r = $bd->consultarPorFilas(' . var_export($q, true) . ', [], null, function (array $f) use ($h, &$n, &$tramos) {'
+                . ' $tramos = $n === 0 ? count(glob(' . var_export("$dir/e/.orden/*.tramo", true) . ') ?: []) : $tramos; hash_update($h, serialize($f)); $n++; });'
+                . ' foreach (is_array($r) ? $r : [] as $f) { hash_update($h, serialize($f)); $n++; }'   // lo que no salió por el sumidero
+                . ' echo $n, ":", hash_final($h), ":", count(glob(' . var_export("$dir/e/.orden/*", true) . ') ?: []), " ", $tramos;';
+        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($codigo) . ' 2>&1'));
+    };
+    foreach ($consultas as $q) {
+        $mucha = explode(' ', $correr('1G', $q))[0];
+        [$poca, $tramos] = explode(' ', $correr('24M', $q)) + [1 => ''];
+        // Pocos tramos: hasta la 2.9 cada 2 MB era uno (19 con SELECT *), porque
+        // contaba la memoria reservada, que no baja, y la mezcla se arrastraba
+        if ($mucha !== $poca || !preg_match('/^\d+:[0-9a-f]{32}:0$/', $poca) || (int)$tramos > 8) {
+            borrarArbol($dir);
+            return "$q: con memoria $mucha / con 24 MB $poca, $tramos tramos";
+        }
+    }
+    borrarArbol($dir);
+    return true;
+});
+
+/** Un disco que, como el de Windows, no deja borrar un fichero abierto (2.9; para la prueba de abajo) */
+final class DiscoComoWindows
+{
+    /** @var array<string, string> */
+    public static array $ficheros = [];
+    /** @var array<string, int> */
+    private static array $abiertos = [];
+    /** @var resource|null */
+    public $context;
+    private string $ruta = '';
+    private int $pos = 0;
+
+    public function stream_open(string $ruta, string $modo, int $opciones, ?string &$abierta): bool
+    {
+        if ($modo[0] === 'w') {
+            self::$ficheros[$ruta] = '';
+        } elseif (!isset(self::$ficheros[$ruta])) {
+            return false;
+        }
+        $this->ruta = $ruta;
+        self::$abiertos[$ruta] = (self::$abiertos[$ruta] ?? 0) + 1;
+        return true;
+    }
+    public function stream_write(string $datos): int { self::$ficheros[$this->ruta] .= $datos; return strlen($datos); }
+    public function stream_read(int $n): string
+    {
+        $trozo = (string)substr(self::$ficheros[$this->ruta], $this->pos, $n);
+        $this->pos += strlen($trozo);
+        return $trozo;
+    }
+    public function stream_eof(): bool { return $this->pos >= strlen(self::$ficheros[$this->ruta]); }
+    public function stream_close(): void
+    {
+        if (--self::$abiertos[$this->ruta] === 0) {
+            unset(self::$abiertos[$this->ruta]);
+        }
+    }
+    /** @return array<string, int>|false */
+    public function url_stat(string $ruta, int $flags)
+    {
+        return isset(self::$ficheros[$ruta]) ? ['mode' => 0100644, 'size' => strlen(self::$ficheros[$ruta])]
+            : (strpos(substr($ruta, 14), '/') === false ? ['mode' => 040755] : false);   // la carpeta
+    }
+    public function unlink(string $ruta): bool
+    {
+        if (isset(self::$abiertos[$ruta])) {
+            return false;
+        }
+        unset(self::$ficheros[$ruta]);
+        return true;
+    }
+}
+
+chk('una ordenación en disco cortada por un LIMIT cierra sus tramos antes de borrarlos: en Windows, abiertos, no se podían borrar y se quedaban una hora (2.9)', function () {
+    stream_wrapper_register('comowindows', DiscoComoWindows::class);
+    $o = new JsonSQLDB\OrdenExterno([['dir' => 'ASC']], 'comowindows://orden');
+    foreach ([[3, 1, 5], [6, 2, 4]] as $tramo) {
+        foreach ($tramo as $v) {
+            $o->anadir([$v], ['v' => $v]);
+        }
+        $o->volcar();                                   // cada lista, un tramo
+    }
+    $tramos = count(DiscoComoWindows::$ficheros);
+    $primeras = array_column(iterator_to_array($o->filas(0, 2), false), 'v');
+    $quedan = array_keys(DiscoComoWindows::$ficheros);
+    stream_wrapper_unregister('comowindows');
+    return $tramos === 2 && $primeras === [1, 2] && $quedan === [] ?: json_encode([$tramos, $primeras, $quedan]);
+});
+
+echo "\n== Lo demás que no cabe, por el disco (2.9) ==\n";
+
+chk('JOIN, GROUP BY, subconsultas del FROM, UNION, IN, EXISTS, WITH, ventanas y COUNT(DISTINCT) que no caben en 24 MB salen por el disco igual que con memoria de sobra, sin dejar temporales; lo que ni así cabe, con un error y no con el fatal', function () use ($raiz) {
+    $dir = "$raiz/disco";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('d', $dir);
+    $bd = new Database('d', $dir);
+    $bd->consultar('CREATE TABLE a (id INTEGER PRIMARY KEY, bid INTEGER, g INTEGER, t TEXT, v DOUBLE)');
+    $bd->consultar('CREATE TABLE b (id INTEGER PRIMARY KEY, k INTEGER, n TEXT)');
+    mt_srand(7);
+    for ($lote = 0; $lote < 60; $lote++) {
+        $va = $vb = [];
+        for ($i = 1; $i <= 1000; $i++) {
+            $id   = $lote * 1000 + $i;
+            $va[] = "($id, " . (mt_rand(0, 20) === 0 ? 'NULL' : mt_rand(1, 70000)) . ', ' . mt_rand(1, 40000) . ", 't" . mt_rand(1, 50000) . "', " . (mt_rand(0, 10000) / 100) . ')';
+            $vb[] = "($id, " . mt_rand(1, 9) . ", 'n" . ($id % 30000) . "')";
+        }
+        $bd->consultar('INSERT INTO a VALUES ' . implode(', ', $va));
+        $bd->consultar('INSERT INTO b VALUES ' . implode(', ', $vb));
+    }
+    unset($bd);
+    $consultas = [
+        'SELECT a.id, b.n FROM a JOIN b ON b.id = a.bid',
+        'SELECT a.id, b.k FROM a LEFT JOIN b ON b.id = a.bid ORDER BY a.id',
+        'SELECT g, COUNT(*) AS c, SUM(v) AS s FROM a GROUP BY g ORDER BY g',
+        'SELECT COUNT(*) AS n FROM (SELECT DISTINCT t FROM a)',
+        'SELECT COUNT(*) AS n FROM (SELECT t FROM a UNION SELECT n FROM b)',
+        'SELECT COUNT(*) AS n, SUM(x) AS s FROM (SELECT bid AS x FROM a UNION ALL SELECT id FROM b)',
+        'SELECT t FROM a UNION SELECT n FROM b',
+        'SELECT COUNT(*) AS n FROM a WHERE bid IN (SELECT id FROM b WHERE k > 3)',
+        'SELECT COUNT(*) AS n FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.id = a.bid AND b.k > 3)',
+        'SELECT id, ROW_NUMBER() OVER (ORDER BY v DESC, id) AS r FROM a ORDER BY id',
+        'SELECT id, LAG(t) OVER (PARTITION BY g % 10 ORDER BY id) AS l FROM a ORDER BY id',
+        'WITH x AS (SELECT bid, COUNT(*) AS c FROM a GROUP BY bid) SELECT COUNT(*) AS n, MAX(c) AS m FROM x',
+        'SELECT COUNT(DISTINCT t) AS n, COUNT(DISTINCT bid) AS m, SUM(DISTINCT g) AS s, COUNT(DISTINCT t || bid) AS x FROM a',
+    ];
+    $correr = static function (string $memoria, string $q) use ($dir): string {
+        // Las filas salen por el sumidero y se resumen: en orden si hay ORDER
+        // BY; si no, con una suma que no depende del orden
+        $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0); define("JSONSQLDB_CACHE_ACTIVA", false);'
+                . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+                . ' $bd = new JsonSQLDB\Database("d", ' . var_export($dir, true) . '); $h = hash_init("md5"); $s = 0; $n = 0;'
+                . ' $enOrden = ' . var_export(stripos($q, 'ORDER BY') !== false, true) . ';'
+                . ' $anotar = function (array $f) use ($h, &$s, &$n, $enOrden) {'
+                . ' $l = serialize(array_map(fn($v) => is_float($v) ? round($v, 6) : $v, array_values($f)));'
+                . ' if ($enOrden) { hash_update($h, $l); } else { $s = ($s + hexdec(substr(md5($l), 0, 14))) % (1 << 60); } $n++; };'
+                . ' try { $r = $bd->consultarPorFilas(' . var_export($q, true) . ', [], null, $anotar);'
+                . ' foreach (is_array($r) ? $r : [] as $f) { $anotar($f); }'   // lo que no salió por el sumidero
+                . ' $res = $n . ":" . ($enOrden ? hash_final($h) : $s); } catch (JsonSQLDB\\JsonSqlDbError $e) { $res = $e->sqlState; }'
+                . ' echo $res, ":", count(glob(' . var_export("$dir/d/.orden/*", true) . ') ?: []);';
+        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($codigo) . ' 2>&1'));
+    };
+    // Y lo que ni así cabe se corta con un error, no con el fatal de PHP: lo
+    // que el intento en memoria dejó pedido se devuelve antes de repetir
+    $justas = [
+        'SELECT id, ROW_NUMBER() OVER (ORDER BY v DESC, id) AS r, LAG(t) OVER (PARTITION BY g % 10 ORDER BY id) AS l FROM a ORDER BY id',
+        'SELECT id, FIRST_VALUE(t) OVER (PARTITION BY g % 3 ORDER BY v DESC, id) AS f, CUME_DIST() OVER (ORDER BY g) AS c FROM a ORDER BY id',
+    ];
+    foreach (array_merge($consultas, $justas) as $q) {
+        $mucha = $correr('1G', $q);
+        $poca  = $correr('24M', $q);
+        if (!preg_match('/^\d+:\w+:0$/', $mucha) || ($poca !== $mucha && !(in_array($q, $justas, true) && $poca === 'MEMORIA:0'))) {
+            borrarArbol($dir);
+            return "$q: con memoria $mucha / con 24 MB " . substr($poca, 0, 300);
+        }
+    }
+    borrarArbol($dir);
+    return true;
+});
+
+// Sin dejar nada en la carpeta temporal del sistema
+borrarArbol($raiz);
 
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";

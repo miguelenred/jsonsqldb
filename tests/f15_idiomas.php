@@ -63,14 +63,14 @@ chk('cada traducción conserva sus marcadores y sus etiquetas', function () use 
             preg_match_all($patron, $ingles, $b);
             sort($a[0]);
             sort($b[0]);
-            if ($a[0] !== $b[0]) { return "«$es»"; }
+            if ($a[0] !== $b[0]) { return "«{$es}»"; }
         }
     }
     return true;
 });
 chk('ninguna traducción está vacía', function () use ($en) {
     foreach ($en as $es => $ingles) {
-        if (trim($ingles) === '') { return "«$es» está vacía"; }
+        if (trim($ingles) === '') { return "«{$es}» está vacía"; }
     }
     return true;
 });
@@ -91,7 +91,7 @@ chk('el primero de su lista que el panel tenga; si no hay ninguno, inglés', fun
     ];
     foreach ($casos as $cabecera => $esperado) {
         $r = Idioma::delNavegador($cabecera);
-        if ($r !== $esperado) { return "«$cabecera» dio $r y no $esperado"; }
+        if ($r !== $esperado) { return "«{$cabecera}» dio $r y no $esperado"; }
     }
     return true;
 });

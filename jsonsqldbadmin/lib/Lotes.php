@@ -14,7 +14,7 @@ declare(strict_types=1);
 final class Lotes
 {
     /** Filas de la muestra con la que se mide lo que ocupa cada una. */
-    private const MUESTRA = 200;
+    private const MUESTRA = 20;
     /**
      * Veces lo que ocupa el lote como array que se reservan: la respuesta de
      * la API en texto, el texto que se genera para la descarga y, en conexión
@@ -40,7 +40,9 @@ final class Lotes
         }
         $porFila = max(64, intdiv($bytes, $n));
         $libre   = max(0, $limite - memory_get_usage());
-        return max(self::MUESTRA, min(self::MAX_LOTE, intdiv($libre, $porFila * self::MARGEN)));
+        // Al menos una fila: con filas muy anchas, de una en una (antes, nunca
+        // menos que la muestra, y con filas de cientos de KB no cabía)
+        return max(1, min(self::MAX_LOTE, intdiv($libre, $porFila * self::MARGEN)));
     }
 
     /**
@@ -52,13 +54,15 @@ final class Lotes
     public static function filas(string $base, string $sql, array $params = [], ?int $total = null): iterable
     {
         $sql = rtrim(trim($sql), "; \t\r\n");
+        if (Api::directa() && $base !== '') {
+            return self::porTemporal($base, $sql, $params);
+        }
         if ($total !== null) {
-            $antes   = memory_get_usage();
             $muestra = self::pedir($base, $sql, $params, self::MUESTRA, 0);
             if (count($muestra) < self::MUESTRA) {
                 return $muestra;                         // ya está entero
             }
-            if ($total <= self::filasPorLote(memory_get_usage() - $antes, count($muestra))) {
+            if ($total <= self::filasPorLote(self::ocupa($muestra), count($muestra))) {
                 unset($muestra);
                 return self::pedir($base, $sql, $params, null, 0);
             }
@@ -67,18 +71,48 @@ final class Lotes
         return self::porLotes($base, $sql, $params);
     }
 
+    /**
+     * Con la conexión directa (2.9), la consulta una vez: sus filas, según
+     * las da el motor, a un temporal, y de ahí según se piden. Por lotes cada
+     * uno la repetía entera, y un ORDER BY de toda la tabla con un OFFSET
+     * alto, en el mismo proceso que el panel, se cortaba por la memoria.
+     *
+     * @return Generator<int,array<string,mixed>>
+     */
+    private static function porTemporal(string $base, string $sql, array $params): Generator
+    {
+        $f  = ficheroTemporal('lotes');
+        $fh = $f === false ? false : @fopen($f, 'w+b');
+        if ($fh === false) {
+            throw new RuntimeException(t('No se pudo crear un fichero temporal para la exportación.'));
+        }
+        register_shutdown_function(static fn() => @unlink($f));    // si PHP se corta a medias
+        try {
+            Api::filasDirectas($base, $sql, $params, static function (array $fila) use ($fh): void {
+                $s = serialize($fila);
+                fwrite($fh, pack('N', strlen($s)) . $s);
+            });
+            rewind($fh);
+            while (($n = fread($fh, 4)) !== false && strlen($n) === 4) {
+                yield unserialize((string)fread($fh, unpack('N', $n)[1]), ['allowed_classes' => false]);
+            }
+        } finally {
+            fclose($fh);
+            @unlink($f);
+        }
+    }
+
     /** @return Generator<int,array<string,mixed>> */
     private static function porLotes(string $base, string $sql, array $params): Generator
     {
         $lote  = self::MUESTRA;
         $desde = 0;
         do {
-            $antes = memory_get_usage();
             $filas = self::pedir($base, $sql, $params, $lote, $desde);
             $n     = count($filas);
             $pedidas = $lote;
             if ($desde === 0) {
-                $lote = self::filasPorLote(memory_get_usage() - $antes, $n);
+                $lote = self::filasPorLote(self::ocupa($filas), $n);
             }
             foreach ($filas as $f) {
                 yield $f;
@@ -88,13 +122,30 @@ final class Lotes
         } while ($n === $pedidas);
     }
 
+    /**
+     * Lo que ocupan unas filas en memoria, midiendo una copia. Medir la
+     * memoria antes y después de pedirlas contaba también lo que se cargaba
+     * esa primera vez (el motor entero con la conexión directa): salían lotes
+     * de 200 filas y miles de peticiones.
+     */
+    private static function ocupa(array $filas): int
+    {
+        $antes = memory_get_usage();
+        $copia = unserialize(serialize($filas));
+        $bytes = memory_get_usage() - $antes;
+        unset($copia);
+        return $bytes;
+    }
+
     /** @return list<array<string,mixed>> */
     private static function pedir(string $base, string $sql, array $params, ?int $limite, int $desde): array
     {
         if ($limite !== null) {
+            // En otra línea: si la consulta acaba en un comentario (-- …), el
+            // LIMIT quedaba dentro de él y se pedía la tabla entera de una vez
             $sql = self::admiteLimite($sql, $params)
-                ? "$sql LIMIT $limite OFFSET $desde"
-                : "SELECT * FROM ($sql) AS _lote LIMIT $limite OFFSET $desde";
+                ? "$sql\nLIMIT $limite OFFSET $desde"
+                : "SELECT * FROM ($sql\n) AS _lote LIMIT $limite OFFSET $desde";
         }
         $filas = Api::sql($base, $sql, $params);
         if (isset($filas['success'])) {
@@ -113,7 +164,7 @@ final class Lotes
         try {
             GeneradorSql::cargarAnalizador();
             $ast = \JsonSQLDB\Parser::analizar($sql, $params);
-        } catch (Throwable $e) {
+        } catch (Throwable) {
             return false;
         }
         return in_array($ast['k'], ['select', 'union'], true) && $ast['limit'] === null && $ast['offset'] === null;

@@ -48,9 +48,12 @@ namespace JsonSQLDB;
  *
  * Los NULL no se indexan: ninguna igualdad los encuentra nunca.
  *
+ * Qué condiciones de un WHERE puede resolver un índice, y con cuál, está en
+ * IndexesBusqueda: una escritura que no busca filas no tiene que compilarlo.
+ *
  * https://miguelenred.es/jsonsqldb
  */
-final class Indexes
+class Indexes
 {
     /** Prefijo reservado para los índices automáticos de PK y UNIQUE. */
     public const PREFIJO_AUTO = 'auto_';
@@ -62,13 +65,13 @@ final class Indexes
      * columnas con diez valores cada una son mil búsquedas: a partir de ahí sale
      * más barato recorrer la tabla.
      */
-    private const MAX_CLAVES = 512;
+    protected const MAX_CLAVES = 512;
     /**
      * Con claves numéricas el tope es mayor: cada una se busca solo en el trozo
      * cuyo rango la contiene, así que 4.000 claves cuestan unas 4.000 búsquedas
      * pequeñas. Con texto cada clave se busca en todos los trozos
      */
-    private const MAX_CLAVES_NUMERICAS = 4096;
+    protected const MAX_CLAVES_NUMERICAS = 4096;
 
     public static function validarNombre(string $nombre): void
     {
@@ -102,35 +105,69 @@ final class Indexes
         $vistas = [];
         // Los conjuntos únicos (clave primaria y UNIQUE): un índice sobre uno de
         // ellos devuelve una fila o ninguna por clave
-        $unicos = [];
-        foreach (Catalog::conjuntosUnicos($meta) as $uq) {
-            $unicos[strtolower(implode(',', array_map('strval', $uq['columns'])))] = true;
+        $unicos    = [];
+        $conjuntos = Catalog::conjuntosUnicos($meta);
+        foreach ($conjuntos as $uq) {
+            $unicos[strtolower(implode("\0", array_map('strval', $uq['columns'])))] = true;   // un nombre puede llevar comas (2.9)
         }
+        $colaciones = Catalog::colaciones($meta);          // 2.9
 
         foreach ($meta['indexes'] ?? [] as $idx) {
             $cols = array_values(array_map('strval', (array)($idx['columns'] ?? [])));
             if ($cols === []) {
                 continue;
             }
-            $clave = strtolower(implode(',', $cols));
+            $clave = strtolower(implode("\0", $cols));
             if (isset($vistas[$clave])) {
                 continue;
             }
             $vistas[$clave] = true;
-            $out[] = ['name' => (string)$idx['name'], 'columns' => $cols, 'auto' => false, 'unico' => isset($unicos[$clave])];
+            $out[] = ['name' => (string)$idx['name'], 'columns' => $cols, 'auto' => false, 'unico' => isset($unicos[$clave]),
+                      'plegar' => Catalog::plegarCon($colaciones, $cols)];
         }
 
-        foreach (Catalog::conjuntosUnicos($meta) as $uq) {
+        $autos = [];
+        foreach ($conjuntos as $uq) {
             $cols  = array_values(array_map('strval', $uq['columns']));
-            $clave = strtolower(implode(',', $cols));
+            $clave = strtolower(implode("\0", $cols));
             if ($cols === [] || isset($vistas[$clave])) {
                 continue;
             }
             $vistas[$clave] = true;
-            $out[] = ['name' => self::nombreAuto($cols), 'columns' => $cols, 'auto' => true, 'unico' => true];
+            $nombre = self::nombreAuto($cols);
+            // Dos conjuntos con el mismo nombre ((a, b) y (a_b)) compartirían
+            // fichero: el segundo se queda sin índice y se comprueba leyendo la
+            // tabla. Una tabla así ya no se puede crear (ver autoRepetido())
+            if (isset($autos[strtolower($nombre)])) {
+                continue;
+            }
+            $autos[strtolower($nombre)] = true;
+            $out[] = ['name' => $nombre, 'columns' => $cols, 'auto' => true, 'unico' => true,
+                      'plegar' => $uq['plegar']];
         }
 
         return $out;
+    }
+
+    /**
+     * Dos conjuntos únicos de una tabla cuyo índice automático se llamaría
+     * igual, o null (2.9): (a, b) y (a_b) dan los dos auto_a_b, el mismo
+     * fichero, y antes ninguno de los dos funcionaba bien.
+     *
+     * @return array{0: string, 1: list<string>, 2: list<string>}|null nombre y las dos listas de columnas
+     */
+    public static function autoRepetido(array $meta): ?array
+    {
+        $vistos = [];
+        foreach (Catalog::conjuntosUnicos($meta) as $uq) {
+            $cols   = array_values(array_map('strval', $uq['columns']));
+            $nombre = strtolower(self::nombreAuto($cols));
+            if (isset($vistos[$nombre]) && strcasecmp(implode("\0", $vistos[$nombre]), implode("\0", $cols)) !== 0) {
+                return [self::nombreAuto($cols), $vistos[$nombre], $cols];
+            }
+            $vistos[$nombre] = $cols;
+        }
+        return null;
     }
 
     /**
@@ -173,11 +210,39 @@ final class Indexes
     }
 
     /**
+     * Clave de índice de unas columnas de una fila, cada valor con la
+     * colación de su columna ($plegar, por posición: ver
+     * Catalog::plegarDe()), o null si alguno es NULL o la fila es un hueco
+     * (null: una borrada, ver Storage). Trozo a trozo, sin juntar antes los
+     * valores para clave() (2.9): desde que ADD UNIQUE, ADD PRIMARY KEY, ADD
+     * FOREIGN KEY y CHECK KEYS comparan las claves así, con cada fila, esa
+     * vuelta de más era entre un tercio y la mitad de lo que les añadía.
+     *
+     * @param list<string>       $columnas
+     * @param array<int, ?string> $plegar
+     */
+    public static function claveFila(?array $fila, array $columnas, array $plegar = []): ?string
+    {
+        if ($fila === null) {
+            return null;
+        }
+        $clave = '';
+        foreach ($columnas as $i => $c) {
+            $v = $fila[$c] ?? null;
+            if ($v === null) {
+                return null;
+            }
+            $clave .= self::trozo(isset($plegar[$i]) ? Functions::plegar($v, $plegar[$i]) : $v);
+        }
+        return $clave;
+    }
+
+    /**
      * Un valor convertido en trozo de clave: tipo, longitud y contenido.
      *
      * @param mixed $v
      */
-    private static function trozo($v): string
+    protected static function trozo($v): string
     {
         // Los dos atajos de abajo son el mismo resultado por el camino corto, y
         // aquí se nota: construir un índice llama a esto una vez por fila y por
@@ -244,6 +309,237 @@ final class Indexes
     }
 
     /**
+     * El valor de la primera columna de una clave: el número de una clave
+     * numérica o el texto tal cual de una de texto.
+     *
+     * @return int|float|string
+     */
+    public static function primerValor(string $clave)
+    {
+        $numero = self::valorNumerico($clave);
+        if ($numero !== null) {
+            return $numero;
+        }
+        $sep = (int)strpos($clave, ':');
+        return substr($clave, $sep + 1, (int)substr($clave, 1, $sep - 1));
+    }
+
+    /** Bits por clave del filtro de un trozo (ver filtro()): ~1 % de falsos positivos con 7 comprobaciones */
+    private const FILTRO_BITS = 10;
+    private const FILTRO_K    = 7;         // resumenDeTexto() los lleva desplegados
+    /**
+     * El filtro cubre también las claves numéricas (ver resumenDeTexto()) cuando
+     * el rango del trozo abarca al menos este número de veces su tamaño de parte:
+     * valores repartidos, que el rango no acota. Lo mira igual quien escribe y
+     * quien busca (ver Storage::clavesEnTexto()), con el mismo dato.
+     */
+    public const FILTRO_NUMEROS_DESDE = 8;
+
+    /** ¿Lleva filtro de números un trozo con ese rango numérico (ver Indexes::rango()) y ese tamaño de parte? */
+    public static function filtraNumeros(?array $rango, int $chunk): bool
+    {
+        return is_array($rango) && count($rango) === 2 && $rango[1] - $rango[0] >= self::FILTRO_NUMEROS_DESDE * $chunk;
+    }
+
+    /**
+     * Lo que va en la cabecera de un trozo de índice sobre sus claves de texto
+     * (2.9), en una sola pasada:
+     *  - 'filtro': un filtro de Bloom (en base64) que dice sin leer las claves
+     *    si una NO está en el trozo; si dice que puede estar, puede ser un
+     *    falso positivo (~1 %) y entonces se leen. Las claves de texto no
+     *    tienen rango, y una búsqueda por una leía todos los trozos. Vacío si
+     *    el trozo no tiene claves de texto.
+     *  - 'min' y 'max', si todas sus claves son de texto: el menor y el mayor
+     *    valor de la primera columna, comparados como compara el WHERE dos
+     *    textos (strcmp), para los rangos.
+     *
+     * Con $conNumeros (2.9), el filtro cubre también las claves numéricas, y
+     * lo dice 'cubre': "todo" en vez de "texto". Es para un índice
+     * cuyos valores van repartidos por toda la tabla (el cliente de cada
+     * pedido), donde el rango de cada trozo no descarta ninguno y una búsqueda
+     * los leía todos. Con las claves de una clave primaria, que cada trozo
+     * acota, no hace falta (ver StorageEscritura::escribirTrozo()). En memoria
+     * el filtro lleva esa marca en su primer byte (ver filtro()).
+     *
+     * @param array<string, mixed> $keys clave => posiciones
+     * @return array{filtro: string, cubre?: string, min?: string, max?: string}
+     */
+    public static function resumenDeTexto(array $keys, bool $conNumeros = false): array
+    {
+        $texto = [];
+        $todas = $keys !== [];
+        $min = $max = null;
+        foreach ($keys as $clave => $_) {
+            $clave = (string)$clave;
+            if ($clave === '' || $clave[0] !== 't') {
+                $todas = false;
+                if ($conNumeros && $clave !== '' && $clave[0] === 'n') {
+                    $texto[] = $clave;
+                }
+                continue;
+            }
+            $texto[] = $clave;
+            if ($todas) {
+                // primerValor(), sin la llamada: una vez por clave
+                $sep = (int)strpos($clave, ':');
+                $v   = substr($clave, $sep + 1, (int)substr($clave, 1, $sep - 1));
+                if ($min === null) {
+                    $min = $max = $v;
+                } elseif (strcmp($v, $min) < 0) {
+                    $min = $v;
+                } elseif (strcmp($v, $max) > 0) {
+                    $max = $v;
+                }
+            }
+        }
+        $resumen = ['filtro' => ''];
+        if ($texto !== []) {
+            // En palabras de 32 bits, empaquetado al final en little-endian: el
+            // bit b queda en el byte b >> 3, bit b & 7, que es lo que lee
+            // puedeEstar(). Dos crc32 por clave y siete posiciones de ellos
+            // (FILTRO_K), sumando el paso módulo m, que da los mismos bits que
+            // (h1 + i·h2) % m y cuesta un cuarto menos: se hace por cada trozo
+            // que se escribe
+            $m = max(64, (int)ceil(count($texto) * self::FILTRO_BITS / 32) * 32);
+            $w = array_fill(0, $m >> 5, 0);
+            foreach ($texto as $clave) {
+                $b = crc32($clave) % $m;
+                $s = (crc32(strrev($clave)) | 1) % $m;
+                $w[$b >> 5] |= 1 << ($b & 31); $b += $s; if ($b >= $m) { $b -= $m; }
+                $w[$b >> 5] |= 1 << ($b & 31); $b += $s; if ($b >= $m) { $b -= $m; }
+                $w[$b >> 5] |= 1 << ($b & 31); $b += $s; if ($b >= $m) { $b -= $m; }
+                $w[$b >> 5] |= 1 << ($b & 31); $b += $s; if ($b >= $m) { $b -= $m; }
+                $w[$b >> 5] |= 1 << ($b & 31); $b += $s; if ($b >= $m) { $b -= $m; }
+                $w[$b >> 5] |= 1 << ($b & 31); $b += $s; if ($b >= $m) { $b -= $m; }
+                $w[$b >> 5] |= 1 << ($b & 31);
+            }
+            $resumen['filtro'] = base64_encode(pack('V*', ...$w));
+            $resumen['cubre']  = $conNumeros ? 'todo' : 'texto';
+        }
+        if ($todas && $min !== null) {
+            $resumen['min'] = $min;
+            $resumen['max'] = $max;
+        }
+        return $resumen;
+    }
+
+    /**
+     * Cada posición de un trozo con su clave (2.9): para quitar las de las
+     * filas que se borran sin leerlas, y para pasar las claves de una parte
+     * que se compacta a su sitio nuevo (ver StorageEscritura).
+     *
+     * @param array<string, int|list<int>> $keys
+     * @return array<int, string>
+     */
+    public static function porPosicion(array $keys): array
+    {
+        $out = [];
+        foreach ($keys as $clave => $donde) {
+            if (is_array($donde)) {
+                foreach ($donde as $p) {
+                    $out[$p] = (string)$clave;
+                }
+            } else {
+                $out[$donde] = (string)$clave;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Un número de 64 bits que resume una clave (2.9): con las de un índice
+     * grande en un mapa de huellas, que ocupa menos de la mitad que el de sus
+     * claves (ver StorageEscritura::posicionesDeClave()). Dos claves distintas
+     * pueden tener la misma: quien la usa confirma la clave.
+     */
+    public static function huella(string $clave): int
+    {
+        return crc32($clave) << 32 | crc32(strrev($clave));
+    }
+
+    /**
+     * El filtro de un trozo como se maneja en memoria y en la caché (2.9), a
+     * partir de su cabecera (ver resumenDeTexto()): los bits que van en el
+     * fichero, con un byte delante que dice si cubre también los números (1,
+     * 'cubre' "todo") o solo los textos (0). Vacío si el trozo no tiene
+     * filtro; null si lo que hay no es base64.
+     *
+     * @param array{filtro?: string, cubre?: string} $resumen
+     */
+    public static function filtro(array $resumen): ?string
+    {
+        $bits = base64_decode((string)($resumen['filtro'] ?? ''), true);
+        if ($bits === false) {
+            return null;
+        }
+        return $bits === '' ? '' : (($resumen['cubre'] ?? '') === 'todo' ? "\x01" : "\x00") . $bits;
+    }
+
+    /**
+     * ¿Puede estar esta clave en un trozo con este filtro (ver filtro())? Las
+     * claves que el filtro no cubre pueden estar siempre.
+     */
+    public static function puedeEstar(string $filtro, string $clave): bool
+    {
+        if ($clave === '') {
+            return true;
+        }
+        if ($clave[0] !== 't' && ($clave[0] !== 'n' || $filtro === '' || $filtro[0] !== "\x01")) {
+            return true;                                    // el filtro no cubre esa clase de clave
+        }
+        if ($filtro === '') {
+            return false;                                   // el trozo no tiene claves de texto
+        }
+        $m  = (strlen($filtro) - 1) << 3;                   // tras el byte que dice qué cubre
+        $h1 = crc32($clave);
+        $h2 = crc32(strrev($clave)) | 1;
+        for ($i = 0; $i < self::FILTRO_K; $i++) {
+            $b = ($h1 + $i * $h2) % $m;
+            if ((ord($filtro[1 + ($b >> 3)]) & (1 << ($b & 7))) === 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Los trozos cuyo filtro dice que pueden tener una clave de texto (2.9),
+     * como puedeEstar() en cada uno, para buscar una en todos los de un índice
+     * grande: sus bits se calculan una vez por tamaño de filtro, no en cada
+     * trozo.
+     *
+     * @param array<int, string> $filtros trozo => filtro
+     * @return list<int>
+     */
+    public static function trozosPosibles(array $filtros, string $clave): array
+    {
+        $h1   = crc32($clave);
+        $h2   = crc32(strrev($clave)) | 1;
+        $bits = [];                                         // por tamaño de filtro: [byte, máscara] de cada bit
+        $out  = [];
+        foreach ($filtros as $p => $filtro) {
+            if ($filtro === '') {
+                continue;                                   // el trozo no tiene claves de texto
+            }
+            $m = (strlen($filtro) - 1) << 3;                // tras el byte que dice qué cubre (ver puedeEstar())
+            if (!isset($bits[$m])) {
+                $bits[$m] = [];
+                for ($i = 0; $i < self::FILTRO_K; $i++) {
+                    $b = ($h1 + $i * $h2) % $m;
+                    $bits[$m][] = [1 + ($b >> 3), 1 << ($b & 7)];
+                }
+            }
+            foreach ($bits[$m] as [$byte, $mascara]) {
+                if ((ord($filtro[$byte]) & $mascara) === 0) {
+                    continue 2;
+                }
+            }
+            $out[] = $p;
+        }
+        return $out;
+    }
+
+    /**
      * Mínimo y máximo del valor numérico de la primera columna en un trozo
      * de índice: [min, max]; [] si el trozo no tiene claves; null si alguna
      * clave es de texto y no se puede acotar. Con una clave primaria
@@ -279,83 +575,6 @@ final class Indexes
     }
 
     /**
-     * ¿Puede estar alguna clave con estos valores numéricos en un trozo con
-     * este rango? Un valor null es una clave de texto, que puede estar en
-     * cualquiera. Con rango desconocido (null) sí; con un trozo vacío ([]) no.
-     *
-     * @param list<int|float|null> $valores los de valorNumerico() de cada clave
-     */
-    public static function cabeEnRango(array $valores, ?array $rango): bool
-    {
-        if ($rango === null) {
-            return true;
-        }
-        if ($rango === []) {
-            return false;
-        }
-        foreach ($valores as $v) {
-            if ($v === null || ($v >= $rango[0] && $v <= $rango[1])) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * ¿La clave de este valor es de fiar para decidir una igualdad?
-     *
-     * Casi siempre sí. La excepción son los números tan grandes que ya no caben
-     * exactos en un entero: ahí un mismo valor puede escribirse de dos formas
-     * que el motor considera iguales y que dan claves distintas. Son valores por
-     * encima de 9·10^18, que en la práctica no aparecen, pero cuando el conjunto
-     * se usa para responder directamente —como en un IN— no hay un WHERE detrás
-     * que corrija el fallo, así que esos se comparan uno a uno.
-     *
-     * @param mixed $v
-     */
-    public static function claveFiable($v): bool
-    {
-        if (is_bool($v) || $v === null || !Valor::esNumerico($v)) {
-            return true;
-        }
-        $n = Valor::aNumero($v);
-        return is_int($n) ? abs($n) < 9.0E+18 : (is_finite($n) && abs($n) < 9.0E+18);
-    }
-
-    /**
-     * Agrupa unos valores por su clave, para poder resolver un IN sin recorrer
-     * la lista entera en cada fila.
-     *
-     * Devuelve [conjunto, dudosos, hayNulo]. En el conjunto, cada clave lleva
-     * los valores originales que le corresponden: la clave acota los candidatos
-     * pero la igualdad la sigue decidiendo Valor::comparar(), porque dos valores
-     * distintos pueden compartir clave.
-     *
-     * @param list<mixed> $valores
-     * @return array{0: array<string, list<mixed>>, 1: list<mixed>, 2: bool}
-     */
-    public static function conjunto(array $valores): array
-    {
-        $conjunto = [];
-        $dudosos  = [];
-        $hayNulo  = false;
-
-        foreach ($valores as $x) {
-            if ($x === null) { $hayNulo = true; continue; }
-            if (!self::claveFiable($x)) { $dudosos[] = $x; continue; }
-            $conjunto[(string)self::clave([$x])][] = $x;
-        }
-        return [$conjunto, $dudosos, $hayNulo];
-    }
-
-    /**
-     * Construye el contenido de un índice a partir de las filas de la tabla.
-     *
-     * @param list<array>    $filas
-     * @param list<string>   $columnas
-     * @return array<string, list<int>>
-     */
-    /**
      * Añade al índice ANTERIOR las filas que hay a partir de una posición.
      *
      * Reconstruir el índice entero es la mayor parte de lo que cuesta escribir
@@ -372,15 +591,20 @@ final class Indexes
      * @param int                          $desde    posición de la primera de $filas
      * @return array<string, int|list<int>>
      */
-    public static function ampliar(array $anterior, array $filas, array $columnas, int $desde): array
+    public static function ampliar(array $anterior, array $filas, array $columnas, int $desde, array $plegar = []): array
     {
         $keys = $anterior;
         foreach ($filas as $i => $fila) {
-            $valores = [];
-            foreach ($columnas as $c) {
-                $valores[] = $fila[$c] ?? null;
+            // Sin colación, la clave aquí mismo: esto va una vez por fila
+            if ($plegar === []) {
+                $valores = [];
+                foreach ($columnas as $c) {
+                    $valores[] = $fila[$c] ?? null;
+                }
+                $clave = self::clave($valores);
+            } else {
+                $clave = self::claveFila($fila, $columnas, $plegar);
             }
-            $clave = self::clave($valores);
             if ($clave !== null) {
                 self::anotar($keys, $clave, $desde + $i);
             }
@@ -424,63 +648,80 @@ final class Indexes
     }
 
     /**
-     * Cambia la fila de una posición sin mover las demás: se quita la clave
-     * vieja y se anota la nueva. $cambio se pone a true si el índice cambió.
-     *
-     * @param array<string, int|list<int>> $keys
-     * @param list<string>                 $columnas
-     * @return array<string, int|list<int>>
-     */
-    /**
      * ¿Cambia la clave de índice de una fila? Si las columnas del índice
      * valen lo mismo, no: ni siquiera hace falta calcularla.
+     *
+     * @param array|null $nueva null: la fila se ha borrado y queda un hueco (2.9)
      */
-    public static function cambiaClave(array $columnas, array $vieja, array $nueva): bool
+    public static function cambiaClave(array $columnas, array $vieja, ?array $nueva, array $plegar = []): bool
     {
         $vv = $nv = [];
         foreach ($columnas as $c) {
             $vv[] = $vieja[$c] ?? null;
             $nv[] = $nueva[$c] ?? null;
         }
-        return $vv !== $nv && self::clave($vv) !== self::clave($nv);
+        if ($plegar === []) {
+            return $vv !== $nv && self::clave($vv) !== self::clave($nv);
+        }
+        return $vv !== $nv && self::claveFila($vieja, $columnas, $plegar) !== ($nueva === null ? null : self::claveFila($nueva, $columnas, $plegar));
     }
 
-    public static function sustituir(array $keys, array $columnas, int $pos, array $vieja, array $nueva, bool &$cambio): array
+    /**
+     * Cambia la clave de una posición sin mover las demás: sale de la de
+     * antes y entra en la nueva (null: sin clave, como la de un hueco).
+     *
+     * Se cambia $keys en su sitio, y la posición sale de la lista de su clave
+     * sin hacer otra (2.9): un UPDATE de toda la tabla sobre una columna
+     * indexada con pocos valores copiaba dos veces en cada fila la lista de su
+     * valor, de cientos de posiciones.
+     *
+     * @param array<string, int|list<int>> $keys
+     */
+    public static function sustituir(array &$keys, int $pos, ?string $antes, ?string $ahora): void
     {
-        $vv = $nv = [];
-        foreach ($columnas as $c) {
-            $vv[] = $vieja[$c] ?? null;
-            $nv[] = $nueva[$c] ?? null;
-        }
-        $cv = self::clave($vv);
-        $cn = self::clave($nv);
-        if ($cv === $cn) {
-            return $keys;
-        }
-        $cambio = true;
-        if ($cv !== null && isset($keys[$cv])) {
-            $lista = array_values(array_diff(self::posiciones($keys[$cv]), [$pos]));
-            if ($lista === []) {
-                unset($keys[$cv]);
-            } else {
-                $keys[$cv] = count($lista) === 1 ? $lista[0] : $lista;
+        if ($antes !== null && isset($keys[$antes])) {
+            if (!is_array($keys[$antes])) {
+                if ((int)$keys[$antes] === $pos) {
+                    unset($keys[$antes]);
+                }
+            } elseif (($i = array_search($pos, $keys[$antes])) !== false) {
+                array_splice($keys[$antes], (int)$i, 1);
+                if (count($keys[$antes]) <= 1) {
+                    if ($keys[$antes] === []) {
+                        unset($keys[$antes]);
+                    } else {
+                        $keys[$antes] = (int)$keys[$antes][0];
+                    }
+                }
             }
         }
-        if ($cn !== null) {
-            self::anotar($keys, $cn, $pos);
+        if ($ahora !== null) {
+            self::anotar($keys, $ahora, $pos);
         }
-        return $keys;
     }
 
-    public static function construir(array $filas, array $columnas): array
+    /**
+     * Construye el contenido de un índice a partir de las filas de la tabla.
+     *
+     * @param list<array>    $filas
+     * @param list<string>   $columnas
+     * @param array<int, ?string> $plegar la colación de cada columna, por posición (2.9; ver claveFila())
+     * @return array<string, list<int>>
+     */
+    public static function construir(array $filas, array $columnas, array $plegar = []): array
     {
         $keys = [];
         foreach ($filas as $pos => $fila) {
-            $valores = [];
-            foreach ($columnas as $c) {
-                $valores[] = $fila[$c] ?? null;
+            // Sin colación, la clave aquí mismo: esto va una vez por fila
+            if ($plegar === []) {
+                $valores = [];
+                foreach ($columnas as $c) {
+                    $valores[] = $fila[$c] ?? null;
+                }
+                $clave = self::clave($valores);
+            } else {
+                $clave = self::claveFila($fila, $columnas, $plegar);
             }
-            $clave = self::clave($valores);
             if ($clave === null) {
                 continue;                       // los NULL no se indexan
             }
@@ -527,282 +768,8 @@ final class Indexes
     // Elección de índice para una consulta
     // ------------------------------------------------------------------
 
-    /**
-     * El mejor índice para unos predicados de igualdad: el primero de candidatos().
-     *
-     * @return array{def: array, claves: list<string>, prefijo: bool}|null
-     */
-    public static function elegir(array $defs, array $predicados): ?array
-    {
-        return self::candidatos($defs, $predicados)[0] ?? null;
-    }
-
-    /**
-     * Los índices que sirven para unos predicados de igualdad, del mejor al
-     * peor: primero uno único cubierto entero (una fila o ninguna por clave),
-     * después el que cubre más columnas por la izquierda, y a igualdad, el
-     * orden de definición. Antes, a igualdad de columnas ganaba el primero
-     * definido, y los creados a mano van antes que los de la clave primaria:
-     * con un índice sobre «ciudad», «WHERE id = ? AND ciudad = ?» leía todas
-     * las filas de esa ciudad en vez de una. Quien busca prueba el siguiente
-     * si uno no compensa.
-     *
-     * @return list<array{def: array, claves: list<string>, prefijo: bool}>
-     */
-    public static function candidatos(array $defs, array $predicados): array
-    {
-        $lista = [];
-        foreach (array_values($defs) as $orden => $def) {
-            $n = 0;
-            foreach ($def['columns'] as $col) {
-                if (!isset($predicados[strtolower($col)])) {
-                    break;
-                }
-                $n++;
-            }
-            if ($n === 0) {
-                continue;
-            }
-            // Producto de los valores de cada columna cubierta: un IN aporta varios
-            $claves = [''];
-            $tope = self::MAX_CLAVES;
-            if ($n === 1) {
-                $numericas = true;
-                foreach ($predicados[strtolower($def['columns'][0])] as $v) {
-                    $numericas = $numericas && (is_int($v) || is_float($v));
-                }
-                $tope = $numericas ? self::MAX_CLAVES_NUMERICAS : self::MAX_CLAVES;
-            }
-            for ($i = 0; $i < $n && $claves !== null; $i++) {
-                $valores = $predicados[strtolower($def['columns'][$i])];
-                if (count($claves) * count($valores) > $tope) {
-                    $claves = null;                 // demasiadas: con este índice sale más barato recorrer
-                    break;
-                }
-                $nuevas = [];
-                foreach ($claves as $base) {
-                    foreach ($valores as $v) {
-                        if ($v !== null) {          // NULL nunca es igual a nada
-                            $nuevas[] = $base . self::trozo($v);
-                        }
-                    }
-                }
-                $claves = $nuevas;
-            }
-            if ($claves === null) {
-                continue;
-            }
-            $claves = array_values(array_unique($claves));
-            if ($claves === []) {
-                return [];                          // ninguna fila puede cumplirlo
-            }
-            $lista[] = ['def' => $def, 'claves' => $claves, 'prefijo' => $n < count($def['columns']),
-                        'unico' => !empty($def['unico']) && $n === count($def['columns']), 'n' => $n, 'orden' => $orden];
-        }
-        usort($lista, static fn($a, $b) => [$b['unico'], $b['n'], $a['orden']] <=> [$a['unico'], $a['n'], $b['orden']]);
-        return array_map(static fn($c) => ['def' => $c['def'], 'claves' => $c['claves'], 'prefijo' => $c['prefijo']], $lista);
-    }
-
     // ------------------------------------------------------------------
     // Predicados aprovechables de un WHERE
     // ------------------------------------------------------------------
 
-    /**
-     * De las igualdades del WHERE (col = 'texto' o col IN ('a', 'b')), los
-     * textos que una parte tiene que contener, entre comillas como van en el
-     * fichero, para que alguna de sus filas pueda cumplirlas (ver
-     * Storage::parte()). Sirven a la lectura y a UPDATE y DELETE. Solo textos que no son números (un número se compara
-     * por su valor, '5' = 5.0) y de caracteres que ningún JSON escribe de otra
-     * manera: letras, cifras, espacios y signos corrientes, sin comillas,
-     * barras ni < > & '. Con cualquier otro valor, esa columna no aporta nada.
-     *
-     * @param array<string, list<mixed>> $predicados columna => valores
-     * @return list<list<string>>
-     */
-    public static function agujas(array $predicados): array
-    {
-        $out = [];
-        foreach ($predicados as $valores) {
-            $lista = [];
-            foreach ($valores as $v) {
-                if (!is_string($v) || $v === '' || is_numeric(trim($v)) || !preg_match('#^[\x20-\x7E]+$#', $v)
-                    || strpbrk($v, "\"\\/<>&'") !== false) {
-                    continue 2;
-                }
-                $lista[] = '"' . $v . '"';
-            }
-            if ($lista !== []) {
-                $out[] = $lista;
-            }
-        }
-        return $out;
-    }
-
-    /**
-     * Saca del WHERE los predicados de igualdad que un índice puede resolver.
-     *
-     * Solo se miran las conjunciones de primer nivel (`a = 1 AND b IN (2,3)`) y
-     * solo `=` e `IN` contra literales. Queda fuera a propósito:
-     *
-     *   - el OR de primer nivel, que no permite descartar ninguna fila;
-     *   - todo lo que cuelgue de un NOT, donde la condición está negada;
-     *   - `IS NULL`, porque los NULL no están en el índice y filtrar por él
-     *     dejaría fuera las filas que un LEFT JOIN rellena con NULL;
-     *   - `NOT IN` y los rangos, que no son igualdades.
-     *
-     * Filtrar la tabla antes del JOIN es seguro porque el WHERE se aplica
-     * después de cruzar: una fila rellenada con NULL nunca supera `col = valor`,
-     * así que el resultado final es el mismo tanto si se descartó antes como si
-     * se descartó después.
-     *
-     * El resultado es  tabla o alias en minúsculas => columna => valores. Las
-     * columnas sin cualificar solo se aceptan cuando el FROM tiene un único
-     * origen: con varios no se sabe de cuál son sin resolver el mapa de
-     * columnas, y eso exige haber leído ya las tablas.
-     *
-     * @return array<string, array<string, list<mixed>>>
-     */
-    public static function predicados(?array $where, ?string $aliasUnico): array
-    {
-        if ($where === null) {
-            return [];
-        }
-        $out = [];
-        foreach (self::conjunciones($where) as $n) {
-            [$col, $valores] = self::igualdad($n);
-            if ($col === null) {
-                continue;
-            }
-            $alias = $col['tabla'] === null ? $aliasUnico : strtolower((string)$col['tabla']);
-            if ($alias === null) {
-                continue;
-            }
-            $nombre = strtolower((string)$col['nombre']);
-            // Dos condiciones sobre la misma columna: se queda la primera, que
-            // basta para acotar. La otra la aplica el WHERE como siempre.
-            $out[$alias][$nombre] ??= $valores;
-        }
-        return $out;
-    }
-
-    /**
-     * Rangos numéricos del WHERE por alias y columna: `col > 5`, `col <= 9`,
-     * `col BETWEEN 1 AND 3` y sus combinaciones en la cadena de AND de
-     * primer nivel, con literales numéricos. Cada rango es [min, max], y un
-     * extremo null es abierto. Sirven para saltar las partes de la tabla
-     * cuyo trozo de índice no puede contener ningún valor del rango (ver
-     * Storage::filasPorRango()); el WHERE se aplica igual a lo que se lee.
-     *
-     * @return array<string, array<string, array{0: int|float|null, 1: int|float|null}>>
-     */
-    public static function rangos(?array $where, ?string $aliasUnico): array
-    {
-        if ($where === null) {
-            return [];
-        }
-        $out = [];
-        foreach (self::conjunciones($where) as $n) {
-            foreach (self::acotaciones($n) as [$col, $min, $max]) {
-                $alias = $col['tabla'] === null ? $aliasUnico : strtolower((string)$col['tabla']);
-                if ($alias === null) {
-                    continue;
-                }
-                $nombre = strtolower((string)$col['nombre']);
-                $r = $out[$alias][$nombre] ?? [null, null];
-                if ($min !== null && ($r[0] === null || $min > $r[0])) { $r[0] = $min; }
-                if ($max !== null && ($r[1] === null || $max < $r[1])) { $r[1] = $max; }
-                $out[$alias][$nombre] = $r;
-            }
-        }
-        return $out;
-    }
-
-    /**
-     * Las acotaciones numéricas de un nodo: [columna, min, max].
-     *
-     * @return list<array{0: array, 1: int|float|null, 2: int|float|null}>
-     */
-    private static function acotaciones(array $n): array
-    {
-        $k = $n['k'] ?? '';
-        if ($k === 'between' && empty($n['not']) && ($n['e']['k'] ?? '') === 'col') {
-            $a = self::literalNumerico($n['min']);
-            $b = self::literalNumerico($n['max']);
-            return $a === null || $b === null ? [] : [[$n['e'], $a, $b]];
-        }
-        if ($k !== 'bin' || !in_array($n['op'] ?? '', ['<', '<=', '>', '>='], true)) {
-            return [];
-        }
-        $op = $n['op'];
-        [$col, $lit] = [$n['i'], $n['d']];
-        if (($col['k'] ?? '') !== 'col') {
-            [$col, $lit] = [$n['d'], $n['i']];
-            $op = strtr($op, ['<' => '>', '>' => '<']);      // 5 < col  es  col > 5
-        }
-        if (($col['k'] ?? '') !== 'col') {
-            return [];
-        }
-        $v = self::literalNumerico($lit);
-        if ($v === null) {
-            return [];
-        }
-        // Los extremos abiertos (< y >) se tratan como cerrados: acotar de más
-        // solo lee una parte de más, y el WHERE deja fuera el igual
-        return $op === '<' || $op === '<=' ? [[$col, null, $v]] : [[$col, $v, null]];
-    }
-
-    /** @return int|float|null */
-    private static function literalNumerico(array $n)
-    {
-        if (($n['k'] ?? '') !== 'lit' || $n['v'] === null || is_bool($n['v'])) {
-            return null;
-        }
-        return is_int($n['v']) || is_float($n['v']) ? $n['v'] : (Valor::esNumerico($n['v']) ? Valor::aNumero($n['v']) : null);
-    }
-
-    /** @return list<array> conjunciones de primer nivel */
-    public static function conjunciones(array $n): array
-    {
-        if (($n['k'] ?? '') === 'bin' && ($n['op'] ?? '') === 'AND') {
-            return array_merge(self::conjunciones($n['i']), self::conjunciones($n['d']));
-        }
-        return [$n];
-    }
-
-    /**
-     * Si el nodo es `col = literal` o `col IN (literales)`, devuelve la columna
-     * y los valores; si no, [null, []].
-     *
-     * @return array{0: array|null, 1: list<mixed>}
-     */
-    private static function igualdad(array $n): array
-    {
-        $k = $n['k'] ?? '';
-
-        if ($k === 'bin' && ($n['op'] ?? '') === '=') {
-            [$col, $lit] = [$n['i'], $n['d']];
-            if (($col['k'] ?? '') !== 'col' || ($lit['k'] ?? '') !== 'lit') {
-                [$col, $lit] = [$n['d'], $n['i']];
-            }
-            if (($col['k'] ?? '') === 'col' && ($lit['k'] ?? '') === 'lit' && $lit['v'] !== null) {
-                return [$col, [$lit['v']]];
-            }
-            return [null, []];
-        }
-
-        if ($k === 'in' && empty($n['not']) && ($n['select'] ?? null) === null
-            && is_array($n['lista'] ?? null) && $n['lista'] !== []
-            && ($n['e']['k'] ?? '') === 'col') {
-            $valores = [];
-            foreach ($n['lista'] as $e) {
-                if (($e['k'] ?? '') !== 'lit' || $e['v'] === null) {
-                    return [null, []];          // un solo elemento no literal lo invalida
-                }
-                $valores[] = $e['v'];
-            }
-            return [$n['e'], $valores];
-        }
-
-        return [null, []];
-    }
 }
