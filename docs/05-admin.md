@@ -410,8 +410,11 @@ the autoincrement continuing.
   the SQL Server and Access scripts described below; or a whole database as
   one JSON document exported by the panel (2.9). PostgreSQL's `COPY` data,
   primary keys and `IDENTITY` declared after the table, and SQL Server's `GO`,
-  `IDENTITY` and `ALTER TABLE … ADD DEFAULT … FOR` are understood; names that
-  are not valid here become valid (`Order Details` → `Order_Details`). The format is detected from the first lines,
+  `IDENTITY` and `ALTER TABLE … ADD DEFAULT … FOR` are understood; column names
+  keep their accents, `ñ` and spaces (2.9), and a table, view, index or trigger
+  name that is not valid here becomes valid (`Order Details` → `Order_Details`,
+  `Año` → `Ano`). The format is detected from the first lines (also with
+  Windows line endings),
   or chosen by hand. Dumps of other systems are translated statement by
   statement (`lib/Traductor.php`): backtick and bracket names, MySQL's
   backslash escapes, `X'…'`, `0x…`, `b'…'` and SQLite's `char(10)`; MySQL
@@ -772,8 +775,14 @@ default values other than the current date and time (`CURRENT_TIMESTAMP`,
 `CHECK` that uses something this engine does not have (the others arrive since
 2.9, and so do MySQL's `ENUM` lists; a PostgreSQL enumerated type arrives as
 text), time zones of dates, and binary data that is not text (kept as its hexadecimal,
-`\x…`). Names that are not valid here become valid: `Order Details` →
-`Order_Details`. And if the dump contains `DROP TABLE`, a table with the same name
+`\x…`). Column names arrive as they are, with accents, `ñ` or spaces, as the
+engine allows since 2.8 (2.9; they were changed like table names). The name
+of a table, view, index or trigger is part of file names, so it is made of
+letters, digits and `_`: `Order Details` → `Order_Details`, and a letter with
+an accent becomes its plain letter, `Año` → `Ano` (2.9; it became one `_` per
+byte, `A__o`). A view of an Access database that uses a table of another
+Access database (`[C:\…\other.mdb].table` or `table IN '…'`) is skipped and
+the summary says which table and file. And if the dump contains `DROP TABLE`, a table with the same name
 here is replaced: import into a new, empty database if in doubt.
 
 **The SQL dump of a whole database is written table by table** (2.7.3): the

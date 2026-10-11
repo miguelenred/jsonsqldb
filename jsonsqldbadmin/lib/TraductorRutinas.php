@@ -75,6 +75,15 @@ final class TraductorRutinas
             $t = $this->limiteSqlServer($t);
         }
         if ($this->d === 'access') {
+            // Una tabla de otra base de Access, [C:\…\otra.mdb].tabla o tabla IN
+            // 'C:\…\otra.mdb', no está aquí (2.9: se decía que faltaba un ON)
+            foreach ($t as $i => $x) {
+                if (preg_match('/\.(mdb|accdb)$/i', (string)$x['v'])
+                    && ($x['k'] === 'id' ? self::esOp($t[$i + 1] ?? [], '.') : $this->palabra($t[$i - 1] ?? []) === 'IN')) {
+                    throw new NoTraducible(t("usa la tabla '{tabla}' de otra base de Access ({base})",
+                        ['tabla' => (string)($x['k'] === 'id' ? $t[$i + 2]['v'] ?? '' : $t[$i - 2]['v'] ?? ''), 'base' => $x['v']]));
+                }
+            }
             // DISTINCTROW quita los registros repetidos de las tablas, no los
             // valores repetidos: en la consulta de una tabla no quita nada
             $t = array_values(array_filter($t, fn($x) => $this->palabra($x) !== 'DISTINCTROW'));
@@ -312,7 +321,7 @@ final class TraductorRutinas
         if ($sentencias === '') {
             throw new NoTraducible(t('el trigger no hace nada que se pueda hacer aquí'));
         }
-        return [[$nombre, 'CREATE TRIGGER ' . $this->tr->nombre($nombre) . " $momento $evento ON " . $this->tr->nombre($tabla)
+        return [[$nombre, 'CREATE TRIGGER ' . $this->tr->nombreObjeto($nombre) . " $momento $evento ON " . $this->tr->nombreObjeto($tabla)
              . " FOR EACH ROW BEGIN $sentencias END"]];
     }
 
@@ -406,7 +415,7 @@ final class TraductorRutinas
                 continue;                           // en este evento no hace nada
             }
             $n = count($eventos) > 1 ? $nombre . '_' . strtolower($evento) : $nombre;
-            $out[] = [$n, 'CREATE TRIGGER ' . $this->tr->nombre($n) . " $momento $evento ON " . $this->tr->nombre($tabla)
+            $out[] = [$n, 'CREATE TRIGGER ' . $this->tr->nombreObjeto($n) . " $momento $evento ON " . $this->tr->nombreObjeto($tabla)
                 . ' FOR EACH ROW' . ($cuando !== null ? ' WHEN ' . $this->expr($cuando) : '') . " BEGIN $sentencias END"];
         }
         if ($out === []) {
@@ -482,7 +491,7 @@ final class TraductorRutinas
                 continue;
             }
             $n = count($eventos) > 1 ? $nombre . '_' . strtolower($evento) : $nombre;
-            $sql = 'CREATE TRIGGER ' . $this->tr->nombre($n) . " AFTER $evento ON " . $this->tr->nombre($tabla)
+            $sql = 'CREATE TRIGGER ' . $this->tr->nombreObjeto($n) . " AFTER $evento ON " . $this->tr->nombreObjeto($tabla)
                 . " FOR EACH ROW BEGIN $sentencias END";
             // Lo que actualiza la propia fila, a un BEFORE con SET NEW: en SQL
             // Server un trigger no se vuelve a disparar a sí mismo; aquí sí
@@ -743,8 +752,8 @@ final class TraductorRutinas
         $cambios = $set !== null ? array_slice($s, $set + 1, $finSet - $set - 1) : [];
         $quitarAlias = isset($cambiarFrom) ? $cambiarFrom : fn(array $x) => $this->sinAlias($x, $alias, $tabla);
         $sql = $u === 'UPDATE'
-            ? 'UPDATE ' . $this->tr->nombre($tabla) . ' SET ' . $this->exprSs($quitarAlias($cambios))
-            : 'DELETE FROM ' . $this->tr->nombre($tabla);
+            ? 'UPDATE ' . $this->tr->nombreObjeto($tabla) . ' SET ' . $this->exprSs($quitarAlias($cambios))
+            : 'DELETE FROM ' . $this->tr->nombreObjeto($tabla);
         if ($donde !== null && $donde !== []) {
             $sql .= ' WHERE ' . (is_string($donde) ? $donde : $this->exprSs($quitarAlias($donde)));
         }
@@ -1212,7 +1221,7 @@ final class TraductorRutinas
                 $cols[] = $this->tr->nombre($a[0]['v']);
                 $vals[] = $this->expr(array_slice($a, 2));
             }
-            return 'INSERT INTO ' . $this->tr->nombre($s[$k]['v']) . ' (' . implode(', ', $cols) . ') VALUES (' . implode(', ', $vals) . ')';
+            return 'INSERT INTO ' . $this->tr->nombreObjeto($s[$k]['v']) . ' (' . implode(', ', $cols) . ') VALUES (' . implode(', ', $vals) . ')';
         }
         return $this->expr($s);
     }
@@ -1228,6 +1237,9 @@ final class TraductorRutinas
     public function expr(array $t): string
     {
         $t = $this->operadores($t);
+        foreach ($this->tr->marcarTablas($t) as $k => $es) {
+            $t[$k]['es'] = $es;                     // cada token va solo a texto()
+        }
         $out = [];
         $n = count($t);
         for ($k = 0; $k < $n; $k++) {

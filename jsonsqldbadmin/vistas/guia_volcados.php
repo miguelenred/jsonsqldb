@@ -100,13 +100,14 @@ sqlite3 tienda.db ".dump clientes pedidos" &gt; dos_tablas.sql</code></pre>
               <li><?= t('<strong>Sin</strong> FULL JOIN, INTERSECT, EXCEPT, OFFSET, GROUP_CONCAT ni expresiones regulares: las vistas que los usan van comentadas con el motivo.') ?></li>
               <li><?= t('El texto llega hasta 255 caracteres; más largo es <code>MEMO</code>, que no se puede indexar. Las fechas van del año 100 al 9999. Sí/No vale -1 en Access y 1 aquí.') ?></li>
               <li><?= t('Access compara los textos sin distinguir mayúsculas, también con <code>=</code>; aquí <code>=</code> sí las distingue.') ?></li>
+              <li><?= h(t('Una consulta que usa una tabla de otra base de Access no se importa: el resumen dice cuál y de qué fichero.')) ?></li>
               <li><?= t('<strong>No llegan</strong> los adjuntos ni los objetos OLE (datos binarios), las consultas de acción, de referencias cruzadas o con parámetros, ni las consultas ocultas de formularios e informes. El script las nombra al terminar.') ?></li>
             </ul>
           </div>
         </div>
 
         <hr>
-        <p class="small mb-0"><?= t('En ninguno llegan igual: los valores por defecto calculados que no son la fecha u hora actual (esos sí llegan: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), una restricción <code>CHECK</code> que usa algo que aquí no existe (las demás llegan, y las listas <code>ENUM</code> de MySQL también; un tipo enumerado de PostgreSQL llega como texto), la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Un nombre que aquí no vale se cambia (<code>Order Details</code> → <code>Order_Details</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.') ?></p>
+        <p class="small mb-0"><?= t('En ninguno llegan igual: los valores por defecto calculados que no son la fecha u hora actual (esos sí llegan: <code>CURRENT_TIMESTAMP</code>, <code>NOW()</code>, <code>getdate()</code>…), una restricción <code>CHECK</code> que usa algo que aquí no existe (las demás llegan, y las listas <code>ENUM</code> de MySQL también; un tipo enumerado de PostgreSQL llega como texto), la zona horaria de las fechas y los datos binarios que no son texto (se guardan en hexadecimal). Las columnas conservan su nombre, con acentos, ñ o espacios; el de una tabla, vista, índice o trigger, que aquí es de letras sin acento, números y _, se cambia (<code>Order Details</code> → <code>Order_Details</code>, <code>Año</code> → <code>Ano</code>). Si el volcado trae <code>DROP TABLE</code>, la tabla con el mismo nombre se sustituye: ante la duda, importa en una base nueva.') ?></p>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><?= h(t('Cerrar')) ?></button>

@@ -896,6 +896,55 @@ chk('semanas en las vistas: DATEADD(week, …) de SQL Server, interval week de M
     }
     return $mal === [] ?: implode(' | ', $mal);
 });
+chk('un volcado con saltos de línea de Windows se reconoce por su cabecera: el de Access, con una tabla de nombre numérico, pasa por el traductor (2.9: se tomaba por uno de aquí y paraba en la tabla)', function () {
+    $f = JSONSQLDB_DATA_PATH . '/windows.sql';
+    file_put_contents($f, str_replace("\n", "\r\n", "-- jsonsqldb-dialecto: access\n-- escrito en Windows\n"
+        . "CREATE TABLE [210] ([id] LONG CONSTRAINT [PK_210] PRIMARY KEY, [Nombre] TEXT(20));\nINSERT INTO [210] ([id], [Nombre]) VALUES (1, 'uno');\n"));
+    Database::crear('windows');
+    Importar::sql($f, 'windows');
+    @unlink($f);
+    $r = (new Database('windows'))->consultar('SELECT id, Nombre FROM _210');
+    return $r === [['id' => 1, 'Nombre' => 'uno']] ?: json_encode($r);
+});
+chk('al importar, las columnas guardan su nombre con ñ, acentos o espacios, y en el de una tabla la letra con acento pasa a la suya: AÑO a ANO (2.9: un _ por byte, también en las columnas)', function () {
+    $f = JSONSQLDB_DATA_PATH . '/nombres.sql';
+    file_put_contents($f, "-- jsonsqldb-dialecto: access\n"
+        . "CREATE TABLE [Pagos Año] ([Id] LONG CONSTRAINT [PK_Pagos] PRIMARY KEY, [Año] LONG, [Num Domic] TEXT(20));\n"
+        . "INSERT INTO [Pagos Año] ([Id], [Año], [Num Domic]) VALUES (1, 2026, 'uno');\n"
+        . "CREATE INDEX [Índice Año] ON [Pagos Año] ([Año]);\n"
+        . "CREATE VIEW [Vista Año] AS SELECT [Pagos Año].[Año], p.[Num Domic] FROM [Pagos Año], [Pagos Año] AS p WHERE p.[Id] = [Pagos Año].[Id];\n");
+    Database::crear('nombres');
+    $resumen = Importar::sql($f, 'nombres');
+    $bd = new Database('nombres');
+    $cols = array_column($bd->consultar('SHOW SCHEMA Pagos_Ano'), 'columna');
+    $indices = array_column($bd->consultar('SHOW INDEXES'), 'indice');
+    $vista = $bd->consultar('SELECT * FROM Vista_Ano');
+    $mal = $cols === ['Id', 'Año', 'Num Domic'] && in_array('Indice_Ano', $indices, true) && $vista === [['Año' => 2026, 'Num Domic' => 'uno']]
+        ? [] : [json_encode([$cols, $indices, $vista, $resumen], JSON_UNESCAPED_UNICODE)];
+    // Y en los volcados de los demás, que pasan por el mismo traductor
+    foreach (['mysql' => "-- MySQL dump 10.13\nCREATE TABLE `Pagos Año` (`Año` int, `Num Domic` varchar(20));\nINSERT INTO `Pagos Año` VALUES (2026,'uno');\n",
+              'pg' => "-- PostgreSQL database dump\nCREATE TABLE public.\"Pagos Año\" (\"Año\" integer, \"Num Domic\" text);\nINSERT INTO public.\"Pagos Año\" (\"Año\", \"Num Domic\") VALUES (2026, 'uno');\n",
+              'ss' => "CREATE TABLE [dbo].[Pagos Año] ([Año] int, [Num Domic] nvarchar(20))\nGO\nINSERT [dbo].[Pagos Año] ([Año], [Num Domic]) VALUES (2026, N'uno')\nGO\n",
+              'sqlite' => "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCREATE TABLE \"Pagos Año\" (\"Año\" INTEGER, \"Num Domic\" TEXT);\nINSERT INTO \"Pagos Año\" VALUES(2026,'uno');\nCOMMIT;\n"] as $d => $sql) {
+        file_put_contents($f, $sql);
+        Database::crear("nombres_$d");
+        Importar::sql($f, "nombres_$d");
+        $r = (new Database("nombres_$d"))->consultar('SELECT * FROM Pagos_Ano');
+        if ($r !== [['Año' => 2026, 'Num Domic' => 'uno']]) { $mal[] = "$d: " . json_encode($r, JSON_UNESCAPED_UNICODE); }
+    }
+    @unlink($f);
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk('una vista de Access con una tabla de otra base de Access se salta diciéndolo (2.9: «falta la condición ON del INNER JOIN»)', function () {
+    $f = JSONSQLDB_DATA_PATH . '/otra_base.sql';
+    file_put_contents($f, "-- jsonsqldb-dialecto: access\nCREATE TABLE [t] ([Id] LONG);\n"
+        . "CREATE VIEW [v] AS SELECT t.[Id] FROM t INNER JOIN [C:\\datos\\otra.mdb].remota AS r ON r.[Id] = t.[Id];\n"
+        . "CREATE VIEW [w] AS SELECT [Id] FROM remota IN 'C:\\datos\\otra.accdb';\n");
+    Database::crear('otra_base');
+    $resumen = Importar::sql($f, 'otra_base');
+    @unlink($f);
+    return substr_count($resumen, "usa la tabla 'remota' de otra base de Access") === 2 && str_contains($resumen, 'otra.mdb') && str_contains($resumen, 'otra.accdb') ?: $resumen;
+});
 chk('con la carpeta de la base a mano, una importación que falla deja la base como estaba (todo o nada)', function () {
     Database::crear('todo');
     $bd = new Database('todo');
@@ -1392,7 +1441,7 @@ chk('Excel: una fecha y hora a medianoche vuelve con su hora, por el formato de 
         ?: json_encode($filas);
 });
 chk('nombres y textos del resumen: un nombre de 64 caracteres que empieza por una cifra se queda en 64, y «(n veces)» y el error de campos de un CSV van traducidos (2.9)', function () {
-    $largo = (new Traductor('mysql'))->nombre('1' . str_repeat('a', 63));
+    $largo = (new Traductor('mysql'))->nombreObjeto('1' . str_repeat('a', 63));
     $tr = new Traductor('mysql');
     Idioma::elegir('en');
     try {

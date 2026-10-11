@@ -97,10 +97,25 @@ final class Traductor
     private const PALABRAS_CHECK  = ['AND', 'OR', 'NOT', 'IN', 'BETWEEN', 'IS', 'NULL', 'LIKE'];
     private const FUNCIONES_CHECK = ['LENGTH', 'CHAR_LENGTH', 'LOWER', 'UPPER', 'TRIM', 'ABS', 'COALESCE', 'IFNULL',
                                      'ROUND', 'SUBSTR', 'SUBSTRING', 'JSON_VALID'];
+    /** Una letra con acento (y sus parientes), en un nombre de tabla: su letra base (2.9) */
+    private const LETRA_BASE = [
+        'á' => 'a', 'à' => 'a', 'ä' => 'a', 'â' => 'a', 'ã' => 'a', 'å' => 'a', 'Á' => 'A', 'À' => 'A', 'Ä' => 'A', 'Â' => 'A', 'Ã' => 'A', 'Å' => 'A',
+        'é' => 'e', 'è' => 'e', 'ë' => 'e', 'ê' => 'e', 'É' => 'E', 'È' => 'E', 'Ë' => 'E', 'Ê' => 'E',
+        'í' => 'i', 'ì' => 'i', 'ï' => 'i', 'î' => 'i', 'Í' => 'I', 'Ì' => 'I', 'Ï' => 'I', 'Î' => 'I',
+        'ó' => 'o', 'ò' => 'o', 'ö' => 'o', 'ô' => 'o', 'õ' => 'o', 'ø' => 'o', 'Ó' => 'O', 'Ò' => 'O', 'Ö' => 'O', 'Ô' => 'O', 'Õ' => 'O', 'Ø' => 'O',
+        'ú' => 'u', 'ù' => 'u', 'ü' => 'u', 'û' => 'u', 'Ú' => 'U', 'Ù' => 'U', 'Ü' => 'U', 'Û' => 'U',
+        'ñ' => 'n', 'Ñ' => 'N', 'ç' => 'c', 'Ç' => 'C', 'ý' => 'y', 'ÿ' => 'y', 'Ý' => 'Y',
+        'ß' => 'ss', 'æ' => 'ae', 'Æ' => 'AE', 'œ' => 'oe', 'Œ' => 'OE',
+    ];
+    /** La palabra tras la que va el nombre de una tabla (ver marcarTablas()) */
+    private const TRAS_TABLA = ['FROM' => 1, 'JOIN' => 1, 'INTO' => 1, 'UPDATE' => 1, 'TABLE' => 1, 'EXISTS' => 1];
+    /** Lo que acaba la lista de tablas de un FROM */
+    private const FIN_FROM = ['WHERE' => 1, 'GROUP' => 1, 'ORDER' => 1, 'HAVING' => 1, 'UNION' => 1, 'EXCEPT' => 1, 'INTERSECT' => 1,
+                              'LIMIT' => 1, 'ON' => 1, 'USING' => 1, 'WINDOW' => 1, 'SET' => 1, 'VALUES' => 1, 'SELECT' => 1];
     /** @var array<string,string> nombre de destino (en minúsculas) de cada tabla o vista → nombre de origen */
     private array $destinos = [];
-    /** @var array<string,string> nombre de origen → nombre de destino, cuando el saneado chocaba con otro */
-    private array $reemplazos = [];
+    /** @var array<string,string> nombre de origen de cada tabla o vista → su nombre aquí (ver nombreTabla()) */
+    private array $tablaDe = [];
     /** @var array<string,true> nombres ya cambiados, para avisar una sola vez */
     private array $renombrados = [];
     /** Orden de las fechas d/m/a de SET DATEFORMAT (SQL Server), o '' */
@@ -123,8 +138,10 @@ final class Traductor
     /** ¿Qué dialecto parece un volcado, por sus primeras líneas? */
     public static function detectar(string $inicio): string
     {
-        // Los volcados del propio panel dicen para qué motor son en su cabecera
-        if (preg_match('/^-- jsonsqldb-dialecto: (sqlite|mysql|postgresql|sqlserver|access)$/m', $inicio, $m)) {
+        // Los volcados del propio panel dicen para qué motor son en su cabecera,
+        // con saltos de línea de Windows o no (2.9: el script de Access, en
+        // Windows, escribe \r\n, y su volcado se tomaba por uno de aquí)
+        if (preg_match('/^-- jsonsqldb-dialecto: (sqlite|mysql|postgresql|sqlserver|access)\r?$/m', $inicio, $m)) {
             return $m[1] === 'sqlite' ? 'jsonsqldb' : $m[1];
         }
         if (preg_match('/MDB Tools - A library for reading MS Access/', $inicio)) {
@@ -299,12 +316,12 @@ final class Traductor
             $this->aplazar($tabla, $nombre, $d);
         } elseif ($w === 'UNIQUE') {
             $cols = $this->lista($d);
-            return ['ALTER TABLE ' . $this->nombre($tabla) . ' ADD ' . ($nombre !== null ? 'CONSTRAINT ' . $this->nombre($nombre) . ' ' : '')
+            return ['ALTER TABLE ' . $this->nombreObjeto($tabla) . ' ADD ' . ($nombre !== null ? 'CONSTRAINT ' . $this->nombreObjeto($nombre) . ' ' : '')
                 . 'UNIQUE (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ')'];
         } elseif ($w === 'CHECK') {
             [$sql] = $this->check($tabla, $d, 1);
             if ($sql !== null) {
-                return ['ALTER TABLE ' . $this->nombre($tabla) . ' ADD ' . ($nombre !== null ? 'CONSTRAINT ' . $this->nombre($nombre) . ' ' : '')
+                return ['ALTER TABLE ' . $this->nombreObjeto($tabla) . ' ADD ' . ($nombre !== null ? 'CONSTRAINT ' . $this->nombreObjeto($nombre) . ' ' : '')
                     . 'CHECK ' . $sql];
             }
         }
@@ -327,7 +344,7 @@ final class Traductor
         $tipos = $this->tablas[$tabla]['tipos'] ?? [];
         $out = [];
         $lote = [];
-        $cab = 'INSERT INTO ' . $this->nombre($tabla) . ' (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ') VALUES ';
+        $cab = 'INSERT INTO ' . $this->nombreObjeto($tabla) . ' (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ') VALUES ';
         foreach (explode("\n", rtrim($datos, "\r\n")) as $linea) {
             if ($linea === '') { continue; }
             $vals = [];
@@ -471,7 +488,7 @@ final class Traductor
             // Una vista provisional de mysqldump (o un --clean de pg_dump) se
             // borra antes de crear la de verdad
             $k = strtoupper($t[2]['v'] ?? '') === 'IF' ? 4 : 2;
-            return isset($t[$k]) ? ["DROP $p2 IF EXISTS " . ($p2 === 'VIEW' ? $this->nombreTabla((string)$t[$k]['v']) : $this->texto([$t[$k]]))] : [];
+            return isset($t[$k]) ? ["DROP $p2 IF EXISTS " . ($p2 === 'VIEW' ? $this->nombreTabla((string)$t[$k]['v']) : $this->nombreObjeto((string)$t[$k]['v']))] : [];
         }
         if ($p1 === 'DROP' && in_array($p2, ['PROCEDURE', 'PROC', 'FUNCTION', 'SEQUENCE', 'TYPE', 'INDEX', 'SCHEMA'], true)) {
             return [];                              // lo que borra lo crea el propio volcado, y eso se salta
@@ -598,25 +615,19 @@ final class Traductor
      */
     public function nombreTabla(string $n): string
     {
-        if (isset($this->reemplazos[$n])) {
-            return '"' . $this->reemplazos[$n] . '"';
-        }
-        $destino = trim($this->nombre($n), '"');
-        $ya = $this->destinos[strtolower($destino)] ?? null;
-        if ($ya === null || $ya === $n) {
-            $this->destinos[strtolower($destino)] = $n;
-            return '"' . $destino . '"';
-        }
-        for ($i = 2; ; $i++) {
-            $otro = substr($destino, 0, 64 - strlen("_$i")) . "_$i";
-            if (!isset($this->destinos[strtolower($otro)])) {
-                break;
+        if (!isset($this->tablaDe[$n])) {
+            $destino = trim($this->nombreObjeto($n), '"');
+            $ya = $this->destinos[strtolower($destino)] ?? null;
+            if ($ya !== null) {
+                for ($i = 2; isset($this->destinos[strtolower($otro = substr($destino, 0, 64 - strlen("_$i")) . "_$i")]); $i++) {
+                }
+                $this->avisar(t("Nombre '{n}' cambiado a '{otro}': '{ya}' ya se llamaba '{destino}' aquí", ['n' => $n, 'otro' => $otro, 'ya' => $ya, 'destino' => $destino]));
+                $destino = $otro;
             }
+            $this->destinos[strtolower($destino)] = $n;
+            $this->tablaDe[$n] = $destino;
         }
-        $this->destinos[strtolower($otro)] = $n;
-        $this->reemplazos[$n] = $otro;
-        $this->avisar(t("Nombre '{n}' cambiado a '{otro}': '{ya}' ya se llamaba '{destino}' aquí", ['n' => $n, 'otro' => $otro, 'ya' => $ya, 'destino' => $destino]));
-        return '"' . $otro . '"';
+        return '"' . $this->tablaDe[$n] . '"';
     }
 
     /**
@@ -1253,16 +1264,29 @@ final class Traductor
         return false;
     }
 
-    /** Los tokens otra vez como texto, en el SQL de aquí. */
+    /**
+     * Los tokens otra vez como texto, en el SQL de aquí. Un nombre entre
+     * comillas que no vale tal cual como el de una tabla, o el de una tabla
+     * que aquí se llama de otro modo, depende de dónde va: de una tabla si lo
+     * dice marcarTablas() (y delante de un punto, si la hay con ese nombre),
+     * y si no, de una columna. Las marcas, solo entonces: cuestan.
+     */
     public function texto(array $t): string
     {
         $out = '';
         $antes = null;
-        foreach ($t as $tk) {
+        $marcas = null;
+        foreach ($t as $i => $tk) {
             if ($tk['k'] === 'str') {
                 $s = "'" . str_replace("'", "''", $tk['v']) . "'";
-            } elseif ($tk['k'] === 'id' && (!empty($tk['q']))) {
-                $s = $this->nombre($tk['v']);
+            } elseif ($tk['k'] === 'id' && !empty($tk['q'])) {
+                $v = (string)$tk['v'];
+                if (preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $v) && ($this->tablaDe[$v] ?? $v) === $v) {
+                    $s = '"' . $v . '"';
+                } else {
+                    $es = $tk['es'] ?? (count($t) > 1 ? ($marcas ??= $this->marcarTablas($t))[$i] ?? '' : '');
+                    $s = $es === 'tabla' || ($es === 'calif' && isset($this->tablaDe[$v])) ? $this->nombreObjeto($v) : $this->nombre($v);
+                }
             } else {
                 $s = $tk['v'];
             }
@@ -1271,6 +1295,54 @@ final class Traductor
             $antes = $s;
         }
         return $out;
+    }
+
+    /**
+     * Dónde van los nombres de tabla de una sentencia: tras FROM, JOIN, INTO,
+     * UPDATE o TABLE, y en la lista de un FROM con comas ('tabla'), y delante
+     * de un punto, de una tabla o de un alias ('calif'). Los demás son
+     * columnas, que guardan su nombre (2.9; ver texto()).
+     *
+     * @param list<array> $t
+     * @return array<int, string> posición => 'tabla' o 'calif'
+     */
+    public function marcarTablas(array $t): array
+    {
+        // INSERT INTO t [(columnas)] VALUES …, cada fila de un volcado: solo t
+        // es una tabla, y se ve sin recorrer las columnas (buscado en C)
+        if (strtoupper((string)($t[0]['v'] ?? '')) === 'INSERT' && strtoupper((string)($t[1]['v'] ?? '')) === 'INTO') {
+            $values = ($t[3]['v'] ?? '') === '(' ? array_search(')', array_column($t, 'v'), true) + 1 : 3;
+            if (strtoupper((string)($t[$values]['v'] ?? '')) === 'VALUES') {
+                return [2 => 'tabla'];
+            }
+        }
+        $marcas = [];
+        $enFrom = [];                               // por nivel de paréntesis
+        $nivel = 0;
+        $antes = '';                                // la palabra clave o el signo de antes
+        foreach ($t as $k => $x) {
+            if ($x['k'] === 'op') {
+                $nivel += $x['v'] === '(' ? 1 : ($x['v'] === ')' ? -1 : 0);
+                unset($enFrom[$nivel + 1]);
+                $antes = $x['v'];
+                continue;
+            }
+            $u = $x['k'] === 'id' && empty($x['q']) ? strtoupper((string)$x['v']) : '';
+            if ($u === 'VALUES' && $nivel === 0) {
+                break;                              // las filas de un INSERT: ahí no hay tablas
+            }
+            if ($u === 'FROM') {
+                $enFrom[$nivel] = true;
+            } elseif (isset(self::FIN_FROM[$u])) {
+                unset($enFrom[$nivel]);
+            } elseif ($x['k'] === 'id' && (isset(self::TRAS_TABLA[$antes]) || ($antes === ',' && isset($enFrom[$nivel])))) {
+                $marcas[$k] = 'tabla';
+            } elseif ($x['k'] === 'id' && ($t[$k + 1]['v'] ?? '') === '.' && $t[$k + 1]['k'] === 'op') {
+                $marcas[$k] = 'calif';
+            }
+            $antes = $u;
+        }
+        return $marcas;
     }
 
     // ------------------------------------------------------------------
@@ -1364,7 +1436,7 @@ final class Traductor
                 if ($cols === null) {
                     continue;
                 }
-                $restricciones[] = ($nombre !== null ? 'CONSTRAINT ' . $this->nombre($nombre) . ' ' : '')
+                $restricciones[] = ($nombre !== null ? 'CONSTRAINT ' . $this->nombreObjeto($nombre) . ' ' : '')
                                  . 'UNIQUE (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ')';
             } elseif ($w === 'KEY' || $w === 'INDEX') {
                 $idx = ($d[1]['k'] ?? '') === 'id' ? $d[1]['v'] : 'ix_' . $tabla . '_' . (count($indices) + 1);
@@ -1372,7 +1444,7 @@ final class Traductor
                 if ($cols === null) {
                     continue;
                 }
-                $indices[] = 'CREATE INDEX ' . $this->nombre($idx) . ' ON ' . $this->nombre($tabla)
+                $indices[] = 'CREATE INDEX ' . $this->nombreObjeto($idx) . ' ON ' . $this->nombreObjeto($tabla)
                            . ' (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ')';
             } elseif ($w === 'FOREIGN') {
                 $this->aplazar($tabla, $nombre, $d);
@@ -1381,7 +1453,7 @@ final class Traductor
             } else {
                 [$sql] = $this->check($tabla, $d, 1);                 // CHECK (2.9)
                 if ($sql !== null) {
-                    $restricciones[] = ($nombre !== null ? 'CONSTRAINT ' . $this->nombre($nombre) . ' ' : '') . 'CHECK ' . $sql;
+                    $restricciones[] = ($nombre !== null ? 'CONSTRAINT ' . $this->nombreObjeto($nombre) . ' ' : '') . 'CHECK ' . $sql;
                 }
             }
         }
@@ -1908,8 +1980,8 @@ final class Traductor
             }
         }
         $nombre ??= 'fk_' . $tabla . '_' . implode('_', $cols);
-        $this->aplazadas[] = 'ALTER TABLE ' . $this->nombre($tabla) . ' ADD CONSTRAINT ' . $this->nombre($nombre)
-            . ' FOREIGN KEY (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ') REFERENCES ' . $this->nombre($destino)
+        $this->aplazadas[] = 'ALTER TABLE ' . $this->nombreObjeto($tabla) . ' ADD CONSTRAINT ' . $this->nombreObjeto($nombre)
+            . ' FOREIGN KEY (' . implode(', ', array_map([$this, 'nombre'], $cols)) . ') REFERENCES ' . $this->nombreObjeto($destino)
             . ($colsDestino !== [] ? ' (' . implode(', ', array_map([$this, 'nombre'], $colsDestino)) . ')' : '') . $acciones;
     }
 
@@ -1942,22 +2014,38 @@ final class Traductor
         $lista = '(' . implode(', ', array_map([$this, 'nombre'], $cols)) . ')';
         // Aquí un índice no impone unicidad: un índice único es una restricción UNIQUE
         return [$unico
-            ? 'ALTER TABLE ' . $this->nombre($tabla) . ' ADD CONSTRAINT ' . $this->nombre($nombre) . ' UNIQUE ' . $lista
-            : 'CREATE INDEX ' . $this->nombre($nombre) . ' ON ' . $this->nombre($tabla) . ' ' . $lista];
+            ? 'ALTER TABLE ' . $this->nombreObjeto($tabla) . ' ADD CONSTRAINT ' . $this->nombreObjeto($nombre) . ' UNIQUE ' . $lista
+            : 'CREATE INDEX ' . $this->nombreObjeto($nombre) . ' ON ' . $this->nombreObjeto($tabla) . ' ' . $lista];
     }
 
     /**
-     * Un nombre entre comillas dobles. Aquí un nombre es de letras, números y
-     * _, y empieza por letra o _: "Order Details" pasa a Order_Details.
+     * Una columna, o un nombre de una expresión que no es de tabla (ver
+     * marcarTablas()), entre comillas dobles: tal cual, con ñ, acentos o
+     * espacios, que el motor admite en las columnas desde la 2.8 (2.9: se
+     * cambiaban como los de tabla). Lo que ni así vale, como uno de tabla.
      */
     public function nombre(string $n): string
     {
-        if (isset($this->reemplazos[$n])) {
-            return '"' . $this->reemplazos[$n] . '"';
+        return preg_match('/^(?=.*\S)[^\x00-\x1f\x7f]{1,64}$/u', $n) ? '"' . str_replace('"', '""', $n) . '"' : $this->nombreObjeto($n);
+    }
+
+    /**
+     * Un nombre de tabla, vista, índice, restricción o trigger, entre comillas
+     * dobles. Aquí es de letras, números y _, y empieza por letra o _, porque
+     * es parte de nombres de fichero: "Order Details" pasa a Order_Details, y
+     * una letra con acento, a su letra base: AÑO pasa a ANO (2.9: un _ por
+     * byte, A__O). El de una tabla o vista del volcado, el que se le dio.
+     */
+    public function nombreObjeto(string $n): string
+    {
+        if (isset($this->tablaDe[$n])) {
+            return '"' . $this->tablaDe[$n] . '"';
         }
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $n)) {
-            // El _ delante del que empieza por una cifra, dentro de los 64 (2.9: quedaba en 65)
-            $limpio = (string)preg_replace('/[^A-Za-z0-9_]/', '_', $n);
+            // Un _ por letra (por byte si no es UTF-8), y delante del que empieza
+            // por una cifra, dentro de los 64 (2.9: quedaba en 65)
+            $base = strtr($n, self::LETRA_BASE);
+            $limpio = (string)(preg_replace('/[^A-Za-z0-9_]/u', '_', $base) ?? preg_replace('/[^A-Za-z0-9_]/', '_', $base));
             $limpio = substr(preg_match('/^[A-Za-z_]/', $limpio) ? $limpio : '_' . $limpio, 0, 64);
             if (!isset($this->renombrados[$n])) {
                 $this->renombrados[$n] = true;

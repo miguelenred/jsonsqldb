@@ -960,6 +960,21 @@ without its fix:
   or in the PHP example client, and the panel no longer looks up its language
   with `null` as an array key, which 8.5 reports and which ended up inside
   exported files.
+- **Panel: a dump with Windows line endings is recognised by its header**
+  (also in 2.8.0): the `-- jsonsqldb-dialecto:` line was only read with `\n`,
+  so the dump of the Access script, which writes `\r\n` on Windows, was taken
+  as one of this engine, skipped the translator and stopped at the first name
+  that needs it (a table called `210`, which becomes `_210`).
+- **Panel: imported column names keep their accents, `ñ` and spaces** (also in
+  2.8.0): the engine allows them since 2.8, but the importer still changed them
+  like table names (`Num Domic` → `Num_Domic`). The name of a table, view,
+  index or trigger, part of file names, is still made of letters, digits and
+  `_`, but a letter with an accent becomes its plain letter (`Año` → `Ano`)
+  instead of one `_` per byte (`A__o`).
+- **Panel: an Access view that uses a table of another Access database is
+  skipped with its reason** (also in 2.8.0): `[C:\…\other.mdb].table` or
+  `table IN '…'` gave «Falta la condición ON del INNER JOIN»; the summary now
+  names the table and the file.
 - **Panel: a trigger with `IF … END IF` can be imported again from the panel's
   own dumps** (also in 2.8.0): the `END` of `END IF` closed it, so the SQL and
   JSON dumps failed with «Falta el END del trigger», and the SQL console split
@@ -1782,7 +1797,9 @@ same time.
   real PostgreSQL and MySQL servers. `f17_rutinas_importadas` imports a
   PostgreSQL trigger function for three events and compares what it leaves
   with PostgreSQL 16; `f11_asistente` checks the data folder with an
-  administrator's session and no API URL. Fixed in the tests themselves: the
+  administrator's session and no API URL; `f14_volcados` imports Access
+  dumps with Windows line endings, with accents and spaces in names, and with
+  a view on another Access database. Fixed in the tests themselves: the
   scheduled backup test takes 02:00 on the day the clocks go back as the
   running PHP does (8.0 takes the second one, 8.1 and later the first); the
   tests that read private members call `setAccessible()` only on PHP 8.0, as
