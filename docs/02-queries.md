@@ -103,9 +103,11 @@ against literals in the top-level `AND` chain of the `WHERE`: `WHERE city =
 under a `NOT`, no `IS NULL`, `NOT IN` or `LIKE`. Since 2.9 also on ranges
 (`<`, `<=`, `>`, `>=`, `BETWEEN`) on the first column of an index, when the
 rows they match are in few parts, and for `ORDER BY column [DESC] LIMIT n` on
-a single table. A composite index is
+a single table with no `WHERE`, when the column is numeric. A composite index is
 used left to right: one on `(city, age)` serves a lookup by `city`, or by both,
-but not by `age` alone. Details in [03-writes.md](03-writes.md).
+but not by `age` alone; and by `city` alone only when `age` is `NOT NULL`, since
+a row with `NULL` in any column of an index is not in it (2.9.1). Details in
+[03-writes.md](03-writes.md).
 
 **Simple comparisons.** A `WHERE column = value` — and the same with `<>`, `<`,
 `<=`, `>`, `>=` — is resolved without going through the general expression
@@ -212,7 +214,7 @@ And these behavioural differences are worth keeping in mind:
 |---|---|
 | `SELECT` | columns, expressions, `*`, `table.*`, `DISTINCT`, `AS` (the `AS` is optional) |
 | `FROM` | tables, aliases, subqueries (`FROM (SELECT ...) t`; the alias can be left out, as in SQLite, 2.9) |
-| `JOIN` | `INNER`, `LEFT [OUTER]`, `RIGHT [OUTER]`, `FULL [OUTER]`, `CROSS`, comma; `ON` with any condition; `USING (a, b)` and `NATURAL [INNER | LEFT | RIGHT] JOIN` on tables (2.9, not with `FULL` or `CROSS JOIN`, an error: the common columns appear once in `SELECT *`, and without a table in front they are not ambiguous; with a view or a subquery, write the `ON`) |
+| `JOIN` | `INNER`, `LEFT [OUTER]`, `RIGHT [OUTER]`, `FULL [OUTER]`, `CROSS`, comma; `ON` with any condition; `USING (a, b)` and `NATURAL [INNER \| LEFT \| RIGHT] JOIN` on tables (2.9, not with `FULL` or `CROSS JOIN`, an error: the common columns appear once in `SELECT *`, and without a table in front they are not ambiguous; with a view or a subquery, write the `ON`) |
 | `WHERE` | any expression |
 | `GROUP BY` | one or more expressions, or the number of an output column (`GROUP BY 1`, 2.9) |
 | `HAVING` | with or without `GROUP BY` |
@@ -249,7 +251,10 @@ inside an aggregate or a window function: `COUNT(DISTINCT x COLLATE NOCASE)`,
 `MIN(x COLLATE NOCASE)`, `GROUP_CONCAT(DISTINCT x COLLATE NOCASE)`; if one
 side of a comparison has it, it applies to both. On its own
 (`SELECT x COLLATE NOCASE`) the value does not change. A column can have one
-too (2.9, below).
+too (2.9, below). In `ORDER BY`, the collation is applied to the values and
+then they are sorted in the configured order (`JSONSQLDB_COLACION`, section
+4): `ORDER BY x COLLATE BINARY` is therefore not byte order unless that
+setting is `'binaria'`; with the default, `'general'`, it gives `A, a, B, b`.
 
 ### COLLATE in a column (2.9)
 
@@ -548,29 +553,30 @@ BOTH] [c] FROM x)`, `POSITION(a IN b)`, `SUBSTRING(x FROM i [FOR n])`,
 
 ## 5. Performance
 
-Measured with `php tests/benchmark.php` (PHP 8.3, one core, 20,000 customers
-and 30,000 orders, on-disk cache; each figure the mean of three runs, each run
-the mean of several repetitions; two runs of the same thing differ by up to
-10 %):
+Measured with `php tests/benchmark.php` and 2.9.1 (PHP 8.3, one core, 20,000
+customers and 30,000 orders, on-disk cache; each figure the mean of three
+runs, each run the mean of several repetitions, the first of the process
+included, which loads the code; two runs of the same thing differ by up to
+10–15 %). The memory is the peak of the whole process:
 
 | Query | Time · peak memory |
 |---|---|
-| Lookup by primary key | 0.58 ms · 5.5 MB |
-| Lookup by a `UNIQUE` text column | 0.57 ms · 5.3 MB |
-| `BETWEEN` on the primary key (1,000 rows) | 1.9 ms · 6.3 MB |
-| Equality on an indexed column (2,000 matches) | 18 ms · 7.6 MB |
-| Numeric range, no index | 12 ms · 6.3 MB |
-| `LIKE` by prefix | 19 ms · 6.3 MB |
-| `LIMIT 50`, no filter | 0.57 ms · 6.3 MB |
-| `COUNT(*)` of a 30,000-row table | 5.4 ms · 5.4 MB |
-| `GROUP BY` + `SUM` + `ORDER BY` | 26 ms · 6.3 MB |
-| `ORDER BY ... LIMIT 20` | 22 ms · 6.3 MB |
-| `ORDER BY`, whole table | 36 ms · 20 MB |
-| `JOIN` 30,000 × 20,000 with aggregation | 134 ms · 22 MB |
-| `IN (SELECT ...)` subquery | 56–72 ms · 9 MB |
-| `JOIN` of one order with its customer, after `WHERE o.id = ?` | 0.46 ms · 5.6 MB |
-| `LEFT JOIN` of twenty orders with their customers | 3.7 ms · 6.1 MB |
-| Any of the above repeated on unchanged data | < 0.5 ms · 4 MB |
+| Lookup by primary key | 1.2 ms · 4.7 MB (about 0.2 ms once the process has made one) |
+| Lookup by a `UNIQUE` text column | 0.46 ms · 4.5 MB |
+| `BETWEEN` on the primary key (1,000 rows) | 2.5 ms · 5.8 MB |
+| `COUNT(*)` of an equality on an indexed column (2,000 matches) | 0.35 ms · 4.7 MB |
+| Numeric range, no index | 14 ms · 5.7 MB |
+| `LIKE` by prefix | 18 ms · 5.7 MB |
+| `LIMIT 50`, no filter | 0.64 ms · 5.7 MB |
+| `COUNT(*)` of a 30,000-row table | 0.79 ms · 5.0 MB |
+| `GROUP BY` + `SUM` + `ORDER BY` | 24 ms · 5.8 MB |
+| `ORDER BY ... LIMIT 20` | 14 ms · 5.9 MB |
+| `ORDER BY`, whole table | 36 ms · 15 MB |
+| `JOIN` 30,000 × 20,000 with aggregation | 150 ms · 18 MB |
+| `IN (SELECT ...)` subquery | 68 ms · 6.5 MB |
+| `JOIN` of one order with its customer, after `WHERE o.id = ?` | 0.45 ms · 5.0 MB |
+| `LEFT JOIN` of twenty orders with their customers | 3.2 ms · 5.6 MB |
+| Any of the above repeated on unchanged data | 0.23 ms · 2.7 MB |
 
 Decisions that make this possible:
 
@@ -595,7 +601,10 @@ Decisions that make this possible:
    the group. Memory is proportional to the number of groups.
 6. **`ORDER BY … LIMIT n` keeps only the n rows in the lead**; a full sort uses
    `array_multisort` when every key is all numbers or all text, computing the
-   collation key once per row rather than once per comparison.
+   collation key once per row rather than once per comparison. Since 2.9.1 a
+   full sort projects each row as it is read and keeps only that and its sort
+   keys, not the table: `SELECT id, balance … ORDER BY balance DESC` on 30,000
+   rows, 104 → 47 ms and 33.8 → 13.5 MB.
 7. **Hash `JOIN`**: if the `ON` contains equalities (`a.id = b.a_id`), the
    inner side is indexed and looked up directly instead of comparing every row
    against every row, and the joined rows stream into the `WHERE` and the
@@ -604,7 +613,7 @@ Decisions that make this possible:
    already joined are applied before the join (2.7), and when what is left
    on the left is small and the right-hand table has an index on the `ON`
    columns, each left row is looked up by key instead of hashing the table:
-   one order and its customer in 0.46 ms instead of about 20. Tables separated
+   one order and its customer in 0.45 ms instead of about 20. Tables separated
    by commas are joined the same way when the `WHERE` has equalities between
    their columns, written with the table in front (`FROM a, b WHERE b.x =
    a.y`, 2.9): 20,000 by 10,000 rows, 76 s → 40 ms.
@@ -634,7 +643,15 @@ Decisions that make this possible:
     in order, as with a primary key that grows, it is found almost at once
     (ten keys at the end of their pieces, 0.426 → 0.342 ms). A few rows from
     a part are read by their byte offset, one line each, without decoding
-    the part (2.7). A
+    the part (2.7), up to 30 of a part; the index is used while that costs
+    no more than reading half the table, counting 200 lines as one part (2.9.1;
+    until 2.9.0 it counted 30, and gave the index up with more than 15
+    matching rows per part: `WHERE age = 30`, 453 of 30,000 rows, 21.9 →
+    1.8 ms). An index on several columns serves its first ones only when
+    the columns after them are `NOT NULL`: a row with `NULL` in an indexed
+    column is not in the index (2.9.1; before, a lookup by `a` through an
+    index on `(a, b)` missed the rows with `b` `NULL`: in `UPDATE` and
+    `DELETE` from 2.5.0, in `SELECT` from 2.7.4). A
     `BETWEEN`, `<` or `>` on a numeric indexed column reads only the parts
     whose piece can hold a value in the range (2.7) — one or two parts for a
     range of ids on a table that grows by appending, the whole table for a
@@ -667,12 +684,15 @@ Decisions that make this possible:
     `BETWEEN` or `=` against a literal on the first column of an index looks
     for the matching rows in the index pieces and reads only their parts, a
     few rows by their lines. It only starts when it will not cost more than
-    reading the table: with numbers, an estimate from the range of each piece
+    reading half the table: with numbers, an estimate from the range of each piece
     must leave fewer than half the parts to open; with texts and dates, the
     head of each piece written by 2.9 carries its smallest and largest value,
     and only the pieces that can hold the range are read. A `COUNT(*)` whose
-    `WHERE` is only such comparisons (not only equalities) on one indexed
-    column counts in the index without reading the table. The comparison is
+    `WHERE` is only such comparisons on one indexed column counts in the index
+    without reading the table; with only equalities it does so for texts
+    that are not numbers and, since 2.9.1, for numbers on an `INTEGER`,
+    `DOUBLE` or `DECIMAL` column, where each value has a single key (`COUNT(*)
+    WHERE age = 30` on 30,000 rows, 21.3 → 0.36 ms). The comparison is
     the `WHERE`'s own, exact: with a text the index must hold only texts, with
     a number only numbers, or the table is read as before. On 60,000 rows,
     against 2.8.0: `SELECT *` of one day 65.6 → 2.7 ms, `COUNT(*)` of a month
@@ -680,10 +700,13 @@ Decisions that make this possible:
     most of the table, the same.
 14. **`ORDER BY col [DESC] LIMIT n` from the index** (2.9): with one table, no
     `WHERE`, grouping or `DISTINCT`, and a single order key that is a numeric
-    column with an index, the index pieces are read starting with the one
-    whose range has the best end, stopping as soon as the next one cannot beat
-    the n-th value, and only the rows that can be in the result are read (all
-    the ties included, so the order and the cut are exactly the usual ones).
+    column first in an index (whose other columns are `NOT NULL`), the index
+    pieces are read starting with the one whose range has the best end,
+    stopping as soon as the next one cannot beat
+    the n-th value, and only the n rows of the result are read: in a tie on
+    the last value, the first ones in the table, which are the ones the usual
+    sort keeps (2.9.1; before, every row of that value was read: `ORDER BY age
+    DESC LIMIT 20` with 439 rows tied, 11.5 → 3.6 ms).
     In ascending order `NULL`s come first and are not in the index: the column
     must be `NOT NULL` (the primary key is). On 60,000 rows, median of five
     runs against 2.8.0: `ORDER BY id DESC LIMIT 20` 117.7 → 2.9 ms, `ORDER BY
@@ -708,7 +731,8 @@ Decisions that make this possible:
     memory error.
 17. **`MIN` and `MAX` from the index** (2.9): `SELECT MIN(col), MAX(col) FROM t`,
     with no `WHERE`, on an `INTEGER`, `DOUBLE` or `DECIMAL` column that is the
-    first column of an index (the primary key is), comes from the range of
+    first column of an index whose other columns are `NOT NULL` (the primary
+    key is), comes from the range of
     each index piece that the table already keeps, without reading a row:
     136 → 7 ms on 60,000 rows. With a `WHERE`, or on a column without an index,
     the table is read as before.
@@ -790,6 +814,6 @@ silently wrong result.
 php tests/f1_nucleo.php     → OK: 73
 php tests/f2_parser.php     → OK: 83
 php tests/f2_select.php     → OK: 164
-php tests/f8_indices.php    → OK: 81
+php tests/f8_indices.php    → OK: 85
 php tests/f21_compatibilidad.php → OK: 96
 ```

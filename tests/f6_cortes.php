@@ -218,6 +218,62 @@ chk('las claves foráneas quedan íntegras', function () use ($raiz) {
 echo "\n  Resumen: $dentro de $INTENTOS muertes dentro de la ventana"
    . "  ·  $deshechas deshechas  ·  $aplicadas ya aplicadas\n";
 
+// Lo mismo dentro de una transacción, que desde la 2.9.1 no escribe el
+// diario de cada sentencia: si muere a mitad de una, al abrir la base se
+// devuelven los originales que la transacción guardó. Todo o nada: ni la
+// cascada a medias ni la cascada sin el UPDATE que va detrás
+echo "\n== Recuperación tras matar el proceso a mitad de una transacción ==\n";
+
+$hijoTx = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+        . 'define("JSONSQLDB_FILAS_POR_PARTE", 100);'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . '(new JsonSQLDB\\Database("cortes", ' . var_export($raiz, true) . '))->transaccion(static function ($bd): void {'
+        . '$bd->consultar("DELETE FROM padres WHERE id = 1");'
+        . '$bd->consultar("UPDATE hijas SET t = \'cambiada\' WHERE padre_id = 2");'
+        . '});'
+        . 'echo "terminado";';
+$dentroTx = 0;
+$corruptasTx = [];
+prepararBase($raiz, $HIJAS);
+$duracionTx = cronometrar($hijoTx);
+for ($i = 1; $i <= $INTENTOS; $i++) {
+    prepararBase($raiz, $HIJAS);
+    $proc = proc_open([PHP_BINARY, '-r', $hijoTx], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tuberias);
+    if (!is_resource($proc)) {
+        $corruptasTx[] = 'no se pudo lanzar el proceso hijo';
+        break;
+    }
+    usleep(random_int(intdiv($duracionTx, 3), $duracionTx));
+    proc_terminate($proc, 9);
+    foreach ($tuberias as $t) { @fclose($t); }
+    proc_close($proc);
+    $dentroTx += is_file("$raiz/cortes/.lote/manifiesto.lote") ? 1 : 0;
+
+    $bd2      = new Database('cortes', $raiz);
+    $padres   = (int)$bd2->consultar('SELECT COUNT(*) AS n FROM padres')[0]['n'];
+    $hijas    = (int)$bd2->consultar('SELECT COUNT(*) AS n FROM hijas')[0]['n'];
+    $cambiadas = (int)$bd2->consultar("SELECT COUNT(*) AS n FROM hijas WHERE t = 'cambiada'")[0]['n'];
+    $limpia   = $bd2->consultar('CHECK TABLES') === [] && $bd2->consultar('CHECK KEYS') === [];
+    unset($bd2);
+    $sinTocar = $padres === $PADRES && $hijas === $HIJAS_TOTAL && $cambiadas === 0;
+    $completa = $padres === $PADRES - 1 && $hijas === intdiv($HIJAS_TOTAL, 2) && $cambiadas === $hijas;
+    if ((!$sinTocar && !$completa) || !$limpia || is_file("$raiz/cortes/.lote/manifiesto.lote") || hayJournal("$raiz/cortes")) {
+        $corruptasTx[] = "intento $i: padres=$padres hijas=$hijas cambiadas=$cambiadas" . ($limpia ? '' : ', CHECK con avisos');
+    }
+}
+
+chk("$INTENTOS muertes a mitad de una transacción y ninguna base a medias (2.9.1: sin diario por sentencia)", function () use (&$corruptasTx) {
+    return $corruptasTx === [] ?: implode(' | ', array_slice($corruptasTx, 0, 3));
+});
+
+chk('alguna muerte cayó dentro de la transacción', function () use ($dentroTx, $INTENTOS) {
+    if ($dentroTx === 0) {
+        echo "       (ninguna de las $INTENTOS cayó dentro; la prueba no ha ejercitado la recuperación)\n";
+    }
+    return true;
+});
+echo "\n  Resumen: $dentroTx de $INTENTOS muertes dentro de la transacción\n";
+
 // ======================================================================
 // Segundo bloque: una sola tabla, repartida en varias partes y con índices
 //

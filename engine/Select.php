@@ -695,29 +695,49 @@ class Select
                 try {
                     if ($cuantas !== null) {
                         [$filas, $indices] = SelectOrden::primerasDe($filas, $clavesDirectas, $orden, $cuantas);
-                    } else {
-                        if (!is_array($filas)) {
-                            $filas = iterator_to_array($filas, false);
+                        $vigilar = Memoria::cada();  // filas hasta mirar la memoria (ver Storage::filas())
+                        foreach ($indices as $k) {
+                            if (--$vigilar === 0) {
+                                Memoria::revisar('la construcción del resultado');
+                                $vigilar = Memoria::cada();
+                            }
+                            $resultado[] = $proyectar($filas[$k], ['fila' => $filas[$k], 'sub' => $sub,
+                                                                    'conjunto' => $conjunto, 'filaExterna' => $externa]);
+                            unset($filas[$k]);                       // cada fila de origen se usa una vez
                         }
+                    } else {
+                        // Cada fila se proyecta según se lee, no después de ordenar:
+                        // para ordenar solo viven las columnas de la salida y las
+                        // claves, y la tabla no llega a estar entera en memoria
+                        // (2.9.1). Numeradas en el orden de lectura, que es el
+                        // desempate: un generador puede repetir claves (yield from)
+                        $proyectadas = [];
                         $clavesOrden = array_fill(0, count($clavesDirectas), []);
+                        $vigilar     = Memoria::cada();
+                        $n           = 0;
                         foreach ($filas as $k => $fila) {
+                            $proyectadas[$n] = $proyectar($fila, ['fila' => $fila, 'sub' => $sub,
+                                                                  'conjunto' => $conjunto, 'filaExterna' => $externa]);
                             foreach ($clavesDirectas as $i => $clave) {
-                                $clavesOrden[$i][$k] = $fila[$clave] ?? null;
+                                $clavesOrden[$i][$n] = $fila[$clave] ?? null;
+                            }
+                            $n++;
+                            if (--$vigilar === 0) {
+                                Memoria::revisar('la construcción del resultado');
+                                $vigilar = Memoria::cada();
+                            }
+                            if (is_array($filas)) {
+                                unset($filas[$k]);                   // la tabla no convive con lo proyectado
                             }
                         }
-                        $indices = SelectOrden::ordenNativo($orden, $clavesOrden, array_keys($filas))
-                                ?? SelectOrden::todasOrdenadas(array_keys($filas), SelectOrden::comparadorDe($orden, $clavesOrden));
+                        unset($filas);
+                        $indices = SelectOrden::ordenNativo($orden, $clavesOrden, array_keys($proyectadas))
+                                ?? SelectOrden::todasOrdenadas(array_keys($proyectadas), SelectOrden::comparadorDe($orden, $clavesOrden));
                         $clavesOrden = [];
-                    }
-                    $vigilar = Memoria::cada();      // filas hasta mirar la memoria (ver Storage::filas())
-                    foreach ($indices as $k) {
-                        if (--$vigilar === 0) {
-                            Memoria::revisar('la construcción del resultado');
-                            $vigilar = Memoria::cada();
+                        foreach ($indices as $k) {
+                            $resultado[] = $proyectadas[$k];
+                            unset($proyectadas[$k]);
                         }
-                        $resultado[] = $proyectar($filas[$k], ['fila' => $filas[$k], 'sub' => $sub,
-                                                                'conjunto' => $conjunto, 'filaExterna' => $externa]);
-                        unset($filas[$k]);                       // cada fila de origen se usa una vez
                     }
                 } finally {
                     Memoria::dejarAviso($aviso);
@@ -969,10 +989,12 @@ class Select
      * filas que cumplen son exactamente las posiciones que el índice tiene
      * para esas claves, y contarlas no exige leer ninguna fila. Antes se
      * leían todas las que cumplían (un 10 % de la tabla, 18 ms con 20.000
-     * filas) solo para contarlas. Solo con textos que no son números: con
-     * números, el índice junta valores que el WHERE puede separar (true y
-     * '1.0' tienen la misma clave) y hay que mirar cada fila. Null si no se
-     * puede: lo cuenta el camino normal.
+     * filas) solo para contarlas. Con textos que no son números, o con
+     * números en columnas INTEGER, DOUBLE o DECIMAL (2.9.1): en ellas solo
+     * hay números, y el mismo valor es la misma clave. En las demás el índice
+     * junta valores que el WHERE puede separar (true y '1.0' tienen la misma
+     * clave) y hay que mirar cada fila. Null si no se puede: lo cuenta el
+     * camino normal.
      */
     private function contarPorIndice(string $tabla, string $alias, array $where): ?int
     {
@@ -984,9 +1006,17 @@ class Select
         if ($predicados === [] || count(IndexesBusqueda::conjunciones($where)) !== count($predicados)) {
             return $this->contarPorComparacion($tabla, $alias, $where);
         }
-        foreach ($predicados as $valores) {
+        $meta = null;
+        foreach ($predicados as $col => $valores) {
             foreach ($valores as $v) {
-                if (!is_string($v) || is_numeric(trim($v))) {
+                if (is_string($v) && !is_numeric(trim($v))) {
+                    continue;
+                }
+                if (is_bool($v) || !(is_int($v) || is_float($v) || is_string($v))) {
+                    return null;
+                }
+                $meta ??= $this->cat->meta($tabla);
+                if (!in_array(Catalog::columna($meta, (string)$col)['type'] ?? null, [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
                     return null;
                 }
             }
@@ -1021,7 +1051,7 @@ class Select
             return null;
         }
         foreach ($this->cat->indicesDe($tabla) as $def) {
-            if (strtolower((string)$def['columns'][0]) === key($cols)) {
+            if (strtolower((string)$def['columns'][0]) === key($cols) && Indexes::sirve($def, 1)) {
                 $n = StorageRangos::posicionesPorComparacion($this->cat->storage(), $tabla, $def, current($cols), true);
                 if (is_int($n)) {
                     return $n;
@@ -1120,7 +1150,7 @@ class Select
             if (!array_key_exists($clave, $memo)) {
                 $memo[$clave] = null;
                 foreach ($this->cat->indicesDe($tabla) as $def) {
-                    if (strcasecmp((string)$def['columns'][0], $col['name']) === 0) {
+                    if (strcasecmp((string)$def['columns'][0], $col['name']) === 0 && Indexes::sirve($def, 1)) {
                         $memo[$clave] = StorageRangos::extremosIndice($this->cat->storage(), $tabla, $def);
                         if ($memo[$clave] !== null) {
                             if ($this->cat->storage()->traza !== null) {
@@ -1261,7 +1291,7 @@ class Select
             return null;
         }
         foreach ($this->cat->indicesDe($o['nombre']) as $def) {
-            if (strcasecmp((string)$def['columns'][0], $col['name']) === 0) {
+            if (strcasecmp((string)$def['columns'][0], $col['name']) === 0 && Indexes::sirve($def, 1)) {
                 return ['def' => $def, 'desc' => $desc, 'k' => $k];
             }
         }
@@ -1283,7 +1313,7 @@ class Select
         if (!$st->indicesActivos()) {
             return null;
         }
-        $defs = $this->cat->indicesDe($tabla);
+        $defs = array_filter($this->cat->indicesDe($tabla), static fn(array $d): bool => Indexes::sirve($d, 1));
         foreach ($defs as $def) {
             $r = $rangos[strtolower($def['columns'][0])] ?? null;
             if ($r !== null && ($r[0] !== null || $r[1] !== null)) {
@@ -1615,7 +1645,7 @@ class Select
                 }
                 $cubre[] = $porColumna[$c];
             }
-            if (count($cubre) > count($externas)) {
+            if (count($cubre) > count($externas) && Indexes::sirve($d, count($cubre))) {
                 $def      = $d;
                 $externas = $cubre;
             }

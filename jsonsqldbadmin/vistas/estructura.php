@@ -341,7 +341,7 @@ require __DIR__ . '/_pestanas.php';
             <?php endforeach; ?>
           </select>
           <div class="form-text">
-            <?= h(t('El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.')) ?>
+            <?= h(t('El orden importa: un índice sobre (a, b) sirve para buscar por a y b, o solo por a si b es NOT NULL (una fila con NULL en una columna del índice no está en él), pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.')) ?>
           </div>
         </div>
       </div>

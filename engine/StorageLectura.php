@@ -200,14 +200,14 @@ final class StorageLectura extends Storage
         }
         // ¿Compensa frente a recorrer la tabla? Una parte con pocas filas
         // pedidas se lee por líneas, sin decodificarla: cuesta lo que sus
-        // líneas, y FILAS_POR_LINEA líneas cuestan como decodificar una parte.
+        // líneas, y LINEAS_COMO_PARTE líneas cuestan como recorrer una parte.
         // Antes contaba como una parte entera, y 100 claves repartidas por la
         // tabla renunciaban al índice y la recorrían entera. Si sale más de la
         // mitad de las partes, se recorre. Sin ninguna, se sale con la lista
         // vacía sin abrir un solo fichero.
         $coste = 0.0;
         foreach ($necesarias as $n) {
-            $coste += $n <= self::FILAS_POR_LINEA ? $n / self::FILAS_POR_LINEA : 1;
+            $coste += $n <= self::FILAS_POR_LINEA ? $n / self::LINEAS_COMO_PARTE : 1;
         }
         if ($necesarias !== [] && $coste * 2 > $todas) {
             return null;
@@ -314,7 +314,7 @@ final class StorageLectura extends Storage
             }
             $n = $corte($valores, $r[1], false) - $corte($valores, $r[0], true);
             if ($n > 0) {
-                $coste += $n <= self::FILAS_POR_LINEA ? $n / self::FILAS_POR_LINEA : 1;
+                $coste += $n <= self::FILAS_POR_LINEA ? $n / self::LINEAS_COMO_PARTE : 1;
             }
         }
         return $coste * 2 > max(1, $st->partes($tabla));
@@ -471,11 +471,10 @@ final class StorageLectura extends Storage
     }
 
     /**
-     * Las filas que pueden estar entre las $k primeras de la tabla ordenada por
-     * la primera columna de un índice numérico (ORDER BY col [DESC] LIMIT k),
-     * en el orden de la tabla: todas las que tienen un valor igual o mejor que
-     * el k-ésimo, empates incluidos, así que ordenarlas y cortar da lo mismo
-     * que ordenar la tabla entera. Los trozos se leen empezando por el de
+     * Las $k primeras filas de la tabla ordenada por la primera columna de un
+     * índice numérico (ORDER BY col [DESC] LIMIT k), en el orden de la tabla:
+     * en un empate, las de posición más baja, así que ordenarlas y cortar da
+     * lo mismo que ordenar la tabla entera. Los trozos se leen empezando por el de
      * mejor extremo (su rango, que ya está en el estado) y se para en cuanto
      * el siguiente ya no puede mejorar el k-ésimo. Null si no se puede: algún
      * trozo sin rango numérico, menos de $k valores (los NULL no están en el
@@ -525,6 +524,9 @@ final class StorageLectura extends Storage
                 if ($v === null) {
                     return null;
                 }
+                if ($corte !== null && ($desc ? $v < $corte : $v > $corte)) {
+                    continue;                           // peor que el k-ésimo ya visto (2.9.1)
+                }
                 foreach ((array)$donde as $x) {
                     $valores[] = [$v, (int)$x];
                 }
@@ -541,7 +543,14 @@ final class StorageLectura extends Storage
         if (count($valores) < $k) {
             return null;
         }
-        $posiciones = array_column($valores, 1);
+        // Solo las $k primeras: en un empate en el corte, las de posición más
+        // baja, que son las que el ORDER BY deja, porque ordena en el orden de
+        // la tabla (2.9.1: se leían todas las del valor del corte, y con
+        // valores muy repetidos, ORDER BY edad DESC LIMIT 20 leía cientos de
+        // filas para quedarse con 20)
+        usort($valores, $desc ? static fn(array $a, array $b): int => [$b[0], $a[1]] <=> [$a[0], $b[1]]
+                              : static fn(array $a, array $b): int => [$a[0], $a[1]] <=> [$b[0], $b[1]]);
+        $posiciones = array_column(array_slice($valores, 0, $k), 1);
         sort($posiciones);
         return self::filasDePosiciones($st, $tabla, $posiciones);
     }

@@ -294,7 +294,7 @@ final class IndexesBusqueda extends Indexes
                 }
                 $n++;
             }
-            if ($n === 0) {
+            if ($n === 0 || !Indexes::sirve($def, $n)) {
                 continue;
             }
             // Producto de los valores de cada columna cubierta: un IN aporta varios

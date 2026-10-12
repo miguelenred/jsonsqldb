@@ -29,6 +29,7 @@ What is new since 2.7.1, and where it is described:
 | 2.9 | `COLLATE`, `CHECK` and `ENUM` in the Structure tab, the imports and the dumps | 3 |
 | 2.9 | A PowerShell script that dumps a SQL Server database and loads a dump into one | 3 |
 | 2.9 | Imports sized to the API's limits per request; an all-or-nothing import runs in one transaction of the engine and no longer undoes what others wrote meanwhile | 3 |
+| 2.9.1 | The form for a new index says that one on `(a, b)` serves a search by `a` alone only when `b` is `NOT NULL` | 3 |
 
 The panel talks to the engine in one of two ways, chosen when it is installed:
 
@@ -240,7 +241,8 @@ for more, plus an X to remove the spare ones; blank ones are ignored.
   `NEW.column`, `OLD.column`, `RAISE(ABORT, 'message')`, `IF … END IF` and, in
   a `BEFORE INSERT`/`BEFORE UPDATE`, `SET NEW.column = …` are valid.
 - Indexes: create one on one or more columns — the form warns that order
-  matters — and drop it. The automatic ones of the primary key and the
+  matters, and that one on `(a, b)` serves a search by `a` alone only when `b`
+  is `NOT NULL` (2.9.1) — and drop it. The automatic ones of the primary key and the
   `UNIQUE`s are shown as such and cannot be dropped on their own: they go with
   their constraint.
 - Drop any unique or foreign key, any named `CHECK`, any trigger and any
@@ -551,8 +553,8 @@ Import into a new database when in doubt.
   own SQL and JSON dumps of such a trigger could not be imported again, and the
   SQL console split it in two. A SQL Server `CREATE OR ALTER` view or trigger
   is read as a `CREATE` one.
-- **`||` keeps its meaning** (2.9): here, as in SQLite, `||` binds before `+
-  - * / %`, and in PostgreSQL after them, so in a PostgreSQL view or trigger
+- **`||` keeps its meaning** (2.9): here, as in SQLite, `||` binds before
+  `+ - * / %`, and in PostgreSQL after them, so in a PostgreSQL view or trigger
   each side of `||` that is a calculation goes in parentheses (`'A' || n + 1`
   → `'A' || (n + 1)`); a SQL Server `+` that joins texts becomes `(a || b)`,
   parentheses included. In a MySQL trigger, `||` is `OR`, as MySQL reads it,
@@ -1239,10 +1241,10 @@ folder, so it does not touch your data.
 ```
 php tests/f5_admin.php      → OK: 176   the panel, page by page
 php tests/f11_asistente.php → OK: 41    setup wizard, direct connection, configuration, sessions, languages
-php tests/f14_volcados.php  → OK: 54    dumps, difficult dumps, ZIP paths, all-or-nothing (12 more with servers)
+php tests/f14_volcados.php  → OK: 57    dumps, difficult dumps, ZIP paths, all-or-nothing (12 more with servers)
 php tests/f15_idiomas.php   → OK: 6     every text translated, none left over, browser language
 php tests/f16_vistas_triggers.php → OK: 10    views and triggers exported (6 more run them in MySQL and PostgreSQL)
-php tests/f17_rutinas_importadas.php → OK: 6    views and triggers imported (8 more with MySQL and PostgreSQL)
+php tests/f17_rutinas_importadas.php → OK: 7    views and triggers imported (8 more with MySQL and PostgreSQL)
 php tests/f18_access.php    → OK: 10    importing and exporting Access (3 more with PowerShell)
 php tests/f19_escrituras_contra_sqlite.php → OK: 19  random writes and queries against SQLite
 php tests/f20_memoria.php   → OK: 31    larger than memory, uploads in pieces, backups (also with --directa)

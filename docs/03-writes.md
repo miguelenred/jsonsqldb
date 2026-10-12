@@ -368,12 +368,19 @@ the `auto_` one, which comes back if you drop it. In a table made so before 2.9,
 `(a, b)`, the second key is checked by reading the table.
 
 A composite index is used **left to right**: one on `(city, age)` serves a
-lookup by `city`, or by `city` and `age`, but not by `age` alone.
+lookup by `city`, or by `city` and `age`, but not by `age` alone; and by `city`
+alone only when `age` is `NOT NULL` (or in the primary key): a row with `NULL`
+in any column of an index is not in it, so the lookup would miss it (2.9.1;
+before, an `UPDATE` or `DELETE` by `city` missed the rows whose `age` was
+`NULL` from 2.5.0, and a `SELECT` from 2.7.4). Declare such columns `NOT NULL`, or index `city`
+on its own.
 
 Equalities and `IN` against literals in the top-level `AND` chain of the
 `WHERE` use an index; since 2.9 also ranges (`<`, `<=`, `>`, `>=`, `BETWEEN`)
-on the first column of an index, `MIN`/`MAX` of an indexed column and
-`ORDER BY col [DESC] LIMIT n` without `WHERE` ([Part 2](02-queries.md),
+on the first column of an index, `COUNT(*)` of such comparisons on one
+column, counted in the index, and, on a numeric column that is the first of
+an index, `MIN`/`MAX` and `ORDER BY col [DESC] LIMIT n` without `WHERE` —
+always with the rule above for the columns after it ([Part 2](02-queries.md),
 Performance). `LIKE`, other aggregates, `IS NULL`, `NOT IN`, a top-level `OR`
 and anything under a `NOT` scan the table.
 
@@ -460,8 +467,9 @@ touches a single file — a table over `JSONSQLDB_FILAS_POR_PARTE` rows lives in
 several parts, each index is a file, and every write rewrites the revision
 file — the whole set is put in place under a **redo journal**: every file is
 written to a temporary first, a manifest lists the renames, and a power cut in
-the middle is finished when the database is next opened. Details in
-[01-core.md §6](01-core.md).
+the middle is finished when the database is next opened (inside a transaction,
+since 2.9.1, the files the transaction keeps do that job, and the statement
+writes no journal). Details in [01-core.md §6](01-core.md).
 
 What a write reads and rewrites, since 2.5:
 
@@ -476,10 +484,12 @@ What a write reads and rewrites, since 2.5:
 An index is stored in one piece per part of the table (2.6), so a write
 rewrites the pieces of the parts it touched and leaves the rest alone.
 
-Measured on 20,000 rows (`php tests/benchmark.php`, mean of several runs,
-on-disk cache): a one-row `INSERT` 9 ms and 9 MB, an `UPDATE` by key 11 ms and
-9 MB, a `DELETE` by key 16 ms and 8 MB. On 100,000 rows: 28 ms / 22 MB,
-30 ms / 23 MB and 50 ms / 22 MB. The cost of a write no longer grows with the
+Measured with `php tests/benchmark.php` and 2.9.1 (on-disk cache, one core,
+mean of several runs): a one-row `INSERT` 7.3 ms and 5.1 MB, an `UPDATE` by
+key 6.5 ms and 5.6 MB on 20,000 rows; 8.9 ms / 5.7 MB and 6.7 ms / 6.1 MB on
+100,000. Outside that benchmark, also with 2.9.1, a `DELETE` by key of a row
+without children: 7.1 ms on a table of 60,000 rows (the best of seven
+rounds). The cost of a write no longer grows with the
 size of the table nor with the size of its indexes; what remains is checking
 uniqueness, which for a numeric key looks at the pieces whose range can hold
 it (a new id is rejected as unique without opening any) and for a text key,
@@ -494,15 +504,15 @@ replaces the lines of the rows it changes, without decoding or re-encoding the
 rest of the part (2.7.1); the file ends up byte for byte as if written whole. An
 `UPDATE` or `DELETE` that depends only on each row does its work with the
 table's shared lock and locks the table only to commit ("writes by part", see
-[01-core.md](01-core.md#writes-by-part-27)). Measured with `php tests/benchmark.php`
-on 20,000 rows in 2.7.1 (one core, on-disk cache, mean of three runs): `INSERT`
-7.2 ms, `UPDATE` by key 6.7 ms, `DELETE` by key 11.1 ms.
+[01-core.md](01-core.md#writes-by-part-27)).
 
-On a real disk the cost is the `fsync` calls, not the encoding: four per write
-since 2.7 (the part, `rev.json`, the manifest and the directory; five when it
-opens a new part), down from ten in 2.6. Index pieces are written without one,
+On a real disk the cost is the `fsync` calls, not the encoding: five per write
+since 2.7 (the part, `rev.json`, the manifest, the `.tx/` folder and the
+database folder; six when it fills the last part and also opens a new one),
+down from ten in 2.6. Index pieces are written without one,
 since they can be rebuilt from the rows if a crash loses them. With an `fsync`
-of 3 ms, typical of a shared host, a one-row `INSERT` takes about 28 ms; see
+of 3 ms, typical of a shared host, a one-row `INSERT` took about 28 ms when
+measured in 2.7; see
 [01-core.md](01-core.md#several-files-the-redo-journal).
 
 The comparison to keep in mind: one `INSERT` with 2,000 `VALUES` costs about
@@ -547,7 +557,11 @@ transaction.
   locked.
 - **If the process dies halfway**, the transaction is undone when the database
   is next opened. How it is kept is in
-  [01-core.md §6](01-core.md#several-files-the-redo-journal). If a file cannot
+  [01-core.md §6](01-core.md#several-files-the-redo-journal). Its statements
+  write no journal of their own (2.9.1): the originals the transaction keeps
+  undo them, so each one saves writing a manifest and its `fsync`s (a
+  transaction of 100 one-row `INSERT`s makes 305 `fsync` calls instead of
+  505). If a file cannot
   be put in its place half-way through a statement (on Windows, one another
   program holds open), the transaction can only be undone: it takes no more
   writes, and it is undone when the function returns, with an error.
@@ -575,7 +589,7 @@ transaction.
 | `engine/ParserEscritura.php` | `INSERT`, `UPDATE`, `DELETE` and the `SET NEW` of triggers; extends `Parser` (2.9) |
 | `engine/ParserSentencias.php` | DDL, triggers and `RAISE`, `SHOW`, `CHECK`, `REPAIR`, `EXPLAIN` and the rest; extends `ParserEscritura` (2.9) |
 | `engine/Database.php` | decides the lock scope of each statement |
-| `tests/f3_escrituras.php` | 110 checks, transactions among them |
+| `tests/f3_escrituras.php` | 111 checks, transactions among them |
 | `tests/f5_esquema.php` | 122 checks, `CREATE TABLE … AS SELECT` among them |
 
 ## 6. Tests
@@ -584,9 +598,9 @@ transaction.
 php tests/f1_nucleo.php       → OK: 73
 php tests/f2_parser.php       → OK: 83
 php tests/f2_select.php       → OK: 164
-php tests/f3_escrituras.php   → OK: 110
+php tests/f3_escrituras.php   → OK: 111
 php tests/f5_esquema.php      → OK: 122
-php tests/f8_indices.php      → OK: 81
+php tests/f8_indices.php      → OK: 85
 php tests/f10_indices_incrementales.php → OK: 21
 php tests/f21_compatibilidad.php → OK: 96
 ```

@@ -252,7 +252,7 @@ final class StorageRangos extends Storage
                 // Lo que costará leer las filas de esta parte (ver StorageLectura::filasDePosiciones())
                 $aqui   = count($pos) - $total;
                 $total  = count($pos);
-                $coste += $aqui <= self::FILAS_POR_LINEA ? $aqui / self::FILAS_POR_LINEA : 1;
+                $coste += $aqui <= self::FILAS_POR_LINEA ? $aqui / self::LINEAS_COMO_PARTE : 1;
                 if (++$vistos >= 2 && $coste / $vistos * count($orden) * 2 > $plan['partes']) {
                     return null;
                 }

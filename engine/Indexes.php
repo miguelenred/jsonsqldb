@@ -97,12 +97,34 @@ class Indexes
      * Si un índice a mano cubre exactamente las mismas columnas que uno
      * automático, sobra el automático: sería el mismo fichero dos veces.
      *
-     * @return list<array{name: string, columns: list<string>, auto: bool}>
+     * 'minimo' es cuántas de sus primeras columnas hay que buscar para poder
+     * usarlo (ver sirve()).
+     *
+     * @return list<array{name: string, columns: list<string>, auto: bool, minimo: int}>
      */
     public static function definiciones(array $meta): array
     {
         $out    = [];
         $vistas = [];
+        $noNulas = [];
+        foreach ($meta['columns'] as $c) {
+            if (!empty($c['notnull'])) {
+                $noNulas[strtolower((string)$c['name'])] = true;
+            }
+        }
+        // Una fila con NULL en alguna columna del índice no está en él: buscar
+        // solo por las primeras perdería las que lo tienen en las de detrás
+        // (2.9.1: WHERE a = 1 con un índice sobre (a, b) no veía las filas con
+        // b NULL, en UPDATE y DELETE desde la 2.5.0 y en SELECT y COUNT desde
+        // la 2.7.4). Vale desde donde todas las
+        // que quedan detrás son NOT NULL
+        $minimo = static function (array $cols) use ($noNulas): int {
+            $m = count($cols);
+            while ($m > 1 && isset($noNulas[strtolower($cols[$m - 1])])) {
+                $m--;
+            }
+            return $m;
+        };
         // Los conjuntos únicos (clave primaria y UNIQUE): un índice sobre uno de
         // ellos devuelve una fila o ninguna por clave
         $unicos    = [];
@@ -123,7 +145,7 @@ class Indexes
             }
             $vistas[$clave] = true;
             $out[] = ['name' => (string)$idx['name'], 'columns' => $cols, 'auto' => false, 'unico' => isset($unicos[$clave]),
-                      'plegar' => Catalog::plegarCon($colaciones, $cols)];
+                      'plegar' => Catalog::plegarCon($colaciones, $cols), 'minimo' => $minimo($cols)];
         }
 
         $autos = [];
@@ -143,10 +165,16 @@ class Indexes
             }
             $autos[strtolower($nombre)] = true;
             $out[] = ['name' => $nombre, 'columns' => $cols, 'auto' => true, 'unico' => true,
-                      'plegar' => $uq['plegar']];
+                      'plegar' => $uq['plegar'], 'minimo' => $minimo($cols)];
         }
 
         return $out;
+    }
+
+    /** ¿Sirve el índice para buscar por sus $n primeras columnas (ver definiciones())? */
+    public static function sirve(array $def, int $n): bool
+    {
+        return $n >= ($def['minimo'] ?? count($def['columns']));
     }
 
     /**

@@ -87,7 +87,7 @@ lower of the two wins.
 | Blocked | Why |
 |---|---|
 | `data/`, `logs/`, `engine/`, `docs/`, `tests/`, `nginx/`, `litespeed/` | Data, logs, engine code and documentation |
-| `jsonsqldbadmin/lib/`, `vistas/`, `datos/` | Panel internals: users with their hashes, the audit trail, scheduled backups and files waiting to be imported |
+| `jsonsqldbadmin/lib/`, `vistas/`, `datos/`, `idiomas/`, `herramientas/` | Panel internals: users with their hashes, the audit trail, scheduled backups and files waiting to be imported; its code, translations and tools |
 | `config.php`, `*_config.php`, `*.dist.php` | API keys and HMAC secrets |
 | `*.json`, `*.md`, `*.log`, `*.crt`, `*.pem`, `*.key`… | Tables are `.json` files: this is the key rule |
 | Hidden files (`.git`, `.env`, `.htaccess`) | The usual |

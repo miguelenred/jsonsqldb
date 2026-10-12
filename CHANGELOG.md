@@ -5,9 +5,191 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Given that the only supported way in is the HTTP API, the public surface for
-versioning purposes is: the API request and response format, the SQL dialect, the
-configuration constants, and the on-disk format of `data/`.
+The recommended way in is the HTTP API; PHP code on the same server can also
+use the engine directly, through the `Database` class (since 1.5, off by
+default). The public surface for versioning purposes is: the API request and
+response format, the functions of the `Database` class, the SQL dialect, the
+configuration constants, and the on-disk format of `data/` (see the
+[compatibility policy](docs/01-core.md#compatibility-policy)).
+
+## [2.9.1] - 2026-10-12
+
+A fix and speed. The fix: a lookup by the first columns of an index on
+several columns missed the rows with `NULL` in the others, in `UPDATE` and
+`DELETE` since 2.5.0 and in `SELECT` and `COUNT(*)` since 2.7.4. The
+speed comes from two external reviews of 2.9.0 made with artificial
+intelligence: each proposal was checked in the code and measured against
+2.9.0 with the same data (30,000 and 100,000 customers, the two engines
+alternated in each round and the best time of each kept), and kept only if it
+was better; the ones that were not are under *Measured and left out*. Nothing changes in
+the on-disk format, the SQL dialect or the API's request and response.
+Figures below are 2.9.0 → 2.9.1, on 30,000 customers unless said otherwise.
+
+### Fixed
+
+- **An index on several columns missed the rows with `NULL` in its later
+  columns.** A row with `NULL` in any column of an index is not in it, and
+  `WHERE a = 1` used an index (or a `UNIQUE`) on `(a, b)` for `a` alone: from
+  2.5.0, `UPDATE` skipped the rows whose `b` was `NULL` and `DELETE` left them;
+  from 2.7.4, `SELECT` and `COUNT(*)` missed them too (checked with each
+  published version: 2.4.0 and earlier gave the right rows). An index now
+  serves its first columns only when the columns after them are `NOT NULL`
+  (as the primary key's are); otherwise the table is read. Every path that
+  picks an index by its first columns follows the same rule: `=`, `IN`,
+  ranges, `COUNT(*)` in the index, `MIN`/`MAX`, `ORDER BY … LIMIT` and the
+  inner side of a join. The engine goes by the declaration, so such a lookup
+  is slower also where no row has a `NULL` there: `WHERE grupo = 7` with
+  `UNIQUE (grupo, codigo)` and `codigo` nullable, 5.3 → 20.6 ms. With the
+  later columns `NOT NULL`, or an index on `a` alone, the index is used as
+  before. Nothing on disk needs changing: the indexes were right, the choice
+  of index was not.
+
+### Faster
+
+- **Equalities and `IN` by an index with many matching rows per part.** Up to
+  30 rows of a part are read by their lines, without decoding the part, and
+  the index is used while that costs no more than reading half the table. The
+  engine counted 30 such lines as the cost of reading a part, so with more than 15
+  matching rows per part it gave the index up and read the table. Measured
+  with and without OPcache and APCu, a part costs as much as 190 to 280 lines:
+  it now counts 200, also for ranges by index. `SELECT id … WHERE edad = 30`
+  (453 rows): 21.9 → 1.8 ms and 1.6 → 0.7 MB; with 16 to 30 matching rows in
+  every part, 33–37 ms → 2.6–4.1 ms (nine to thirteen times faster) and less
+  memory.
+- **`COUNT(*)` of a numeric equality counts in the index** on an `INTEGER`,
+  `DOUBLE` or `DECIMAL` column, as it already did for texts that are not
+  numbers. Those columns hold only numbers, and the same value is the same
+  key, so counting keys is exact; in other columns one key can stand for
+  values the `WHERE` tells apart (`true` and `'1.0'`), and there, or when the
+  value compared is a boolean, the rows are counted as before. `COUNT(*) …
+  WHERE edad = 30`: 21.3 → 0.36 ms and 1.4 → 0.0 MB; on 100,000 customers
+  15.4 → 0.98 ms.
+- **`ORDER BY col [DESC] LIMIT n` from the index reads only the n rows that
+  come out.** It read every row with the value of the n-th one, all of them
+  when many rows tie there; it now keeps the n positions, breaking ties by
+  their place in the table as the usual sort does, and skips keys that cannot
+  enter. `ORDER BY edad DESC LIMIT 20` (439 rows tied): 11.5 → 3.6 ms and
+  0.7 → 0.3 MB; on 100,000 customers 54.0 → 18.0 ms and 2.4 → 0.5 MB. `ORDER
+  BY saldo DESC LIMIT 20`: 8.8 → 5.1 ms.
+- **A whole `ORDER BY` keeps only what it returns** (proposed by one of the
+  reviews). Without `LIMIT`, each row is projected as it is read, and only the
+  projected row and its sort keys are kept until the sort, instead of the whole
+  table. `SELECT id, saldo … ORDER BY saldo DESC`: 104 → 47 ms and 33.8 →
+  13.5 MB; on 100,000 customers 430 → 183 ms and 114 → 47 MB; `ORDER BY
+  nombre`: 59.5 → 55.8 ms and 39.3 → 20.4 MB. In `tests/benchmark.php` (20,000
+  customers), 61 → 36 ms and 19.8 → 14.9 MB.
+- **Statements inside a transaction write no journal of their own** (proposed
+  by one of the reviews). A statement that replaces several files saves a
+  manifest first, so that a crash can finish or undo it; inside a transaction
+  the originals are already kept in `.lote/` before anything is replaced, and
+  a crash undoes the whole transaction. A transaction of 100 one-row
+  `INSERT`s makes 305 `fsync` calls instead of 505 and 402 renames instead of
+  502; 50 `UPDATE`s, 200 instead of 300. What that saves depends on the disk:
+  on this machine's, whose times vary up to 15 % from one round to the next,
+  the median of ten rounds is 14 % lower for both and 10 % for a `lote` of
+  four statements, faster in 7 or 8 rounds of 10. A statement that fails half-way through its
+  renames still leaves the transaction unable to commit, also when the error
+  is caught: it is undone whole.
+
+### Measured and left out
+
+- **Weighing the index against the whole table** instead of part by part (one
+  of the reviews): `ciudad IN ('Elche', 'Murcia', 'Bilbao')` 49.7 → 53.1 ms
+  and 4.8 → 13.0 MB, `ciudad = 'Elche'` 28.7 → 26.0 ms but 2.7 → 4.7 MB. The
+  new count above gives the gains without that cost.
+- **Reading every index piece to find the n rows of `ORDER BY … LIMIT n`**
+  (one of the reviews): `ORDER BY id DESC LIMIT 10` 0.61 → 38 ms, `ORDER BY
+  saldo DESC LIMIT 20` 8.7 → 23.6 ms. The pieces are still read from the one
+  with the best values, stopping when the next cannot enter.
+- **Writing the index pieces only at the end of a transaction** (one of the
+  reviews): 100 `INSERT`s 575 → 365 ms, but 50 `UPDATE`s 0.7 → 2.5 MB, and a
+  statement that failed half-way inside a transaction was committed with
+  part of its rows (a test that makes one fail after its first file: of 30
+  rows, 5 were kept). Leaving out the journal (above) keeps the safety.
+
+### Checked
+
+- **`INSERT OR IGNORE` and `ON CONFLICT DO NOTHING` do not lose rows.** One of
+  the reviews reported that they deleted the row already there. It was not
+  reproduced on 2.9.0, on 2.8.0 nor on the copy the review patched, neither
+  with its own script (9 cases, all right on the three) nor comparing with
+  SQLite: 96 combinations (parts of 3, 12 and 1,000 rows, cache on and off,
+  with and without triggers and indexes, four seeds) of 400 random
+  statements on a table with a primary key, a `UNIQUE` text, a `UNIQUE
+  COLLATE NOCASE`, a `UNIQUE` of two columns and a `CHECK`, plus tables of
+  20,000 rows with holes: the same rows as SQLite. Two differences with
+  SQLite remain, neither a loss: a row that breaks a `CHECK` or a `NOT NULL`
+  is an error here, where SQLite's `OR IGNORE` skips it, and an ignored row
+  without an id uses up a number of the autoincrement.
+- **Holes at the end of a table are not taken for rows, nor rows for holes.**
+  One of the reviews said that finding them was fragile. A line counts as a
+  hole only when, at its offset, it is exactly `null` with the engine's
+  indentation, and no row has a line break inside; anything else stops the
+  search and the line stays. With a hand edit that moved the offsets of a part
+  and with holes indented by hand, then a `DELETE` of the last row: no row
+  lost, `CHECK TABLES` clean.
+- **Nothing is slower than 2.9.0** except the lookups of the fix above. 29
+  queries on 30,000 customers and 60,000 orders (seven rounds, the best of
+  nine runs each) and 14 on 100,000 customers (five rounds): besides the ones
+  above, every one within ±3 % (lookups by key, unique text, `IN`, ranges,
+  `LIKE`, `GROUP BY`, `DISTINCT`, joins, `COUNT(*)`, `MIN`/`MAX`); the ones
+  that came out at +5 and +6 % (a `COUNT(*)` of a range, `ORDER BY id DESC
+  LIMIT 10` on 100,000), measured again in ten rounds, −3 and +3 %. A one-row
+  `INSERT`, `UPDATE` or `DELETE` outside a transaction makes the same calls to
+  the disk as in 2.9.0 (counted with `strace`), and its time stays within what
+  this machine's disk varies.
+
+### Tests
+
+- `f8_indices` (85): an index on two columns with `NULL`s in the second gives
+  the same as a full scan with `=`, `IN`, `COUNT(*)`, ranges, `MIN`/`MAX`,
+  `ORDER BY … LIMIT`, a join, `UPDATE` and `DELETE` (it fails on 2.9.0);
+  `COUNT(*)` of numeric equalities in the index on `INTEGER`, `DOUBLE` and
+  `DECIMAL` (`5` and `5.0`, numeric texts, `IN`, rows deleted and changed),
+  and not on other columns or with a boolean; 16 to 30 matching rows per part
+  use the index, and `ORDER BY … LIMIT` with ties reads only the rows that
+  come out; a whole `ORDER BY` of wide rows under half the memory, same
+  result.
+- `f3_escrituras` (111): a statement that fails half-way through its renames
+  in a transaction leaves it unable to commit, and it is undone whole.
+- `f6_cortes` (35): a process killed with `SIGKILL` at random points of a
+  transaction (a `DELETE` with cascades and an `UPDATE`) leaves all or
+  nothing, with `CHECK TABLES` and `CHECK KEYS` clean and no journal or
+  `.lote/` left.
+
+### Documentation
+
+- README: the tables and figures of speed were those of 2.6.1 and 2.7; now
+  those of `tests/benchmark.php` with 2.9.1 on 20,000 and 100,000 customers.
+  An `INSERT` of one row makes five `fsync` calls (it said four in one place).
+  jsonSQLDBadmin's direct connection is turned on for the panel only, without
+  touching `config.php`: `JSONSQLDB_CONEXION_DIRECTA` stays as it is (`false`
+  by default) for everything else.
+- `docs/01-core.md`, `docs/02-queries.md`, `docs/03-writes.md`: the indexes on
+  several columns, the new cost of an index, `COUNT(*)` and `ORDER BY` by
+  index, the memory of a whole `ORDER BY`, transactions without journal per
+  statement, and the measures of 2.9.1. `docs/02-queries.md`: `ORDER BY x
+  COLLATE BINARY` sorts in byte order only with `JSONSQLDB_COLACION`
+  `'binaria'`. `docs/06-format.md`: inside a transaction a statement writes no
+  `.tx/`. `docs/05-admin.md` and the panel's form for a new index: one on `(a,
+  b)` serves a search by `a` alone only when `b` is `NOT NULL`.
+- Corrected, from a review of every document: an index is used while reading
+  its rows costs no more than reading half the table (they said «less than
+  the table»); five `fsync` calls are the floor of a write and two writers
+  overlap in the fifth, the part's (`docs/01-core.md` said four and «the
+  fourth» in two places); the 28 ms of a one-row `INSERT` with a slow disk
+  were measured in 2.7; `nginx/README.md` lists every folder of the panel its
+  rules block (`idiomas/` and `herramientas/` were missing); without the
+  servers, `f14_volcados` passes 57 checks and `f17_rutinas_importadas` 7 (the
+  lists said 54 and 6); an `INSERT` makes six `fsync` calls when it fills the
+  last part and also opens a new one, not whenever it opens one; the join by
+  key and older figures carry the version they were measured with; two
+  places where the Markdown broke (a table cell with `|`, a list line that
+  began with `-`). Every document was checked against the code before the
+  release.
+- The compatibility policy (`docs/01-core.md`) now covers the functions of the
+  `Database` class that the direct connection uses, and the header of this
+  file no longer says that the API is the only way in.
 
 ## [2.9.0] - 2026-10-11
 
@@ -4905,6 +5087,7 @@ First public release. Everything below is the starting point, not a change.
 - 441 checks across seven suites, including a suite that drives the admin panel
   over real HTTP with cookies and CSRF tokens.
 
+[2.9.1]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.9.1
 [2.9.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.9.0
 [2.8.0]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.8.0
 [2.7.4]: https://github.com/miguelenred/jsonsqldb/releases/tag/v2.7.4

@@ -343,8 +343,8 @@ return [
         => 'The file is not a valid ZIP or it is damaged.',
     'El motor no responde: {error}'
         => 'The engine is not responding: {error}',
-    'El orden importa: un índice sobre (a, b) sirve para buscar por a, o por a y b, pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.'
-        => 'Order matters: an index on (a, b) helps to search by a, or by a and b, but not by b alone. It speeds up equalities and IN, ranges (<, >, BETWEEN) and COUNT(*) on its first column, and on a numeric column MIN, MAX and ORDER BY … LIMIT; not LIKE, IS NULL or an OR. And it makes every write to the table a little slower.',
+    'El orden importa: un índice sobre (a, b) sirve para buscar por a y b, o solo por a si b es NOT NULL (una fila con NULL en una columna del índice no está en él), pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.'
+        => 'Order matters: an index on (a, b) helps to search by a and b, or by a alone if b is NOT NULL (a row with NULL in a column of the index is not in it), but not by b alone. It speeds up equalities and IN, ranges (<, >, BETWEEN) and COUNT(*) on its first column, and on a numeric column MIN, MAX and ORDER BY … LIMIT; not LIKE, IS NULL or an OR. And it makes every write to the table a little slower.',
     'El panel carga el motor y le habla sin HTTP'
         => 'The panel loads the engine and talks to it without HTTP',
     'El panel carga el motor y le habla sin HTTP. Para cuando el panel y los datos están en el mismo servidor.'

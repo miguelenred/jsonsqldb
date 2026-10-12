@@ -617,7 +617,7 @@ them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 php tests/f1_nucleo.php       → OK: 73
 php tests/f2_parser.php       → OK: 83
 php tests/f2_select.php       → OK: 164
-php tests/f3_escrituras.php   → OK: 110
+php tests/f3_escrituras.php   → OK: 111
 php tests/f4_api.php          → OK: 76
 php tests/f5_esquema.php      → OK: 122
 php tests/f5_admin.php        → OK: 176

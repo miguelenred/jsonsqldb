@@ -49,8 +49,15 @@ class Storage
     /** @var list<array>|null cómo se leyó cada tabla, solo durante un EXPLAIN (ver SelectAvanzada::apuntar()) */
     public ?array $traza = null;
 
-    /** Hasta cuántas filas de una parte se leen por líneas en vez de decodificarla entera (medido: 30 cuestan como decodificar una parte) */
+    /** Hasta cuántas filas de una parte se leen por líneas en vez de decodificarla entera */
     protected const FILAS_POR_LINEA = 30;
+    /**
+     * Cuántas líneas leídas sueltas cuestan como recorrer una parte para decidir
+     * entre el índice y el recorrido (2.9.1, medido con y sin OPcache y APCu:
+     * 190 a 280). Antes contaba 30: con más de 15 filas por parte se dejaba el
+     * índice y se recorría la tabla, de 9 a 13 veces más lento y con más memoria
+     */
+    protected const LINEAS_COMO_PARTE = 200;
     /** Trozos de cada índice que se guardan en el proceso mientras dura el bloqueo (ver trozoIndice()) */
     private const TROZOS_EN_MEMORIA = 64;
     /** La huella del texto de una parte que deja una escritura (2.9, ver parte()): basta para notar una edición, y sale por muy poco al lado de escribir la parte */

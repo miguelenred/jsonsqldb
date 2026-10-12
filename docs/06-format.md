@@ -309,7 +309,8 @@ temporary is renamed to its file and each file in `borrar` deleted (redoing it
 twice is the same as once); a missing temporary listed in `regenerables` (an
 index piece) is skipped. A manifest with `estado` instead of `tipo` is the
 undo journal of 2.4 and earlier, and `.tx/<scope>/manifiesto.json` that of 2.5
-and 2.6: both are still applied.
+and 2.6: both are still applied. A statement inside a transaction writes none
+(2.9.1): `.lote/`, below, already undoes it.
 
 **`.lote/`** (2.9): while a transaction runs, the original of every file it
 replaces or deletes, under the same name (a hard link, or a copy forced to disk

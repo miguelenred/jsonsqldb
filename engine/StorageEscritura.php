@@ -115,7 +115,11 @@ final class StorageEscritura extends Storage
             StorageMantenimiento::loteGuardar($st, array_merge(array_values($st->txRenombrar), array_keys($st->txBorrar)));
         }
         $manifiesto = null;
-        if (count($st->txRenombrar) + count($st->txBorrar) > 1) {
+        $varios     = count($st->txRenombrar) + count($st->txBorrar) > 1;
+        // Dentro de una transacción no hace falta (2.9.1): si el proceso muere a
+        // mitad, al abrir la base se devuelven los originales que acaban de
+        // guardarse, y el diario solo era un fichero y un fsync más por sentencia
+        if ($varios && $st->lote === null) {
             $manifiesto = self::ficheroJournal($st, $ambito);
             if (!is_dir($st->dirTx) && !@mkdir($st->dirTx, 0775, true) && !is_dir($st->dirTx)) {
                 throw JsonSqlDbError::io('No se puede crear la carpeta del journal');
@@ -145,15 +149,13 @@ final class StorageEscritura extends Storage
         try {
             self::rehacer($st, $st->txRenombrar, array_keys($st->txBorrar), $st->txRegenerables);
         } catch (\Throwable $e) {
-            if ($manifiesto !== null && $st->lote === null) {
+            if ($manifiesto !== null) {
                 // Ya es irrevocable: sus temporales se quedan y se termina al
                 // abrir la base (2.9: se borraban, y la base ya no se abría)
                 $st->txRenombrar = $st->txRegenerables = $st->txBorrar = [];
-            } elseif ($manifiesto !== null) {
-                // En una transacción se deshace entera, con los originales ya
-                // guardados: el manifiesto sobra, y al abrir la base habría
-                // vuelto a borrar lo devuelto
-                @unlink($manifiesto);
+            } elseif ($varios && $st->lote !== null) {
+                // En una transacción, a medias: se deshace entera, con los
+                // originales ya guardados, y no se puede confirmar
                 $st->lote['rota'] = true;
             }
             throw $e;

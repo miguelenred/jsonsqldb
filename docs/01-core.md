@@ -668,9 +668,9 @@ o.id = ?`, one order and its customer. Since 2.7 the conditions of the
 and if what is left on the left is small compared with the right-hand table
 — one row for every 150 the table has, up to a thousand — and the right-hand
 table has an index on the columns the `ON` equates, each left row is looked
-up by key instead: 0.46 ms and 5.6 MB for that query on 30,000 orders and
-20,000 customers, where the hash join took about 20 ms and 25 MB; 3.7 ms for
-twenty orders with a `LEFT JOIN`, where it took about 60. Above the threshold, or without
+up by key instead: 0.45 ms and 5.0 MB for that query on 30,000 orders and
+20,000 customers (2.9.1), where the hash join took about 20 ms and 25 MB;
+3.2 ms for twenty orders with a `LEFT JOIN`, where it took about 60. Above the threshold, or without
 an index, the hash join runs as before, on the rows the `WHERE` left.
 
 ### The last entries stay in the process
@@ -799,17 +799,36 @@ Indexes serve reads and writes:
   and only the matching index pieces.
 
 Equalities and `IN` against literals in the top-level `AND` chain of the
-`WHERE` use an index, and since 2.9 also:
+`WHERE` use an index, as long as reading the rows they point to costs no
+more than reading half the table: up to 30 rows of a part are read by their
+lines, and the engine counts 200 such lines as the cost of reading a part
+(measured with and without OPcache and APCu: 190 to 280). Until 2.9.0 it
+counted 30, so with
+more than 15 matching rows per part it gave the index up and read the table,
+nine to thirteen times slower and with more memory: on 30,000 rows, `WHERE age =
+30` (453 rows) went from 21.9 to 1.8 ms in 2.9.1. An index on several columns
+serves its first ones only when the columns after them are `NOT NULL` (the
+primary key's are): a row with `NULL` in any column of an index is not in it,
+so a lookup by `a` through an index on `(a, b)` would miss the rows whose `b`
+is `NULL` (2.9.1; before, it did: in `UPDATE` and `DELETE` from 2.5.0, in
+reads from 2.7.4). Since 2.9 also, with the same rule for the columns after the first:
 
 - a range (`<`, `<=`, `>`, `>=`, `BETWEEN`) against a literal on the first
   column of an index, when the ranges of the pieces show it will not cost more
-  than reading the table (with numbers, fewer than half the parts to open);
+  than reading half the table (with numbers, fewer than half the parts to
+  open);
 - `COUNT(*)` whose `WHERE` is only comparisons on one indexed column, counted
-  in the index without reading rows;
+  in the index without reading rows; with equalities, on texts that are not
+  numbers and, since 2.9.1, on numbers in an `INTEGER`, `DOUBLE` or `DECIMAL`
+  column (`COUNT(*) WHERE age = 30` on 30,000 rows, 21.3 → 0.36 ms), where
+  each value has one key;
 - `MIN(col)` and `MAX(col)` with no `WHERE` on a numeric column that is the
   first column of an index, taken from the ranges already in `rev.json`;
 - `ORDER BY col [DESC] LIMIT n` on one table, with no `WHERE`, grouping or
-  `DISTINCT`, on a numeric indexed column (ascending needs it `NOT NULL`).
+  `DISTINCT`, on a numeric indexed column (ascending needs it `NOT NULL`);
+  since 2.9.1 only the n rows that come out are read, also when many rows tie
+  on the last value (`ORDER BY age DESC LIMIT 20` with 439 rows of the same
+  age: 11.5 → 3.6 ms).
 
 `EXPLAIN SELECT …` says which of these a query used. `LIKE`, `IS NULL`,
 `NOT IN`, other aggregates and orders, a top-level `OR` and anything under a
@@ -962,14 +981,16 @@ pending journal by an earlier version recovers correctly. The pre-2.0 layout
 What the journal costs, counted with `strace`: a one-row `INSERT` into a
 table with three indexes makes **five `fsync` calls** — the part, `rev.json`,
 the manifest, the `.tx/` folder that holds it and the database folder; six
-when it opens a new part — down from ten in 2.6 and from twenty-odd in 2.4. The autoincrement counter moved from the
+when it fills the last part and also opens a new one — down from ten in 2.6
+and from twenty-odd in 2.4. The autoincrement counter moved from the
 structure file into `rev.json` for exactly this reason: a file the write
 touches anyway. On this benchmark machine an `fsync` takes 0.1 ms and the
 difference is invisible; on a hosting disk it takes 3–8 ms, and there the
-same `INSERT` goes from 50 ms to 28 ms (3 ms per `fsync`) or from 102 ms to
-about 50 ms (8 ms), measured by making the kernel delay each `fsync` by that
-much. Four is the floor for a write that keeps every data file durable on its
-own: one per data file plus the manifest and the directory.
+same `INSERT` went from 50 ms to 28 ms (3 ms per `fsync`) or from 102 ms to
+about 50 ms (8 ms) when measured in 2.7, by making the kernel delay each
+`fsync` by that much. Five is the floor for a write that keeps every data file durable on its
+own: one per data file (the part and `rev.json`), the manifest, the folder
+that holds it and the database folder.
 
 A process killed with `SIGKILL` runs no `finally` and can leave its temporary
 on disk; that cannot be avoided from inside. What is avoided is accumulation:
@@ -988,10 +1009,13 @@ before a write first replaces or deletes a file, the original is kept in
 `.lote/` with a hard link (a copy forced to disk where links are not allowed),
 which keeps the old content without copying it, because the engine never
 changes a file in place. The originals are kept, and listed in
-`.lote/manifiesto.lote`, before the statement's own journal is written, so a
-crash between the two cannot leave a statement that the transaction does not
-know how to undo. Committing deletes `.lote/`; undoing puts the
-originals back and removes what is new. If the process dies halfway, the
+`.lote/manifiesto.lote`, before anything is put in place, so a statement cut
+short is undone with the rest of the transaction; that is why, since 2.9.1, a
+statement inside a transaction writes no journal of its own (its manifest
+and its `fsync`s were redundant: a transaction of 100 one-row `INSERT`s
+makes 305 `fsync` calls instead of 505). A statement that fails half-way through putting its files in place
+leaves the transaction unable to commit: it can only be undone. Committing
+deletes `.lote/`; undoing puts the originals back and removes what is new. If the process dies halfway, the
 transaction is undone when the database is next opened (`tests/f3_escrituras.php`
 kills one with `SIGKILL` and checks it).
 
@@ -1052,8 +1076,11 @@ So the working rule is:
 memory_limit  ≥  20 × (the largest table a single query has to hold in full)
 ```
 
-A query holds a table in full only when it needs every row at once: `ORDER BY`
-without `LIMIT` and the inner side of a `JOIN`. Since 2.9 what does not fit —
+A query holds a table in full only when it needs every row at once: the
+inner side of a `JOIN`, and an `ORDER BY` without `LIMIT`, which since 2.9.1
+keeps of each row only the columns it returns and its sort keys, projected as
+the rows are read (`SELECT id, balance … ORDER BY balance DESC` on 30,000 rows:
+33.8 → 13.5 MB, 104 → 47 ms). Since 2.9 what does not fit —
 those two, a `GROUP BY` of many groups, a subquery, a `UNION`, window
 functions — goes to files on disk instead (in `.orden/`, as soon as half of
 `memory_limit` is in use, see [What does not fit goes to
@@ -1115,7 +1142,7 @@ What makes the difference:
 - **`ORDER BY … LIMIT n` keeps only the n rows in the lead** (2.6); a full
   `ORDER BY` sorts with `array_multisort` when every key is all numbers or
   all text, with the collation key computed once per row instead of once per
-  comparison.
+  comparison, and since 2.9.1 keeps only the projected row and its keys.
 - **A `JOIN` streams** its rows into the `WHERE` and the grouping, loads of
   each side only the columns the query names, and keeps its hash index as
   integers (2.6).
@@ -1220,7 +1247,8 @@ and if not, key by key, through the filter of each index piece.
 
 ### A million rows (2.9)
 
-Measured with two tables of a million rows each — `clientes` (six columns,
+Measured with 2.9.0 (2.9.1 only made some of these faster or lighter: see
+the CHANGELOG) with two tables of a million rows each — `clientes` (six columns,
 `email` `UNIQUE`, an index on `ciudad`) and `pedidos` (four columns, an index
 on `cid`) — with `memory_limit = 256M`, PHP 8.3, the on-disk cache, the result
 cache off, each query in its own process; 300 MB of data and indexes. Every
@@ -1341,7 +1369,7 @@ half the time of its JSON and a cached index piece in a third. Three values:
 | Value | Files and space | Speed |
 |---|---|---|
 | `true` (default) | APCu if the host has it (then the table cache lives in shared memory and **costs nothing on disk**, except, with OPcache active, the `.php` copies of the parts and one state file per table); otherwise `.cache/` on disk, the figures above | full |
-| `'apcu'` | shared memory only; `.cache/` is never written. **Without APCu this means no cache at all** | full with APCu; without it, reads decode JSON every time: on 100,000 rows a scan with a filter goes from 116 ms to 159 ms, a `GROUP BY` from 162 ms to 233 ms and a lookup by a `UNIQUE` text from 0.7 ms to 3.2 ms; a lookup by primary key stays about the same, since it reads one line |
+| `'apcu'` | shared memory only; `.cache/` is never written. **Without APCu this means no cache at all** | full with APCu; without it, reads decode JSON every time (measured with 2.9): on 100,000 rows a scan with a filter goes from 116 ms to 159 ms, a `GROUP BY` from 162 ms to 233 ms and a lookup by a `UNIQUE` text from 0.7 ms to 3.2 ms; a lookup by primary key stays about the same, since it reads one line |
 | `false` | no cache | as above, without cache; only for debugging |
 
 So the first thing to check on a shared host is whether APCu is available for
@@ -1353,7 +1381,8 @@ files and 36.8 MB, all of them data and indexes.
 bigger part means fewer parts, and since index pieces and cache entries follow
 the parts, fewer of everything, and the space stays the same: on 20,000
 customers, 387 files at 1,000 rows per part and 99 at 5,000. What it costs,
-measured there, same machine, two runs of each one after the other (the mean):
+measured there with 2.9, same machine, two runs of each one after the other
+(the mean):
 
 | | 1,000 rows per part | 5,000 rows per part |
 |---|---|---|
@@ -1544,7 +1573,9 @@ cache is per part, so there is no whole-table entry to cap).
 
 By default the engine can **only** be used through the API. On a direct
 connection, the first query or transaction of a `Database` is rejected with an
-explicit message.
+explicit message. jsonSQLDBadmin, set to its direct connection, allows it for
+itself only, without changing `config.php`
+([05-admin.md](05-admin.md)).
 The API itself can be turned off with `JSONSQLDB_API_ACTIVA = false` (2.9, see
 docs/04-api.md). To allow the direct connection, in `config.php`:
 
@@ -1714,25 +1745,26 @@ Every release so far has found the next thing to speed up, and every
 measurement finds one more. This section says, for each kind of operation,
 what the engine cannot go below without ceasing to be what it is — data in
 JSON a person can read, PHP interpreting every row, and writes that survive a
-power cut — and how far from that floor 2.7 stands. When something here is
+power cut — and how far from that floor 2.9.1 stands. When something here is
 called the floor, the way past it is a binary format, a C extension or a
 resident process, none of which this project will have.
 
-Measured on the one-core benchmark machine (PHP 8.3, on-disk cache, 20,000
-customers and 30,000 orders unless said otherwise); the floor is what the same
-machine takes to do only the unavoidable part:
+Measured on the one-core benchmark machine with `php tests/benchmark.php`
+(PHP 8.3, on-disk cache, 20,000 customers and 30,000 orders unless said
+otherwise; the floors were measured with 2.7.1, by timing only the
+unavoidable part on the same machine):
 
-| Operation | 2.7.1 | Floor | What separates them |
+| Operation | 2.9.1 | Floor | What separates them |
 |---|---|---|---|
-| Scan with a numeric filter | 0.6 ms per part of 1,000 rows | ~0.45 ms: decoding the part | yielding each row through the pipeline and counting it, in PHP |
-| Scan with other filters, `GROUP BY`, `ORDER BY … LIMIT` | 1.0–1.2 ms per part | ~0.45 ms | evaluating the `WHERE` and accumulating, in PHP, one row at a time |
-| Lookup of one row by a numeric key | 0.58 ms (0.75 ms on 100,000 rows) | ~0.3 ms | reading one piece of the index and three small reads of the part; the lock, the parse and the log are the rest |
-| Lookup of one row by a text key (`UNIQUE` on a text column) | 0.57 ms (1.9 ms on 100,000 rows) | same as a numeric key | in 2.7.1 every piece of the index had to be read, since a text key can be in any (read as text and searched for the key, not decoded), so the reading grew with the table. Since 2.9 the filter in each piece's head leaves only the one that can hold the key: see below |
-| `JOIN` of two big tables | 134 ms for 30,000 × 20,000 | ~50 ms: decoding both sides | hashing one side and matching every row of the other, in PHP |
-| `JOIN` after a selective `WHERE` (one order and its customer) | 0.46 ms | ~0.3 ms | one lookup by key per row on the left; nothing else |
-| Full `ORDER BY` | 36 ms for 20,000 rows | ~20 ms: decoding plus `asort` | building the sort keys and the result rows |
-| Write of one row | 5 `fsync` calls (6 when it opens a new part); `INSERT` 7.2 ms, `UPDATE` 6.7 ms on 20,000 rows | 5 `fsync` calls plus rewriting one part and one piece per index | an `INSERT` or `UPDATE` edits the text of the part without decoding it; what remains is checking uniqueness, the index pieces and the journal |
-| Writes to the same table from two processes | by part since 2.7 (see [Writes by part](#writes-by-part-27)); the commit, one at a time | the commit, one at a time | four of the five `fsync` calls belong to the commit, so two writers overlap only in the fourth and in their computing |
+| Scan with a numeric filter | 0.7 ms per part of 1,000 rows | ~0.45 ms: decoding the part | yielding each row through the pipeline and counting it, in PHP |
+| Scan with other filters, `GROUP BY`, `ORDER BY … LIMIT` | 0.7–1.2 ms per part | ~0.45 ms | evaluating the `WHERE` and accumulating, in PHP, one row at a time |
+| Lookup of one row by a numeric key | 0.16 ms in a process that has already made one (0.18 ms on 100,000 rows); 1.2 ms with the first, which loads the code | reading one piece of the index and three small reads of the part | the lock, the parse and the log |
+| Lookup of one row by a text key (`UNIQUE` on a text column) | 0.18 ms (0.25 ms on 100,000 rows), measured the same way | same as a numeric key | in 2.7.1 every piece of the index had to be read, since a text key can be in any (read as text and searched for the key, not decoded), so the reading grew with the table. Since 2.9 the filter in each piece's head leaves only the one that can hold the key: see below |
+| `JOIN` of two big tables | 150 ms for 30,000 × 20,000 | ~50 ms: decoding both sides | hashing one side and matching every row of the other, in PHP |
+| `JOIN` after a selective `WHERE` (one order and its customer) | 0.45 ms | ~0.3 ms | one lookup by key per row on the left; nothing else |
+| Full `ORDER BY` | 36 ms and 15 MB for 20,000 rows | ~20 ms: decoding plus `asort` | building the sort keys and the result rows |
+| Write of one row | 5 `fsync` calls (6 when it fills the last part and also opens a new one); `INSERT` 7.3 ms, `UPDATE` 6.5 ms on 20,000 rows | 5 `fsync` calls plus rewriting one part and one piece per index | an `INSERT` or `UPDATE` edits the text of the part without decoding it; what remains is checking uniqueness, the index pieces and the journal |
+| Writes to the same table from two processes | by part since 2.7 (see [Writes by part](#writes-by-part-27)); the commit, one at a time | the commit, one at a time | four of the five `fsync` calls belong to the commit, so two writers overlap only in the fifth (the part's) and in their computing |
 
 Everything in the third column is the cost of PHP arrays and readable JSON.
 SQLite on the same machine does the lookup in a few microseconds and the scan
@@ -1775,6 +1807,13 @@ From 2.7.2 on, these are promises, not just what has happened so far:
   configuration files** follow the same rule: within 2.x, what works keeps
   working. A `config.php` from an earlier version keeps working with default
   values for the options added since.
+- **The `Database` class of the direct connection** (stated since 2.9.1): its
+  functions — `new Database()`, `consultar()`, `consultarPorFilas()`,
+  `lote()`, `transaccion()`, `Database::crear()`, `Database::bases()` and the
+  rest shown in this documentation — keep their names, what they take and what
+  they return, and their errors stay `JsonSqlDbError` with its `sqlState`.
+  Should a compelling reason force a change, it is documented and announced in
+  the changelog before the version that brings it.
 - **The way out does not depend on this project.** The panel's SQL dump loads
   unchanged into SQLite, and the data files can be read by anything that reads
   JSON.

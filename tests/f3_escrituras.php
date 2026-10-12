@@ -1395,6 +1395,25 @@ chk('transaccion(): todo pasa junto, y dentro cada sentencia ve lo que hicieron 
     });
     return $visto === 400.0 && array_column($txVer(), 'saldo') === [400.0, 200.0] ?: json_encode([$visto, $txVer()]);
 });
+chk('una sentencia que falla a mitad de sus renombrados en una transacción la deja sin poder confirmarse aunque se capture el error: se deshace entera (2.9.1: sin diario por sentencia)', function () use ($raiz) {
+    exec('rm -rf ' . escapeshellarg($raiz . '/rota'));
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", 10);'
+        . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . ' use JsonSQLDB\Database; Database::crear("rota", ' . var_export($raiz, true) . '); $bd = new Database("rota", ' . var_export($raiz, true) . ');'
+        . ' $bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");'
+        . ' $bd->consultar("INSERT INTO t VALUES " . implode(",", array_map(fn($i) => "($i, \'a\')", range(1, 25))));'
+        // Donde irá la parte nueva, una carpeta con algo dentro: ese renombrado falla
+        . ' mkdir(' . var_export($raiz . '/rota/t.part4.json/x', true) . ', 0775, true);'
+        . ' try { $bd->transaccion(function (Database $d) { $d->consultar("UPDATE t SET v = \'b\'");'
+        . ' try { $d->consultar("INSERT INTO t VALUES (31, \'c\'), (32, \'c\'), (33, \'c\'), (34, \'c\'), (35, \'c\'), (36, \'c\')"); } catch (Throwable $e) {} });'
+        . ' echo "confirmada"; } catch (Throwable $e) { echo "deshecha"; }'
+        . ' rmdir(' . var_export($raiz . '/rota/t.part4.json/x', true) . '); rmdir(' . var_export($raiz . '/rota/t.part4.json', true) . ');'
+        . ' $bd = new Database("rota", ' . var_export($raiz, true) . ');'
+        . ' echo json_encode([$bd->consultar("SELECT v, COUNT(*) AS n FROM t GROUP BY v"), $bd->consultar("CHECK TABLES")]);';
+    $r = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    exec('rm -rf ' . escapeshellarg($raiz . '/rota'));
+    return $r === 'deshecha[[{"v":"a","n":25}],[]]' ?: substr($r, 0, 300);
+});
 chk('transaccion(): una excepción lo deshace todo, también un CREATE TABLE y un DELETE, y la excepción sigue su camino', function () use ($txBase, $txVer, $raiz) {
     $bd = $txBase();
     $antes = $txVer();
