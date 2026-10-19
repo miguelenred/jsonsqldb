@@ -23,6 +23,7 @@ define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_FILAS_POR_PARTE', 40);
 
 require_once __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
@@ -56,15 +57,6 @@ function hayJournal(string $base): bool {
         if (substr((string)$f, -4) !== '.tmp') { return true; }
     }
     return false;
-}
-function borrarArbol(string $dir): void {
-    if (!is_dir($dir)) { return; }
-    foreach ((array)scandir($dir) as $f) {
-        if ($f === '.' || $f === '..') { continue; }
-        $r = "$dir/$f";
-        is_dir($r) ? borrarArbol($r) : @unlink($r);
-    }
-    @rmdir($dir);
 }
 
 /** Contenido de todos los ficheros de la base, por nombre. */
@@ -723,8 +715,7 @@ chk('cambiar el tamaño de parte con datos ya escritos no corrompe la tabla', fu
            . 'define("JSONSQLDB_FILAS_POR_PARTE", ' . $parte . ');'
            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
            . $codigo;
-        return trim((string)shell_exec(
-            escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($c) . ' 2>&1'));
+        return trim(phpHijo(['-r', $c]));
     };
     $d = var_export($dir, true);
 
@@ -773,7 +764,7 @@ chk('con el tamaño de parte cambiado, UPDATE y DELETE por un texto sin índice 
            . 'define("JSONSQLDB_FILAS_POR_PARTE", ' . $parte . ');'
            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
            . $codigo;
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($c) . ' 2>&1'));
+        return trim(phpHijo(['-r', $c]));
     };
     $d = var_export($dir, true);
     $correr(40,
@@ -805,7 +796,7 @@ chk('con el tamaño de parte cambiado, CREATE INDEX, un trigger, un CHECK y VACU
         $c = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", ' . $parte . ');'
            . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
            . '$bd = new JsonSQLDB\\Database("g", ' . var_export($dir, true) . ');' . $codigo;
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($c) . ' 2>&1'));
+        return trim(phpHijo(['-r', $c]));
     };
     foreach ([[40, 80], [40, 20]] as [$antes, $ahora]) {
         foreach (['CREATE INDEX ix2 ON t (v, id)', 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END', 'ALTER TABLE t ADD CHECK (id > 0)', 'VACUUM'] as $q) {

@@ -7,8 +7,9 @@
 declare(strict_types=1);
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 require __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 $raiz = $argv[1];
-exec('rm -rf ' . escapeshellarg($raiz . '/apcu'));
+borrarArbol($raiz . '/apcu');
 JsonSQLDB\Database::crear('apcu', $raiz);
 $bd = new JsonSQLDB\Database('apcu', $raiz);
 $bd->consultar('CREATE TABLE cuentas (id INTEGER PRIMARY KEY, titular TEXT, saldo DOUBLE)');
@@ -23,4 +24,4 @@ try {
 }
 $bd->consultar("INSERT INTO cuentas VALUES (3, 'Eva', 5)");
 echo json_encode(array_keys((new JsonSQLDB\Database('apcu', $raiz))->consultar('SELECT * FROM cuentas WHERE id = 3')[0] ?? []));
-exec('rm -rf ' . escapeshellarg($raiz . '/apcu'));
+borrarArbol($raiz . '/apcu');

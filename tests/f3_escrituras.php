@@ -11,6 +11,7 @@ declare(strict_types=1);
 define('JSONSQLDB_CONEXION_DIRECTA', true);
 
 require_once __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
@@ -55,7 +56,7 @@ function uno(string $sql) {
     return $f === [] ? null : reset($f[0]);
 }
 
-exec('rm -rf ' . escapeshellarg($raiz));        // lo que haya dejado una ejecución cortada a medias
+borrarArbol($raiz);        // lo que haya dejado una ejecución cortada a medias
 @mkdir($raiz, 0775, true);
 Database::crear($base, $raiz);
 $bd = new Database($base, $raiz);
@@ -275,8 +276,7 @@ chk('cientos de escrituras al azar dejan tabla, índices y partes como un modelo
     // En otro proceso, con partes de 7 y de 50 filas para que las escrituras
     // crucen sus bordes todo el rato (ver tests/_azar_escrituras.php)
     foreach ([[11, 7], [12, 50]] as [$semilla, $parte]) {
-        $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/_azar_escrituras.php')
-            . " $semilla $parte 300 " . escapeshellarg("$raiz/azar") . ' 2>&1');
+        $salida = phpHijo([__DIR__ . '/_azar_escrituras.php', (string)$semilla, (string)$parte, '300', "$raiz/azar"]);
         if (!str_contains($salida, 'todo coincide')) { return trim($salida); }
     }
     @rmdir("$raiz/azar");
@@ -1103,7 +1103,7 @@ chk('sin ficheros temporales y base borrada', function () use ($raiz, $base) {
 });
 
 chk('el recuento de filas guardado en la caché nunca miente: una edición a mano se ve, también la del mismo segundo con el mismo tamaño (2.9)', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/recuento'));
+    borrarArbol($raiz . '/recuento');
     Database::crear('recuento', $raiz);
     (new Database('recuento', $raiz))->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)");
     (new Database('recuento', $raiz))->consultar("INSERT INTO t VALUES (1, 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'), (2, 'b'), (3, 'c')");
@@ -1131,12 +1131,12 @@ chk('el recuento de filas guardado en la caché nunca miente: una edición a man
     touch($f, $ahora);
     clearstatcache();
     $d = $cuenta();
-    exec('rm -rf ' . escapeshellarg($raiz . '/recuento'));
+    borrarArbol($raiz . '/recuento');
     return [$a, $a2, $b, $c, $d, $mismo] === [3, 3, 4, 4, 5, true] ?: json_encode([$a, $a2, $b, $c, $d, $mismo, $st instanceof JsonSQLDB\Storage]);
 });
 chk('con OPcache activo, las partes estables se cargan de OPcache con las mismas filas; al reescribirse se borra su .php; y se puede desactivar (2.9)', function () use ($raiz) {
     if (!function_exists('opcache_get_status')) { return null; }
-    exec('rm -rf ' . escapeshellarg($raiz . '/opc'));
+    borrarArbol($raiz . '/opc');
     Database::crear('opc', $raiz);
     $bd = new Database('opc', $raiz);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT, n DOUBLE)');
@@ -1145,12 +1145,12 @@ chk('con OPcache activo, las partes estables se cargan de OPcache con las mismas
         for ($j = $i; $j < $i + 500; $j++) { $v[] = "($j, 'fila \"$j\" con ''comillas'' y \\\\ barra', " . ($j / 7) . ')'; }
         $bd->consultar('INSERT INTO t VALUES ' . implode(', ', $v));
     }
-    $correr = static fn(string ...$extra): array => (array)json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d opcache.enable_cli=1 '
-        . escapeshellarg(__DIR__ . '/_opcache.php') . ' ' . escapeshellarg($raiz) . ' ' . implode(' ', array_map('escapeshellarg', $extra)) . ' 2>&1'), true);
+    $correr = static fn(string ...$extra): array
+        => (array)json_decode(phpHijo(array_merge(['-d', 'opcache.enable_cli=1', __DIR__ . '/_opcache.php', $raiz], $extra)), true);
     $con = $correr();
-    exec('rm -rf ' . escapeshellarg($raiz . '/opc/.cache'));
+    borrarArbol($raiz . '/opc/.cache');
     $sin = $correr('sin');
-    exec('rm -rf ' . escapeshellarg($raiz . '/opc'));
+    borrarArbol($raiz . '/opc');
     // Sin estabilidad, ninguno; estables, 4 en la petición (el límite); las mismas
     // filas; tras el UPDATE, el .php de la parte 1 ya no está; ningún .tmp; y
     // con JSONSQLDB_CACHE_OPCACHE = false, ningún .php
@@ -1178,7 +1178,7 @@ chk('en un mismo proceso, el estado y la estructura ya leídos no se usan si otr
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . ' $b = new JsonSQLDB\\Database("proc", ' . var_export($raiz, true) . ');'
         . ' $b->consultar("ALTER TABLE t ADD COLUMN y INTEGER DEFAULT 7"); $b->consultar("INSERT INTO t (x) VALUES (\'c\')");';
-    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo));
+    phpHijo(['-r', $codigo]);
     $estables(30);
     $despues = [(new Database('proc', $raiz))->consultar('SELECT COUNT(*) AS n FROM t'), (new Database('proc', $raiz))->consultar('SELECT * FROM t WHERE id = 3')];
     Database::borrar('proc', $raiz);
@@ -1203,7 +1203,7 @@ chk('en un mismo proceso, el estado de una tabla escrita en este segundo no se r
         try {
             $bd->consultar("INSERT INTO t (x) VALUES ('este')");
             (new Database('seg', $raiz))->consultar('SELECT COUNT(*) FROM t');
-            shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo));
+            phpHijo(['-r', $codigo]);
             $bd->consultar("INSERT INTO t (x) VALUES ('este')");
         } catch (JsonSqlDbError $e) {
             $mal[] = $e->getMessage();
@@ -1223,9 +1223,8 @@ chk('el estado de una tabla guardado en OPcache no se usa si otro proceso la cam
     foreach ((array)glob($raiz . '/est/t*.json') as $f) {
         touch((string)$f, time() - 60);                 // estable: su estado se puede guardar
     }
-    $correr = static fn(string $paso, bool $opcache): array => (array)json_decode((string)shell_exec(escapeshellarg(PHP_BINARY)
-        . ($opcache ? ' -d opcache.enable_cli=1' : '') . ' ' . escapeshellarg(__DIR__ . '/_estado_cache.php') . ' '
-        . escapeshellarg($raiz) . ' ' . $paso . ' 2>&1'), true);
+    $correr = static fn(string $paso, bool $opcache): array => (array)json_decode(phpHijo(array_merge(
+        $opcache ? ['-d', 'opcache.enable_cli=1'] : [], [__DIR__ . '/_estado_cache.php', $raiz, $paso])), true);
     $primero = $correr('leer', true);                   // guarda el estado en su .php
     $otro    = $correr('escribir', false);              // otro proceso, sin OPcache, añade una fila
     foreach ((array)glob($raiz . '/est/t*.json') as $f) {
@@ -1246,28 +1245,28 @@ chk('el estado de una tabla guardado en OPcache no se usa si otro proceso la cam
 });
 chk('con APCu disponible se usa, y JSONSQLDB_CACHE_APCU = false lo deja de lado: la caché va a disco (2.9)', function () use ($raiz) {
     if (!extension_loaded('apcu')) { return null; }
-    exec('rm -rf ' . escapeshellarg($raiz . '/apc'));
+    borrarArbol($raiz . '/apc');
     Database::crear('apc', $raiz);
     $bd = new Database('apc', $raiz);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)');
     $bd->consultar("INSERT INTO t VALUES (1, 'a')");
-    exec('rm -rf ' . escapeshellarg($raiz . '/apc/.cache'));
+    borrarArbol($raiz . '/apc/.cache');
     $ficheros = static function (bool $apcu) use ($raiz): int {
         $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);' . ($apcu ? '' : ' define("JSONSQLDB_CACHE_APCU", false);')
             . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
             . ' (new JsonSQLDB\Database("apc", ' . var_export($raiz, true) . '))->consultar("SELECT * FROM t");'
             . ' echo count((array)glob(' . var_export($raiz . '/apc/.cache/*.cache', true) . '));';
-        return (int)shell_exec(escapeshellarg(PHP_BINARY) . ' -d apc.enable_cli=1 -r ' . escapeshellarg($codigo));
+        return (int)phpHijo(['-d', 'apc.enable_cli=1', '-r', $codigo], false);
     };
     $con = $ficheros(true);
     $sin = $ficheros(false);
-    exec('rm -rf ' . escapeshellarg($raiz . '/apc'));
+    borrarArbol($raiz . '/apc');
     return $con === 0 && $sin > 0 ?: "con APCu $con ficheros, sin APCu $sin";
 });
 
 chk('con APCu casi lleno no se le da nada más: una tabla mayor que su memoria no lo vacía (2.9: lo vaciaba en cada recorrido, más lento que sin caché)', function () use ($raiz) {
     if (!extension_loaded('apcu')) { return null; }
-    exec('rm -rf ' . escapeshellarg($raiz . '/apcg'));
+    borrarArbol($raiz . '/apcg');
     Database::crear('apcg', $raiz);
     $bd = new Database('apcg', $raiz);
     $bd->consultar('CREATE TABLE g (id INTEGER PRIMARY KEY, r TEXT)');
@@ -1281,35 +1280,35 @@ chk('con APCu casi lleno no se le da nada más: una tabla mayor que su memoria n
         . ' $a = $bd->consultar("SELECT SUM(LENGTH(r)) AS n FROM g"); $b = $bd->consultar("SELECT SUM(LENGTH(r)) AS n FROM g");'
         . ' $i = apcu_cache_info(true);'
         . ' echo json_encode([$a[0]["n"], $b[0]["n"], $i["expunges"], $i["num_entries"] > 0]);';
-    $r = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d apc.enable_cli=1 -d apc.shm_size=4M -r ' . escapeshellarg($codigo) . ' 2>&1'));
-    exec('rm -rf ' . escapeshellarg($raiz . '/apcg'));
+    $r = trim(phpHijo(['-d', 'apc.enable_cli=1', '-d', 'apc.shm_size=4M', '-r', $codigo]));
+    borrarArbol($raiz . '/apcg');
     return $r === '[6000000,6000000,0,true]' ?: $r;
 });
 
 chk('un UPDATE que toca todas las partes escribe cada una al hacerla: con 16 MB, en 40 partes de 400 KB (2.9: las juntaba todas y agotaba la memoria)', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/upd'));
+    borrarArbol($raiz . '/upd');
     $base = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", 100); define("JSONSQLDB_CACHE_ACTIVA", false);'
         . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . ' if (!is_dir(' . var_export($raiz . '/upd', true) . ')) { JsonSQLDB\Database::crear("upd", ' . var_export($raiz, true) . '); }'
         . ' $bd = new JsonSQLDB\Database("upd", ' . var_export($raiz, true) . ');';
     $correr = static fn(string $memoria, string $codigo): string
-        => trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($base . $codigo) . ' 2>&1'));
+        => trim(phpHijo(['-d', "memory_limit=$memoria", '-r', $base . $codigo]));
     $correr('256M', '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, r TEXT)");'
         . ' for ($k = 0; $k < 40; $k++) { $v = []; for ($i = 1; $i <= 100; $i++) { $v[] = "(" . ($k * 100 + $i) . ", 0, \'" . str_repeat("r", 4000) . "\')"; }'
         . ' $bd->consultar("INSERT INTO t VALUES " . implode(", ", $v)); }');
     $r = $correr('16M', 'echo json_encode([$bd->consultar("UPDATE t SET n = n + 1 WHERE id % 100 = 0")["filas"], $bd->consultar("SELECT SUM(n) AS s FROM t")[0]["s"]]);');
-    exec('rm -rf ' . escapeshellarg($raiz . '/upd'));
+    borrarArbol($raiz . '/upd');
     return $r === '[40,40]' ?: substr($r, 0, 300);
 });
 
 chk('un INSERT OR IGNORE … SELECT en una tabla con dos columnas UNIQUE de texto da lo mismo con 16, 32 y 256 MB: si su índice entero no cabe, busca cada clave por los filtros de los trozos (2.9: lo armaba entero y se cortaba)', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/uni') . ' ' . escapeshellarg($raiz . '/uni0'));
+    borrarArbol($raiz . '/uni', $raiz . '/uni0');
     $base = static fn(string $dir): string => 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_ACTIVA", false); define("JSONSQLDB_CACHE_RESULTADOS", 0);'
         . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . ' if (!is_dir(' . var_export("$raiz/$dir", true) . ')) { JsonSQLDB\Database::crear("' . $dir . '", ' . var_export($raiz, true) . '); }'
         . ' $bd = new JsonSQLDB\Database("' . $dir . '", ' . var_export($raiz, true) . ');';
     $correr = static fn(string $memoria, string $dir, string $codigo): string
-        => trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($base($dir) . $codigo) . ' 2>&1'));
+        => trim(phpHijo(['-d', "memory_limit=$memoria", '-r', $base($dir) . $codigo]));
     // t: 40.000 filas; s: 10.000, de ellas 1.000 con un email de t y 500 con un nombre de t, que no entran
     $correr('256M', 'uni0', '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, email TEXT UNIQUE, nombre TEXT UNIQUE)");'
         . ' $bd->consultar("CREATE TABLE s (id INTEGER PRIMARY KEY, email TEXT, nombre TEXT)");'
@@ -1320,23 +1319,24 @@ chk('un INSERT OR IGNORE … SELECT en una tabla con dos columnas UNIQUE de text
         . ' $bd->consultar("INSERT INTO s VALUES " . implode(", ", $v)); }');
     $resultados = [];
     foreach (['16M', '32M', '256M'] as $memoria) {
-        exec('rm -rf ' . escapeshellarg($raiz . '/uni') . ' && cp -r ' . escapeshellarg($raiz . '/uni0') . ' ' . escapeshellarg($raiz . '/uni'));
+        borrarArbol($raiz . '/uni');
+        copiarArbol($raiz . '/uni0', $raiz . '/uni');
         $resultados[$memoria] = $correr($memoria, 'uni', 'echo json_encode([$bd->consultar("INSERT OR IGNORE INTO t SELECT * FROM s")["filas"],'
             . ' array_values($bd->consultar("SELECT COUNT(*) AS n, SUM(id) AS i, SUM(LENGTH(email)) AS e, SUM(LENGTH(nombre)) AS m FROM t")[0])]);');
     }
-    exec('rm -rf ' . escapeshellarg($raiz . '/uni') . ' ' . escapeshellarg($raiz . '/uni0'));
+    borrarArbol($raiz . '/uni', $raiz . '/uni0');
     $esperado = json_decode((string)$resultados['256M'], true);
     return is_array($esperado) && $esperado[0] === 8500 && count(array_unique($resultados)) === 1 ?: $resultados;
 });
 
 chk('una escritura que no cabe en memoria se hace por tramos: con 16 MB, UPDATE, INSERT … SELECT, upsert y DELETE de 16 MB de filas (2.9: la memoria se agotaba)', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/tram'));
+    borrarArbol($raiz . '/tram');
     $base = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", 100); define("JSONSQLDB_CACHE_ACTIVA", false);'
         . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . ' if (!is_dir(' . var_export($raiz . '/tram', true) . ')) { JsonSQLDB\Database::crear("tram", ' . var_export($raiz, true) . '); }'
         . ' $bd = new JsonSQLDB\Database("tram", ' . var_export($raiz, true) . ');';
     $correr = static fn(string $memoria, string $codigo): string
-        => trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($base . $codigo) . ' 2>&1'));
+        => trim(phpHijo(['-d', "memory_limit=$memoria", '-r', $base . $codigo]));
     $correr('256M', '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, r TEXT UNIQUE)"); $bd->consultar("CREATE TABLE c (id INTEGER PRIMARY KEY, n INTEGER, r TEXT)");'
         . ' for ($k = 0; $k < 40; $k++) { $v = []; for ($i = 1; $i <= 100; $i++) { $v[] = "(" . ($k * 100 + $i) . ", 0, \'" . ($k * 100 + $i) . str_repeat("r", 4000) . "\')"; }'
         . ' $bd->consultar("INSERT INTO t VALUES " . implode(", ", $v)); }');
@@ -1347,18 +1347,18 @@ chk('una escritura que no cabe en memoria se hace por tramos: con 16 MB, UPDATE,
         . ' $bd->consultar("INSERT INTO c SELECT * FROM t")["filas"], $s("SELECT COUNT(*) AS n, SUM(n) AS s FROM c"),'
         . ' $bd->consultar("INSERT INTO t SELECT id, n + 1, r FROM c WHERE true ON CONFLICT (id) DO UPDATE SET n = excluded.n")["filas"], $s("SELECT COUNT(*) AS n, SUM(n) AS s FROM t"),'
         . ' $bd->consultar("DELETE FROM t WHERE id % 2 = 0")["filas"], $s("SELECT COUNT(*) AS n, SUM(id) AS s FROM t")]);');
-    exec('rm -rf ' . escapeshellarg($raiz . '/tram'));
+    borrarArbol($raiz . '/tram');
     return $r === '[4000,[4000],4000,[4000,4000],4000,[4000,8000],2000,[2000,4000000]]' ?: substr($r, 0, 300);
 });
 
 chk('un INSERT … SELECT en una tabla vacía ve las claves repetidas del origen, también tras escribir un tramo: con 24 y 256 MB (2.9: con el índice vacío no se mira)', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/vac'));
+    borrarArbol($raiz . '/vac');
     $base = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", 100); define("JSONSQLDB_CACHE_ACTIVA", false);'
         . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . ' if (!is_dir(' . var_export($raiz . '/vac', true) . ')) { JsonSQLDB\Database::crear("vac", ' . var_export($raiz, true) . '); }'
         . ' $bd = new JsonSQLDB\Database("vac", ' . var_export($raiz, true) . ');';
     $correr = static fn(string $memoria, string $codigo): string
-        => trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($base . $codigo) . ' 2>&1'));
+        => trim(phpHijo(['-d', "memory_limit=$memoria", '-r', $base . $codigo]));
     $correr('256M', '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY, k TEXT, r TEXT)");'
         . ' for ($k = 0; $k < 40; $k++) { $v = []; for ($i = 1; $i <= 100; $i++) { $v[] = "(" . ($k * 100 + $i) . ", \'k" . ($k * 100 + $i) . "\', \'" . str_repeat("r", 4000) . "\')"; }'
         . ' $bd->consultar("INSERT INTO t VALUES " . implode(", ", $v)); }');
@@ -1371,13 +1371,13 @@ chk('un INSERT … SELECT en una tabla vacía ve las claves repetidas del origen
                 . ' echo " ", $bd->consultar("SELECT COUNT(*) AS n FROM d")[0]["n"];');
         }
     }
-    exec('rm -rf ' . escapeshellarg($raiz . '/vac'));
+    borrarArbol($raiz . '/vac');
     return $r === array_fill(0, 4, 'CONSTRAINT 0') ?: $r;
 });
 
 echo "\n== Transacciones (2.9) ==\n";
 $txBase = static function () use ($raiz): Database {
-    exec('rm -rf ' . escapeshellarg($raiz . '/tx') . ' ' . escapeshellarg($raiz . '/listo'));
+    borrarArbol($raiz . '/tx', $raiz . '/listo');
     Database::crear('tx', $raiz);
     $bd = new Database('tx', $raiz);
     $bd->consultar('CREATE TABLE cuentas (id INTEGER PRIMARY KEY, titular TEXT UNIQUE, saldo DOUBLE)');
@@ -1397,7 +1397,7 @@ chk('transaccion(): todo pasa junto, y dentro cada sentencia ve lo que hicieron 
     return $visto === 400.0 && array_column($txVer(), 'saldo') === [400.0, 200.0] ?: json_encode([$visto, $txVer()]);
 });
 chk('una sentencia que falla a mitad de sus renombrados en una transacción la deja sin poder confirmarse aunque se capture el error: se deshace entera (2.10: sin diario por sentencia)', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/rota'));
+    borrarArbol($raiz . '/rota');
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_FILAS_POR_PARTE", 10);'
         . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . ' use JsonSQLDB\Database; Database::crear("rota", ' . var_export($raiz, true) . '); $bd = new Database("rota", ' . var_export($raiz, true) . ');'
@@ -1411,8 +1411,8 @@ chk('una sentencia que falla a mitad de sus renombrados en una transacción la d
         . ' rmdir(' . var_export($raiz . '/rota/t.part4.json/x', true) . '); rmdir(' . var_export($raiz . '/rota/t.part4.json', true) . ');'
         . ' $bd = new Database("rota", ' . var_export($raiz, true) . ');'
         . ' echo json_encode([$bd->consultar("SELECT v, COUNT(*) AS n FROM t GROUP BY v"), $bd->consultar("CHECK TABLES")]);';
-    $r = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
-    exec('rm -rf ' . escapeshellarg($raiz . '/rota'));
+    $r = trim(phpHijo(['-r', $codigo]));
+    borrarArbol($raiz . '/rota');
     return $r === 'deshecha[[{"v":"a","n":25}],[]]' ?: substr($r, 0, 300);
 });
 chk('transaccion(): una excepción lo deshace todo, también un CREATE TABLE y un DELETE, y la excepción sigue su camino', function () use ($txBase, $txVer, $raiz) {
@@ -1461,7 +1461,7 @@ chk('lote(): si una sentencia falla, ninguna queda; si todas van bien, devuelve 
 });
 chk('después de deshacer, la caché no devuelve nada de lo deshecho aunque las revisiones vuelvan a contar los mismos números (con APCu, que no se limpia por tabla)', function () use ($raiz) {
     if (!extension_loaded('apcu')) { return null; }
-    $r = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d apc.enable_cli=1 ' . escapeshellarg(__DIR__ . '/_deshacer_apcu.php') . ' ' . escapeshellarg($raiz) . ' 2>&1');
+    $r = phpHijo(['-d', 'apc.enable_cli=1', __DIR__ . '/_deshacer_apcu.php', $raiz]);
     return trim($r) === '["id","titular","saldo"]' ?: $r;
 });
 chk('deshacer una transacción con la caché en APCu la vacía sin traerla a memoria: con 20 MB en APCu, menos de 8 MB de pico, y lo leído después es lo de antes (2.10: 33 MB)', function () use ($raiz) {
@@ -1494,13 +1494,13 @@ chk('una transacción a medias de un proceso que muere: los demás no ven nada m
     for ($i = 0; $i < 500 && !is_file($raiz . '/listo'); $i++) { usleep(20000); }
     $lee = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
          . ' echo json_encode((new JsonSQLDB\Database("tx", ' . var_export($raiz, true) . '))->consultar("SELECT saldo FROM cuentas WHERE id = 1"));';
-    $durante = (string)shell_exec('timeout 2 ' . escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($lee) . ' 2>&1');
+    $durante = phpHijo(['-r', $lee], true, 2);
     $vivo = proc_get_status($p)['running'];
     proc_terminate($p, 9);
     proc_close($p);
     $despues = $txVer();
     $tablas = array_column((new Database('tx', $raiz))->consultar('SHOW TABLES'), 'tabla');
-    exec('rm -rf ' . escapeshellarg($raiz . '/tx') . ' ' . escapeshellarg($raiz . '/listo'));
+    borrarArbol($raiz . '/tx', $raiz . '/listo');
     return $durante === '' && $vivo && array_column($despues, 'saldo') === [500.0, 100.0] && $tablas === ['cuentas']
         ?: json_encode([$durante, $vivo, $despues, $tablas]);
 });
@@ -1512,18 +1512,18 @@ chk('un lote que solo lee no para a los demás mientras dura, y da lo mismo que 
     $largo = proc_open([PHP_BINARY, '-r', $motor . '$bd->lote(["WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 400000) SELECT COUNT(*) AS n FROM c"]);'], [], $tubos);
     usleep(300000);
     $t0 = microtime(true);
-    $otro = (string)shell_exec('timeout 2 ' . escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($motor . 'echo json_encode($bd->consultar("SELECT saldo FROM cuentas WHERE id = 1"));') . ' 2>&1');
+    $otro = phpHijo(['-r', $motor . 'echo json_encode($bd->consultar("SELECT saldo FROM cuentas WHERE id = 1"));'], true, 2);
     $espera = microtime(true) - $t0;
     $seguia = proc_get_status($largo)['running'];
     proc_terminate($largo, 9);
     proc_close($largo);
-    exec('rm -rf ' . escapeshellarg($raiz . '/tx'));
+    borrarArbol($raiz . '/tx');
     return $r[1] === [['n' => 2]] && $r[2] == [['saldo' => 100]] && count($r) === 4 && $otro === '[{"saldo":500}]' && $seguia
         ?: json_encode([$r, $otro, round($espera, 2), $seguia]);
 });
 chk('un lote que solo lee no se queda bloqueado con un INSERT que toca dos tablas por su clave foránea (2.9: se esperaban el uno al otro para siempre)', function () use ($raiz) {
     $dir = "$raiz/mutuo";
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     Database::crear('m', $dir);
     $bd = new Database('m', $dir);
     $bd->consultar('CREATE TABLE p (id INTEGER PRIMARY KEY)');
@@ -1532,19 +1532,18 @@ chk('un lote que solo lee no se queda bloqueado con un INSERT que toca dos tabla
     $bd->consultar('INSERT INTO h VALUES ' . implode(',', array_map(static fn($i) => "($i, $i)", range(1, 250))));
     $motor = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
            . '$bd = new JsonSQLDB\Database("m", ' . var_export($dir, true) . '); $t = microtime(true);';
-    $con = static fn(string $codigo): string => 'timeout 30 ' . escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($motor . $codigo . ' echo round(microtime(true) - $t, 1);');
+    // Cada uno escribe lo que tardó al acabar; si se esperasen el uno al otro,
+    // a los 30 s se paran sin haberlo escrito
+    $con = static fn(string $codigo): array => ['-r', $motor . $codigo . ' echo round(microtime(true) - $t, 1);'];
     // El lote lee p, tarda (un cruce de p consigo misma) y luego lee h; el INSERT llega entre medias
-    $lector = proc_open($con('$bd->lote(["SELECT COUNT(*) AS a FROM p", "SELECT COUNT(*) AS b FROM p x, p y, p z WHERE x.id + y.id = z.id", "SELECT COUNT(*) AS c FROM h"]);'),
-        [1 => ['pipe', 'w']], $t1);
+    $lector = phpLanzar($con('$bd->lote(["SELECT COUNT(*) AS a FROM p", "SELECT COUNT(*) AS b FROM p x, p y, p z WHERE x.id + y.id = z.id", "SELECT COUNT(*) AS c FROM h"]);'), false);
     usleep(700000);
-    $escritor = (string)shell_exec($con('$bd->consultar("INSERT INTO h VALUES (1000, 5)");') . ' 2>&1');
-    $leido = (string)stream_get_contents($t1[1]);
-    fclose($t1[1]);
-    $codigo = proc_close($lector);
+    $escritor = phpHijo($con('$bd->consultar("INSERT INTO h VALUES (1000, 5)");'), true, 30);
+    $leido = phpRecoger($lector, 30);
     $n = (new Database('m', $dir))->consultar('SELECT COUNT(*) AS n FROM h');
-    exec('rm -rf ' . escapeshellarg($dir));
-    return $codigo === 0 && is_numeric($leido) && is_numeric(trim($escritor)) && $n === [['n' => 251]]
-        ?: json_encode(['lector' => [$codigo, $leido], 'escritor' => $escritor, 'h' => $n]);
+    borrarArbol($dir);
+    return is_numeric($leido) && is_numeric(trim($escritor)) && $n === [['n' => 251]]
+        ?: json_encode(['lector' => $leido, 'escritor' => $escritor, 'h' => $n]);
 });
 chk('si no se puede guardar el original de un fichero, la transacción se deshace sin dejar el journal de esa sentencia (2.9: quedaba, y un corte ahí guardaba media transacción)', function () use ($txBase, $txVer, $raiz) {
     $bd = $txBase();
@@ -1564,7 +1563,7 @@ chk('si no se puede guardar el original de un fichero, la transacción se deshac
     $journal = (array)glob($raiz . '/tx/.tx/*');
     $b = (new Database('tx', $raiz))->consultar('SELECT * FROM b');
     $cuentas = $txVer();
-    exec('rm -rf ' . escapeshellarg($raiz . '/tx'));
+    borrarArbol($raiz . '/tx');
     return str_contains($error, 'b.rev.json') && $journal === [] && $cuentas === $antes && $b === [['id' => 1, 'v' => 'x']]
         ?: json_encode([$error, $journal, $cuentas, $b]);
 });
@@ -1580,18 +1579,18 @@ chk('una sentencia que falla dentro de una transacción no deja nada abierto: la
     });
     $tablas = array_column((new Database('tx', $raiz))->consultar('SHOW TABLES'), 'tabla');
     $cuentas = $txVer();
-    exec('rm -rf ' . escapeshellarg($raiz . '/tx'));
+    borrarArbol($raiz . '/tx');
     return $r === ['CONSTRAINT', 'ok'] && $tablas === ['cuentas', 'z'] && $cuentas === $antes ?: json_encode([$r, $tablas]);
 });
 chk('si no se puede poner un fichero en su sitio, la escritura se termina al abrir la base; en una transacción, se deshace entera (2.9: la base ya no se abría)', function () use ($raiz) {
     $dir = "$raiz/ren";
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     Database::crear('r', $dir);
     $bd = new Database('r', $dir);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY)');
     $bd->consultar('INSERT INTO t VALUES (1)');
     $estorbo = static function (string $f) use ($dir): void { mkdir("$dir/r/$f"); touch("$dir/r/$f/x"); };   // un directorio no se reemplaza
-    $quitar  = static fn(string $f) => exec('rm -rf ' . escapeshellarg("$dir/r/$f"));
+    $quitar  = static fn(string $f) => borrarArbol("$dir/r/$f");
     $tablas  = static fn(): array => array_column((new Database('r', $dir))->consultar('SHOW TABLES'), 'tabla');
     $r = [];
     // Fuera de una transacción
@@ -1616,7 +1615,7 @@ chk('si no se puede poner un fichero en su sitio, la escritura se termina al abr
     $r[] = $tablas();
     $r[] = array_column((new Database('r', $dir))->consultar('SELECT id FROM t'), 'id');
     $r[] = (array)glob("$dir/r/.tx/*");
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     return $r === ['IO', ['t', 'x'], 'IO', 'IO', 'IO', ['t', 'x'], [1], []] ?: json_encode($r);
 });
 chk('en una transacción de INSERT de una fila, un UNIQUE de texto se mira en el texto de los trozos en cada sentencia, sin juntar el índice entero en memoria, y los repetidos se rechazan igual (2.10: desde el noveno lo juntaba en cada uno)', function () use ($raiz) {
@@ -1641,7 +1640,7 @@ chk('en una transacción de INSERT de una fila, un UNIQUE de texto se mira en el
         . '   foreach (["c777@e.es", "n5@e.es", "n30@e.es"] as $e) { try { $bd->consultar("INSERT INTO t VALUES (?, ?, ?)", [30000, $e, "x"]); } catch (Throwable $x) { $rechazos[] = $e; } }'
         . ' });'
         . ' echo json_encode([round((memory_get_peak_usage() - $b) / 1048576, 1), $rechazos, $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]]);';
-    $r = json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'), true);
+    $r = json_decode(phpHijo(['-r', $codigo]), true);
     StorageMantenimiento::borrarBase($dir, 'u');
     @rmdir($dir);
     // Con el índice entero en memoria pasaba de 3 MB
@@ -1678,7 +1677,7 @@ chk('dentro de una transacción ningún fichero se fuerza a disco hasta confirma
     return $fuera >= 10 && $dentro === 0 && $alConfirmar >= 2 && $alConfirmar <= 4 && $n === 55
         ?: json_encode(compact('fuera', 'dentro', 'alConfirmar', 'n'));
 });
-chk('dentro de una transacción no se escribe la caché en disco, que cada sentencia dejaba vieja, y lo leído después es lo escrito (2.10)', function () use ($raiz) {
+chk('dentro de una transacción no se escribe en disco la caché de las tablas, que cada sentencia dejaba vieja, y lo leído después es lo escrito (2.10)', function () use ($raiz) {
     if (function_exists('apcu_enabled') && apcu_enabled()) {
         return true;                                // con APCu no va al disco
     }
@@ -1689,7 +1688,10 @@ chk('dentro de una transacción no se escribe la caché en disco, que cada sente
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, email TEXT UNIQUE)');
     $bd->consultar('INSERT INTO t VALUES (1, ?)', ['a1']);
     $bd->consultar('SELECT * FROM t WHERE email = ?', ['a1']);
-    $ficheros = static fn(): array => array_map('basename', (array)glob("$dir/k/.cache/*"));
+    // Los resultados de las consultas (q.*) sí, como en la 2.9: una consulta
+    // repetida sin escribir entre medias sale de ahí. Una que tarda menos de
+    // 1 ms no se guarda, así que en un sistema lento (Windows) aparecían
+    $ficheros = static fn(): array => array_values(preg_grep('/^q\./', array_map('basename', (array)glob("$dir/k/.cache/*")), PREG_GREP_INVERT));
     $antes = $ficheros();
     $bd->transaccion(function (Database $bd) {
         for ($i = 2; $i <= 21; $i++) {
@@ -1711,7 +1713,7 @@ chk('una transacción dentro de otra, o crear una base dentro, se rechaza', func
     foreach ([static fn(Database $b) => $b->transaccion(static fn() => 1), static fn(Database $b) => $b->consultar('CREATE DATABASE otra')] as $f) {
         try { $bd->transaccion($f); $r[] = 'pasó'; } catch (JsonSqlDbError $e) { $r[] = $e->sqlState; }
     }
-    exec('rm -rf ' . escapeshellarg($raiz . '/tx'));
+    borrarArbol($raiz . '/tx');
     return $r === ['LOCK', 'LOCK'] ?: json_encode($r);
 });
 
@@ -1840,7 +1842,7 @@ chk('en una parte de antes de la 2.7, sin desfases, borrar la última fila tambi
     file_put_contents($f, "{\n  \"table\": \"t\",\n  \"rows\": [\n    "
         . implode(",\n    ", array_map(static fn($r) => json_encode($r, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $filas)) . "\n  ]\n}\n");
     touch($f, time() - 60);
-    exec('rm -rf ' . escapeshellarg("$raiz/huecos/h/.cache"));
+    borrarArbol("$raiz/huecos/h/.cache");
     $bd = new Database('h', "$raiz/huecos");
     $bd->consultar('DELETE FROM t WHERE id = 20');
     $r = [$revH()['rows'], $revH()['huecos'] ?? null, count(json_decode((string)file_get_contents($f), true)['rows']),
@@ -1865,7 +1867,7 @@ chk('con OPcache y con APCu, una tabla con huecos se lee igual (2.9)', function 
     foreach ((array)glob("$raiz/huecos/h/t*.json") as $f) { touch((string)$f, time() - 60); }   // estables: van a OPcache
     $mal = [];
     foreach (['-d opcache.enable_cli=1', '-d apc.enable_cli=1'] as $modo) {
-        $r = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " $modo -r " . escapeshellarg($codigo) . ' 2>&1'));
+        $r = trim(phpHijo(array_merge(explode(' ', $modo), ['-r', $codigo])));
         if ($r !== $esperado) { $mal[] = "$modo: $r"; }
     }
     return $mal === [] ?: implode(' | ', $mal);
@@ -1927,8 +1929,8 @@ chk('UPDATE OR REPLACE de una tabla que no cabe en la memoria, escrito por tramo
             . ' $b->consultar("INSERT INTO t VALUES " . implode(",", $v)); }'
             . '$r = $b->consultar("UPDATE OR REPLACE t SET u = u + 1");'
             . 'echo json_encode([$r["filas"], $b->consultar("SELECT COUNT(*) AS n, SUM(u) AS s FROM t")[0]]);';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r ' . escapeshellarg($codigo) . ' 2>&1'));
-    exec('rm -rf ' . escapeshellarg($dir));
+    $salida = trim(phpHijo(['-d', 'memory_limit=32M', '-r', $codigo]));
+    borrarArbol($dir);
     // En SQLite: cada fila impar pasa a la clave de la par siguiente, que se borra
     return $salida === json_encode([10000, ['n' => 10000, 's' => 100010000]]) ?: $salida;
 });
@@ -1948,9 +1950,9 @@ chk('en una transacción, una sentencia que falla después de escribir parte por
             . 'echo json_encode($r);';
     $salida = [];
     foreach (['32M', '256M'] as $m) {
-        $salida[$m] = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$m -r " . escapeshellarg($codigo) . ' 2>&1'));
+        $salida[$m] = trim(phpHijo(['-d', "memory_limit=$m", '-r', $codigo]));
     }
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     // Con 32 MB escribe por tramos: las dos se deshacen. Con 256 MB, de una vez:
     // el error deja la tabla como estaba y la transacción se confirma
     return $salida === ['32M' => '["capturado","deshecha","capturado","deshecha",0,20000]',
@@ -2002,7 +2004,7 @@ chk('en una transacción, cada fichero que ya reemplazó una sentencia anterior 
 });
 chk('en una transacción, un fallo al escribir en su sitio un solo fichero la deja solo para deshacer, y sin leer en ella; un renombrado que falla deja el fichero como estaba, y lo que viene después no se escribe en su sitio sobre el original guardado; un original que no se puede devolver al deshacerla no deja la conexión dentro; lo que se guardó antes de un fallo está en el manifiesto, y lo que no llegó a él se guarda otra vez (2.10)', function () use ($raiz) {
     $dir = "$raiz/fallo_escritura";
-    $r   = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/_fallo_escritura.php') . ' ' . escapeshellarg($dir) . ' 2>&1'));
+    $r   = trim(phpHijo([__DIR__ . '/_fallo_escritura.php', $dir]));
     @rmdir($dir);
     // En PHP 8.0 no se escribe en su sitio: falla el temporal, y la sentencia no deja nada
     $escribir = function_exists('fsync') ? '"v2: error","lectura: error","deshecha","v0"' : '"v2: error","lectura: 2","confirmada","v0,v1"';
@@ -2028,17 +2030,17 @@ chk('en una transacción, una sentencia que pasa de la memoria sin haber escrito
             . 'echo json_encode($r);';
     $salida = [];
     foreach (['32M', '256M'] as $m) {
-        $salida[$m] = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$m -r " . escapeshellarg($codigo) . ' 2>&1'));
+        $salida[$m] = trim(phpHijo(['-d', "memory_limit=$m", '-r', $codigo]));
     }
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     return $salida === ['32M' => '["capturado","confirmada",20001]', '256M' => '["capturado","confirmada",20001]'] ?: json_encode($salida);
 });
 chk('un DELETE escrito por tramos con ON DELETE CASCADE hacia una hija sin índice (cargada) borra justo sus hijas, también si un trigger hace cargar la tabla que borra y luego borra otra por tramos; y un UPDATE por tramos cuya cascada da a una hija la clave única que otra tuvo antes del tramo no ve un duplicado: 3.000 filas, tramos forzados (2.10: desde la 2.9, un tramo escribía sin huecos las tablas cargadas, que se seguían usando por sus posiciones de antes, y quedaban huérfanas y se borraban otras filas)', function () use ($raiz) {
-    $r = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/_tramo_forzado.php') . ' ' . escapeshellarg("$raiz/tramo_forzado") . ' 2>&1'));
+    $r = trim(phpHijo([__DIR__ . '/_tramo_forzado.php', "$raiz/tramo_forzado"]));
     return $r === '[[1500,1500,0,3000,true],[1499,1499,0,0,true],[[1,10,20],[2,10,2]]]' ?: $r;
 });
 chk('una cascada ON UPDATE hacia una hija con trigger y un REPLACE de una fila padre no cargan la tabla padre entera: 60.000 filas en 40 MB (2.10, ver WriterForaneas::padreTiene())', function () use ($raiz) {
-    $r = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/_padre_grande.php') . ' ' . escapeshellarg("$raiz/padre_grande") . ' 2>&1'));
+    $r = trim(phpHijo([__DIR__ . '/_padre_grande.php', "$raiz/padre_grande"]));
     return $r === '["ok","ok",300]' ?: $r;
 });
 chk('la carpeta temporal queda vacía y se elimina', function () use ($raiz) {

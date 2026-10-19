@@ -295,7 +295,14 @@ final class Memoria
         if ($uso < self::$techo && $cabeOtroSalto) {
             return;
         }
-
+        // Lo pedido cuenta también lo que PHP ya soltó y guarda para volver a
+        // usarlo: antes de cortar se le devuelve y se mira otra vez (2.10). En
+        // PHP 8.0 y 8.1 un ORDER BY en disco que cabía de sobra se cortaba
+        // así, o no, según cayera la memoria: con 18, 25 y 26 MB sí, con 24 no
+        if (\gc_mem_caches()) {
+            self::revisar($donde);
+            return;
+        }
         self::cortar($donde, $uso);
     }
 

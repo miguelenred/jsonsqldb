@@ -8,6 +8,7 @@ declare(strict_types=1);
  * https://miguelenred.es/jsonsqldb
  */
 require_once __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 
 use JsonSQLDB\Catalog;
 use JsonSQLDB\CatalogDdl;
@@ -307,6 +308,12 @@ chk('el directorio se puede sincronizar de verdad, no en apariencia', function (
         echo "       (omitida: fsync() necesita PHP 8.1)\n";
         return true;
     }
+    if (PHP_OS_FAMILY === 'Windows') {
+        // Allí fopen() no abre una carpeta, así que StorageEscritura::fsyncDir()
+        // no hace nada; el contenido de cada fichero sí se fuerza a disco
+        echo "       (omitida: en Windows PHP no puede abrir una carpeta)\n";
+        return true;
+    }
     $dir = sys_get_temp_dir() . '/jsonsqldb_fsyncdir_' . getmypid();
     @mkdir($dir, 0775, true);
 
@@ -351,8 +358,7 @@ chk('el motor, el panel y el fichero VERSION dicen lo mismo', function () {
     $codigo = 'require ' . var_export($raizProyecto . '/engine/bootstrap.php', true) . ';'
             . 'require ' . var_export($raizProyecto . '/jsonsqldbadmin/lib/util.php', true) . ';'
             . 'echo version();';
-    $delPanel = trim((string)shell_exec(
-        escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $delPanel = trim(phpHijo(['-r', $codigo]));
     if ($delPanel !== $esperada) {
         return "el panel dice '$delPanel' y VERSION dice '$esperada'";
     }
@@ -399,13 +405,12 @@ chk('corta bien y deja el proceso utilizable, con distintos límites', function 
                 // se cortaría nada más empezar aunque quepa de sobra.
                 . 'try { echo "|", $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]; }'
                 . 'catch (Throwable $e) { echo "|SEGUNDA FALLA"; }';
-        $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$limite -r "
-                . escapeshellarg($codigo) . ' 2>&1'));
+        $salida = trim(phpHijo(['-d', "memory_limit=$limite", '-r', $codigo]));
         if ($salida !== 'MEMORIA|1200') {
             $fallos[] = "$limite -> " . substr($salida, 0, 60);
         }
     }
-    exec('rm -rf ' . escapeshellarg($raiz . '/mem2'));
+    borrarArbol($raiz . '/mem2');
     return $fallos === [] ?: implode(' | ', $fallos);
 });
 chk('una consulta que no cabe en memoria se corta con un error, no con un fatal', function () use ($raiz) {
@@ -421,8 +426,7 @@ chk('una consulta que no cabe en memoria se corta con un error, no con un fatal'
             . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
             . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState, "|", $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"]; }';
 
-    $salida = trim((string)shell_exec(
-        escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(phpHijo(['-d', 'memory_limit=32M', '-r', $codigo]));
 
     // MEMORIA = cortó bien; y después sigue respondiendo, así que el proceso vivía
     return $salida === 'MEMORIA|1500' ?: $salida;
@@ -437,32 +441,30 @@ chk('la red actúa aunque la predicción esté desactivada', function () use ($r
             . '$bd = new JsonSQLDB\\Database("m", ' . var_export($raiz . '/mem', true) . ');'
             . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
             . 'catch (Throwable $e) { echo "excepcion"; }';
-    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r '
-            . escapeshellarg($codigo) . ' 2>/dev/null');
+    $salida = phpHijo(['-d', 'memory_limit=32M', '-r', $codigo], false);
     return str_contains($salida, 'RED') ?: trim($salida);
 });
 // La red (2.9): al agotarse la memoria, el sitio para responder sale de subir
 // memory_limit en ese momento; si el hosting no deja cambiarlo, de una reserva.
 // El aviso de estas pruebas necesita 1 MB, como una respuesta de verdad que
 // tenga algo de trabajo: sin margen, PHP no llega a escribirlo
-$redCodigo = static function (bool $sinIniSet): string {
-    return escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M' . ($sinIniSet ? ' -d disable_functions=ini_set' : '') . ' -r '
-        . escapeshellarg('define("JSONSQLDB_CONEXION_DIRECTA", true);'
+$red = static function (bool $sinIniSet): string {
+    return phpHijo(array_merge(['-d', 'memory_limit=32M'], $sinIniSet ? ['-d', 'disable_functions=ini_set'] : [], ['-r',
+        'define("JSONSQLDB_CONEXION_DIRECTA", true);'
             . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
             . 'JsonSQLDB\\Memoria::alAgotarse(function () { $r = str_repeat("x", 1048576); echo "RESPONDE ", strlen($r); });'
-            . 'JsonSQLDB\\Memoria::iniciar(); $a = []; while (true) { $a[] = str_repeat("y", 500); }')
-        . ' 2>/dev/null';
+            . 'JsonSQLDB\\Memoria::iniciar(); $a = []; while (true) { $a[] = str_repeat("y", 500); }']), false);
 };
 chk('al agotarse la memoria hay sitio para responder: se sube memory_limit en ese momento', fn() =>
-    str_contains((string)shell_exec($redCodigo(false)), 'RESPONDE 1048576') ?: 'no respondió');
+    str_contains($red(false), 'RESPONDE 1048576') ?: 'no respondió');
 chk('si el hosting no deja cambiar memory_limit, el sitio sale de la reserva', fn() =>
-    str_contains((string)shell_exec($redCodigo(true)), 'RESPONDE 1048576') ?: 'no respondió');
+    str_contains($red(true), 'RESPONDE 1048576') ?: 'no respondió');
 chk('sin agotarse no se aparta memoria, y al terminar no se toca memory_limit', function () {
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=64M -r ' . escapeshellarg(
+    $salida = trim(phpHijo(['-d', 'memory_limit=64M', '-r',
         'define("JSONSQLDB_CONEXION_DIRECTA", true);'
         . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
         . '$antes = memory_get_usage(); JsonSQLDB\\Memoria::iniciar(); echo memory_get_usage() - $antes < 262144 ? "SIN RESERVA " : "CON RESERVA ";'
-        . 'register_shutdown_function(function () { echo ini_get("memory_limit"); });') . ' 2>&1'));
+        . 'register_shutdown_function(function () { echo ini_get("memory_limit"); });']));
     return $salida === 'SIN RESERVA 64M' ?: $salida;
 });
 chk('el registro, por defecto, apunta las escrituras y los errores, no las lecturas (2.9)', function () {
@@ -482,7 +484,7 @@ chk('el registro, por defecto, apunta las escrituras y los errores, no las lectu
         . '$b->consultar("CREATE TABLE t (x INTEGER)"); $b->consultar("INSERT INTO t VALUES (1)");'
         . 'foreach (["SELECT x FROM t", "SELECT x FROM t UNION SELECT 2", "SHOW TABLES", "CHECK TABLES"] as $q) { $b->consultar($q); }'
         . 'try { $b->consultar("SELECT nada FROM t"); } catch (Throwable $e) {}';
-    shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    phpHijo(['-r', $codigo]);
     $ops = [];
     foreach ((array)glob("$dir/logs/consultas-*.json") as $f) {
         foreach (file((string)$f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) {
@@ -499,7 +501,7 @@ chk('con el registro de config.php (escrituras y errores), una lectura no carga 
     // Con el config.php de la raíz, que enciende el registro con el nivel
     // escrituras; si cambia lo que trae, cambia lo que se espera aquí
     $dir = sys_get_temp_dir() . '/jsonsqldb_test_log3';
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     $codigo = static fn(string $sql, string $nivel): string => 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_LOG_PATH", ' . var_export("$dir/logs", true) . ');'
         . ($nivel === '' ? '' : 'define("JSONSQLDB_LOG_NIVEL", ' . var_export($nivel, true) . ');')
         . 'require ' . var_export(dirname(__DIR__) . '/config.php', true) . ';'
@@ -510,7 +512,7 @@ chk('con el registro de config.php (escrituras y errores), una lectura no carga 
     $cargado = [];
     foreach ([['CREATE TABLE t (x INTEGER)', ''], ['SELECT 1', ''], ['SELECT x FROM t', ''], ['INSERT INTO t VALUES (1)', ''],
               ['INSERT INTO t VALUES (2)', 'errores'], ['SELECT nada FROM t', 'errores']] as [$sql, $nivel]) {
-        $cargado[] = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo($sql, $nivel)) . ' 2>&1'));
+        $cargado[] = trim(phpHijo(['-r', $codigo($sql, $nivel)]));
     }
     $ops = [];
     foreach ((array)glob("$dir/logs/consultas-*.json") as $f) {
@@ -519,12 +521,12 @@ chk('con el registro de config.php (escrituras y errores), una lectura no carga 
             $ops[] = ($e['op'] ?? '?') . (isset($e['error']) && $e['error'] !== null ? ' (error)' : '');
         }
     }
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     return $cargado === ['1', '0', '0', '1', '0', '1'] && $ops === ['CREATE TABLE', 'INSERT', 'SELECT (error)'] ?: json_encode([$cargado, $ops]);
 });
 chk('el registro escribe la línea aunque el corte de la SQL caiga en medio de una letra o lleve bytes que no son UTF-8, y la corta sin partir letras (2.9)', function () {
     $dir = sys_get_temp_dir() . '/jsonsqldb_test_log2';
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_LOG_ACTIVO", true); define("JSONSQLDB_LOG_MAX_SQL", 25);'
         . 'define("JSONSQLDB_LOG_PARAMS", true); define("JSONSQLDB_LOG_PATH", ' . var_export("$dir/logs", true) . ');'
         . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
@@ -542,7 +544,7 @@ chk('el registro escribe la línea aunque el corte de la SQL caiga en medio de u
             $vistas[] = [$e['sql'] ?? null, $e['params'] ?? null];
         }
     }
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     return $vistas === [['CREATE TABLE t (x TEXT)', null], ["INSERT INTO t VALUES ('a…", null], ["INSERT /* \u{FFFD} */ INTO t VAL…", null], ['X', [0, "a\u{FFFD}b"]]]
         ?: json_encode($vistas, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
 });
@@ -554,8 +556,7 @@ chk('sin vigilancia, la misma consulta muere con un fatal de PHP', function () u
             . 'try { $bd->consultar("SELECT a.id, b.v FROM t a CROSS JOIN t b"); echo "SIN CORTAR"; }'
             . 'catch (Throwable $e) { echo "capturado"; }';
 
-    $salida = (string)shell_exec(
-        escapeshellarg(PHP_BINARY) . ' -d memory_limit=32M -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $salida = phpHijo(['-d', 'memory_limit=32M', '-r', $codigo]);
 
     // Se comprueba que el interruptor sirve de algo: sin él, fatal incapturable
     return str_contains($salida, 'Allowed memory size') ?: trim($salida);
@@ -577,7 +578,7 @@ chk('también corta con filas grandes, donde cada una pesa mucho', function () u
           . '$p = array_fill(0, 500, str_repeat("y", 3900));'
           . '$v = implode(",", array_fill(0, 500, "(?)"));'
           . '$bd->consultar("INSERT INTO t (v) VALUES $v", $p);';
-    shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
+    phpHijo(['-d', 'memory_limit=512M', '-r', $prep]);
 
     $leer = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
           . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
@@ -588,13 +589,12 @@ chk('también corta con filas grandes, donde cada una pesa mucho', function () u
 
     $fallos = [];
     foreach (['16M', '32M', '48M', '64M'] as $limite) {
-        $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$limite -r "
-                . escapeshellarg($leer) . ' 2>&1'));
+        $salida = trim(phpHijo(['-d', "memory_limit=$limite", '-r', $leer]));
         if ($salida !== 'MEMORIA') {
             $fallos[] = "$limite -> " . substr($salida, 0, 50);
         }
     }
-    exec('rm -rf ' . escapeshellarg($base));
+    borrarArbol($base);
     return $fallos === [] ?: implode(' | ', $fallos);
 });
 chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz) {
@@ -611,7 +611,7 @@ chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz)
           . '$p = array_fill(0, 900, str_repeat("x", 380));'
           . '$v = implode(",", array_fill(0, 900, "(?)"));'
           . 'for ($i = 0; $i < 12; $i++) { $bd->consultar("INSERT INTO t (v) VALUES $v", $p); }';
-    shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r ' . escapeshellarg($prep) . ' 2>&1');
+    phpHijo(['-d', 'memory_limit=512M', '-r', $prep]);
 
     // Un ORDER BY sin LIMIT y no un COUNT: desde 2.4.0 el COUNT(*) cuenta
     // líneas sin cargar nada, y desde 2.6.0 los agregados se acumulan sin
@@ -619,14 +619,12 @@ chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz)
     // Ordenar entero sí obliga a tener todas las filas a la vez.
     // La sonda imprime cuántas filas salen (o el valor de COUNT(*)), o el
     // estado del error si la consulta se corta
-    $sonda = static fn(string $sql, string $limite): string => trim((string)shell_exec(
-        escapeshellarg(PHP_BINARY) . " -d memory_limit=$limite -r " . escapeshellarg(
+    $sonda = static fn(string $sql, string $limite): string => trim(phpHijo(['-d', "memory_limit=$limite", '-r',
             'define("JSONSQLDB_CONEXION_DIRECTA", true);'
             . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
             . '$bd = new JsonSQLDB\\Database("g", ' . var_export($base, true) . ');'
             . 'try { $r = $bd->consultar(' . var_export($sql, true) . '); echo $r[0]["n"] ?? count($r); }'
-            . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }'
-        ) . ' 2>&1'));
+            . 'catch (JsonSQLDB\\JsonSqlDbError $e) { echo $e->sqlState; }']));
 
     // Con poca memoria: corte explicado. Con suficiente: la consulta sale.
     $poco  = $sonda('SELECT v FROM t ORDER BY v', '12M');
@@ -635,7 +633,7 @@ chk('un fichero que no cabe se rechaza antes de leerlo', function () use ($raiz)
     // cuenta líneas, no depende del memory_limit ni de lo que haya en caché.
     $atajo = $sonda('SELECT COUNT(*) AS n FROM t', '12M');
 
-    exec('rm -rf ' . escapeshellarg($base));
+    borrarArbol($base);
     return ($poco === 'MEMORIA' && $mucho === '10800' && $atajo === '10800')
         ?: "12M -> " . substr($poco, 0, 50) . " | 256M -> " . substr($mucho, 0, 50)
          . " | COUNT(*) 12M -> " . substr($atajo, 0, 50);
@@ -646,8 +644,8 @@ chk('los datos siguen intactos tras el corte', function () use ($raiz) {
             . '$bd = new JsonSQLDB\\Database("m", ' . var_export($raiz . '/mem', true) . ');'
             . '$bd->consultar("INSERT INTO t (v) VALUES (?)", ["despues"]);'
             . 'echo $bd->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"];';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
-    exec('rm -rf ' . escapeshellarg($raiz . '/mem'));
+    $salida = trim(phpHijo(['-r', $codigo]));
+    borrarArbol($raiz . '/mem');
     return $salida === '1501' ?: $salida;
 });
 
@@ -661,7 +659,7 @@ chk('bloqueada por defecto', function () use ($raiz) {
             . '      (new JsonSQLDB\\Database("d", $r))->consultar("CREATE TABLE t (a INTEGER)");'
             . '      echo "permitida"; }'
             . 'catch (Throwable $e) { echo $e->getMessage(); }';
-    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $salida = phpHijo(['-r', $codigo]);
     return str_contains($salida, 'conexión directa al motor está desactivada') ?: $salida;
 });
 chk('permitida con el parámetro a true, y con permisos de admin', function () use ($raiz) {
@@ -675,7 +673,7 @@ chk('permitida con el parámetro a true, y con permisos de admin', function () u
             . '$bd->consultar("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n VARCHAR(10))");'
             . '$bd->consultar("INSERT INTO t (n) VALUES (?)", ["uno"]);'
             . 'echo count($bd->consultar("SELECT * FROM t"));';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(phpHijo(['-r', $codigo]));
     $GLOBALS['logDirecta'] = $raiz . '/logs';
     return $salida === '1' ?: $salida;
 });
@@ -692,7 +690,7 @@ chk('el log de una conexión directa pone ip = local', function () {
         (array)glob($GLOBALS['logDirecta'] . '/*')));
 });
 chk('limpiar la base de la conexión directa', function () use ($raiz) {
-    exec('rm -rf ' . escapeshellarg($raiz . '/directa') . ' ' . escapeshellarg($raiz . '/logs'));
+    borrarArbol($raiz . '/directa', $raiz . '/logs');
     return true;
 });
 chk('la caché en disco no confunde la parte 1 en la revisión 13 con la 11 en la 3: leer no reescribe la tabla (2.9)', function () use ($raiz) {
@@ -709,11 +707,11 @@ chk('la caché en disco no confunde la parte 1 en la revisión 13 con la 11 en l
             . '(new JsonSQLDB\Database("c", $r))->consultar("SELECT SUM(n) FROM t");'
             . '$s = (new JsonSQLDB\Database("c", $r))->consultar("SELECT SUM(n) AS s FROM t")[0]["s"];'
             . 'echo json_encode([$antes, $rev(), $s]);';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
-    exec('rm -rf ' . escapeshellarg($r));
+    $salida = trim(phpHijo(['-r', $codigo]));
+    borrarArbol($r);
     return $salida === '[13,13,10]' ?: $salida;
 });
-chk('cada petición carga solo las clases que usa, y sin OPcache no compila más código que en la 2.10, que es menos que en la 2.9.0 o, en un INSERT con su id, lo mismo (2.10); una consulta carga Evaluator antes de leer las filas (2.10)', function () use ($raiz) {
+chk('cada petición carga solo las clases que usa, y sin OPcache no compila más código que en la 2.10, que es menos que en la 2.9.0 o, en un INSERT con su id, casi lo mismo (2.10); una consulta carga Evaluator antes de leer las filas (2.10)', function () use ($raiz) {
     // Sin OPcache, PHP compila en cada petición todo lo que carga. Cada
     // sentencia, en un proceso nuevo, con la caché de resultados apagada. Con
     // 300 filas en c, el JOIN de una fila de p busca su cliente por la clave
@@ -722,7 +720,7 @@ chk('cada petición carga solo las clases que usa, y sin OPcache no compila más
     $motor = var_export(dirname(__DIR__) . '/engine/bootstrap.php', true);
     $ini = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0); require ' . $motor . ';'
          . '$b = new JsonSQLDB\\Database("c", ' . var_export($r, true) . ');';
-    $correr = static fn(string $codigo): string => trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $correr = static fn(string $codigo): string => trim(phpHijo(['-r', $codigo]));
     $correr('define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . $motor . '; JsonSQLDB\\Database::crear("c", ' . var_export($r, true) . ');'
         . '$b = new JsonSQLDB\\Database("c", ' . var_export($r, true) . ');'
         . '$b->consultar("CREATE TABLE c (id INTEGER PRIMARY KEY, email VARCHAR(30) UNIQUE, n INTEGER)");'
@@ -744,41 +742,48 @@ chk('cada petición carga solo las clases que usa, y sin OPcache no compila más
                   'EvaluatorConjunto'];
     // Lo que no puede cargar cada sentencia, y su tope de piezas de código
     // (sin espacios ni comentarios): lo que compila en la 2.10 en esta misma
-    // base, con 40 de margen: las lecturas, entre 1.100 y 3.550 menos que la
-    // 2.9.0 (un WHERE con IN, 2.100: solo carga lo que busca en el conjunto,
-    // no el IN fila a fila); un UPDATE y un DELETE, 1.700 menos; un INSERT con su id, lo
-    // mismo, y uno sin él, 2.450 menos (no lee filas para saber el id). Lo
+    // base, con 40 de margen: las lecturas, entre 1.090 y 3.540 menos que la
+    // 2.9.0 (un WHERE con IN, 2.090: solo carga lo que busca en el conjunto,
+    // no el IN fila a fila); un UPDATE y un DELETE, 1.700 menos; un INSERT con
+    // su id, 19 más (el reintento de Memoria::revisar() antes de cortar), y uno
+    // sin él, 2.440 menos (no lee filas para saber el id). Lo
     // que va aparte y vuelve a una clase que se carga siempre pasa el tope.
     // Sin config.php el registro está apagado, así que ninguna carga Logger
     // (con el de config.php, lo mira la prueba del registro)
     $casos = [
-        'SELECT * FROM c WHERE id = 2'                                       => [$aparte, 58645],
-        "SELECT id FROM c WHERE email = '2@x'"                               => [$aparte, 58645],
-        'SELECT p.id, c.email FROM p JOIN c ON c.id = p.cid WHERE p.id = 2'  => [array_diff($aparte, ['SelectJoinIndice']), 62848],
-        'SELECT COUNT(*) FROM c'                                             => [$aparte, 45592],
-        'SELECT id FROM c WHERE id BETWEEN 1 AND 2'                          => [array_diff($aparte, ['StorageRangos']), 58239],
-        'SELECT UPPER(email) FROM c WHERE id = 2'                            => [$aparte, 62062],
-        'SELECT id FROM c WHERE n IN (1, 2)'                                 => [array_diff($aparte, ['EvaluatorConjunto']), 58983],
-        'SELECT n, COUNT(*), MAX(id) FROM c GROUP BY n'                      => [array_merge(array_diff($aparte, ['SelectAgrupada']), ['Functions']), 62121],
-        'SELECT id FROM c ORDER BY n DESC LIMIT 3'                           => [array_diff($aparte, ['SelectOrden']), 57859],
-        'SELECT id FROM c ORDER BY id DESC LIMIT 3'                          => [array_diff($aparte, ['SelectOrden', 'StorageOrden']), 61066],
-        'SELECT id FROM c LIMIT 2 OFFSET 150'                                => [$aparte, 56972],
-        'SELECT id FROM c WHERE id < 3 UNION SELECT cid FROM p'              => [array_diff($aparte, ['SelectCompuesta', 'StorageRangos']), 61113],
-        'WITH t AS (SELECT id FROM c) SELECT id FROM t WHERE id = 2'         => [array_diff($aparte, ['SelectCompuesta']), 59119],
-        "INSERT INTO c VALUES (301, 'z@x', -4)"                              => [array_merge($escritura, ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator', 'ParserCambios']), 52294],
-        "INSERT INTO c (email, n) VALUES ('y@x', 5)"                         => [array_merge(array_diff($escritura, ['StorageMayores']), ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator', 'ParserCambios']), 52699],
-        'UPDATE c SET n = n + 1 WHERE id = 301'                              => [array_merge($escritura, ['WriterInsercion']), 67205],
-        'DELETE FROM c WHERE id = 301'                                       => [array_merge($escritura, ['WriterInsercion']), 67205],
+        'SELECT * FROM c WHERE id = 2'                                       => [$aparte, 58662],
+        "SELECT id FROM c WHERE email = '2@x'"                               => [$aparte, 58662],
+        'SELECT p.id, c.email FROM p JOIN c ON c.id = p.cid WHERE p.id = 2'  => [array_diff($aparte, ['SelectJoinIndice']), 62865],
+        'SELECT COUNT(*) FROM c'                                             => [$aparte, 45609],
+        'SELECT id FROM c WHERE id BETWEEN 1 AND 2'                          => [array_diff($aparte, ['StorageRangos']), 58256],
+        'SELECT UPPER(email) FROM c WHERE id = 2'                            => [$aparte, 62079],
+        'SELECT id FROM c WHERE n IN (1, 2)'                                 => [array_diff($aparte, ['EvaluatorConjunto']), 59000],
+        'SELECT n, COUNT(*), MAX(id) FROM c GROUP BY n'                      => [array_merge(array_diff($aparte, ['SelectAgrupada']), ['Functions']), 62138],
+        'SELECT id FROM c ORDER BY n DESC LIMIT 3'                           => [array_diff($aparte, ['SelectOrden']), 57876],
+        'SELECT id FROM c ORDER BY id DESC LIMIT 3'                          => [array_diff($aparte, ['SelectOrden', 'StorageOrden']), 61083],
+        'SELECT id FROM c LIMIT 2 OFFSET 150'                                => [$aparte, 56989],
+        'SELECT id FROM c WHERE id < 3 UNION SELECT cid FROM p'              => [array_diff($aparte, ['SelectCompuesta', 'StorageRangos']), 61130],
+        'WITH t AS (SELECT id FROM c) SELECT id FROM t WHERE id = 2'         => [array_diff($aparte, ['SelectCompuesta']), 59136],
+        "INSERT INTO c VALUES (301, 'z@x', -4)"                              => [array_merge($escritura, ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator', 'ParserCambios']), 52311],
+        "INSERT INTO c (email, n) VALUES ('y@x', 5)"                         => [array_merge(array_diff($escritura, ['StorageMayores']), ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator', 'ParserCambios']), 52716],
+        'UPDATE c SET n = n + 1 WHERE id = 301'                              => [array_merge($escritura, ['WriterInsercion']), 67222],
+        'DELETE FROM c WHERE id = 301'                                       => [array_merge($escritura, ['WriterInsercion']), 67222],
     ];
     $medir = 'echo json_encode(array_map(static function (string $f): array { $n = 0;'
         . ' foreach (token_get_all((string)file_get_contents($f)) as $t) { $n += (int)!(is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)); }'
-        . ' return [basename($f, ".php"), $n]; }, array_filter(get_included_files(), static fn(string $f): bool => str_contains($f, "/engine/"))));';
+        . ' return [basename($f, ".php"), $n]; }, array_filter(get_included_files(), static fn(string $f): bool => basename(dirname($f)) === "engine")));';
+    // En un disco que no distingue mayúsculas (Windows), Catalog::nombreReal()
+    // lee la estructura de la tabla para saber cómo se llama, y normalizarla
+    // carga Types, que el COUNT(*) no carga en los demás: ahí no cuenta (con
+    // ella, 46.982 piezas; la 2.9.0, 47.475)
+    $sinMayusculas = is_dir(strtoupper($r));
     $mal = [];
     foreach ($casos as $sql => [$no, $tope]) {
         $cargadas = json_decode($correr($ini . '$b->consultar(' . var_export($sql, true) . ');' . $medir), true);
         if (!is_array($cargadas)) { $mal[] = "$sql: no respondió"; continue; }
         if (($sobra = array_intersect($no, array_column($cargadas, 0))) !== []) { $mal[] = "$sql carga " . implode(', ', $sobra); }
-        if (($n = array_sum(array_column($cargadas, 1))) > $tope) { $mal[] = "$sql compila $n piezas (tope, $tope)"; }
+        $n = array_sum(array_column($cargadas, 1)) - ($sinMayusculas && $sql === 'SELECT COUNT(*) FROM c' ? (array_column($cargadas, 1, 0)['Types'] ?? 0) : 0);
+        if ($n > $tope) { $mal[] = "$sql compila $n piezas (tope, $tope)"; }
     }
     // Evaluator, antes que lo que lee las filas: sin OPcache, compilarlo con
     // ellas y con esas clases ya en memoria subía el pico de una consulta por
@@ -794,7 +799,7 @@ chk('cada petición carga solo las clases que usa, y sin OPcache no compila más
     if (array_diff(['ParserSentencias', 'CatalogDdl', 'WriterDdl', 'StorageMantenimiento'], (array)$cargadas) !== []) {
         $mal[] = 'CREATE TABLE no cargó lo suyo: ' . json_encode($cargadas);
     }
-    exec('rm -rf ' . escapeshellarg($r));
+    borrarArbol($r);
     return $mal === [] ?: implode(' | ', $mal);
 });
 chk('el JIT de OPcache se enciende si php.ini le da memoria y lo deja en "off" o 0; con off sin comillas, que php.ini lee como vacío y PHP toma por "disable", no se puede; JSONSQLDB_JIT = false lo deja como está, y sin ini_set() no pasa nada (2.10)', function () {
@@ -813,7 +818,7 @@ chk('el JIT de OPcache se enciende si php.ini le da memoria y lo deja en "off" o
     };
     $r = [$correr($codigo('')), $correr($codigo(''), '0'), $correr($codigo(''), 'off'), $correr($codigo('define("JSONSQLDB_JIT", false);')),
           $correr($codigo(''), '"off"', ['-d', 'disable_functions=ini_set'])];
-    exec('rm -rf ' . escapeshellarg($dir));
+    borrarArbol($dir);
     if ($r[0] === 'sin') {
         return null;                    // este PHP no tiene OPcache para la línea de comandos
     }

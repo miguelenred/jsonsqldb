@@ -322,6 +322,19 @@ distance and operations whose result is not a number (see *Fixed*).
   gave the new row 4 (SQLite gives 3). Now it is the largest of the rows that
   remain + 1, with the table loaded or written without loading it, and also
   when a row the same statement had just added is the one deleted.
+- **An `ORDER BY` sorted on disk could be cut by the memory guard with memory
+  to spare** (also in 2.9.0, on PHP 8.0 and 8.1). Besides the memory in use,
+  the guard looks at what PHP has asked the system for, and that also counts
+  what PHP has already freed and keeps to use again: with the stretches of the
+  sort coming and going, it was left one block of 2 MB from cutting, and
+  whether it cut depended on where the memory fell. The 40,000 rows of
+  `f8_indices` were cut with 18, 25 and 26 MB and not with 24 (on the CI of
+  GitHub, also with 24). Before cutting, the guard now gives that memory back
+  to the system (`gc_mem_caches()`) and looks again. Nothing changes until a
+  query is about to be cut; without OPcache, compiling it is about 12,000
+  instructions more per request (+0.012 %, counted with `valgrind`), and
+  nothing with OPcache. Giving the memory back after every stretch instead
+  was measured too: +0.5 to +0.8 % in a sort on disk.
 - **A statement too large for memory that failed inside a transaction** after
   writing part of its rows (in stretches, 2.9) was committed half done if the
   function caught its error: of 20,000 rows, 17,664 changed (19,968 in 2.9.0).
@@ -750,9 +763,11 @@ distance and operations whose result is not a number (see *Fixed*).
   are forced to disk once each when the transaction commits, not at every
   statement. A `UNIQUE` text column is checked in the text of the index pieces
   at each one-row `INSERT`, without gathering the whole index in memory from the
-  ninth on. And the shared cache (APCu or `.cache/`) is not written inside a
-  transaction, only the process's own, since each statement left the previous
-  entry stale. And once a statement has replaced a file, the next ones write it
+  ninth on. And the shared cache of the tables (APCu or `.cache/`: parts,
+  index pieces, structures) is not written inside a transaction, only the
+  process's own, since each statement left the previous entry stale; the
+  results of queries still are, as in 2.9, so a query repeated without a write
+  in between still comes from there. And once a statement has replaced a file, the next ones write it
   in its place, without a temporary file or a rename: its original is already
   safe in `.lote/`, nobody else reads the database while the transaction runs,
   and committing forces it to disk with the rest, also an index piece, which in
@@ -835,9 +850,9 @@ distance and operations whose result is not a number (see *Fixed*).
   (the lines of `Logger` that look for the constant).
   Counted in pieces of code (without spaces or comments, each statement in a
   new process, 300 customers with their orders): a lookup by key 61,685 →
-  58,605 (−5.0 %), a join by key 63,920 → 62,808 (−1.7 %), a one-row `INSERT`
-  52,252 → 52,254 (the same) and an `UPDATE` or a `DELETE` 68,882 → 67,165
-  (−2.5 %). See *Checked* for what a whole request does.
+  58,622 (−5.0 %), a join by key 63,920 → 62,825 (−1.7 %), a one-row `INSERT`
+  52,252 → 52,271 (+0.04 %, the retry of the memory guard: see *Fixed*) and an
+  `UPDATE` or a `DELETE` 68,882 → 67,182 (−2.5 %). See *Checked* for what a whole request does.
 - **An `INSERT` that leaves out the id of an integer primary key takes the
   largest from its index, without reading rows.** Without `AUTOINCREMENT` the
   next id is the largest + 1 (2.9); to find it, the `INSERT` read the row of
@@ -850,7 +865,7 @@ distance and operations whose result is not a number (see *Fixed*).
   with `valgrind`: a whole request without OPcache −10.0 % (−1.7 % before
   this), −13.1 % with OPcache; in a process, from the 101st `INSERT` on,
   −31.5 % without OPcache, −31.7 % with it and −29.9 % with its JIT; compiled,
-  55,120 → 52,659 pieces of code (55,477 before this).
+  55,120 → 52,676 pieces of code (55,494 before this).
 - **The keys that rows added to an index piece bring in are added to it in one
   go**, not one by one: the `DELETE` with a cascade of `tests/benchmark.php`
   did 2 % more work than in 2.9.0, and does 1.7 to 2.9 % less.
@@ -1126,8 +1141,8 @@ distance and operations whose result is not a number (see *Fixed*).
   the second statement on, a transaction writes each file in its place (renamed
   as always on PHP 8.0), and undoing it brings the originals back; undoing one
   with 20 MB in APCu stays under 8 MB; no file forced to disk until commit, then
-  each once; no shared cache written inside a transaction; a `UNIQUE` text
-  checked without gathering the index (under 2 MB); an `UPDATE OR REPLACE`
+  each once; no shared cache of the tables written inside a transaction; a
+  `UNIQUE` text checked without gathering the index (under 2 MB); an `UPDATE OR REPLACE`
   written in stretches with 32 MB does not bring back the rows it deleted (an
   independent review found it, before release); a write in place of a single
   file that fails half-way leaves the transaction only to undo, and a file whose
@@ -1269,7 +1284,20 @@ distance and operations whose result is not a number (see *Fixed*).
   exist, which no system can rename. The check of undoing with APCu (`f3`)
   called `memory_reset_peak_usage()`, which PHP 8.0 and 8.1 do not have:
   there its peak also counts the read before it (about 5 MB, under its limit
-  of 8; with 2.9.0, 34).
+  of 8; with 2.9.0, 34). The sort on disk of `f8` was cut on PHP 8.0 and 8.1
+  (see *Fixed*): it also runs with 18, 25 and 26 MB, which fail there without
+  the fix. On Windows, the suites of its job ran PHP in another process
+  through the shell, where `escapeshellarg()` broke the code of a `-r` and
+  `rm -rf`, `cp -r` and `timeout` do not exist: they go through
+  `tests/_procesos.php` (see CONTRIBUTING). There the check of `fsync` on a
+  folder is skipped (PHP cannot open one, so the engine forces only the
+  files); on a disk that does not tell capitals apart, a `COUNT(*)` loads
+  `Types` to read the table's real name, and its budget leaves it out (46,982
+  pieces; 2.9.0, 47,475); the simulated failure to undo a transaction lasts
+  through the retries Windows makes; and the check that a transaction writes
+  no cache of the tables leaves out the results of queries, which a slower
+  system saves, as 2.9 does. All nine suites of the Windows job pass with the
+  PHP 8.3 build for Windows, run under Wine.
 - Each new check was seen failing with its change undone. The `fsync` of the
   panel's files cannot be seen failing without cutting the power, and has no
   check of its own.

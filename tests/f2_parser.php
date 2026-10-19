@@ -8,6 +8,7 @@ declare(strict_types=1);
  * https://miguelenred.es/jsonsqldb
  */
 require_once __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Lexer;
@@ -186,7 +187,7 @@ chk('20.000 comparaciones encadenadas o anidadas (=, <, BETWEEN, IN, IS, con COL
             $peor[$k] = round($cpu() - $t, 3);
         }
         echo json_encode($peor);';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(phpHijo(['-r', $codigo]));
     $peor = json_decode($salida, true);
     return is_array($peor) && count($peor) === 14 && max($peor) < 0.5 ?: substr($salida, 0, 300);
 });

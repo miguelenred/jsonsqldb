@@ -19,6 +19,7 @@ define('JSONSQLDB_CONEXION_DIRECTA', true);
 define('JSONSQLDB_FILAS_POR_PARTE', 50);
 
 require_once __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
@@ -48,15 +49,6 @@ function esperaError(string $titulo, string $estado, callable $fn): void {
         if ($e->sqlState === $estado) { $ok++; echo "  OK   $titulo\n"; }
         else { $ko++; echo "  FALLO $titulo -> $e->sqlState: {$e->getMessage()}\n"; }
     }
-}
-function borrarArbol(string $dir): void {
-    if (!is_dir($dir)) { return; }
-    foreach ((array)scandir($dir) as $f) {
-        if ($f === '.' || $f === '..') { continue; }
-        $r = "$dir/$f";
-        is_dir($r) ? borrarArbol($r) : @unlink($r);
-    }
-    @rmdir($dir);
 }
 
 borrarArbol($raiz);
@@ -562,7 +554,7 @@ chk('JSONSQLDB_INDICES a false da los mismos resultados', function () use ($raiz
             . 'echo count($bd->consultar("SELECT id FROM gente WHERE id = 555"));'
             . '$bd->consultar("UPDATE gente SET mote = mote WHERE id = 555");'
             . 'echo "|", count(glob(' . var_export("$raiz/idx/gente.idx.*.json", true) . '));';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(phpHijo(['-r', $codigo]));
     // Un resultado correcto, y los ficheros de índice borrados al reescribir
     return $salida === '1|0' ?: $salida;
 });
@@ -1368,7 +1360,7 @@ chk('ORDER BY col [DESC] LIMIT n de una columna de texto con índice da lo mismo
             . '   $sin = preg_replace("/ORDER BY (\\\\w+)/", "ORDER BY CASE WHEN 1 THEN $1 END", $q);'
             . '   $r[] = [$bd->consultar("EXPLAIN $q")[0]["acceso"], $bd->consultar($q) === $bd->consultar($sin)];'
             . ' } echo json_encode($r, JSON_UNESCAPED_UNICODE);';
-        $r = json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'), true);
+        $r = json_decode(phpHijo(['-r', $codigo]), true);
         foreach ($consultas as $i => $q) {
             $porIndice = str_starts_with((string)($r[$i][0] ?? ''), 'índice, en orden');
             if (!is_array($r) || $r[$i][1] !== true || $porIndice !== $i < 5) {
@@ -1505,7 +1497,7 @@ chk('SELECT DISTINCT descarta las repetidas según llegan: con 16 MB de memoria 
             . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
             . ' $bd = new JsonSQLDB\Database("d", ' . var_export($dir, true) . ');'
             . ' echo json_encode(array_column($bd->consultar("SELECT DISTINCT c FROM t ORDER BY c"), "c"));';
-    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=16M -r ' . escapeshellarg($codigo) . ' 2>&1'));
+    $salida = trim(phpHijo(['-d', 'memory_limit=16M', '-r', $codigo]));
     borrarArbol($dir);
     return $salida === '["c0","c1","c2","c3","c4","c5","c6"]' ?: substr($salida, 0, 300);
 });
@@ -1557,7 +1549,7 @@ chk('un ORDER BY sin LIMIT proyecta cada fila al leerla: con filas anchas y una 
             . ' $bd = new JsonSQLDB\Database("p", ' . var_export($dir, true) . '); $bd->consultar("SELECT id FROM t ORDER BY n DESC");'
             . ' $b = memory_get_usage(); $r = $bd->consultar("SELECT id FROM t ORDER BY n DESC");'
             . ' echo json_encode([round((memory_get_peak_usage() - $b) / 1048576), md5(json_encode($r))]);';
-    $r = json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'), true);
+    $r = json_decode(phpHijo(['-r', $codigo]), true);
     // Lo esperado, ordenado aquí: n de mayor a menor y, en un empate, el orden de la tabla
     $ids = range(1, 20000);
     usort($ids, static fn(int $a, int $b): int => [($b * 7919) % 500, $a] <=> [($a * 7919) % 500, $b]);
@@ -1586,7 +1578,7 @@ chk('una función de ventana guarda de cada fila solo las columnas que usa: con 
             . ' $bd = new JsonSQLDB\Database("p", ' . var_export($dir, true) . '); $bd->consultar("' . $q . '");'
             . ' $b = memory_get_usage(); $r = $bd->consultar("' . $q . '");'
             . ' echo json_encode([round((memory_get_peak_usage() - $b) / 1048576), md5(json_encode($r))]);';
-    $r = json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'), true);
+    $r = json_decode(phpHijo(['-r', $codigo]), true);
     // Lo esperado: por n de mayor a menor y, en un empate, en el orden de la tabla, numeradas
     $ids = range(1, 20000);
     usort($ids, static fn(int $a, int $b): int => [($b * 7919) % 500, $a] <=> [($a * 7919) % 500, $b]);
@@ -1595,7 +1587,7 @@ chk('una función de ventana guarda de cada fila solo las columnas que usa: con 
         ?: json_encode($r);
 });
 
-chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale igual que con memoria de sobra, sin dejar temporales', function () use ($raiz) {
+chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale igual que con memoria de sobra, sin dejar temporales; con 18, 25 y 26 MB tampoco se corta (2.10)', function () use ($raiz) {
     $dir = "$raiz/ext";
     borrarArbol($dir);
     @mkdir($dir, 0775, true);
@@ -1631,16 +1623,24 @@ chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale 
                 . ' $tramos = $n === 0 ? count(glob(' . var_export("$dir/e/.orden/*.tramo", true) . ') ?: []) : $tramos; hash_update($h, serialize($f)); $n++; });'
                 . ' foreach (is_array($r) ? $r : [] as $f) { hash_update($h, serialize($f)); $n++; }'   // lo que no salió por el sumidero
                 . ' echo $n, ":", hash_final($h), ":", count(glob(' . var_export("$dir/e/.orden/*", true) . ') ?: []), " ", $tramos;';
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($codigo) . ' 2>&1'));
+        return trim(phpHijo(['-d', "memory_limit=$memoria", '-r', $codigo]));
     };
-    foreach ($consultas as $q) {
+    foreach ($consultas as $i => $q) {
         $mucha = explode(' ', $correr('1G', $q))[0];
-        [$poca, $tramos] = explode(' ', $correr('24M', $q)) + [1 => ''];
-        // Pocos tramos: hasta la 2.9 cada 2 MB era uno (19 con SELECT *), porque
-        // contaba la memoria reservada, que no baja, y la mezcla se arrastraba
-        if ($mucha !== $poca || !preg_match('/^\d+:[0-9a-f]{32}:0$/', $poca) || (int)$tramos > 8) {
-            borrarArbol($dir);
-            return "$q: con memoria $mucha / con 24 MB $poca, $tramos tramos";
+        // La primera, también con 18, 25 y 26 MB (2.10): en PHP 8.0 y 8.1 el
+        // vigilante la cortaba con ellos y no con 24 (en la CI de GitHub, también
+        // con 24), por la memoria que PHP guarda para volver a usarla (ver
+        // Memoria::revisar())
+        foreach ($i === 0 ? ['24M', '18M', '25M', '26M'] : ['24M'] as $m) {
+            $salida = $correr($m, $q);
+            [$poca, $tramos] = explode(' ', $salida) + [1 => ''];
+            // Pocos tramos con 24 MB: hasta la 2.9 cada 2 MB era uno (19 con
+            // SELECT *), porque contaba la memoria reservada, que no baja, y la
+            // mezcla se arrastraba
+            if ($mucha !== $poca || !preg_match('/^\d+:[0-9a-f]{32}:0$/', $poca) || $m === '24M' && (int)$tramos > 8) {
+                borrarArbol($dir);
+                return "$q: con memoria $mucha / con $m " . substr($salida, 0, 300);
+            }
         }
     }
     borrarArbol($dir);
@@ -1767,7 +1767,7 @@ chk('JOIN, GROUP BY, subconsultas del FROM, UNION, IN, EXISTS, WITH, ventanas y 
                 . ' foreach (is_array($r) ? $r : [] as $f) { $anotar($f); }'   // lo que no salió por el sumidero
                 . ' $res = $n . ":" . ($enOrden ? hash_final($h) : $s); } catch (JsonSQLDB\\JsonSqlDbError $e) { $res = $e->sqlState; }'
                 . ' echo $res, ":", count(glob(' . var_export("$dir/d/.orden/*", true) . ') ?: []);';
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . " -d memory_limit=$memoria -r " . escapeshellarg($codigo) . ' 2>&1'));
+        return trim(phpHijo(['-d', "memory_limit=$memoria", '-r', $codigo]));
     };
     // Y lo que ni así cabe se corta con un error, no con el fatal de PHP: lo
     // que el intento en memoria dejó pedido se devuelve antes de repetir

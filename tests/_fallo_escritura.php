@@ -13,7 +13,8 @@
  *   (como en Windows con el fichero abierto por otro). El fichero se queda
  *   como estaba, y las siguientes no se escriben en su sitio sobre el
  *   original que la transacción guardó: deshacerla lo devuelve.
- * - deshacer: al deshacerla, un original no se puede devolver una vez. La
+ * - deshacer: al deshacerla, un original no se puede devolver (tampoco con
+ *   los reintentos de Windows, ver StorageEscritura::reemplazar()). La
  *   conexión no se queda dentro de la transacción: lo siguiente lo devuelve,
  *   y lo que escribe después se queda.
  * - guardar: no se puede guardar el original del último fichero de una
@@ -39,7 +40,6 @@ namespace JsonSQLDB {
     function rename(string $de, string $a): bool
     {
         if (($GLOBALS['fallar'] ?? '') === 'deshacer' && str_contains($de, '/.lote/')) {
-            $GLOBALS['fallar'] = '';
             return false;
         }
         return ($GLOBALS['fallar'] ?? '') === 'renombrar' && basename($a) === '_views.json' ? false : \rename($de, $a);
@@ -132,6 +132,7 @@ namespace {
             } catch (RuntimeException) {
                 $r[] = 'deshecha a mano';
             }
+            $GLOBALS['fallar'] = '';
             if ($fallo === 'manifiesto') {
                 $r[] = $bd->consultar('SELECT v FROM t')[0]['v'];
             }

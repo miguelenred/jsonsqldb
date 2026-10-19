@@ -50,6 +50,13 @@ and `f20_memoria.php` need the cURL extension.
 
 - **Tests for the change.** Every suite is a plain PHP file with `chk()` calls;
   follow the surrounding style and add cases to the file that fits.
+- **A check that runs PHP in another process** uses `phpHijo()` from
+  `tests/_procesos.php` (`phpLanzar()` and `phpRecoger()` for one that runs
+  alongside another or may hang), and `copiarArbol()` and `borrarArbol()` for
+  folders, not `shell_exec()`, `rm -rf` or `timeout`. The suites of the
+  Windows job in `.github/workflows/tests.yml` need it: there the code of a
+  `-r` passed through the shell arrives broken, and those commands do not
+  exist.
 - **All 27 suites green**, and update the expected counts in the README and in
   `docs/` if you added checks.
 - **Documentation updated.** `docs/` is part of the project, not an afterthought.

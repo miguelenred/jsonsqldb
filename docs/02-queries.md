@@ -842,7 +842,10 @@ Decisions that make this possible:
     `OFFSET`. The temporary files are deleted at the end whatever happens, and
     one left by a process that died is deleted by the next sort after an hour.
     On 40,000 rows with `memory_limit = 24M` it answers; 2.8.0 stopped with the
-    memory error.
+    memory error. On PHP 8.0 and 8.1, 2.9.0 also stopped it with some limits
+    that leave room to spare (18, 25 and 26 MB on those rows) and not with
+    others, depending on where the memory fell; 2.10 does not (see [When it still will not
+    fit](01-core.md#when-it-still-will-not-fit)).
 17. **`MIN` and `MAX` from the index** (2.9): `SELECT MIN(col), MAX(col) FROM t`,
     with no `WHERE`, on an `INTEGER`, `DOUBLE` or `DECIMAL` column that is the
     first column of an index whose other columns are `NOT NULL` (the primary

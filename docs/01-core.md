@@ -1306,7 +1306,11 @@ Some detail on how it decides, because the naive version did not work:
 - It watches the reserved figure too, because **the limit applies to it**.
   Between the two there is a gap of fragmented blocks that is not negligible
   with a small limit; with 16 MB the process hit the fatal with only 13 MB in
-  use.
+  use. That figure also counts what PHP has freed and keeps to use again, so
+  before stopping a query the engine hands that back to the system
+  (`gc_mem_caches()`) and looks again (2.10): on PHP 8.0 and 8.1 an `ORDER BY`
+  sorted on disk that had memory to spare was stopped with some limits and not
+  with others, depending on where the memory fell.
 - It also stops when **another jump like the last one would not fit**. PHP
   doubles an array's hash table when it grows, so between two checks
   consumption can jump by more than the remaining margin. And the reserve never
@@ -1691,16 +1695,17 @@ add finding a few more files (about 15 µs in a lookup by key).
 compiles more than 40 pieces of code over what it compiles in 2.10.
 
 Against 2.9.0, 2.10 compiles less for every kind of statement measured, and
-the same for a one-row `INSERT` with its id: the comparison rules of SQLite,
+about the same (19 pieces more) for a one-row `INSERT` with its id: the comparison rules of SQLite,
 the table names without case and the keys of the text indexes are in every
 statement, and the writes carry the fixes of 2.10 (foreign keys checked when
 the statement ends, the ids after an `OR REPLACE`, the line in the
 `.lock`…), but what a statement does not use is in the classes above. Counted
 the same way (each statement in a new process, 300 rows), a lookup by key
-61,685 → 58,605 pieces of code (−5.0 %), a join by key 63,920 → 62,808
-(−1.7 %), a one-row `INSERT` 52,252 → 52,254 (the same), one without its id
-55,120 → 52,659 (−4.5 %: it no longer reads rows to find the next id) and an
-`UPDATE` or a `DELETE` 68,882 → 67,165 (−2.5 %). A whole request without
+61,685 → 58,622 pieces of code (−5.0 %), a join by key 63,920 → 62,825
+(−1.7 %), a one-row `INSERT` 52,252 → 52,271 (+0.04 %: the memory guard
+returns PHP's freed memory before cutting a query), one without its id
+55,120 → 52,676 (−4.4 %: it no longer reads rows to find the next id) and an
+`UPDATE` or a `DELETE` 68,882 → 67,182 (−2.5 %). A whole request without
 OPcache does less work than with 2.9.0, every one measured (counted with
 `valgrind` on 30,000 customers, the log off): a lookup by key −2.6 %, by a
 unique column −2.6 %, by ten keys −2.3 %, by a range −2.4 %, a `COUNT(*)` by

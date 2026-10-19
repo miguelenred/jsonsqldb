@@ -12,11 +12,12 @@ define('JSONSQLDB_CONEXION_DIRECTA', true);
 // serviría una consulta repetida sin leerlos. Con ella, en su prueba, aparte
 define('JSONSQLDB_CACHE_RESULTADOS', 0);
 require_once __DIR__ . '/../engine/bootstrap.php';
+require_once __DIR__ . '/_procesos.php';
 
 use JsonSQLDB\Database;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f23';
-exec('rm -rf ' . escapeshellarg($raiz));
+borrarArbol($raiz);
 mkdir($raiz, 0777, true);
 
 $ok = 0;
@@ -42,7 +43,7 @@ function chk(string $titulo, callable $fn): void
 function nueva(): string
 {
     global $raiz;
-    exec('rm -rf ' . escapeshellarg("$raiz/b"));
+    borrarArbol("$raiz/b");
     Database::crear('b', $raiz);
     $bd = new Database('b', $raiz);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, nombre TEXT, ciudad TEXT)');
@@ -100,7 +101,7 @@ chk('un índice destrozado no da resultados erróneos y se rehace en cuanto una 
 });
 chk('COUNT(*) cuenta las filas con comas de más igual que al leerlas, entera la parte o a trozos (2.9: con dos comas, una fila menos)', function () {
     global $raiz;
-    exec('rm -rf ' . escapeshellarg("$raiz/g"));
+    borrarArbol("$raiz/g");
     Database::crear('g', $raiz);
     $bd = new Database('g', $raiz);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)');
@@ -116,10 +117,10 @@ chk('COUNT(*) cuenta las filas con comas de más igual que al leerlas, entera la
     touch($f, time() + 3600);                          // sin el recuento guardado: se cuenta cada vez
     $contar = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
             . ' echo (new JsonSQLDB\Database("g", ' . var_export($raiz, true) . '))->consultar("SELECT COUNT(*) AS n FROM t")[0]["n"];';
-    $aTrozos = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=16M -r ' . escapeshellarg($contar) . ' 2>&1');
+    $aTrozos = phpHijo(['-d', 'memory_limit=16M', '-r', $contar]);
     $entera = (new Database('g', $raiz))->consultar('SELECT COUNT(*) AS m FROM t')[0]['m'];     // otra consulta: no sale de la caché
     $leidas = count((new Database('g', $raiz))->consultar('SELECT id FROM t'));
-    exec('rm -rf ' . escapeshellarg("$raiz/g"));
+    borrarArbol("$raiz/g");
     return $aTrozos === '1000' && $entera === 1000 && $leidas === 1000 ?: json_encode([$aTrozos, $entera, $leidas]);
 });
 chk('la estructura con una coma sobrante se repara; cortada, da error y no se adivina', function () use ($valida) {
@@ -161,7 +162,7 @@ chk('una columna indexada cambiada a mano: la tabla se reescribe y el índice la
 chk('con la caché vacía, una edición válida que cambia una columna indexada también se ve (los desfases no cuadran)', function () {
     global $raiz;
     $d = nueva();
-    exec('rm -rf ' . escapeshellarg("$d/.cache"));
+    borrarArbol("$d/.cache");
     $f = "$d/t.part2.json";
     file_put_contents($f, str_replace('{"id":1200,"nombre":"N1200","ciudad":"C3"}', '{"id":1200,"nombre":"N1200","ciudad":"C9 editada"}', (string)file_get_contents($f)));
     leer();
@@ -212,7 +213,7 @@ chk('con la caché de resultados, la consulta que lee la parte editada reescribe
     $consulta = static function (string $sql) use ($raiz): string {
         $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
                 . ' echo json_encode((new JsonSQLDB\\Database("b", ' . var_export($raiz, true) . '))->consultar(' . var_export($sql, true) . '));';
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'));
+        return trim(phpHijo(['-r', $codigo]));
     };
     $suma = "SELECT COUNT(*) AS n, SUM(id) AS s FROM t WHERE ciudad <> 'C9'";
     $r = [$consulta($suma), count(glob("$d/.cache/q.*.cache") ?: [])];    // guardada
@@ -435,7 +436,7 @@ chk('el estado que dejaba la 2.8 al vaciar la última parte (su revisión en la 
 echo "\n== Una tabla que no cabe en la memoria (2.9) ==\n";
 chk('la reparación sola y REPAIR TABLES reescriben una tabla más grande que la memoria una parte a la vez (antes la juntaban entera y morían sin memoria)', function () use ($valida) {
     global $raiz;
-    exec('rm -rf ' . escapeshellarg("$raiz/g"));
+    borrarArbol("$raiz/g");
     Database::crear('g', $raiz);
     $bd = new Database('g', $raiz);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, nombre TEXT, ciudad TEXT)');
@@ -449,7 +450,7 @@ chk('la reparación sola y REPAIR TABLES reescriben una tabla más grande que la
     $correr = static function (string $sql) use ($raiz): string {
         $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
                 . ' echo json_encode((new JsonSQLDB\Database("g", ' . var_export($raiz, true) . '))->consultar(' . var_export($sql, true) . '));';
-        return trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=24M -r ' . escapeshellarg($codigo) . ' 2>&1'));
+        return trim(phpHijo(['-d', 'memory_limit=24M', '-r', $codigo]));
     };
     $r = [];
     // Sin su llave final, que se arregla sola: la lectura la repara al acabar
@@ -461,7 +462,7 @@ chk('la reparación sola y REPAIR TABLES reescriben una tabla más grande que la
     $r[] = $valida($f);
     $r[] = $correr("SELECT COUNT(*) AS n FROM t WHERE ciudad = 'C3'");
     $copias = count(glob("$raiz/g/.reparados/t.part3.json.*") ?: []);
-    exec('rm -rf ' . escapeshellarg("$raiz/g"));
+    borrarArbol("$raiz/g");
     return $r === ['[{"n":60000}]', true, 1, true, '[{"n":8572}]'] && $copias >= 1 ?: json_encode([$r, $copias]);
 });
 
@@ -504,7 +505,7 @@ chk('CHECK INDEXES compara cada índice con las filas: una clave quitada a mano 
     return $bien ?: json_encode($r, JSON_UNESCAPED_UNICODE);
 });
 
-exec('rm -rf ' . escapeshellarg($raiz));
+borrarArbol($raiz);
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";
 exit($ko === 0 ? 0 : 1);
