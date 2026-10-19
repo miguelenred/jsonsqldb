@@ -236,7 +236,7 @@ $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
         . 'require ' . var_export(__DIR__ . '/../engine/bootstrap.php', true) . ';'
         . '$bd = new JsonSQLDB\\Database("bench", ' . var_export($raiz, true) . ');'
         . '$sql = "SELECT c.ciudad, COUNT(*) AS n, SUM(p.total) AS t FROM pedidos p JOIN clientes c ON c.id = p.cid GROUP BY c.ciudad ORDER BY c.ciudad";'
-        . '$bd->consultar($sql); memory_reset_peak_usage(); $t0 = microtime(true);'
+        . '$bd->consultar($sql); if (function_exists("memory_reset_peak_usage")) { memory_reset_peak_usage(); } $t0 = microtime(true);'
         . 'for ($i = 0; $i < 7; $i++) { $bd->consultar($sql); }'
         . 'echo (microtime(true) - $t0) * 1000 / 7, " ", memory_get_peak_usage() / 1048576;';
 $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d apc.enable_cli=' . (int)(function_exists('apcu_enabled') && apcu_enabled())

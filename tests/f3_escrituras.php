@@ -1474,7 +1474,9 @@ chk('deshacer una transacción con la caché en APCu la vacía sin traerla a mem
         // Ficheros de hace un minuto: estables, así que la lectura los guarda en APCu
         . 'foreach (glob("$raiz/apcu2/*") as $f) { touch($f, time() - 60); } clearstatcache();'
         . '$bd = new Database("apcu2", $raiz); $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE b LIKE \'zz%\'");'
-        . '$mb = apcu_cache_info(true)["mem_size"] / 1048576; memory_reset_peak_usage(); $m0 = memory_get_usage();'
+        // Sin memory_reset_peak_usage() (PHP 8.0 y 8.1), el pico es también el
+        // de la lectura de antes: unos 5 MB, por debajo del tope
+        . '$mb = apcu_cache_info(true)["mem_size"] / 1048576; if (function_exists("memory_reset_peak_usage")) { memory_reset_peak_usage(); } $m0 = memory_get_usage();'
         . 'try { $bd->transaccion(function ($bd) { $bd->consultar("UPDATE t SET b = \'x\' WHERE id = 1"); throw new RuntimeException("no"); }); } catch (RuntimeException $e) {}'
         . '$pico = (memory_get_peak_usage() - $m0) / 1048576;'
         . 'echo json_encode([round($mb), round($pico, 1), strlen((string)$bd->consultar("SELECT b FROM t WHERE id = 1")[0]["b"])]);';

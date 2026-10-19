@@ -628,6 +628,10 @@ distance and operations whose result is not a number (see *Fixed*).
   (at its time limit, for example), the cleanup closed it again, PHP raised an
   error and the other sheets stayed in the temporary folder. It now only
   closes a sheet that is still open.
+- **`tests/benchmark.php` on PHP 8.0 and 8.1 left out the repeated `JOIN`
+  (result cache)**: the process that measures it called
+  `memory_reset_peak_usage()`, which PHP has since 8.2, and stopped there
+  (also in 2.9.0). On 8.0 and 8.1 its peak also counts the first run.
 
 ### Security
 
@@ -1259,6 +1263,13 @@ distance and operations whose result is not a number (see *Fixed*).
   `f4_api` (84) and `f5_admin` (189): the same through the API and through the
   panel with the direct connection, and the line of the write carries the API
   key's label and its IP, or the panel's name.
+- Found by the CI on GitHub: the check that a file that cannot be renamed
+  over is not deleted (`f25`) used a folder as the source, which PHP on
+  Windows puts in the place of the file; it uses a source that does not
+  exist, which no system can rename. The check of undoing with APCu (`f3`)
+  called `memory_reset_peak_usage()`, which PHP 8.0 and 8.1 do not have:
+  there its peak also counts the read before it (about 5 MB, under its limit
+  of 8; with 2.9.0, 34).
 - Each new check was seen failing with its change undone. The `fsync` of the
   panel's files cannot be seen failing without cutting the power, and has no
   check of its own.

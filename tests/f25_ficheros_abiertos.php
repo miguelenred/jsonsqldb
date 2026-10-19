@@ -77,13 +77,13 @@ $bd->consultar('INSERT INTO t VALUES (1, 1), (2, 2)');
 echo "== Reemplazar un fichero ==\n";
 
 chk('si no se puede renombrar encima, el destino no se borra: sigue como estaba (2.10: se borraba y se volvía a intentar)', function () use ($raiz) {
-    $origen  = "$raiz/origen";                     // una carpeta no se puede renombrar encima de un fichero
+    // Un origen que no existe no se puede renombrar en ningún sistema, y el
+    // destino, que nadie tiene abierto, sí se podría borrar. (Una carpeta como
+    // origen no vale: en Windows PHP la pone en el sitio del fichero.)
     $destino = "$raiz/destino.json";
-    @mkdir($origen);
     file_put_contents($destino, 'original');
-    $r = StorageEscritura::reemplazar($origen, $destino);
+    $r = StorageEscritura::reemplazar("$raiz/no-existe.json", $destino);
     $sigue = @file_get_contents($destino);
-    @rmdir($origen);
     @unlink($destino);
     return $r === false && $sigue === 'original' ?: json_encode([$r, $sigue]);
 });
