@@ -772,18 +772,25 @@ chk('cada petición carga solo las clases que usa, y sin OPcache no compila más
     $medir = 'echo json_encode(array_map(static function (string $f): array { $n = 0;'
         . ' foreach (token_get_all((string)file_get_contents($f)) as $t) { $n += (int)!(is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)); }'
         . ' return [basename($f, ".php"), $n]; }, array_filter(get_included_files(), static fn(string $f): bool => basename(dirname($f)) === "engine")));';
-    // En un disco que no distingue mayúsculas (Windows), Catalog::nombreReal()
-    // lee la estructura de la tabla para saber cómo se llama, y normalizarla
-    // carga Types, que el COUNT(*) no carga en los demás: ahí no cuenta (con
-    // ella, 46.982 piezas; la 2.9.0, 47.475)
+    // Lo que solo en Windows se carga de más, que ahí no cuenta: en un disco
+    // que no distingue mayúsculas, Catalog::nombreReal() lee la estructura de
+    // la tabla para saber cómo se llama, y normalizarla carga Types, que el
+    // COUNT(*) no carga en los demás (con ella, 46.982 piezas; la 2.9.0,
+    // 47.475); y el UPDATE y el DELETE, que escriben por partes con el
+    // compartido de la tabla, no pueden dejar su línea en el .lock (allí un
+    // compartido no deja escribir ni a quien lo tiene), así que barren los
+    // temporales como antes de la 2.10 y cargan StorageBarrido (67.503; la
+    // 2.9.0, 68.882)
     $sinMayusculas = is_dir(strtoupper($r));
     $mal = [];
     foreach ($casos as $sql => [$no, $tope]) {
         $cargadas = json_decode($correr($ini . '$b->consultar(' . var_export($sql, true) . ');' . $medir), true);
         if (!is_array($cargadas)) { $mal[] = "$sql: no respondió"; continue; }
-        if (($sobra = array_intersect($no, array_column($cargadas, 0))) !== []) { $mal[] = "$sql carga " . implode(', ', $sobra); }
-        $n = array_sum(array_column($cargadas, 1)) - ($sinMayusculas && $sql === 'SELECT COUNT(*) FROM c' ? (array_column($cargadas, 1, 0)['Types'] ?? 0) : 0);
-        if ($n > $tope) { $mal[] = "$sql compila $n piezas (tope, $tope)"; }
+        $deMas = array_merge($sinMayusculas && $sql === 'SELECT COUNT(*) FROM c' ? ['Types'] : [],
+            PHP_OS_FAMILY === 'Windows' && preg_match('/^(UPDATE|DELETE) /', $sql) ? ['StorageBarrido'] : []);
+        $piezas = array_diff_key(array_column($cargadas, 1, 0), array_flip($deMas));
+        if (($sobra = array_intersect($no, array_keys($piezas))) !== []) { $mal[] = "$sql carga " . implode(', ', $sobra); }
+        if (($n = array_sum($piezas)) > $tope) { $mal[] = "$sql compila $n piezas (tope, $tope)"; }
     }
     // Evaluator, antes que lo que lee las filas: sin OPcache, compilarlo con
     // ellas y con esas clases ya en memoria subía el pico de una consulta por

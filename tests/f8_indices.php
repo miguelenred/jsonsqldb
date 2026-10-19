@@ -1587,7 +1587,7 @@ chk('una función de ventana guarda de cada fila solo las columnas que usa: con 
         ?: json_encode($r);
 });
 
-chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale igual que con memoria de sobra, sin dejar temporales; con 18, 25 y 26 MB tampoco se corta (2.10)', function () use ($raiz) {
+chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale igual que con memoria de sobra, sin dejar temporales; con 18, 25 y 26 MB tampoco se corta, ni cuando ordenar de una vez lo juntado de un tramo no cabe (2.10)', function () use ($raiz) {
     $dir = "$raiz/ext";
     borrarArbol($dir);
     @mkdir($dir, 0775, true);
@@ -1641,6 +1641,15 @@ chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale 
                 borrarArbol($dir);
                 return "$q: con memoria $mucha / con $m " . substr($salida, 0, 300);
             }
+        }
+        // Y si ordenar de una vez lo juntado de un tramo no cabe, cada mitad
+        // por su lado, mezcladas en el mismo tramo (2.10): en la CI de GitHub,
+        // con PHP 8.0 y 8.1, Memoria::antesDePedir() lo cortaba con 24 MB.
+        // _orden_apretada.php corta la ordenación desde 1.000 filas
+        $apretada = trim(phpHijo(['-d', 'memory_limit=24M', __DIR__ . '/_orden_apretada.php', $dir, $q]));
+        if ($apretada !== $mucha) {
+            borrarArbol($dir);
+            return "$q: con memoria $mucha / sin poder ordenar un tramo de una vez " . substr($apretada, 0, 300);
         }
     }
     borrarArbol($dir);

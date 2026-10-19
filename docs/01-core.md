@@ -985,7 +985,10 @@ one line in the table's `.lock` while it works (`escribiendo: pid 1234 desde
 the line of a process that no longer exists (or, where that cannot be asked,
 a line more than a minute old) removes the temporary files of dead processes
 of that table; and every 32 writes it looks anyway. Before, every write
-listed the folder for them: 0.26 ms with 200,000 rows.
+listed the folder for them: 0.26 ms with 200,000 rows. On Windows a write by
+parts (an `UPDATE` or a `DELETE`), which holds the table's shared lock while
+it writes its parts, cannot leave that line (there a shared lock lets nobody
+write the file, not even its holder), so it looks every time, as before.
 
 After a rename the **directory entry** is forced to disk as well (`fsync` on a
 descriptor of the folder): the content may be on disk and the name still only
@@ -1310,7 +1313,9 @@ Some detail on how it decides, because the naive version did not work:
   before stopping a query the engine hands that back to the system
   (`gc_mem_caches()`) and looks again (2.10): on PHP 8.0 and 8.1 an `ORDER BY`
   sorted on disk that had memory to spare was stopped with some limits and not
-  with others, depending on where the memory fell.
+  with others, depending on where the memory fell. And a sort on disk that
+  cannot sort a stretch at once sorts each half on its own and merges the two
+  into the same stretch (2.10), instead of stopping.
 - It also stops when **another jump like the last one would not fit**. PHP
   doubles an array's hash table when it grows, so between two checks
   consumption can jump by more than the remaining margin. And the reserve never

@@ -26,7 +26,7 @@ One folder per database inside the data root (`JSONSQLDB_DATA_PATH`):
 | `<t>.json`, `<t>.part2.json`, `<t>.part3.json`, … | the rows, part 1, 2, 3… | an error that names it, if `rev.json` counts that part (2.9; before, the table ended there) |
 | `<t>.idx.<i>.json`, `<t>.idx.<i>.part2.json`, … | index `<i>`, one piece per part | rebuilt on the next write; until then that index is not used |
 | `.htaccess`, `web.config` | deny web access, written when the database is created | nothing, unless the folder is reachable from the web |
-| `.lock`, `.<t>.lock`, `.turno`, `.<t>.turno` | files for `flock()`, empty; while a write to table `<t>` is under way, `.<t>.lock` holds one line that says so, `escribiendo: pid 1234 desde 2026-10-13 15:04:05`, removed when it ends (2.10, §1.1) | created again |
+| `.lock`, `.<t>.lock`, `.turno`, `.<t>.turno` | files for `flock()`, empty; while a write to table `<t>` is under way, `.<t>.lock` holds one line that says so, `escribiendo: pid 1234 desde 2026-10-13 15:04:05`, removed when it ends (2.10, §1.1; on Windows, not during a write by parts, which holds the shared lock) | created again |
 | `.tx/` | the journal of a write in progress (§8) | normal |
 | `.lote/` | the originals kept by a transaction in progress (§8) | normal |
 | `.reparados/` | originals of repaired files and rows set aside (§9) | normal |

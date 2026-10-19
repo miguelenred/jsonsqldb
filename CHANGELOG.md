@@ -334,7 +334,16 @@ distance and operations whose result is not a number (see *Fixed*).
   query is about to be cut; without OPcache, compiling it is about 12,000
   instructions more per request (+0.012 %, counted with `valgrind`), and
   nothing with OPcache. Giving the memory back after every stretch instead
-  was measured too: +0.5 to +0.8 % in a sort on disk.
+  was measured too: +0.5 to +0.8 % in a sort on disk. And writing a stretch
+  sorts what was gathered at once, which asks for its memory in one go
+  (`Memoria::antesDePedir()`): on the CI of GitHub, with PHP 8.0 and 8.1, that
+  cut the same sort with 15.6 MB of 24 in use. When sorting it at once does
+  not fit, each half is now sorted on its own and the two are merged into the
+  same stretch, the first half first on equal keys: the same rows in the same
+  order, and as many stretches. Until then nothing changes; a sort on disk
+  of 40,000 rows without OPcache does 0.018 to 0.023 % more work (counted
+  with `valgrind`; 222,000 instructions of it compiling the new lines), and
+  no other request loads them.
 - **A statement too large for memory that failed inside a transaction** after
   writing part of its rows (in stretches, 2.9) was committed half done if the
   function caught its error: of 20,000 rows, 17,664 changed (19,968 in 2.9.0).
@@ -1286,7 +1295,10 @@ distance and operations whose result is not a number (see *Fixed*).
   there its peak also counts the read before it (about 5 MB, under its limit
   of 8; with 2.9.0, 34). The sort on disk of `f8` was cut on PHP 8.0 and 8.1
   (see *Fixed*): it also runs with 18, 25 and 26 MB, which fail there without
-  the fix. On Windows, the suites of its job ran PHP in another process
+  the first fix, and with `tests/_orden_apretada.php`, where sorting a
+  stretch at once is cut from 1,000 rows (`asort()`, `arsort()` and
+  `array_multisort()` replaced in the engine's namespace), which fails without
+  the second on every system. On Windows, the suites of its job ran PHP in another process
   through the shell, where `escapeshellarg()` broke the code of a `-r` and
   `rm -rf`, `cp -r` and `timeout` do not exist: they go through
   `tests/_procesos.php` (see CONTRIBUTING). There the check of `fsync` on a
@@ -1294,10 +1306,13 @@ distance and operations whose result is not a number (see *Fixed*).
   files); on a disk that does not tell capitals apart, a `COUNT(*)` loads
   `Types` to read the table's real name, and its budget leaves it out (46,982
   pieces; 2.9.0, 47,475); the simulated failure to undo a transaction lasts
-  through the retries Windows makes; and the check that a transaction writes
-  no cache of the tables leaves out the results of queries, which a slower
-  system saves, as 2.9 does. All nine suites of the Windows job pass with the
-  PHP 8.3 build for Windows, run under Wine.
+  through the retries Windows makes; the check that a transaction writes no
+  cache of the tables leaves out the results of queries, which a slower
+  system saves, as 2.9 does; and an `UPDATE` or a `DELETE`, written by parts
+  with the table's shared lock, cannot leave its line in the `.lock` there,
+  so it sweeps the temporaries as before 2.10 and loads `StorageBarrido`,
+  which its budget leaves out (67,503 pieces; 2.9.0, 68,882). That one only
+  showed on GitHub: under Wine a shared lock lets its holder write.
 - Each new check was seen failing with its change undone. The `fsync` of the
   panel's files cannot be seen failing without cutting the power, and has no
   check of its own.

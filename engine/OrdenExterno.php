@@ -165,28 +165,66 @@ final class OrdenExterno
     /** @return \Generator<int, array{0: list<mixed>, 1: array}> lo juntado, ordenado (estable) */
     private function ordenadas(): \Generator
     {
-        // Por columnas y con la ordenación nativa, como en memoria (ver
-        // SelectOrden::ordenNativo()); con el comparador de PHP solo si una
-        // clave mezcla tipos. Con usort() y el comparador siempre, ordenar los
-        // tramos de un millón de filas costaba más que todo lo demás (2.9)
+        foreach ($this->enOrden(0, \count($this->junto)) as $i) {
+            yield $this->junto[$i];
+            unset($this->junto[$i]);
+        }
+    }
+
+    /**
+     * Las posiciones de lo juntado de $desde a $hasta (sin ella), en orden
+     * (estable). Por columnas y con la ordenación nativa, como en memoria (ver
+     * SelectOrden::ordenNativo(), que cuenta las filas desde 0); con el
+     * comparador de PHP solo si una clave mezcla tipos. Con usort() y el
+     * comparador siempre, ordenar los tramos de un millón de filas costaba más
+     * que todo lo demás (2.9).
+     *
+     * Si ordenarlas de una vez no cabe (Memoria::antesDePedir()), cada mitad
+     * por su lado, y las dos se mezclan en el mismo tramo, a igualdad la
+     * primera (2.10): en PHP 8.0 y 8.1, con su memoria troceada, un ORDER BY
+     * en disco se cortaba así al escribir un tramo con memoria de sobra.
+     *
+     * @return list<int>
+     */
+    private function enOrden(int $desde, int $hasta): array
+    {
         $columnas = [];
-        foreach ($this->junto as $n => [$claves]) {
+        $filas    = $desde === 0 && $hasta === \count($this->junto) ? $this->junto : \array_slice($this->junto, $desde, $hasta - $desde);
+        foreach ($filas as $n => [$claves]) {
             foreach ($claves as $i => $v) {
                 $columnas[$i][$n] = $v;
             }
         }
-        $orden = SelectOrden::ordenNativo($this->orden, $columnas, array_keys($this->junto));
+        $pos = array_keys($filas);
+        unset($filas);
+        try {
+            $orden = SelectOrden::ordenNativo($this->orden, $columnas, $pos);
+        } catch (JsonSqlDbError $e) {
+            if ($e->sqlState !== 'MEMORIA' || $hasta - $desde < 2) {
+                throw $e;
+            }
+            unset($columnas);
+            $mitad = intdiv($desde + $hasta, 2);
+            $a = $this->enOrden($desde, $mitad);
+            $b = $this->enOrden($mitad, $hasta);
+            $orden = [];
+            for ($i = $j = 0; isset($a[$i], $b[$j]);) {
+                $orden[] = $this->comparar($this->junto[$b[$j]][0], $this->junto[$a[$i]][0]) < 0 ? $b[$j++] : $a[$i++];
+            }
+            return array_merge($orden, \array_slice($a, $i), \array_slice($b, $j));
+        }
         unset($columnas);
         if ($orden === null) {
-            $orden = array_keys($this->junto);
+            $orden = $desde === 0 ? $pos : range($desde, $hasta - 1);
             usort($orden, function (int $a, int $b): int {
                 return $this->comparar($this->junto[$a][0], $this->junto[$b][0]) ?: $a <=> $b;
             });
+        } elseif ($desde > 0) {
+            foreach ($orden as $k => $p) {
+                $orden[$k] = $p + $desde;
+            }
         }
-        foreach ($orden as $i) {
-            yield $this->junto[$i];
-            unset($this->junto[$i]);
-        }
+        return $orden;
     }
 
     /**
