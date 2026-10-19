@@ -83,6 +83,10 @@ final class Traductor
     private bool $access;
     /** @var array<string,array{pk: list<string>, auto: array<string,true>, defecto: array<string,string>, tipos: array<string,string>}> lo visto en la primera pasada, por tabla */
     private array $tablas = [];
+    /** @var array<string,string> secuencia de PostgreSQL => la tabla de su columna (2.10, ver contador()) */
+    private array $secuencias = [];
+    /** @var array<string,true> tablas de SQL Server que ya han recibido filas en esta importación (ver contador()) */
+    private array $conFilas = [];
     /** @var array<string,array{cols: list<string>, marcas?: array<string,string>}> columnas de cada tabla de MySQL y cuáles son BIT ('bit') */
     private array $columnasMysql = [];
     /** @var array<string,array{cols: list<string>, marcas: array<string,string>}>|null lo mismo de las tablas de PostgreSQL y SQL Server con columnas con zona horaria ('zona', 2.9; ver conZona()) */
@@ -126,6 +130,8 @@ final class Traductor
      * guarda tal como se escribió; si no, allí || es OR (2.9).
      */
     private bool $tuberiasConcatenan = false;
+    /** ¿"x" es un nombre en MySQL? Solo con ANSI_QUOTES en su sql_mode; si no, un texto (2.10) */
+    private bool $comillasNombran = false;
 
     public function __construct(string $dialecto)
     {
@@ -175,6 +181,21 @@ final class Traductor
         $avisos = $this->avisos;
         $t = $this->tokens(preg_replace('/;\n.*/s', ';', $sql) ?? $sql);
         $this->avisos = $avisos;
+        // De qué tabla es cada secuencia, para su setval() (2.10): la de una
+        // IDENTITY (SEQUENCE NAME), la de un DEFAULT nextval() y OWNED BY
+        $nombre = '((?:"[^"]+"|\w+)(?:\.(?:"[^"]+"|\w+))*)';
+        if ($this->pg && preg_match('/^\s*(?:ALTER|CREATE)\s+(?:TABLE|SEQUENCE)\s+(?:ONLY\s+|IF\s+NOT\s+EXISTS\s+)?' . $nombre . '/i', $sql, $m)) {
+            $de = self::sinEsquema($m[1]);
+            if (preg_match_all("/SEQUENCE\s+NAME\s+$nombre|nextval\s*\(\s*'([^']+)'/i", $sql, $sec, PREG_SET_ORDER)) {
+                foreach ($sec as $x) {
+                    $this->secuencias[strtolower(self::sinEsquema($x[1] !== '' ? $x[1] : $x[2]))] = $de;
+                }
+            }
+            if (preg_match("/^\s*ALTER\s+SEQUENCE\s+\S+\s+OWNED\s+BY\s+$nombre/i", $sql, $o)) {
+                $partes = explode('.', $o[1]);
+                $this->secuencias[strtolower($de)] = trim((string)($partes[count($partes) - 2] ?? ''), '"');
+            }
+        }
         if ($this->pg && $this->particion($t)) {
             return;
         }
@@ -467,6 +488,20 @@ final class Traductor
         if ($this->mysql && $p1 === 'SET' && $p2 === 'SQL_MODE') {
             $this->tuberiasConcatenan = ($t[3]['k'] ?? '') === 'str' && preg_match('/\bPIPES_AS_CONCAT\b|(^|,)ANSI(,|$)/i', (string)$t[3]['v']) === 1;
         }
+        // También como lo escribe mysqldump: SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='…'
+        if ($this->mysql && $p1 === 'SET' && preg_match_all("/\bSQL_MODE\s*=\s*'([^']*)'/i", $sql, $modos)) {
+            $this->comillasNombran = preg_match('/\bANSI_QUOTES\b|(^|,)ANSI(,|$)/i', (string)end($modos[1])) === 1;
+        }
+        $contador = $this->contador($sql);
+        if ($contador !== null) {
+            return $contador;
+        }
+        if (($this->ss || $this->access) && $p1 === 'SELECT' && in_array('INTO', array_map(static fn(array $x): string => empty($x['q']) ? strtoupper($x['v']) : '', $t), true)) {
+            // Crea una tabla con datos: que se diga cuál se pierde (2.10: iba
+            // con las sentencias de control, y no se entendía que faltaba una tabla)
+            $this->avisar(t('SELECT … INTO saltado: crea una tabla a partir de otra, y aquí no se traduce; créala con CREATE TABLE … AS SELECT'));
+            return [];
+        }
         if (in_array($p1, self::CONTROL, true) || (($this->pg || $this->ss || $this->access) && $p1 === 'SELECT')) {
             $this->avisar(t('Sentencias de control saltadas (PRAGMA, SET, LOCK, BEGIN, COMMIT…)'));
             return [];
@@ -511,8 +546,11 @@ final class Traductor
         if ($p1 === 'ALTER' && $p2 === 'TABLE' && ($this->pg || $this->ss || $this->access)) {
             return $this->alterarTabla($t);
         }
-        if ($this->ss && $p1 === 'INSERT' && $p2 !== 'INTO') {
-            array_splice($t, 1, 0, [['k' => 'id', 'v' => 'INTO']]);  // INSERT [t] … de SQL Server
+        if ($this->ss && $p1 === 'INSERT') {
+            if ($p2 !== 'INTO') {
+                array_splice($t, 1, 0, [['k' => 'id', 'v' => 'INTO']]);  // INSERT [t] … de SQL Server
+            }
+            $this->conFilas[strtolower(self::sinEsquema((string)$this->objetivo($t)))] = true;
         }
         if ($this->access) {
             $t = $this->textosConChr($t, '&');
@@ -539,7 +577,9 @@ final class Traductor
             return [];
         }
         if ($this->tocaSecuencia($t)) {
-            return [];                              // sqlite_sequence: su contador lo lleva el motor
+            // sqlite_sequence: su fila, como contador de la tabla (2.10: se
+            // saltaba, y la copia volvía a dar los id de las filas borradas)
+            return self::secuencia($sql);
         }
         if ($p1 === 'CREATE' && ($p2 === 'TABLE' || (in_array($p2, ['TEMP', 'TEMPORARY'], true) && $p3 === 'TABLE'))) {
             return $this->crearTabla($t);
@@ -909,17 +949,19 @@ final class Traductor
                 continue;
             }
             // X'…' y x'…': hexadecimal
+            // (sin cerrar, el error de una cadena sin cerrar: 2.10, el cursor
+            // volvía al principio y el proceso se quedaba sin memoria)
             if (($c === 'x' || $c === 'X') && ($sql[$i + 1] ?? '') === "'") {
-                $fin = strpos($sql, "'", $i + 2);
-                $out[] = $this->hexadecimal(substr($sql, $i + 2, (int)$fin - $i - 2));
-                $i = (int)$fin + 1;
+                $fin = self::cierre($sql, $i + 2);
+                $out[] = $this->hexadecimal(substr($sql, $i + 2, $fin - $i - 2));
+                $i = $fin + 1;
                 continue;
             }
             // b'0101': bits
             if (($c === 'b' || $c === 'B') && ($sql[$i + 1] ?? '') === "'") {
-                $fin = strpos($sql, "'", $i + 2);
-                $out[] = ['k' => 'num', 'v' => (string)bindec(substr($sql, $i + 2, (int)$fin - $i - 2))];
-                $i = (int)$fin + 1;
+                $fin = self::cierre($sql, $i + 2);
+                $out[] = ['k' => 'num', 'v' => (string)bindec(substr($sql, $i + 2, $fin - $i - 2))];
+                $i = $fin + 1;
                 continue;
             }
             if ($c === '0' && ($sql[$i + 1] ?? '') === 'x' && preg_match('/\G0x([0-9a-fA-F]+)/', $sql, $m, 0, $i)) {
@@ -959,6 +1001,13 @@ final class Traductor
                 continue;
             }
             // En las consultas de Access, "…" es un texto, no un nombre
+            // En MySQL, "x" es un texto salvo con ANSI_QUOTES (2.10: se tomaba
+            // por un nombre, y VALUES (1, "Madrid") buscaba la columna Madrid)
+            if ($this->mysql && $c === '"' && !$this->comillasNombran) {
+                [$valor, $i] = $this->cadena($sql, $i, false, '"');
+                $out[] = ['k' => 'str', 'v' => $valor];
+                continue;
+            }
             if ($this->access && $c === '"') {
                 $fin = $i + 1;
                 $v = '';
@@ -1006,7 +1055,13 @@ final class Traductor
                 $i += 3;
                 continue;
             }
-            foreach (['<=', '>=', '<>', '!=', '||', '==', '::'] as $doble) {
+            // ->> y ->, << y >> (2.10: salían partidos, - > > y < <)
+            if (substr($sql, $i, 3) === '->>') {
+                $out[] = ['k' => 'op', 'v' => '->>'];
+                $i += 3;
+                continue;
+            }
+            foreach (['<=', '>=', '<>', '!=', '||', '==', '::', '->', '<<', '>>'] as $doble) {
                 if (substr($sql, $i, 2) === $doble) { $out[] = ['k' => 'op', 'v' => $doble]; $i += 2; continue 2; }
             }
             $out[] = ['k' => 'op', 'v' => $c];
@@ -1113,7 +1168,7 @@ final class Traductor
     }
 
     /** Una cadena entre comillas simples desde $i; en MySQL y en E'…', con sus escapes de barra invertida. */
-    private function cadena(string $sql, int $i, bool $escapes = false): array
+    private function cadena(string $sql, int $i, bool $escapes = false, string $comilla = "'"): array
     {
         $v = '';
         $n = strlen($sql);
@@ -1124,13 +1179,23 @@ final class Traductor
                 $v .= ['0' => "\0", 'n' => "\n", 'r' => "\r", 't' => "\t", 'b' => "\x08", 'Z' => "\x1A"][$s] ?? $s;
                 continue;
             }
-            if ($c === "'") {
-                if (($sql[$i + 1] ?? '') === "'") { $v .= "'"; $i++; continue; }
+            if ($c === $comilla) {
+                if (($sql[$i + 1] ?? '') === $comilla) { $v .= $comilla; $i++; continue; }
                 return [$v, $i + 1];
             }
             $v .= $c;
         }
         throw new RuntimeException(t('Una cadena sin cerrar en el fichero.'));
+    }
+
+    /** Dónde se cierra la comilla de un X'…' o un b'…' que empieza en $desde */
+    private static function cierre(string $sql, int $desde): int
+    {
+        $fin = strpos($sql, "'", $desde);
+        if ($fin === false) {
+            throw new RuntimeException(t('Una cadena sin cerrar en el fichero.'));
+        }
+        return $fin;
     }
 
     /** Un literal hexadecimal: texto si es UTF-8 válido; si son datos binarios, no se pueden guardar. */
@@ -1251,6 +1316,62 @@ final class Traductor
             case 'CREATE': return in_array('INDEX', array_slice($w, 1, 2), true) ? $tras('ON') : $tras('TABLE');
         }
         return null;
+    }
+
+    /**
+     * Una sentencia sobre sqlite_sequence: la fila que pone el contador de una
+     * tabla (INSERT INTO sqlite_sequence [(name, seq)] VALUES ('t', n), la del
+     * .dump de SQLite y la de los volcados de aquí) es ALTER TABLE t
+     * AUTO_INCREMENT = n + 1, que en el motor solo lo sube; lo demás (el
+     * DELETE de antes) no hace falta.
+     *
+     * @return list<string>
+     */
+    public static function secuencia(string $sql): array
+    {
+        if (!preg_match('/^\s*INSERT\s+INTO\s+["`\[]?sqlite_sequence["`\]]?\s*(?:\(\s*["`]?name["`]?\s*,\s*["`]?seq["`]?\s*\)\s*)?VALUES\s*(.*)$/is', $sql, $m)) {
+            return [];
+        }
+        preg_match_all("/\(\s*'((?:[^']|'')*)'\s*,\s*(\d+)\s*\)/", $m[1], $filas, PREG_SET_ORDER);
+        return array_map(static fn(array $f): string => 'ALTER TABLE ' . cita(str_replace("''", "'", $f[1]))
+            . ' AUTO_INCREMENT = ' . ((int)$f[2] + 1), $filas);
+    }
+
+    /**
+     * El contador de un volcado de PostgreSQL o de SQL Server, como ALTER
+     * TABLE … AUTO_INCREMENT (2.10): setval() de la secuencia de una columna
+     * (la de pg_get_serial_sequence(), o una con nombre que el volcado ha
+     * dicho de qué columna es, ver observar()) y DBCC CHECKIDENT (también
+     * con N'…' y WITH NO_INFOMSGS, como se escribe a mano). Con
+     * is_called (el tercer argumento de setval, true si no está) el siguiente
+     * es el de después. null si la sentencia no es ninguna de esas.
+     *
+     * @return list<string>|null
+     */
+    private function contador(string $sql): ?array
+    {
+        if ($this->pg && preg_match("/^\s*SELECT\s+(?:pg_catalog\.)?setval\s*\(\s*(?:pg_get_serial_sequence\s*\(\s*'((?:[^']|'')*)'\s*,\s*'(?:[^']|'')*'\s*\)|'((?:[^']|'')*)'(?:::regclass)?)\s*,\s*(\d+)\s*(?:,\s*(true|false)\s*)?\)\s*;?\s*$/i", $sql, $m)) {
+            $tabla = $m[1] !== '' ? trim(str_replace("''", "'", $m[1]), '"') : ($this->secuencias[strtolower(self::sinEsquema($m[2]))] ?? null);
+            if ($tabla === null) {
+                return [];
+            }
+            return ['ALTER TABLE ' . cita(self::sinEsquema($tabla)) . ' AUTO_INCREMENT = ' . ((int)$m[3] + (strtolower($m[4] ?? 'true') === 'false' ? 0 : 1))];
+        }
+        if ($this->ss && preg_match("/^\s*DBCC\s+CHECKIDENT\s*\(\s*N?'((?:[^']|'')*)'\s*,\s*RESEED\s*,\s*(\d+)\s*\)(?:\s*WITH\s+NO_INFOMSGS)?\s*;?\s*$/i", $sql, $m)) {
+            // Si la tabla ha recibido filas, el siguiente es el de después del
+            // indicado; si no, el indicado, como en SQL Server (2.10: siempre el
+            // de después, y una tabla vacía se saltaba un id)
+            $tabla = trim(self::sinEsquema(str_replace("''", "'", $m[1])), '[]');
+            return ['ALTER TABLE ' . cita($tabla) . ' AUTO_INCREMENT = ' . ((int)$m[2] + (isset($this->conFilas[strtolower($tabla)]) ? 1 : 0))];
+        }
+        return null;
+    }
+
+    /** El nombre sin su esquema delante (public.t_id_seq → t_id_seq) ni comillas. */
+    private static function sinEsquema(string $nombre): string
+    {
+        $partes = explode('.', $nombre);
+        return trim((string)end($partes), '"[]`');
     }
 
     /** ¿Es una sentencia sobre sqlite_sequence? */

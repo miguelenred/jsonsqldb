@@ -33,9 +33,10 @@ namespace JsonSQLDB;
  * colación escrita con COLLATE, o '' (2.9, ver colacionEscrita()).
  *
  * Aquí, las expresiones y el FROM; el resto del SELECT, en ParserConsulta;
- * INSERT, UPDATE y DELETE, en ParserEscritura, y el resto de sentencias en
- * ParserSentencias, que heredan de esta clase y solo se cargan cuando hacen
- * falta (2.9): sin OPcache, PHP compila en cada petición lo que carga.
+ * INSERT, en ParserEscritura; UPDATE y DELETE, en ParserCambios (2.10), y el
+ * resto de sentencias en ParserSentencias, que heredan de esta clase y solo se
+ * cargan cuando hacen falta (2.9): sin OPcache, PHP compila en cada petición
+ * lo que carga.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -52,6 +53,9 @@ class Parser
                            'LOCALTIME' => 'DATETIME', 'LOCALTIMESTAMP' => 'DATETIME',
                            'UTC_DATE' => 'UTC_DATE', 'UTC_TIME' => 'UTC_TIME', 'UTC_TIMESTAMP' => 'UTC_TIMESTAMP'];
     /** …y las funciones de MySQL que dicen lo mismo */
+    // Las funciones que lleva ParserFunciones (2.10)
+    private const CON_PALABRAS = ['TRIM' => 1, 'POSITION' => 1, 'SUBSTRING' => 1, 'SUBSTR' => 1, 'EXTRACT' => 1, 'TIMESTAMPDIFF' => 1,
+        'TIMESTAMPADD' => 1, 'DATE_ADD' => 1, 'DATE_SUB' => 1, 'ADDDATE' => 1, 'SUBDATE' => 1, 'CONVERT' => 1];
     private const AHORA_MYSQL = ['NOW' => 'DATETIME', 'SYSDATE' => 'DATETIME', 'CURDATE' => 'DATE', 'CURTIME' => 'TIME'];
 
     /** Las palabras que pueden seguir a un valor dentro de una comparación (ver exprComparacion()) */
@@ -71,7 +75,7 @@ class Parser
     protected string $sql;
     private array  $params;
     private int    $iParam = 0;
-    /** ¿Llama la sentencia a RANDOMBLOB o ZEROBLOB? (ver Writer::exigirTexto()) */
+    /** ¿Llama la sentencia a RANDOMBLOB o ZEROBLOB? (ver WriterAvanzado::exigirTexto()) */
     private bool   $conBytes = false;
     /** ¿Hay alguna subconsulta en una expresión? (ver Database::tablaUnica() y sinFila()) */
     protected bool   $conSubconsulta = false;
@@ -83,6 +87,13 @@ class Parser
     protected bool   $ventanasPermitidas = false;
     /** Funciones de ventana del SELECT que se está analizando (ver selectSimple()) */
     protected int    $ventanasVistas = 0;
+    /** Nombre escrito de una tabla => el suyo de verdad (ver real()) */
+    private ?\Closure $nombres = null;
+    /** Los nombres de los WITH leídos, en minúsculas: no son tablas (ver real()) */
+    protected array  $ctes = [];
+    /** Un valor ya leído con el que sigue exprConcat(): el IN (…) tras el que viene un || o un + (ver exprComparacion()) */
+    private ?array $izq = null;
+    private const RELACIONALES = ['<' => 1, '<=' => 1, '>' => 1, '>=' => 1];
 
     /** Las funciones que solo son de ventana (2.9), con su mínimo y su máximo de argumentos */
     protected const VENTANA = ['ROW_NUMBER' => [0, 0], 'RANK' => [0, 0], 'DENSE_RANK' => [0, 0], 'PERCENT_RANK' => [0, 0],
@@ -104,8 +115,10 @@ class Parser
      * no puede alterar la sentencia por mucho SQL que contenga.
      *
      * @param array $params Valores posicionales: null, bool, int, float o string.
+     * @param \Closure|null $nombres el nombre de verdad de una tabla escrita sin
+     *                               distinguir mayúsculas (ver Catalog::nombreReal())
      */
-    public static function analizar(string $sql, array $params = []): array
+    public static function analizar(string $sql, array $params = [], ?\Closure $nombres = null): array
     {
         $t   = Lexer::tokens($sql);
         $p   = match ($t[0]['t'] === 'id' && !$t[0]['q'] ? $t[0]['u'] : '') {
@@ -113,16 +126,19 @@ class Parser
             'INSERT', 'REPLACE', 'UPDATE', 'DELETE' => new ParserEscritura($t, $sql, array_values($params)),
             default                                 => new ParserSentencias($t, $sql, array_values($params)),
         };
+        $p->nombres = $nombres;
         $ast = $p->sentencia();
         while ($p->comer('punc', ';')) {
             // Como en SQLite, el ; del final puede ir repetido
         }
         if (!$p->es('eof')) {
-            throw JsonSqlDbError::syntax('Solo se admite una sentencia por consulta');
+            // Lo que sobra, con lo primero que sobra (2.10: sin decir dónde,
+            // y con un FROM a, b USING o un 1 IS NULL + 1 no se entendía)
+            throw JsonSqlDbError::syntax("Sobra lo que va desde '" . $p->actual()['v'] . "': solo se admite una sentencia por consulta");
         }
-        if ($p->iParam !== count($p->params)) {
+        if ($p->iParam !== \count($p->params)) {
             throw JsonSqlDbError::syntax(
-                'La sentencia tiene ' . $p->iParam . ' marcadores ? y se han recibido ' . count($p->params) . ' parámetros'
+                'La sentencia tiene ' . $p->iParam . ' marcadores ? y se han recibido ' . \count($p->params) . ' parámetros'
             );
         }
         if ($p->conBytes) {
@@ -137,14 +153,14 @@ class Parser
     /** Valor del siguiente ? de la sentencia. */
     private function parametro()
     {
-        if (!array_key_exists($this->iParam, $this->params)) {
+        if (!\array_key_exists($this->iParam, $this->params)) {
             throw JsonSqlDbError::syntax('Faltan parámetros para los marcadores ? de la sentencia');
         }
         $v = $this->params[$this->iParam++];
-        if ($v === null || is_int($v) || is_float($v) || is_string($v)) {
+        if ($v === null || \is_int($v) || \is_float($v) || \is_string($v)) {
             return $v;
         }
-        if (is_bool($v)) {
+        if (\is_bool($v)) {
             return $v ? 1 : 0;
         }
         throw JsonSqlDbError::syntax('El parámetro ' . $this->iParam . ' no es un valor simple');
@@ -169,7 +185,17 @@ class Parser
         $from   = [$primero ?? ParserConsulta::origen($this, null)];
         while (true) {
             if ($this->comer('punc', ',')) {
-                $from[] = ParserConsulta::origen($this, 'CROSS');
+                $origen = ParserConsulta::origen($this, 'CROSS');
+                // Con USING u ON detrás, una coma es un JOIN, como en SQLite
+                // (2.10: «solo se admite una sentencia»)
+                if ($this->comer('id', 'USING')) {
+                    $origen['join']  = 'INNER';
+                    $origen['using'] = $this->listaColumnasEntreParentesis();
+                } elseif ($this->comer('id', 'ON')) {
+                    $origen['join'] = 'INNER';
+                    $origen['on']   = $this->expr();
+                }
+                $from[] = $origen;
                 continue;
             }
             $tipo = null;
@@ -226,7 +252,7 @@ class Parser
             return $tk['v'];
         }
         $tk = $this->actual();
-        if ($tk['t'] === 'id' && ($tk['q'] || !in_array($tk['u'], self::RESERVADAS, true))
+        if ($tk['t'] === 'id' && ($tk['q'] || !\in_array($tk['u'], self::RESERVADAS, true))
             && !(!$tk['q'] && $tk['u'] === 'WINDOW' && $this->esSiguiente('id', 'AS', 2))) {
             $this->avanzar();
             return $tk['v'];
@@ -241,12 +267,12 @@ class Parser
         if ($tk['t'] === 'param') {
             $this->avanzar();
             $v = $this->parametro();
-            if (!is_int($v) && !(is_string($v) && ctype_digit($v))) {
+            if (!\is_int($v) && !(\is_string($v) && ctype_digit($v))) {
                 throw JsonSqlDbError::syntax("$clausula necesita un número entero positivo");
             }
             $v = (int)$v;
         } else {
-            if ($tk['t'] !== 'num' || !is_int($tk['v'])) {
+            if ($tk['t'] !== 'num' || !\is_int($tk['v'])) {
                 throw JsonSqlDbError::syntax("$clausula necesita un número entero positivo");
             }
             $this->avanzar();
@@ -264,6 +290,25 @@ class Parser
 
     protected function expr(): array
     {
+        // Un valor suelto (un literal, un ?, una columna) seguido de una coma,
+        // un paréntesis, FROM, AS o el final, que es lo más frecuente en una
+        // lista de columnas, un VALUES o un IN: sin bajar por todos los
+        // niveles, que darían lo mismo (2.10, antes de publicarla: con su nivel
+        // de más, un SELECT 1 hacía más que en la 2.9). NOT es de exprNot(), y
+        // CASE e INTERVAL siguen después de su palabra (CASE AS WHEN …, con una
+        // columna llamada AS): lo de detrás de su END o de su unidad se perdería
+        $tk  = $this->t[$this->i];
+        $sig = $this->t[$this->i + 1] ?? $tk;
+        if ($this->izq === null && (($sig['t'] === 'punc' && ($sig['v'] === ',' || $sig['v'] === ')')) || $sig['t'] === 'eof'
+                || ($sig['t'] === 'id' && !$sig['q'] && ($sig['u'] === 'FROM' || $sig['u'] === 'AS')))) {
+            if ($tk['t'] === 'num' || $tk['t'] === 'str') {
+                $this->i++;
+                return ['k' => 'lit', 'v' => $tk['v']];
+            }
+            if ($tk['t'] === 'param' || ($tk['t'] === 'id' && ($tk['q'] || ($tk['u'] !== 'NOT' && $tk['u'] !== 'CASE' && $tk['u'] !== 'INTERVAL')))) {
+                return $this->exprPrimaria();
+            }
+        }
         return $this->exprOr();
     }
 
@@ -312,9 +357,21 @@ class Parser
         return $this->exprComparacion();
     }
 
+    /**
+     * El nivel de =, IS, IN, LIKE, GLOB, REGEXP y BETWEEN, por debajo de
+     * < <= > >= (ver exprRelacional()), como en SQLite (2.10: todos iban al
+     * mismo nivel, y 0 = 1 < 2 daba 1 donde SQLite da 0). Lo de la derecha de
+     * cada uno es del nivel de arriba, y tras un IN (…) cerrado puede seguir
+     * un operador de más precedencia: 2 IN (2) || 0 es (2 IN (2)) || 0.
+     */
     private function exprComparacion(): array
     {
+        // < <= > >= (ver exprRelacional()), aquí mismo: todo valor pasa por
+        // aquí, y casi ninguno lleva uno detrás
         $e = $this->exprBits();
+        if (($tk = $this->t[$this->i])['t'] === 'op' && isset(self::RELACIONALES[$tk['v']])) {
+            $e = $this->relacional($e);
+        }
 
         while (true) {
             // Lo más habitual tras un valor es una coma, un paréntesis o una
@@ -325,20 +382,24 @@ class Parser
                 return $e;
             }
             // IS [NOT] NULL; y (2.9) IS [NOT] valor de SQLite e IS [NOT] DISTINCT
-            // FROM del estándar: el = que trata NULL como un valor más
+            // FROM del estándar: el = que trata NULL como un valor más, con la
+            // colación escrita como el = (2.10: 'a' IS 'A' COLLATE NOCASE daba 0).
+            // Lo de la derecha es una expresión: 1 IS NULL + 1 es 1 IS (NULL + 1)
             if ($this->es('id', 'IS')) {
                 $this->avanzar();
                 $not = $this->comer('id', 'NOT');
-                if ($this->comer('id', 'NULL')) {
-                    $e = ['k' => 'null', 'e' => $e, 'not' => $not];
-                    continue;
-                }
                 if ($this->comer('id', 'DISTINCT')) {
                     $this->exigir('id', 'FROM');
                     $not = !$not;
                 }
-                $d = $this->exprBits();
-                $e = ['k' => 'bin', 'op' => '<=>', 'i' => $e, 'd' => $d, 'escrita' => $this->escrita([$e, $d])];
+                $esNull = $this->es('id', 'NULL');
+                $d = $this->exprRelacional();
+                if ($esNull && $d === ['k' => 'lit', 'v' => null]) {
+                    $e = ['k' => 'null', 'e' => $e, 'not' => $not];
+                    continue;
+                }
+                [$i, $d] = $this->plegar([$e, $d], $c);
+                $e = ['k' => 'bin', 'op' => '<=>', 'i' => $i, 'd' => $d, 'escrita' => $c];
                 if ($not) {
                     $e = ['k' => 'un', 'op' => 'NOT', 'e' => $e];
                 }
@@ -370,31 +431,33 @@ class Parser
                     $e = ['k' => 'in', 'e' => array_shift($plegados), 'lista' => $plegados, 'select' => null, 'not' => $not, 'escrita' => $c];
                 }
                 $this->exigir('punc', ')');
+                $this->izq = $e;                    // lo que siga, sobre el IN (ver exprConcat())
+                $e = $this->exprRelacional();
                 continue;
             }
 
             if ($this->comer('id', 'REGEXP') || $this->comer('id', 'RLIKE')) {
-                $e = ['k' => 'regexp', 'e' => $e, 'patron' => $this->exprBits(), 'not' => $not];
+                $e = ['k' => 'regexp', 'e' => $e, 'patron' => $this->exprRelacional(), 'not' => $not];
                 continue;
             }
 
             // x GLOB patrón de SQLite: como LIKE, con * ? y [ ], y distinguiendo mayúsculas
             if ($this->comer('id', 'GLOB')) {
-                $e = ['k' => 'like', 'e' => $e, 'patron' => $this->exprBits(), 'escape' => null, 'not' => $not, 'glob' => true];
+                $e = ['k' => 'like', 'e' => $e, 'patron' => $this->exprRelacional(), 'escape' => null, 'not' => $not, 'glob' => true];
                 continue;
             }
 
             if ($this->comer('id', 'LIKE')) {
-                $patron = $this->exprBits();
+                $patron = $this->exprRelacional();
                 $escape = $this->comer('id', 'ESCAPE') ? $this->exprBits() : null;
                 $e = ['k' => 'like', 'e' => $e, 'patron' => $patron, 'escape' => $escape, 'not' => $not];
                 continue;
             }
 
             if ($this->comer('id', 'BETWEEN')) {
-                $min = $this->exprBits();
+                $min = $this->exprRelacional();
                 $this->exigir('id', 'AND');
-                [$e, $min, $max] = $this->plegar([$e, $min, $this->exprBits()], $c);
+                [$e, $min, $max] = $this->plegar([$e, $min, $this->exprRelacional()], $c);
                 $e = ['k' => 'between', 'e' => $e, 'min' => $min, 'max' => $max, 'not' => $not, 'escrita' => $c];
                 continue;
             }
@@ -404,16 +467,34 @@ class Parser
             }
 
             $tk = $this->actual();
-            if ($tk['t'] === 'op' && in_array($tk['v'], ['=', '==', '<>', '!=', '<', '<=', '>', '>=', '<=>'], true)) {
+            if ($tk['t'] === 'op' && \in_array($tk['v'], ['=', '==', '<>', '!=', '<=>'], true)) {
                 $this->avanzar();
                 $op = ['!=' => '<>', '==' => '='][$tk['v']] ?? $tk['v'];
-                [$i, $d] = $this->plegar([$e, $this->exprBits()], $c);
+                [$i, $d] = $this->plegar([$e, $this->exprRelacional()], $c);
                 $e  = ['k' => 'bin', 'op' => $op, 'i' => $i, 'd' => $d, 'escrita' => $c];
                 continue;
             }
 
             return $e;
         }
+    }
+
+    /** < <= > >=, entre la igualdad y los bits, como en SQLite (2.10) */
+    private function exprRelacional(): array
+    {
+        $e = $this->exprBits();
+        return ($tk = $this->t[$this->i])['t'] === 'op' && isset(self::RELACIONALES[$tk['v']]) ? $this->relacional($e) : $e;
+    }
+
+    /** Los < <= > >= que siguen a $e */
+    private function relacional(array $e): array
+    {
+        while (($tk = $this->t[$this->i])['t'] === 'op' && isset(self::RELACIONALES[$tk['v']])) {
+            $this->i++;
+            [$i, $d] = $this->plegar([$e, $this->exprBits()], $c);
+            $e = ['k' => 'bin', 'op' => $tk['v'], 'i' => $i, 'd' => $d, 'escrita' => $c];
+        }
+        return $e;
     }
 
     /** Operadores de bits (2.9): << >> & |, entre la comparación y la suma, como en SQLite */
@@ -455,7 +536,7 @@ class Parser
                 $e = ['k' => 'bin', 'op' => $tk['u'] === 'DIV' ? 'DIV' : '%', 'i' => $e, 'd' => $this->exprConcat()];
                 continue;
             }
-            if ($tk['t'] === 'op' && in_array($tk['v'], ['*', '/', '%'], true)) {
+            if ($tk['t'] === 'op' && \in_array($tk['v'], ['*', '/', '%'], true)) {
                 $this->avanzar();
                 $e = ['k' => 'bin', 'op' => $tk['v'], 'i' => $e, 'd' => $this->exprConcat()];
                 continue;
@@ -472,7 +553,12 @@ class Parser
      */
     private function exprConcat(): array
     {
-        $e = $this->exprUnaria();
+        if ($this->izq !== null) {
+            $e = $this->izq;                        // lo ya leído (ver exprComparacion())
+            $this->izq = null;
+        } else {
+            $e = $this->exprUnaria();
+        }
         while (($tk = $this->t[$this->i])['t'] === 'op' && ($tk['v'] === '||' || $tk['v'] === '->' || $tk['v'] === '->>')) {
             $this->i++;
             $d = $this->exprUnaria();
@@ -506,7 +592,7 @@ class Parser
         while (($tk = $this->t[$this->i])['t'] === 'id' && $tk['u'] === 'COLLATE' && !$tk['q']) {
             $this->i++;
             $c = strtoupper($this->nombreSimple('colación'));
-            if (!in_array($c, ['NOCASE', 'RTRIM', 'BINARY'], true)) {
+            if (!\in_array($c, ['NOCASE', 'RTRIM', 'BINARY'], true)) {
                 throw JsonSqlDbError::syntax("COLLATE $c no está soportado: NOCASE, RTRIM o BINARY");
             }
             $e = ['k' => 'fn', 'nombre' => 'COLLATE', 'args' => [$e, ['k' => 'lit', 'v' => $c]], 'star' => false, 'distinct' => false];
@@ -535,7 +621,7 @@ class Parser
             return $n['escrita'] === '' ? null : $n['escrita'];
         }
         foreach ($n as $clave => $v) {
-            if (is_array($v) && $clave !== 'select' && $clave !== 'filtro' && $clave !== 'orden'
+            if (\is_array($v) && $clave !== 'select' && $clave !== 'filtro' && $clave !== 'orden'
                 && ($c = self::colacionEscrita($v)) !== null) {
                 return $c;
             }
@@ -706,9 +792,8 @@ class Parser
                 $this->avanzar();
                 $this->avanzar();
                 // Las formas con palabras del estándar y de MySQL (2.9)
-                $especial = ParserConsulta::funcionConPalabras($this, $nombre);
-                if ($especial !== null) {
-                    return $especial;
+                if (isset(self::CON_PALABRAS[$nombre])) {
+                    return ParserFunciones::funcionConPalabras($this, $nombre);
                 }
                 // NOW(), CURDATE() y compañía de MySQL son DATETIME(), DATE() y
                 // TIME() sin argumentos: así la caché sabe que dependen del momento
@@ -740,14 +825,14 @@ class Parser
                         $fn['orden'] = ParserConsulta::listaOrden($this);
                     }
                     // GROUP_CONCAT(x … SEPARATOR ';') de MySQL: el segundo argumento de SQLite
-                    if ($nombre === 'GROUP_CONCAT' && count($fn['args']) === 1 && $this->comer('id', 'SEPARATOR')) {
+                    if ($nombre === 'GROUP_CONCAT' && \count($fn['args']) === 1 && $this->comer('id', 'SEPARATOR')) {
                         $fn['args'][] = $this->expr();
                     }
                 }
                 $this->exigir('punc', ')');
                 // JSON_GROUP_OBJECT(clave, valor) y JSON_OBJECTAGG: un agregado de
                 // un argumento, la pareja (ver SelectAgrupada::agregado())
-                if (($nombre === 'JSON_GROUP_OBJECT' || $nombre === 'JSON_OBJECTAGG') && count($fn['args']) === 2) {
+                if (($nombre === 'JSON_GROUP_OBJECT' || $nombre === 'JSON_OBJECTAGG') && \count($fn['args']) === 2) {
                     $fn['args'] = [['k' => 'fn', 'nombre' => 'JSON_ARRAY', 'args' => $fn['args'], 'star' => false, 'distinct' => false]];
                 }
                 // FILTER (WHERE …) de un agregado y OVER de una función de ventana (2.9)
@@ -797,7 +882,7 @@ class Parser
     protected function unidadDeTiempo(): array
     {
         $u = strtoupper($this->nombreSimple('unidad'));
-        if (!in_array($u, self::UNIDADES, true)) {
+        if (!\in_array($u, self::UNIDADES, true)) {
             throw JsonSqlDbError::syntax("Unidad de tiempo no soportada: $u (" . implode(', ', self::UNIDADES) . ')');
         }
         return ['k' => 'lit', 'v' => $u];
@@ -877,19 +962,50 @@ class Parser
         return $cols;
     }
 
-    protected function nombreTabla(): string
+    /**
+     * El nombre de una tabla como está guardada: sin distinguir mayúsculas,
+     * como en SQLite (2.10: FOO no encontraba Foo, y foo se podía crear al
+     * lado, que en Windows es el mismo fichero). Los nombres de un WITH, tal
+     * cual.
+     */
+    protected function real(string $nombre): string
+    {
+        return $this->nombres === null || isset($this->ctes[strtolower($nombre)]) ? $nombre : ($this->nombres)($nombre);
+    }
+
+    protected function nombreTabla(bool $real = true): string
     {
         $tk = $this->actual();
-        if ($tk['t'] !== 'id' || (!$tk['q'] && in_array($tk['u'], self::RESERVADAS, true))) {
+        if ($tk['t'] !== 'id' || (!$tk['q'] && \in_array($tk['u'], self::RESERVADAS, true))) {
             throw JsonSqlDbError::syntax("Se esperaba un nombre de tabla y se encontró '{$tk['v']}'");
         }
         $this->avanzar();
-        // Prefijo de esquema (main.tabla): se acepta y se descarta
-        if ($this->es('punc', '.')) {
-            $this->avanzar();
-            return $this->nombreSimple('tabla');
+        $nombre = $this->sinEsquema($tk['v']);
+        return $real ? $this->real($nombre) : $nombre;
+    }
+
+    /**
+     * El nombre de una tabla con el prefijo de esquema que pueda llevar
+     * delante, que se descarta: aquí cada base es una carpeta y no hay
+     * esquemas. Al escribir vale cualquiera, como siempre; al leer (el FROM,
+     * $soloMain), solo main, el de SQLite, para que otra_base.tabla no lea en
+     * silencio la tabla de esta. Los de catálogo de otros motores
+     * (information_schema…) dicen qué usar en su lugar (2.10: en el FROM no se
+     * aceptaba ninguno, y el error era «solo se admite una sentencia»).
+     */
+    protected function sinEsquema(string $nombre, bool $soloMain = false): string
+    {
+        if (!$this->es('punc', '.')) {
+            return $nombre;
         }
-        return $tk['v'];
+        if (\in_array(strtolower($nombre), ['information_schema', 'pg_catalog', 'sys', 'mysql', 'performance_schema'], true)) {
+            throw JsonSqlDbError::syntax("No hay '$nombre' en jsonSQLDB: las tablas, columnas e índices se ven con SHOW TABLES, SHOW COLUMNS FROM tabla y SHOW INDEXES FROM tabla");
+        }
+        if ($soloMain && strtolower($nombre) !== 'main') {
+            throw JsonSqlDbError::syntax("'$nombre.' delante de una tabla: una consulta solo lee de su base, sin prefijo (o con main.)");
+        }
+        $this->avanzar();
+        return $this->nombreSimple('tabla');
     }
 
     protected function nombreSimple(string $que): string

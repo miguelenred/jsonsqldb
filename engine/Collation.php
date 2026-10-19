@@ -103,8 +103,8 @@ final class Collation
         $mapa = self::mapa();
         self::$mapaAscii ??= array_filter(array_keys($mapa), static fn($k): bool => !preg_match('/[\x80-\xff]/', (string)$k)) !== [];
         $clave = !self::$mapaAscii && !preg_match('/[\x80-\xff]/', $texto) ? strtolower($texto) : strtolower(strtr($texto, $mapa));
-        if (strlen($texto) <= 64) {
-            if (count(self::$memo) >= 4096) {
+        if (\strlen($texto) <= 64) {
+            if (\count(self::$memo) >= 4096) {
                 self::$memo = [];
             }
             self::$memo[$texto] = $clave;

@@ -258,7 +258,7 @@ final class Api
 
     /** Sentencias que puede lanzar un usuario de solo lectura, las mismas que una API key de lectura. */
     private const LECTURA = ['select', 'union', 'show_databases', 'show_tables', 'show_views', 'show_schema',
-                             'show_keys', 'show_triggers', 'show_indexes', 'show_create', 'check_keys', 'check_tables', 'explain'];
+                             'show_keys', 'show_triggers', 'show_indexes', 'show_create', 'check_keys', 'check_tables', 'check_indexes', 'explain'];
 
     /**
      * Varias sentencias en una transacción (2.9): todas o ninguna. Cada una, un
@@ -308,7 +308,10 @@ final class Api
             }
         };
         $usuario = class_exists('Auth') ? (string)(Auth::usuario()['usuario'] ?? '') : '';
-        \JsonSQLDB\Logger::contexto('jsonSQLDBadmin' . ($usuario !== '' ? " ($usuario)" : ''), util_ip());
+        // Quién y desde dónde, para el registro del motor: con una constante,
+        // Logger solo se carga si se escribe una línea (2.10: se cargaba en
+        // cada consulta del panel)
+        \defined('JSONSQLDB_REGISTRO') || \define('JSONSQLDB_REGISTRO', ['jsonSQLDBadmin' . ($usuario !== '' ? " ($usuario)" : ''), util_ip()]);
         try {
             return $hacer($autorizar);
         } catch (\JsonSQLDB\JsonSqlDbError $e) {

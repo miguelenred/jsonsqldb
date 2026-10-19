@@ -32,7 +32,7 @@ class Functions
                 // No existe en SQLite, donde se usa ||. Se admite por comodidad
                 // para quien viene de MySQL, y con su misma semántica: si algún
                 // argumento es NULL, el resultado es NULL.
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     throw JsonSqlDbError::syntax('CONCAT() necesita al menos 2 argumentos');
                 }
                 $partes = '';
@@ -122,7 +122,7 @@ class Functions
 
             // ---------- Nulos ----------
             case 'COALESCE':
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     throw JsonSqlDbError::syntax('COALESCE necesita al menos 2 argumentos');
                 }
                 foreach ($args as $a) {
@@ -143,7 +143,7 @@ class Functions
                 foreach ($args as $a) {
                     if ($a === null) { return null; }
                     if ($res === null) { $res = $a; continue; }
-                    $c = Valor::comparar($a, $res);
+                    $c = Valor::compararClase($a, $res);       // por clase, como en SQLite: MAX(10, '9') es '9' (2.10)
                     if ($c !== null && (($nombre === 'MIN' && $c < 0) || ($nombre === 'MAX' && $c > 0))) {
                         $res = $a;
                     }
@@ -159,11 +159,11 @@ class Functions
                 return self::fecha($args, 'Y-m-d H:i:s');
             case 'STRFTIME':
                 self::exige($nombre, $args, 2, 12);
-                $d = self::conModificadores($args[1], array_slice($args, 2));
+                $d = self::conModificadores($args[1], \array_slice($args, 2));
                 // %s, los segundos de UNIXEPOCH() con la misma fecha (2.9: la
                 // tomaba en la zona horaria de PHP, y no en UTC como SQLite)
                 return $d === null ? null : self::formatearFecha(Valor::aTexto($args[0]), $d, self::FECHA_SQLITE, null,
-                    static fn(): ?int => FunctionsAmpliadas::compatibles('UNIXEPOCH', array_slice($args, 1)));
+                    static fn(): ?int => FunctionsAmpliadas::compatibles('UNIXEPOCH', \array_slice($args, 1)));
         }
         return FunctionsAmpliadas::compatibles($nombre, $args);
     }
@@ -178,7 +178,7 @@ class Functions
      */
     public static function plegar($v, string $colacion)
     {
-        if (!is_string($v)) {
+        if (!\is_string($v)) {
             return $v;
         }
         return $colacion === 'NOCASE' ? strtr($v, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') : rtrim($v, ' ');
@@ -196,7 +196,7 @@ class Functions
             self::exige($nombre, $args, 2);
             return Valor::comparar(self::plegar($args[0], $colacion), self::plegar($args[1], $colacion)) === 0 ? null : $args[0];
         }
-        if (count($args) < 2) {
+        if (\count($args) < 2) {
             return self::escalar($nombre, $args);    // el error de siempre
         }
         $min   = $nombre === 'MIN' || $nombre === 'LEAST';
@@ -205,7 +205,7 @@ class Functions
             if ($v === null) {
                 return null;
             }
-            $c = $i === 0 ? null : Valor::comparar(self::plegar($args[$mejor], $colacion), self::plegar($v, $colacion));
+            $c = $i === 0 ? null : Valor::compararClase(self::plegar($args[$mejor], $colacion), self::plegar($v, $colacion));
             if ($c !== null && ($min ? $c >= 0 : $c < 0)) {
                 $mejor = $i;
             }
@@ -257,7 +257,7 @@ class Functions
             return $len === null ? mb_substr($s, $ini, null, 'UTF-8') : mb_substr($s, $ini, $len, 'UTF-8');
         }
         $car = preg_split('//u', $s, -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        $tro = $len === null ? array_slice($car, $ini) : array_slice($car, $ini, $len);
+        $tro = $len === null ? \array_slice($car, $ini) : \array_slice($car, $ini, $len);
         return implode('', $tro);
     }
 
@@ -269,26 +269,33 @@ class Functions
             $antes = $s;
             foreach ($lista as $c) {
                 if ($izquierda && str_starts_with($s, $c)) {
-                    $s = substr($s, strlen($c));
+                    $s = substr($s, \strlen($c));
                 }
                 if ($derecha && str_ends_with($s, $c)) {
-                    $s = substr($s, 0, -strlen($c));
+                    $s = substr($s, 0, -\strlen($c));
                 }
             }
         } while ($s !== $antes);
         return $s;
     }
 
-    /** Acentos y eñes, para poder cambiar de caja sin la extensión mbstring */
-    private const ACENTOS_MIN = 'áéíóúüàèìòùâêîôûäëïöñçãõåæøœß';
-    private const ACENTOS_MAY = 'ÁÉÍÓÚÜÀÈÌÒÙÂÊÎÔÛÄËÏÖÑÇÃÕÅÆØŒSS';
+    /**
+     * UPPER y LOWER, con acentos y eñes, como MySQL, PostgreSQL y Access (en
+     * SQLite, solo de la A a la Z). Sin mbstring, las letras de esta tabla: la
+     * de antes de la 2.10 tenía la ß de más en las mayúsculas, y LOWER('S')
+     * daba 'ß'. strtr() para la A a la Z: no depende del locale, al revés que
+     * strtoupper() en PHP 8.0 y 8.1.
+     */
+    private const MAYUSCULAS = ['á' => 'Á', 'é' => 'É', 'í' => 'Í', 'ó' => 'Ó', 'ú' => 'Ú', 'ü' => 'Ü', 'à' => 'À', 'è' => 'È',
+        'ì' => 'Ì', 'ò' => 'Ò', 'ù' => 'Ù', 'â' => 'Â', 'ê' => 'Ê', 'î' => 'Î', 'ô' => 'Ô', 'û' => 'Û', 'ä' => 'Ä', 'ë' => 'Ë',
+        'ï' => 'Ï', 'ö' => 'Ö', 'ñ' => 'Ñ', 'ç' => 'Ç', 'ã' => 'Ã', 'õ' => 'Õ', 'å' => 'Å', 'æ' => 'Æ', 'ø' => 'Ø', 'œ' => 'Œ'];
 
     private static function mayus(string $s): string
     {
         if (function_exists('mb_strtoupper')) {
             return mb_strtoupper($s, 'UTF-8');
         }
-        return strtoupper(strtr($s, self::tabla(self::ACENTOS_MIN, self::ACENTOS_MAY)));
+        return strtr(strtr($s, self::MAYUSCULAS + ['ß' => 'SS']), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ');
     }
 
     private static function minus(string $s): string
@@ -296,24 +303,8 @@ class Functions
         if (function_exists('mb_strtolower')) {
             return mb_strtolower($s, 'UTF-8');
         }
-        return strtolower(strtr($s, self::tabla(self::ACENTOS_MAY, self::ACENTOS_MIN)));
-    }
-
-    /** @return array<string,string> equivalencias carácter a carácter */
-    private static function tabla(string $desde, string $hasta): array
-    {
-        static $memo = [];
-        $clave = $desde;
-        if (isset($memo[$clave])) {
-            return $memo[$clave];
-        }
-        $a = preg_split('//u', $desde, -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        $b = preg_split('//u', $hasta, -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        $t = [];
-        foreach ($a as $i => $c) {
-            if (isset($b[$i])) { $t[$c] = $b[$i]; }
-        }
-        return $memo[$clave] = $t;
+        static $minusculas = null;
+        return strtr(strtr($s, $minusculas ??= array_flip(self::MAYUSCULAS)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
     }
 
     /** DATE/TIME/DATETIME: sin argumentos equivale a 'now'. */
@@ -322,7 +313,7 @@ class Functions
         // Sin argumentos, la fecha de ahora. CON argumento NULL, el resultado es
         // NULL: un ?? aquí confundía las dos cosas y DATE(NULL) devolvía hoy.
         $v = $args === [] ? 'now' : $args[0];
-        $d = self::conModificadores($v, array_slice($args, 1));
+        $d = self::conModificadores($v, \array_slice($args, 1));
         return $d === null ? null : $d->format($formato);
     }
 
@@ -334,12 +325,12 @@ class Functions
      */
     protected static function conModificadores($v, array $mods): ?\DateTimeImmutable
     {
-        if ($mods !== [] && is_string($mods[0]) && strcasecmp(trim($mods[0]), 'unixepoch') === 0) {
+        if ($mods !== [] && \is_string($mods[0]) && strcasecmp(trim($mods[0]), 'unixepoch') === 0) {
             if ($v === null || !is_numeric($v)) {
                 return null;
             }
-            $d = (new \DateTimeImmutable('@' . Valor::entero(floor((float)$v))))->modify(sprintf('+%d microseconds', (int)round(fmod((float)$v, 1) * 1e6)));
-            return self::modificar($d, array_slice($mods, 1));
+            $d = (new \DateTimeImmutable('@' . Valor::entero(floor((float)$v))))->modify(\sprintf('+%d microseconds', (int)round(fmod((float)$v, 1) * 1e6)));
+            return self::modificar($d, \array_slice($mods, 1));
         }
         return self::modificar(self::aFecha($v), $mods);
     }
@@ -369,14 +360,14 @@ class Functions
                     if ($n != Valor::entero($n)) {
                         throw JsonSqlDbError::syntax("Modificador de fecha no soportado: '$texto' (los meses y los años, enteros)");
                     }
-                    $d = $d->modify(sprintf('%+d %s', Valor::entero($n), $p[3]));
+                    $d = $d->modify(\sprintf('%+d %s', Valor::entero($n), $p[3]));
                 } else {
                     // En milisegundos, como SQLite, para admitir '+1.5 days' (2.9:
                     // en segundos, y '+0.5 seconds' sumaba uno entero)
                     $ms = Valor::entero(round($n * ['second' => 1000, 'minute' => 60000, 'hour' => 3600000, 'day' => 86400000][$p[3]]));
-                    $d  = $d->modify(sprintf('%+d seconds', intdiv($ms, 1000)));
+                    $d  = $d->modify(\sprintf('%+d seconds', intdiv($ms, 1000)));
                     if ($ms % 1000 !== 0) {
-                        $d = $d->modify(sprintf('%+d microseconds', $ms % 1000 * 1000));
+                        $d = $d->modify(\sprintf('%+d microseconds', $ms % 1000 * 1000));
                     }
                 }
                 continue;
@@ -413,6 +404,15 @@ class Functions
         }
         if (strcasecmp($s, 'now') === 0) {
             return new \DateTimeImmutable('now');
+        }
+        // Una hora sola es del 1 de enero de 2000, como en SQLite (2.10:
+        // TIME('12:00:00') daba NULL)
+        if (preg_match('/^(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/', $s, $m)) {
+            if ((int)$m[1] > 23 || (int)$m[2] > 59 || (int)($m[3] ?? 0) > 59) {
+                return null;
+            }
+            $ms = str_pad(substr($m[4] ?? '', 0, 3), 3, '0');
+            return \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s.v', "2000-01-01 $m[1]:$m[2]:" . ($m[3] ?? '00') . ".$ms") ?: null;
         }
         if (!Types::esFecha($s)) {
             return null;
@@ -468,7 +468,7 @@ class Functions
             if ($codigo === '#j') { return str_pad((string)((int)$d->format('z') + 1), 3, '0', STR_PAD_LEFT); }
             // %W de SQLite: la semana 01 empieza el primer lunes del año, y los
             // días de antes son la 00 (2.9: era la semana ISO, otra cosa)
-            if ($codigo === '#W') { return sprintf('%02d', intdiv((int)$d->format('z') + 8 - (int)$d->format('N'), 7)); }
+            if ($codigo === '#W') { return \sprintf('%02d', intdiv((int)$d->format('z') + 8 - (int)$d->format('N'), 7)); }
             if ($codigo === '#s') { return (string)($segundos === null ? $d->getTimestamp() : $segundos()); }
             return $d->format($codigo);
         }, $formato);
@@ -476,7 +476,7 @@ class Functions
 
     protected static function exige(string $nombre, array $args, int $min, ?int $max = null): void
     {
-        $n = count($args);
+        $n = \count($args);
         $max ??= $min;
         if ($n < $min || $n > $max) {
             $esperado = $min === $max ? "$min" : "entre $min y $max";

@@ -63,9 +63,24 @@ $cuando    = static function (array $p) use ($dias): string {
       </div>
     </div>
 
-    <?php foreach (array_unique(array_column($programas, 'base')) as $b): $ficheros = array_reverse(Copias::ficheros($b)); ?>
+    <?php // También las bases sin programación que tienen copias (2.10: se dejaban de ver, y no se borraban nunca)
+    foreach (array_unique(array_merge(array_column($programas, 'base'), Copias::basesConCopias())) as $b):
+        $ficheros = array_reverse(Copias::ficheros($b));
+        $sueltas  = array_flip(Copias::sueltas($b)); ?>
     <div class="card mb-3">
       <div class="card-header"><?= icono('archive') ?> <?= h(t('Copias de «{base}»', ['base' => $b])) ?></div>
+      <?php if ($sueltas !== []): ?>
+        <div class="card-body py-2 small d-flex flex-wrap gap-2 align-items-center">
+          <span><?= h(t('{n} copia(s) sin una programación de su formato: no se borran solas.', ['n' => count($sueltas)])) ?></span>
+          <form method="post" class="d-inline" data-confirm="<?= h(t('¿Borrar las {n} copia(s) que no se borran solas?', ['n' => count($sueltas)])) ?>">
+            <?= csrf() ?>
+            <input type="hidden" name="accion" value="borrar_sueltas">
+            <input type="hidden" name="nombre" value="<?= h($b) ?>">
+            <input type="hidden" name="volver" value="copias">
+            <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?> <?= h(t('Borrarlas')) ?></button>
+          </form>
+        </div>
+      <?php endif; ?>
       <div class="table-responsive">
         <table class="table table-sm align-middle mb-0">
           <tbody>
@@ -74,7 +89,7 @@ $cuando    = static function (array $p) use ($dias): string {
           <?php endif; ?>
           <?php foreach ($ficheros as $f): ?>
             <tr>
-              <td class="small"><?= h($f) ?></td>
+              <td class="small"><?= h($f) ?><?php if (isset($sueltas[$f])): ?> <span class="badge text-bg-warning"><?= h(t('no se borra sola')) ?></span><?php endif; ?></td>
               <td class="small text-body-secondary"><?= h(Idioma::numero((int)ceil((int)filesize(Copias::ruta($b, $f)) / 1024))) ?> KB</td>
               <td class="text-end text-nowrap">
                 <form method="post" class="d-inline">

@@ -42,7 +42,7 @@ final class Lexer
     public static function tokens(string $sql): array
     {
         $tokens = [];
-        $n      = strlen($sql);
+        $n      = \strlen($sql);
         $i      = 0;
         $linea  = 1;
 
@@ -172,7 +172,7 @@ final class Lexer
             if (($c === '<' && substr($sql, $i, 3) === '<=>') || ($c === '-' && ($sql[$i + 1] ?? '') === '>')) {
                 $op = $c === '<' || ($sql[$i + 2] ?? '') === '>' ? substr($sql, $i, 3) : '->';
                 $tokens[] = ['t' => 'op', 'v' => $op, 'l' => $linea, 'p' => $ini];
-                $i += strlen($op);
+                $i += \strlen($op);
                 continue;
             }
 
@@ -209,6 +209,6 @@ final class Lexer
     {
         $cifras = ltrim($cifras, '0') ?: '0';
         $limite = $negativo ? '9223372036854775808' : '9223372036854775807';
-        return strlen($cifras) < 19 || (strlen($cifras) === 19 && strcmp($cifras, $limite) <= 0);
+        return \strlen($cifras) < 19 || (\strlen($cifras) === 19 && strcmp($cifras, $limite) <= 0);
     }
 }

@@ -618,6 +618,27 @@ chk('el script del cron hace las que tocan y solo esas, con el mismo límite de 
     $nuevos = array_values(array_diff($despues, $antes));
     return $codigo === 0 && count($nuevos) === 1 && str_ends_with($nuevos[0], '.zip') ?: [$codigo, $salida, $nuevos];
 });
+chk('quitada la programación de un formato, sus copias se ven, se dice que no se borran solas y se pueden borrar de una vez, también las de una base con guion (2.10)', function () use ($raizDatos) {
+    // Antes dejaban de verse, sin programación de la base, y se quedaban para siempre
+    $id = '';
+    foreach (json_decode((string)file_get_contents($raizDatos . '/admin/copias.json'), true) as $p) {
+        if ($p['formato'] === 'sql') { $id = $p['id']; }
+    }
+    $zips = glob($raizDatos . '/admin/copias/grande/*.zip');
+    $html = peticion('p=copias', ['csrf' => csrf('p=copias'), 'accion' => 'borrar_programacion', 'id' => $id, 'volver' => 'copias']);
+    $sql = glob($raizDatos . '/admin/copias/grande/*.sql');
+    $aviso = str_contains($html, 'ya no se borran solas') && str_contains($html, 'no se borra sola') && str_contains($html, 'value="borrar_sueltas"');
+    peticion('p=copias', ['csrf' => csrf('p=copias'), 'accion' => 'borrar_sueltas', 'nombre' => 'grande', 'volver' => 'copias']);
+    // Las de una base con guion en el nombre también (el patrón no lo admitía)
+    @mkdir($raizDatos . '/admin/copias/con-guion', 0775, true);
+    file_put_contents($raizDatos . '/admin/copias/con-guion/con-guion-20261014-120000.sql', "-- copia\n");
+    $guion = str_contains(peticion('p=copias', null), 'con-guion-20261014-120000.sql');
+    peticion('p=copias', ['csrf' => csrf('p=copias'), 'accion' => 'borrar_sueltas', 'nombre' => 'con-guion', 'volver' => 'copias']);
+    $guion = $guion && glob($raizDatos . '/admin/copias/con-guion/*') === [];
+    @rmdir($raizDatos . '/admin/copias/con-guion');
+    return $aviso && $guion && count($sql) === 1 && glob($raizDatos . '/admin/copias/grande/*.sql') === [] && glob($raizDatos . '/admin/copias/grande/*.zip') === $zips
+        ?: json_encode([$aviso, $guion, $sql, glob($raizDatos . '/admin/copias/grande/*')]);
+});
 
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";

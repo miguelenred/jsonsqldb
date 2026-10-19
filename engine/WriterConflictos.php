@@ -25,11 +25,12 @@ final class WriterConflictos extends Writer
      * quería insertar. Pasa por todo lo de un UPDATE (tipos, triggers,
      * claves únicas y foráneas). False si el WHERE la deja como está.
      */
-    protected static function actualizarConflicto(Writer $w, string $tabla, array $meta, int $pos, array $propuesta, array $conflicto, array &$indices, bool $devolver): bool
+    public static function actualizarConflicto(Writer $w, string $tabla, array $meta, int $pos, array $propuesta, array $conflicto, array &$indices, bool $devolver): bool
     {
         $mapa = $w->mapaColumnas($tabla, $meta);
         foreach ($meta['columns'] as $c) {
             $mapa['excluded.' . strtolower($c['name'])] = 'excluded.' . $c['name'];
+            $mapa["\0a:excluded." . $c['name']]        = Types::afinidad((string)$c['type']);   // 2.10
         }
         $vieja = self::filaEn($w, $tabla, $pos);
         $fila  = $vieja;
@@ -62,7 +63,7 @@ final class WriterConflictos extends Writer
         $w->comprobarUnicos($tabla, $meta, $nueva, $indices, $vieja);
         $w->comprobarForaneas($tabla, $meta, $nueva);
         // Escrita antes de sus cascadas, como en un UPDATE (ver actualizar())
-        $w->ponerEn($tabla, $pos, $nueva);
+        $w->ponerEn($tabla, $pos, $nueva, $vieja);
         $w->cambiarEnIndices($meta, $vieja, $nueva, $indices);
         self::apuntarUnicas($w, $tabla, $meta, $pos, $vieja, $nueva);
         $w->propagarHijos($tabla, $meta, $vieja, $nueva);
@@ -73,8 +74,52 @@ final class WriterConflictos extends Writer
         return true;
     }
 
+    /**
+     * OR REPLACE en un INSERT o un UPDATE (2.10): un NULL en una columna NOT
+     * NULL toma su valor por defecto, como en SQLite. Sin él sigue siendo
+     * NULL, y un error al comprobar la fila.
+     */
+    public static function nulosPorDefecto(array $meta, array $fila): array
+    {
+        foreach ($meta['columns'] as $c) {
+            if ($c['notnull'] && ($fila[$c['name']] ?? null) === null) {
+                $fila[$c['name']] = self::porDefecto($c);
+            }
+        }
+        return $fila;
+    }
+
+    /**
+     * OR REPLACE: borra las filas con las que $nueva choca en alguna clave
+     * única, con sus acciones de clave foránea y sin triggers (como SQLite con
+     * recursive_triggers desactivado). En un UPDATE (2.10), $pos y $vieja son
+     * la fila que cambia, que no choca consigo misma.
+     *
+     * @return list<int> las posiciones que ha borrado
+     */
+    public static function quitarChoques(Writer $w, string $tabla, array $meta, ?int $pos, ?array $vieja, array $nueva, array &$indices): array
+    {
+        $quitadas = [];
+        foreach ($w->unicos($meta) as $uq) {
+            $clave = self::claveDe($nueva, $uq['columns'], $uq['plegar']);
+            if ($clave === null || ($vieja !== null && $clave === self::claveDe($vieja, $uq['columns'], $uq['plegar']))) {
+                continue;
+            }
+            while (($choca = self::chocaCon($w, $tabla, $meta, $nueva, $uq['name'])) !== null && $choca !== $pos) {
+                $otra = self::filaEn($w, $tabla, $choca);
+                $w->propagarHijos($tabla, $meta, $otra, null);
+                $w->ponerEn($tabla, $choca, null, $otra);
+                WriterForaneas::padreQuitado($w, $tabla, $meta, $otra);
+                WriterCambios::quitarDeIndices($w, $meta, $otra, $indices);
+                self::apuntarUnicas($w, $tabla, $meta, $choca, $otra, null);
+                $quitadas[] = $choca;
+            }
+        }
+        return $quitadas;
+    }
+
     /** El conjunto único que nombra un ON CONFLICT (cols); error si no hay ninguno con esas columnas, como en SQLite. */
-    protected static function claveObjetivo(Writer $w, string $tabla, array $meta, array $cols): string
+    public static function claveObjetivo(Writer $w, string $tabla, array $meta, array $cols): string
     {
         $buscadas = array_map('strtolower', $cols);
         sort($buscadas);
@@ -93,7 +138,7 @@ final class WriterConflictos extends Writer
      * o en cualquiera si es null; null si no choca. Los mapas clave →
      * posición se arman la primera vez y se mantienen con apuntarUnicas().
      */
-    protected static function chocaCon(Writer $w, string $tabla, array $meta, array $nueva, ?string $soloEsa): ?int
+    public static function chocaCon(Writer $w, string $tabla, array $meta, array $nueva, ?string $soloEsa): ?int
     {
         foreach ($w->unicos($meta) as $uq) {
             $n = $uq['name'];
@@ -106,9 +151,9 @@ final class WriterConflictos extends Writer
             }
             if (!isset($w->datos[$tabla])) {
                 // Sin cargar la tabla: lo que ha tocado la sentencia, y si no, el índice
-                $pos = array_key_exists($clave, $w->unicas[$tabla][$n] ?? [])
+                $pos = \array_key_exists($clave, $w->unicas[$tabla][$n] ?? [])
                     ? $w->unicas[$tabla][$n][$clave] : self::chocaEnDisco($w, $tabla, $meta, $uq, $clave);
-                if (is_int($pos)) {
+                if (\is_int($pos)) {
                     return $pos;
                 }
                 if (!isset($w->datos[$tabla])) {
@@ -202,7 +247,7 @@ final class WriterConflictos extends Writer
     }
 
     /** Una fila que entra, cambia o sale: los mapas de chocaCon() al día. */
-    protected static function apuntarUnicas(Writer $w, string $tabla, array $meta, int $pos, ?array $vieja, ?array $nueva): void
+    public static function apuntarUnicas(Writer $w, string $tabla, array $meta, int $pos, ?array $vieja, ?array $nueva): void
     {
         $parcial = !isset($w->datos[$tabla]);
         foreach ($w->unicos($meta) as $uq) {

@@ -148,7 +148,7 @@ final class IndexesBusqueda extends Indexes
                 if ($a !== null && $b !== null) {
                     $lista = [[$n['e'], '>=', $a], [$n['e'], '<=', $b]];
                 }
-            } elseif (($n['k'] ?? '') === 'bin' && in_array($n['op'] ?? '', ['=', '<', '<=', '>', '>='], true)) {
+            } elseif (($n['k'] ?? '') === 'bin' && \in_array($n['op'] ?? '', ['=', '<', '<=', '>', '>='], true)) {
                 [$col, $lit, $op] = [$n['i'], $n['d'], $n['op']];
                 if (($col['k'] ?? '') !== 'col') {
                     [$col, $lit, $op] = [$n['d'], $n['i'], strtr($op, ['<' => '>', '>' => '<'])];
@@ -176,7 +176,7 @@ final class IndexesBusqueda extends Indexes
     /** @return int|float|string|null un literal con el que comparar: número o texto */
     private static function literalComparable(array $n)
     {
-        if (($n['k'] ?? '') !== 'lit' || !(is_int($n['v']) || is_float($n['v']) || is_string($n['v']))) {
+        if (($n['k'] ?? '') !== 'lit' || !(\is_int($n['v']) || \is_float($n['v']) || \is_string($n['v']))) {
             return null;
         }
         return $n['v'];
@@ -195,7 +195,7 @@ final class IndexesBusqueda extends Indexes
             $b = self::literalNumerico($n['max']);
             return $a === null || $b === null ? [] : [[$n['e'], $a, $b]];
         }
-        if ($k !== 'bin' || !in_array($n['op'] ?? '', ['<', '<=', '>', '>='], true)) {
+        if ($k !== 'bin' || !\in_array($n['op'] ?? '', ['<', '<=', '>', '>='], true)) {
             return [];
         }
         $op = $n['op'];
@@ -219,10 +219,10 @@ final class IndexesBusqueda extends Indexes
     /** @return int|float|null */
     private static function literalNumerico(array $n)
     {
-        if (($n['k'] ?? '') !== 'lit' || $n['v'] === null || is_bool($n['v'])) {
+        if (($n['k'] ?? '') !== 'lit' || $n['v'] === null || \is_bool($n['v'])) {
             return null;
         }
-        return is_int($n['v']) || is_float($n['v']) ? $n['v'] : (Valor::esNumerico($n['v']) ? Valor::aNumero($n['v']) : null);
+        return \is_int($n['v']) || \is_float($n['v']) ? $n['v'] : (Valor::esNumerico($n['v']) ? Valor::aNumero($n['v']) : null);
     }
 
     /** @return list<array> conjunciones de primer nivel */
@@ -256,7 +256,7 @@ final class IndexesBusqueda extends Indexes
         }
 
         if ($k === 'in' && empty($n['not']) && ($n['select'] ?? null) === null
-            && is_array($n['lista'] ?? null) && $n['lista'] !== []
+            && \is_array($n['lista'] ?? null) && $n['lista'] !== []
             && ($n['e']['k'] ?? '') === 'col') {
             $valores = [];
             foreach ($n['lista'] as $e) {
@@ -281,7 +281,7 @@ final class IndexesBusqueda extends Indexes
      * las filas de esa ciudad en vez de una. Quien busca prueba el siguiente
      * si uno no compensa.
      *
-     * @return list<array{def: array, claves: list<string>, prefijo: bool}>
+     * @return list<array{def: array, claves: list<string>, prefijo: bool, n: int, parcial: bool}>
      */
     public static function candidatos(array $defs, array $predicados): array
     {
@@ -294,30 +294,44 @@ final class IndexesBusqueda extends Indexes
                 }
                 $n++;
             }
-            if ($n === 0 || !Indexes::sirve($def, $n)) {
+            if ($n === 0) {
                 continue;
             }
+            // Sin servir para estas columnas (las de detrás admiten NULL y sus
+            // filas con NULL no están en él), aún sirve en las partes donde no
+            // falta ninguna fila (2.10, ver Storage::posicionesPorIndice()); va
+            // detrás de los demás
+            $parcial = !Indexes::sirve($def, $n);
             // Producto de los valores de cada columna cubierta: un IN aporta varios
             $claves = [''];
             $tope = self::MAX_CLAVES;
             if ($n === 1) {
                 $numericas = true;
                 foreach ($predicados[strtolower($def['columns'][0])] as $v) {
-                    $numericas = $numericas && (is_int($v) || is_float($v));
+                    $v = Valor::conAfinidad($v, $def['afin'][0] ?? null);
+                    $numericas = $numericas && (\is_int($v) || \is_float($v));
                 }
                 $tope = $numericas ? self::MAX_CLAVES_NUMERICAS : self::MAX_CLAVES;
             }
             for ($i = 0; $i < $n && $claves !== null; $i++) {
                 $valores = $predicados[strtolower($def['columns'][$i])];
-                if (count($claves) * count($valores) > $tope) {
+                if (\count($claves) * \count($valores) > $tope) {
                     $claves = null;                 // demasiadas: con este índice sale más barato recorrer
                     break;
                 }
                 $nuevas = [];
                 $c = $def['plegar'][$i] ?? null;    // la colación de la columna (2.9): las claves van con ella
+                $a = $def['afin'][$i] ?? null;      // y su afinidad (2.10): 7 en una de texto se busca como '7'
                 foreach ($claves as $base) {
                     foreach ($valores as $v) {
                         if ($v !== null) {          // NULL nunca es igual a nada
+                            $v = Valor::conAfinidad($v, $a);
+                            if (!self::claveFiable($v)) {
+                                // Un infinito: este índice no sirve (la
+                                // igualdad la decide Valor::comparar())
+                                $claves = null;
+                                break 3;
+                            }
                             $nuevas[] = $base . self::trozo($c === null ? $v : Functions::plegar($v, $c));
                         }
                     }
@@ -331,11 +345,11 @@ final class IndexesBusqueda extends Indexes
             if ($claves === []) {
                 return [];                          // ninguna fila puede cumplirlo
             }
-            $lista[] = ['def' => $def, 'claves' => $claves, 'prefijo' => $n < count($def['columns']),
-                        'unico' => !empty($def['unico']) && $n === count($def['columns']), 'n' => $n, 'orden' => $orden];
+            $lista[] = ['def' => $def, 'claves' => $claves, 'prefijo' => $n < \count($def['columns']),
+                        'unico' => !empty($def['unico']) && $n === \count($def['columns']), 'n' => $n, 'orden' => $orden, 'parcial' => $parcial];
         }
-        usort($lista, static fn($a, $b) => [$b['unico'], $b['n'], $a['orden']] <=> [$a['unico'], $a['n'], $b['orden']]);
-        return array_map(static fn($c) => ['def' => $c['def'], 'claves' => $c['claves'], 'prefijo' => $c['prefijo'], 'n' => $c['n']], $lista);
+        usort($lista, static fn($a, $b) => [$a['parcial'], $b['unico'], $b['n'], $a['orden']] <=> [$b['parcial'], $a['unico'], $a['n'], $b['orden']]);
+        return array_map(static fn($c) => ['def' => $c['def'], 'claves' => $c['claves'], 'prefijo' => $c['prefijo'], 'n' => $c['n'], 'parcial' => $c['parcial']], $lista);
     }
 
     /**
@@ -360,7 +374,7 @@ final class IndexesBusqueda extends Indexes
             }
             $lista = [];
             foreach ($valores as $v) {
-                if (!is_string($v) || $v === '' || is_numeric(trim($v)) || !preg_match('#^[\x20-\x7E]+$#', $v)
+                if (!\is_string($v) || $v === '' || is_numeric(trim($v)) || !preg_match('#^[\x20-\x7E]+$#', $v)
                     || strpbrk($v, "\"\\/<>&'") !== false) {
                     continue 2;
                 }
@@ -376,22 +390,17 @@ final class IndexesBusqueda extends Indexes
     /**
      * ¿La clave de este valor es de fiar para decidir una igualdad?
      *
-     * Casi siempre sí. La excepción son los números tan grandes que ya no caben
-     * exactos en un entero: ahí un mismo valor puede escribirse de dos formas
-     * que el motor considera iguales y que dan claves distintas. Son valores por
-     * encima de 9·10^18, que en la práctica no aparecen, pero cuando el conjunto
-     * se usa para responder directamente —como en un IN— no hay un WHERE detrás
-     * que corrija el fallo, así que esos se comparan uno a uno.
+     * Sí, salvo un decimal infinito, que no se puede guardar y cuya clave es
+     * la de un texto. Dos números iguales tienen la misma clave en todo el
+     * rango (ver Indexes::trozo()); hasta la 2.10, pasado 9·10^18 un mismo
+     * valor podía tener dos (entero y decimal), y esos se comparaban uno a
+     * uno. Un texto va siempre con su clave de texto (2.10).
      *
      * @param mixed $v
      */
     public static function claveFiable($v): bool
     {
-        if (is_bool($v) || $v === null || !Valor::esNumerico($v)) {
-            return true;
-        }
-        $n = Valor::aNumero($v);
-        return is_int($n) ? abs($n) < 9.0E+18 : (is_finite($n) && abs($n) < 9.0E+18);
+        return !\is_float($v) || is_finite($v);
     }
 
     /**
@@ -399,17 +408,23 @@ final class IndexesBusqueda extends Indexes
      * compara: la de x ($colacion, ver Evaluator::resolver()) o, si x no la
      * decide (true), la de lo que devuelve la subconsulta ($deLaSub). Con
      * una, los valores van plegados y el conjunto la lleva en [3], para
-     * plegar x igual.
+     * plegar x igual. Y con la afinidad (2.10): si x o la subconsulta es una
+     * columna de texto y ninguna de las dos una numérica, se compara como
+     * texto (ver conjunto()), como en SQLite.
      *
      * @param list<mixed> $valores
      */
-    public static function conjuntoDeIn(array $valores, string|bool|null $colacion, ?string $deLaSub): array
+    public static function conjuntoDeIn(array $valores, string|bool|null $colacion, ?string $deLaSub,
+                                        ?string $afinidad = null, ?string $afinidadSub = null): array
     {
+        // Sin saber alguna de las dos (null), como antes de la 2.10
+        $texto = $afinidad !== null && $afinidadSub !== null && $afinidad !== 'N' && $afinidadSub !== 'N'
+            && ($afinidad === 'T' || $afinidadSub === 'T');
         $c = $colacion === true ? $deLaSub : $colacion;
-        if (!is_string($c) || $c === 'BINARY') {
-            return self::conjunto($valores);
+        if (!\is_string($c) || $c === 'BINARY') {
+            return self::conjunto($valores, $texto);
         }
-        $out    = self::conjunto(array_map(static fn($v) => Functions::plegar($v, $c), $valores));
+        $out    = self::conjunto(array_map(static fn($v) => Functions::plegar($v, $c), $valores), $texto);
         $out[3] = $c;
         return $out;
     }
@@ -418,17 +433,22 @@ final class IndexesBusqueda extends Indexes
      * Agrupa unos valores por su clave, para poder resolver un IN sin recorrer
      * la lista entera en cada fila.
      *
-     * Devuelve [conjunto, dudosos, hayNulo]. En el conjunto, cada clave lleva
-     * el valor original que le corresponde, o la lista de ellos si son varios:
-     * la clave acota los candidatos pero la igualdad la sigue decidiendo
-     * Valor::comparar(), porque dos valores distintos pueden compartir clave.
-     * Uno solo va tal cual (2.9): con un millón de valores, una lista de uno
-     * por clave eran más de 150 MB.
+     * Devuelve [conjunto, dudosos, hayNulo, 4 => comoTexto]. En el conjunto,
+     * cada clave lleva el valor original que le corresponde, o la lista de
+     * ellos si son varios: la clave acota los candidatos pero la igualdad la
+     * sigue decidiendo Valor::comparar(), porque dos valores distintos pueden
+     * compartir clave. Uno solo va tal cual (2.9): con un millón de valores,
+     * una lista de uno por clave eran más de 150 MB.
+     *
+     * Un texto que es un número va también con la clave de ese número (2.10):
+     * '7' no es '007', pero los dos son iguales a 7 (ver Valor::comparar()).
+     * Con $comoTexto (la afinidad de texto, ver conjuntoDeIn()), los números
+     * pasan a texto, aquí y en lo que se busca (ver EvaluatorConjunto::enConjunto()).
      *
      * @param list<mixed> $valores
-     * @return array{0: array<string, mixed>, 1: list<mixed>, 2: bool}
+     * @return array{0: array<string, mixed>, 1: list<mixed>, 2: bool, 4: bool}
      */
-    public static function conjunto(array $valores): array
+    public static function conjunto(array $valores, bool $comoTexto = false): array
     {
         $conjunto = [];
         $dudosos  = [];
@@ -436,39 +456,32 @@ final class IndexesBusqueda extends Indexes
 
         foreach ($valores as $x) {
             if ($x === null) { $hayNulo = true; continue; }
+            if ($comoTexto) {
+                $x = Valor::conAfinidad($x, 'T');
+            }
             if (!self::claveFiable($x)) { $dudosos[] = $x; continue; }
-            $k = (string)self::clave([$x]);
-            if (!isset($conjunto[$k])) {
-                $conjunto[$k] = $x;
-            } elseif (is_array($conjunto[$k])) {
-                $conjunto[$k][] = $x;
-            } else {
-                $conjunto[$k] = [$conjunto[$k], $x];
+            // Su clave y, de un texto que es un número, también la de ese
+            // número; sin una función por cada una (2.10, antes de publicarla:
+            // un IN de cien claves hacía un 1,5 % más que en la 2.9)
+            $claves = [(string)self::clave([$x])];
+            if (!$comoTexto && \is_string($x) && Valor::esNumerico($x)) {
+                $n = trim($x) + 0;
+                if (self::claveFiable($n)) {
+                    $claves[] = (string)self::clave([$n]);
+                } else {
+                    $dudosos[] = $x;
+                }
+            }
+            foreach ($claves as $k) {
+                if (!isset($conjunto[$k])) {
+                    $conjunto[$k] = $x;
+                } elseif (\is_array($conjunto[$k])) {
+                    $conjunto[$k][] = $x;
+                } else {
+                    $conjunto[$k] = [$conjunto[$k], $x];
+                }
             }
         }
-        return [$conjunto, $dudosos, $hayNulo];
-    }
-
-    /**
-     * ¿Puede estar alguna clave con estos valores numéricos en un trozo con
-     * este rango? Un valor null es una clave de texto, que puede estar en
-     * cualquiera. Con rango desconocido (null) sí; con un trozo vacío ([]) no.
-     *
-     * @param list<int|float|null> $valores los de valorNumerico() de cada clave
-     */
-    public static function cabeEnRango(array $valores, ?array $rango): bool
-    {
-        if ($rango === null) {
-            return true;
-        }
-        if ($rango === []) {
-            return false;
-        }
-        foreach ($valores as $v) {
-            if ($v === null || ($v >= $rango[0] && $v <= $rango[1])) {
-                return true;
-            }
-        }
-        return false;
+        return [$conjunto, $dudosos, $hayNulo, 4 => $comoTexto];
     }
 }

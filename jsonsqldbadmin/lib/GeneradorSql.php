@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/NoTraducible.php';
 
 use JsonSQLDB\Parser;
-use JsonSQLDB\ParserEscritura;
+use JsonSQLDB\ParserEscrituraAvanzada;
 use JsonSQLDB\Select;
 
 /**
@@ -509,7 +509,7 @@ final class GeneradorSql
                 continue;
             }
             if (strncasecmp(ltrim($paso), 'SET', 3) === 0) {
-                foreach (ParserEscritura::analizarSetNew($paso)['asig'] as [$col, $e]) {
+                foreach (ParserEscrituraAvanzada::analizarSetNew($paso)['asig'] as [$col, $e]) {
                     $valor = $this->expr($e);
                     switch ($this->d) {
                         case 'mysql':      $out .= $pre . 'SET NEW.' . $this->q($col) . " = $valor;\n"; break;
@@ -637,10 +637,10 @@ final class GeneradorSql
     {
         // Lo que estas formas no llevan, mejor sin traducir que traducido a
         // medias: un upsert, RETURNING y, desde la 2.9, un alias, otras tablas,
-        // ORDER BY o LIMIT
+        // ORDER BY o LIMIT (y desde la 2.10, UPDATE OR IGNORE u OR REPLACE)
         if (($ast['conflicto'] ?? null) !== null || ($ast['returning'] ?? null) !== null || ($ast['alias'] ?? null) !== null
             || isset($ast['desde']) || ($ast['order'] ?? []) !== [] || ($ast['limit'] ?? null) !== null) {
-            throw new NoTraducible(t('Un INSERT con OR IGNORE, OR REPLACE u ON CONFLICT, o un UPDATE o DELETE con alias, otras tablas, ORDER BY o LIMIT, o cualquiera con RETURNING, no se traduce dentro de un trigger: hay que escribirlo a mano'));
+            throw new NoTraducible(t('Un INSERT con OR IGNORE, OR REPLACE u ON CONFLICT, un UPDATE con OR IGNORE u OR REPLACE, un UPDATE o DELETE con alias, otras tablas, ORDER BY o LIMIT, o cualquiera con RETURNING, no se traduce dentro de un trigger: hay que escribirlo a mano'));
         }
         $t = $this->q($ast['tabla']);
         switch ($ast['k']) {

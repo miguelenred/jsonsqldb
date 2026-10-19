@@ -4,7 +4,7 @@ A SQL database engine, HTTP API and web admin panel written in plain PHP, with
 the data stored as JSON files you can read. No database server, no Composer, no
 extensions beyond the standard ones. You copy a folder and it works.
 
-**Version 2.9.1** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
+**Version 2.10.0** · [Apache License 2.0](LICENSE) · PHP 8.0+ (CI runs 8.0 to 8.5;
 8.1 or later recommended, [see why](#php-80-works-but-81-or-later-is-recommended))
 
 ---
@@ -20,8 +20,8 @@ from PHP, and you manage it from a web panel.
 
 ## Why you can rely on it
 
-- **It gives the same answers as SQLite.** Every CI run compares 164
-  hand-written queries, 16 writes and 6,000 randomly generated queries against
+- **It gives the same answers as SQLite.** Every CI run compares 231
+  hand-written queries, 32 writes and 6,000 randomly generated queries against
   SQLite on the same data, with and without indexes
   (`tests/f12_contra_sqlite.php`, `tests/f13_fuzz_contra_sqlite.php`). The few
   places where it behaves differently on purpose are listed in
@@ -77,17 +77,17 @@ writes are buffered and flushed at the end, every file is written atomically, an
 multi-file writes are finished or discarded whole by the journal (one too large
 for memory goes in stretches inside a transaction, 2.9).
 
-Rough numbers from `php tests/benchmark.php` with 2.9.1 (20,000 customers and
-30,000 orders, one core, PHP 8.3, on-disk cache, the mean of three runs): a
-primary key lookup 1.2 ms and 4.7 MB (about 0.2 ms once the process has made
-one: the mean includes the first, which loads the code), a lookup by a
-`UNIQUE` text column 0.5 ms, a scan with a numeric filter and no index 14 ms
-and 5.7 MB, a `GROUP BY` 24 ms and 5.8 MB, an aggregate join of both tables
-150 ms and 18 MB, a single-row `INSERT` 7.3 ms and 5.1 MB, an `UPDATE` by key
-6.5 ms and 5.6 MB, and any of those repeated on unchanged data under half a
-millisecond. On 100,000 customers (one run): primary key lookup 1.4 ms and
-4.9 MB, `UNIQUE` text lookup 0.6 ms, `GROUP BY` 118 ms and 6.3 MB, single-row
-`INSERT` 8.9 ms. The writes are measured
+Rough numbers from `php tests/benchmark.php` with 2.10 (20,000 customers and
+30,000 orders, one core, PHP 8.3 without OPcache, on-disk cache, the median of
+fifteen runs): a primary key lookup 1.0 ms and 4.7 MB (about 0.2 ms once the
+process has made one: the figure includes the first, which loads the code), a
+lookup by a `UNIQUE` text column 0.24 ms, a scan with a numeric filter and no
+index 12 ms and 5.8 MB, a `GROUP BY` 19 ms and 6.0 MB, an aggregate join of
+both tables 104 ms and 18 MB, a single-row `INSERT` 6.2 ms and 5.3 MB, an
+`UPDATE` by key 4.7 ms and 5.9 MB, and any of those repeated on unchanged data
+under half a millisecond. On 100,000 customers (seven runs): primary key lookup
+1.2 ms and 5.0 MB, `UNIQUE` text lookup 0.35 ms, `GROUP BY` 103 ms and 6.5 MB,
+single-row `INSERT` 5.3 ms. The writes are measured
 on a disk where an `fsync` costs 0.1 ms; on a shared host's disk, where it
 costs a few milliseconds, add that five times. A write reads and rewrites only the parts
 it touches and the pieces of the indexes that cover them; a read holds the
@@ -116,7 +116,7 @@ statements cost two thousand times that.
 **Indexes speed up reads and writes.** Equality and `IN` on an indexed column
 read only the parts of the table where the matching rows live, and on a
 numeric column only the index pieces whose recorded range can hold the value:
-on 100,000 rows a primary key lookup takes about 0.2 ms (1.4 ms and 4.9 MB with the
+on 100,000 rows a primary key lookup takes about 0.2 ms (1.2 ms and 5.1 MB with the
 first of the process, which loads the code) instead of scanning the table,
 reading one line of one part by its byte offset. A `BETWEEN` on
 a numeric indexed column reads only the parts whose values can fall in the
@@ -124,14 +124,17 @@ range. The last index pieces read stay in the process, so a loop of lookups
 does not decode them again.
 Since 2.9 a range on an indexed column (texts and dates too) reads only the
 index pieces and parts that can hold it, `COUNT(*)` of a range, or of an
-equality on a text that is not a number, counts in the index (since 2.9.1 also
-of an equality on an `INTEGER`, `DOUBLE` or `DECIMAL` column), and on a
-numeric indexed column so do `ORDER BY … LIMIT n` and `MIN` /
-`MAX` without a `WHERE`; `LIKE` and the other aggregates still read
-everything. An index on several columns serves a lookup by its first ones only
-when the columns after them are `NOT NULL`: a row with `NULL` in an indexed
-column is not in the index (2.9.1; before, such a lookup missed those rows:
-in `UPDATE` and `DELETE` from 2.5.0, in `SELECT` from 2.7.4). Writes use
+equality on a text that is not a number, counts in the index (since 2.10 also
+of an equality on an `INTEGER`, `DOUBLE` or `DECIMAL` column, and on a `TEXT`
+column of any text, since each text has its own key), and on a numeric indexed column so do
+`ORDER BY … LIMIT n` and `MIN` / `MAX` without a `WHERE` (since 2.10 `ORDER BY
+… LIMIT n` also on a `TEXT` column without a `COLLATE` of its own); `LIKE` and
+the other aggregates still read everything. An index on several columns serves
+a lookup by its first ones fully only when the columns after them are `NOT
+NULL`: a row with `NULL` in an indexed column is not in the index, so it serves
+the parts of the table that have none of those rows and the others are read
+whole (2.10; before, such a lookup missed those rows: in `UPDATE` and `DELETE`
+from 2.5.0, in `SELECT` from 2.7.4). Writes use
 indexes too: an `INSERT` checks uniqueness against the index on disk and appends to the
 last part without loading the table, and an `UPDATE` or `DELETE` by key reads
 and rewrites only the parts that hold the affected rows. An index is stored in
@@ -147,7 +150,7 @@ n rows in the lead, `SELECT * FROM t LIMIT 50` stops reading as soon as it has
 enough, and `SELECT COUNT(*)` and `SHOW TABLES` never build the rows at all.
 Only a query that genuinely needs every row at once holds them all: the inner
 side of a `JOIN` holds that table, an `ORDER BY` without `LIMIT` only the
-columns it returns and its sort keys (2.9.1; before, the whole table),
+columns it returns and its sort keys (2.10; before, the whole table),
 `DISTINCT` only the distinct rows (2.9); and since 2.9 what does not fit in memory — an `ORDER
 BY`, a `JOIN`, a `GROUP BY` of many groups, a subquery, a view or a `WITH`, a
 `UNION`, window functions — goes to files on disk and gives the same rows.
@@ -158,7 +161,7 @@ rows](docs/01-core.md#a-million-rows-29).
 file per 1,000 rows, plus one per part for each index, plus — without APCu —
 a serialised copy of each in `.cache/`. The benchmark with 100,000 customers,
 150,000 orders and 100,000 notes ends with 911 files and 36.8 MB of data and
-indexes, and 840 files and 42 MB of cache. Space is never the problem on a cheap plan; the
+indexes, and 869 files and 42 MB of cache. Space is never the problem on a cheap plan; the
 number of files can be, if the account counts inodes. Three knobs, in order:
 APCu (used automatically when present; since 2.9 `JSONSQLDB_CACHE_APCU = false`
 leaves it aside): the cache goes to shared memory instead of `.cache/`, except
@@ -187,17 +190,31 @@ the same. What each cache does, and how to switch it, is in
 
 **PHP 8's JIT helps the heavy queries; turn it on if your hosting lets you.**
 With OPcache's JIT (`opcache.jit=tracing` and `opcache.jit_buffer_size=64M` in
-`php.ini`), measured between web requests on 20,000 customers and 30,000 orders
-(PHP 8.3, median of 150 requests): a lookup by key the same (0.55 ms), a range
-scan 3.5 → 2.1 ms, a `GROUP BY` 12.8 → 7.4 ms, an aggregated join of both tables
-62.6 → 48.1 ms; writes, within the noise of the disk. It is a recommendation,
-not a requirement: nothing depends on it.
+`php.ini`), counted with `valgrind` on 2.10 with OPcache, on 30,000 customers
+and 60,000 orders, in a process that has already run the query once: a `GROUP
+BY` does 14 % less work, `MIN`/`MAX` over the table 24 % less, `TOTAL` and
+`AVG` 21 % less, a `LIKE` over the table 13 % less, an aggregated join 19 %
+less and window functions 14 to 29 % less. A short query gains too once the
+JIT has compiled what it runs (after 500 runs, a lookup by key 29 % less and
+an `IN` of 100 keys 35 % less), but until then it costs more
+than it saves, since each process compiles its own: in a process of 21 lookups
+by key, 0.53 → 2.3 million instructions each, and an `IN` of 100 keys 4 %
+more. A web server keeps what it compiled in OPcache's shared memory for the
+next requests. Since 2.10, if
+`php.ini` gives the JIT its memory but leaves it as `opcache.jit="off"` (with
+the quotes) or `opcache.jit=0`, the engine turns it on for each request where
+it is used (also for the rest of your application): `JSONSQLDB_JIT = false` in
+`config.php` leaves it as it is. With `opcache.jit=disable` (the default from
+PHP 8.4), with `off` without quotes (`php.ini` reads it as empty, which PHP
+takes for `disable`) or without the memory (the default up to 8.3), PHP does
+not allow it from code: set it in `php.ini`.
+It is a recommendation, not a requirement: nothing depends on it.
 
 **A `JOIN` behind a selective `WHERE` looks rows up instead of hashing a
 table.** The parts of the `WHERE` that concern the left side run before the
 join, and when few rows are left and the right-hand table has an index on the
 `ON` columns, each one is looked up by key: one order and its customer in
-0.45 ms and 5.0 MB instead of about 20 ms and 25 MB.
+0.44 ms and 5.3 MB instead of about 20 ms and 25 MB.
 
 **A repeated `SELECT` on unchanged data is not run again.** Its result is
 cached under the SQL, the parameters and the revision of every table it
@@ -229,7 +246,8 @@ still run at the same time. Several statements grouped into one transaction
 (2.9) are kept or undone together: the files they replace are kept until it
 ends, and one left unfinished by a process that died is undone the next time
 the database is opened. Inside a transaction a statement writes no journal of
-its own (2.9.1): the files the transaction keeps already undo it.
+its own, and its files are forced to disk once, when the transaction commits
+(2.10): the files the transaction keeps already undo it.
 
 ---
 
@@ -244,9 +262,11 @@ so, with the numbers, where it happened.
    names spelled out, no binary encoding, no compression, no format that needs
    a tool to decode. The indexes, the revision files and the journal follow the
    same rule. This is why the on-disk cache is a copy that can be deleted, not
-   the data itself. The one thing not readable is the Bloom filter of the keys
-   in each index piece (2.9, base64): a summary of the readable keys next to it,
-   which a piece can do without (it is then read whole).
+   the data itself. Two things are not readable: the Bloom filter of the keys
+   in each index piece (2.9, base64), a summary of the readable keys next to
+   it, which a piece can do without (it is then read whole); and the four-byte
+   length in front of each value in the temporary files of `.orden/`, which
+   exist only while a query too large for memory runs.
 
 2. **It runs on cheap hosting.** No database server, or one too small or too
    limited to use: that is the hosting this project is for. Plain PHP 8.0 or
@@ -684,7 +704,8 @@ keeping the last N) from cron or, without cron, when someone opens it. It has
 its own users
 with `admin` / read-only roles, bcrypt passwords, per-IP lockout, CSRF tokens
 and a daily audit trail. Its configuration can be changed from its own page,
-which also warns if the data folder can be downloaded from outside. It is in
+which also warns if the data folder can be downloaded from outside, as its
+home page does for administrators (2.10). It is in
 **Spanish and English**: it follows the browser's language, and a language
 chosen with its selector is saved with the user. The full tour is in
 [`docs/05-admin.md`](docs/05-admin.md).
@@ -701,15 +722,15 @@ theme. The panel makes **zero** external requests.
 | | |
 |---|---|
 | **Query** | `SELECT`; `EXPLAIN SELECT …` (2.9: runs it and says how each table was read) |
-| **Write** | `INSERT` (with `OR IGNORE`, `OR REPLACE`, `ON CONFLICT … DO UPDATE` and `RETURNING`, 2.8), `UPDATE`, `DELETE`; also with other tables (2.9): `UPDATE … FROM`, `UPDATE … JOIN … SET`, `DELETE … USING`, `DELETE t FROM t JOIN …` |
+| **Write** | `INSERT` (with `OR IGNORE`, `OR REPLACE`, `ON CONFLICT … DO UPDATE` and `RETURNING`, 2.8), `UPDATE` (with `OR IGNORE` and `OR REPLACE`, 2.10), `DELETE`; also with other tables (2.9): `UPDATE … FROM`, `UPDATE … JOIN … SET`, `DELETE … USING`, `DELETE t FROM t JOIN …` |
 | **Schema** | `CREATE TABLE`, `CREATE TABLE … AS SELECT`, `CREATE TABLE … LIKE` (2.9), `DROP TABLE`, `ALTER TABLE`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE VIEW`, `DROP VIEW`, `CREATE [UNIQUE] INDEX`, `DROP INDEX` |
 | **Database** | `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` |
 | **Introspection** | `SHOW TABLES`, `SHOW VIEWS`, `SHOW SCHEMA`, `SHOW COLUMNS`, `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES`, `SHOW CREATE TABLE`, `SHOW CREATE VIEW` (2.9) |
-| **Maintenance** | `CHECK KEYS`, `REPAIR KEYS`; `CHECK TABLES`, `REPAIR TABLES`, `VACUUM` (2.9) |
+| **Maintenance** | `CHECK KEYS`, `REPAIR KEYS`; `CHECK TABLES`, `REPAIR TABLES`, `VACUUM` (2.9); `CHECK INDEXES`, `REPAIR INDEXES` (2.10) |
 | **Transactions** | a batch of statements (2.9), which may start with `BEGIN` and end with `COMMIT` or `ROLLBACK` |
 
 `SELECT` supports `DISTINCT`, `WITH` (CTEs, also `WITH RECURSIVE`, 2.9), `UNION` / `UNION ALL` /
-`INTERSECT` / `EXCEPT`, correlated subqueries, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `JOIN … USING` and `NATURAL JOIN` (2.9), `WHERE`, `GROUP BY`,
+`INTERSECT` / `EXCEPT`, correlated subqueries (at any depth, 2.10), `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, `JOIN … USING` and `NATURAL JOIN` (2.9), a comma with `ON` or `USING` (2.10), `WHERE`, `GROUP BY`,
 `HAVING`, window functions (`OVER`, 2.9), `ORDER BY` (`ASC`/`DESC`), `LIMIT`/`OFFSET`, table and column aliases,
 subqueries in `WHERE` and in `FROM`, and `CASE WHEN`.
 
@@ -722,7 +743,7 @@ key, `CHECK`), `DROP CONSTRAINT`, `DROP CHECK` (2.9), `ADD PRIMARY KEY`,
 
 `=` `==` `<>` `!=` `<` `<=` `>` `>=` · `AND` `OR` `NOT` `XOR` · `IS NULL` `IS NOT NULL` ·
 `IS` `IS NOT` `IS [NOT] DISTINCT FROM` `<=>` · `IN` `NOT IN` · `BETWEEN` `NOT BETWEEN` ·
-`LIKE` `NOT LIKE` (with `%` and `_`, case-insensitive) · `GLOB` (case-sensitive) ·
+`LIKE` `NOT LIKE` (with `%` and `_`, case-insensitive for `A` to `Z`) · `GLOB` (case-sensitive) ·
 `EXISTS` `NOT EXISTS` · `REGEXP` `RLIKE` (and `NOT`) · `||` (string concatenation) ·
 `+` `-` `*` `/` `%` `DIV` `MOD` · `&` `|` `~` `<<` `>>` · `->` `->>` (JSON) · `COLLATE`
 — the ones of SQLite and MySQL added in 2.9 behave as there.
@@ -730,8 +751,8 @@ key, `CHECK`), `DROP CONSTRAINT`, `DROP CHECK` (2.9), `ADD PRIMARY KEY`,
 ### Functions
 
 Most of SQLite's and MySQL's (2.9), each behaving as in the engine it comes
-from (one difference: a value with only a time, `'12:00:00'`, is not a date
-here, so `TIME('12:00:00')` is `NULL`; SQLite reads it as 2000-01-01); the full list, and what wins where the two differ, is in
+from (a value with only a time, `'12:00:00'`, is read as on 2000-01-01, as in
+SQLite: `TIME('12:00:00')` gives the time since 2.10); the full list, and what wins where the two differ, is in
 [`docs/02-queries.md` §3](docs/02-queries.md#3-functions).
 
 **Aggregate** — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `TOTAL`, `GROUP_CONCAT` /
@@ -770,9 +791,11 @@ SELECT first_name || ' ' || IFNULL(last_name, '') AS full_name FROM customers;
 
 **It resembles SQLite's but is not compatible with it.** There are SQLite
 constructs missing here, others borrowed from MySQL, and concrete behavioural
-differences — the largest being that a text that is a number compares as that
-number wherever it comes from (`'12' = 12`, `'9' < '10'`), rather than following
-the declared column's affinity.
+differences. Texts and numbers compare by the affinity of the column, as in
+SQLite (2.10: until 2.9 a text that was a number compared as that number
+everywhere, `'9' < '10'`), with two differences kept on purpose: with no
+column on either side `'12' = 12` is true here, and in `x IN (…)` each value of
+the list is compared as in its own `x = value`.
 Do not assume a query that runs in SQLite runs here, or the other way round.
 
 Borrowings, where they are what people expect:
@@ -791,17 +814,17 @@ ignored; the few statements accepted without doing anything (2.9: `ANALYZE`,
 `SELECT … FOR UPDATE`, MySQL's table options…) are those whose promise already
 holds here.
 
-These exist in SQLite and raise an error here: `INSERT OR FAIL` / `OR ROLLBACK`
-(use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT`, supported since 2.8), `CREATE TEMP`/`TEMPORARY TABLE` (no
+These exist in SQLite and raise an error here: `INSERT` and `UPDATE` `OR FAIL` / `OR ROLLBACK`
+(use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT`, supported since 2.8, and in an `UPDATE` since 2.10), `CREATE TEMP`/`TEMPORARY TABLE` (no
 temporary tables), `WITHOUT ROWID` (there is no rowid), and `BEGIN`/`COMMIT`/
 `ROLLBACK` anywhere but at the start and the end of a batch, which is already
 a transaction (each request is independent). `CHECK` constraints, `CREATE
 UNIQUE INDEX`, `GLOB`, window functions (`OVER`), `WITH RECURSIVE` and
 `COLLATE NOCASE` / `RTRIM` in a column work since 2.9.
 
-Behavioural differences worth knowing: `DECIMAL` is a rounded float, `ORDER BY`
-uses a configurable collation rather than binary order, and `LIKE` is
-case-insensitive but accent-sensitive.
+Behavioural differences worth knowing: `DECIMAL` is a rounded float, and
+`ORDER BY` uses a configurable collation rather than binary order. `LIKE`
+ignores the case of `A` to `Z` only, as SQLite does (2.10).
 
 ### Data types
 
@@ -853,6 +876,9 @@ in `.reparados/`; a row that cannot be fixed without guessing makes the query
 fail with the file and the line, until it is fixed by hand or `REPAIR TABLES`
 sets it aside. `CHECK TABLES` lists what is damaged. Details in
 [`docs/01-core.md`](docs/01-core.md#editing-the-files-by-hand-29).
+`CHECK INDEXES` (2.10) compares every index with the rows of its table, part
+by part, and lists any key missing or left over, which a hand edit of an index
+file could cause; `REPAIR INDEXES` rebuilds those indexes from the rows.
 
 **Views** are stored `SELECT` statements you query like a table. They hold no
 data, are resolved on every query, and are read-only. They can nest up to 8
@@ -931,8 +957,8 @@ defined: `JSONSQLDB_JOURNAL_DATOS` and `JSONSQLDB_CACHE_MAX_FILAS`. One was
 added in 2.6, `JSONSQLDB_CACHE_RESULTADOS`, and one in 2.7,
 `JSONSQLDB_ESCRITURA_POR_PARTES`, both with working defaults. Three were added
 in 2.9, `JSONSQLDB_CACHE_APCU`, `JSONSQLDB_CACHE_OPCACHE` and
-`JSONSQLDB_API_ACTIVA`, all on by default; an existing `config.php` without
-them gets the defaults. And without `JSONSQLDB_LOG_NIVEL` the log now records
+`JSONSQLDB_API_ACTIVA`, and one in 2.10, `JSONSQLDB_JIT`, all on by default; an
+existing `config.php` without them gets the defaults. And without `JSONSQLDB_LOG_NIVEL` the log now records
 writes and errors only (`escrituras`; before, `todo`).
 
 **From 2.8 or earlier to 2.9, the cache starts over.** Its entries now carry
@@ -959,6 +985,34 @@ rows there. Views and triggers are stored as their SQL, so one that uses SQL
 only 2.9 accepts (a window function, `UPDATE … FROM`) is an error there when it
 runs.
 
+**From 2.9 or earlier to 2.10, some results change**: texts that are numbers
+compare as texts, as in SQLite (`'7' = '007'` is false, `'10'` sorts before
+`'9'`, and a `UNIQUE` text column takes both `'7'` and `'007'`), comparisons
+have SQLite's precedence, `INSERT OR IGNORE` skips rows that break a `NOT
+NULL` or a `CHECK`, `OR REPLACE` puts the default in a `NOT NULL` column, a row
+that does not go in no longer uses up an id without `AUTOINCREMENT`, table
+names are not case-sensitive, `LIKE` ignores the case of `A` to `Z` only
+(`'É' LIKE 'é'` is 0), `SUM` of integers that does not fit in 64 bits is an
+error, as in SQLite, sums of decimals give SQLite's figures (`TOTAL` of 1e100,
+3 and -1e100 is 3), integers past 2^53 compare exactly with decimals, a
+decimal turned into text has 15 digits (`'123456789.123457'`; it was
+`'123456789.12346'`) and an infinite one is `'Inf'`, an operation without a
+numeric result (`INF - INF`) is `NULL`, a `RANGE` frame with a distance goes
+with SQLite's arithmetic and takes the `NULL`s it reaches, and
+`CREATE VIEW` is an error if a table or view it uses does not exist (as in MySQL and PostgreSQL;
+a script that creates a view before its table stops there). Read the
+[changelog](CHANGELOG.md) before upgrading. The indexes with a `TEXT` or a
+decimal column get new keys: one written by an earlier version is not used (the query reads
+the table, with the right rows) and is rebuilt once, right after that query or
+on the next write to the table (on 30,000 rows with three such indexes, that
+first query took 0.3 s instead of 0.6 ms); `VACUUM` rebuilds them all at a
+time of your choosing. **Going back
+from 2.10 to 2.9: delete first the index files of every index with a `TEXT`
+column**, and of a decimal one that holds whole numbers past 9·10^18
+(`<table>.idx.<index>.json` and its `.partN.json`), which 2.9 would
+read with its own keys and miss rows; it rebuilds them on its next write (see
+[`docs/01-core.md`](docs/01-core.md#going-back-to-an-earlier-version)).
+
 ### Storage
 
 Each database is a directory. A table is `table.json` with the rows,
@@ -968,13 +1022,17 @@ state of the table's parts and indexes, plus `table.partN.json` once it grows pa
 `JSONSQLDB_FILAS_POR_PARTE` rows (1,000 by default) and one
 `table.idx.<n>.json` / `table.idx.<n>.partN.json` per index and part. A
 `_database.json` holds database-level metadata. Everything is readable JSON,
-one row per line, so a file stays diffable and editable by hand. A deleted row
+one row per line, so a file stays diffable and editable by hand; what the
+engine leaves next to it — the line that says who is writing a table, the
+cache — is text too (2.10, see [`docs/06-format.md`](docs/06-format.md)). A deleted row
 leaves `null` on its line (2.9), so deleting does not move the rows behind it
 (except in a table with triggers or a foreign key to itself, which a `DELETE`
 loads whole and writes without them); when holes pass 25 % of a table it is
 rewritten without them, and `VACUUM` does it on demand. `VACUUM` also rebuilds
 the indexes written by 2.8 or earlier, so that lookups by a text key get the
-filter of 2.9 (see [CHANGELOG](CHANGELOG.md)).
+filter of 2.9 (see [CHANGELOG](CHANGELOG.md)); and since 2.10, run it after
+copying a table's files into a database by hand, so that the foreign keys of
+the other tables see it at once.
 
 The revision file is per table and not one shared file, because two writes to
 different tables run at the same time: a single shared counter meant whichever
@@ -991,27 +1049,33 @@ An index maps a value to the positions of the rows that hold it, which tells the
 engine which part files it has to decode. Primary keys and unique constraints get
 one automatically, named `auto_<columns>`; `CREATE INDEX name ON t (a, b)` adds
 your own. A composite index is used left to right: `(a, b)` serves a lookup on
-`a`, or on `a` and `b`, but not on `b` alone; and on `a` alone only when `b` is
-`NOT NULL` (or part of the primary key), because a row with `NULL` in any
-column of an index is not in it (2.9.1; before, such a lookup missed those
-rows: in `UPDATE` and `DELETE` from 2.5.0, in `SELECT` from 2.7.4). Declare those columns `NOT NULL`, or index `a` on its own.
+`a`, or on `a` and `b`, but not on `b` alone; and on `a` alone fully only when
+`b` is `NOT NULL` (or part of the primary key), because a row with `NULL` in any
+column of an index is not in it: otherwise it serves the parts of the table
+where every row is in the index, and the others are read whole (2.10; before,
+such a lookup missed those rows: in `UPDATE` and `DELETE` from 2.5.0, in
+`SELECT` from 2.7.4). Declare those columns `NOT NULL`, or index `a` on its own.
 
 `=`, `IN` and, since 2.9, `<`, `<=`, `>`, `>=` and `BETWEEN` against literals
 use an index, only in the top-level `AND` chain of a `WHERE`.
 Anything under a `NOT`, a top-level `OR`, `IS NULL` and `NOT IN` are left alone,
 because using an index there would change the result rather than just speed it
-up. Index keys follow the engine's own equality, not PHP's: `5`, `'5'`
-and `'5.0'` share a key, so looking up a number still finds the row that stored
-it as text.
+up. Index keys follow the engine's own equality, not PHP's, with the affinity
+of the column (2.10, as in SQLite): in a numeric column `5`, `5.0` and `'5'`
+share a key (a whole decimal and its integer, up to 2^63); in a `TEXT` column each text has its own (`'5'` and `'5.0'` are
+two), and a number looked up there is taken as its text.
 
 An index is stored in **one piece per part of the table** and **corrected
 rather than rebuilt** whenever the engine can prove what changed: rows appended
 at the end, rows replaced in place, or a deleted row left as a hole (2.9). Only the pieces that cover the positions concerned are read and
-rewritten; the header of every other piece is checked so a damaged file is
-rebuilt at the next write. Any doubt rebuilds the index from the rows. The
+rewritten; every other piece is checked — with one `stat()` when its revision
+and size are those the last write left in the cache, by its header and tail
+otherwise — so a damaged file is rebuilt at the next write. Any doubt rebuilds the index from the rows. The
 revision file says which revision each piece belongs to; on any mismatch the
-engine ignores the index and scans, so a stale or hand-edited index can make a
-query slower but never wrong.
+engine ignores the index and scans, so a stale index can make a query slower
+but not wrong. A hand edit of an index file that keeps its header can make a
+lookup miss rows: `CHECK INDEXES` finds it and `REPAIR INDEXES` rebuilds the
+index (2.10).
 
 ### Concurrency
 
@@ -1020,11 +1084,11 @@ table — which is what makes a deadlock impossible:
 
 | Operation | Database | Table |
 |---|---|---|
-| Reads (`SELECT`, `SHOW`, `CHECK KEYS`, `CHECK TABLES`), also each statement of a `lote` that only reads (2.9) | shared | **shared**, per table read |
-| A write to **one** table with no foreign keys or triggers | shared | **exclusive** |
+| Reads (`SELECT`, `SHOW`, `CHECK KEYS`, `CHECK TABLES`, `CHECK INDEXES`), also each statement of a `lote` that only reads (2.9) | shared | **shared**, per table read |
+| A write to **one** table with no foreign keys or triggers, that no other table references (since 2.10, a plain `INSERT` even if one does) | shared | **exclusive** |
 | An `UPDATE` or `DELETE` that depends only on each row (2.7) | shared | **shared** while it works, **exclusive** only to commit (writes by part) |
 | Cascades and triggers, when the set of tables is knowable | shared | **exclusive on every table** it can reach |
-| Schema changes, views, `REPAIR KEYS`, `REPAIR TABLES`, `VACUUM`, and writes that read other tables (`INSERT ... SELECT`, a subquery, an `UPDATE` or `DELETE` with other tables, also in a trigger they fire) | **exclusive** | — |
+| Schema changes, views, `REPAIR KEYS`, `REPAIR TABLES`, `REPAIR INDEXES`, `VACUUM`, and writes that read other tables (`INSERT ... SELECT`, a subquery, an `UPDATE` or `DELETE` with other tables, also in a trigger they fire) | **exclusive** | — |
 | A transaction (2.9), from start to end, also a `lote` that writes | **exclusive** | — |
 
 So two writes to different tables run at the same time, and a write does not
@@ -1062,8 +1126,9 @@ a write whose rename failed without a crash (on Windows, a file another program
 holds open). It replaced the copy-everything-first undo journal of earlier versions, which is
 where most of the write cost used to go; pending journals of the old format are
 still recognised and undone. Inside a transaction (2.9) the files a statement
-replaces are first kept in `.lote/`, so since 2.9.1 the statement writes no
-journal: if it is cut short, the whole transaction is undone from those files.
+replaces are first kept in `.lote/`, so since 2.10 the statement writes no
+journal, and its files are forced to disk once, at commit: if it is cut short,
+the whole transaction is undone from those files.
 
 ### Memory
 
@@ -1086,7 +1151,7 @@ memory_limit  ≥  20 × (the largest table a single query has to hold in full)
 ```
 
 A query holds a table in full only when it needs every row at once: the inner
-side of a `JOIN`, and an `ORDER BY` without `LIMIT`, which since 2.9.1 keeps
+side of a `JOIN`, and an `ORDER BY` without `LIMIT`, which since 2.10 keeps
 of each row only the columns it returns and its sort keys (until they do not
 fit: since 2.9 both then go to files on disk). `GROUP BY` holds one accumulator per group
 and `DISTINCT` the distinct rows; a `WHERE` scan holds only what passes, and a
@@ -1101,32 +1166,41 @@ and streaming do.
 
 #### What the engine does about it
 
-Measured with `php tests/benchmark.php` and 2.9.1 (on-disk cache, one core,
-PHP 8.3): time and peak memory of the process, on 20,000 customers and 30,000
-orders the mean of three runs, on 100,000 customers and 150,000 orders one
-run. A lookup's time includes the first one of the process, which loads the
-code; two runs of the same version differ by up to 10–15 %:
+Measured with `php tests/benchmark.php` and 2.10 (PHP 8.3 without OPcache,
+on-disk cache, one core): time and peak memory of the process, on 20,000
+customers and 30,000 orders the median of fifteen runs, on 100,000 customers
+and 150,000 orders of seven, each taking turns with 2.9.0. A lookup's time
+includes the first one of the process, which loads the code; two runs of the
+same version differ by up to 10–15 %, and two sets of rounds on this machine
+by up to 20 %:
 
 | | 20,000 customers | 100,000 customers |
 |---|---|---|
-| Lookup by primary key | 1.2 ms · 4.7 MB | 1.4 ms · 4.9 MB |
-| `IN` of ten primary keys | 0.47 ms · 4.7 MB | 0.86 ms · 5.0 MB |
-| Lookup by a `UNIQUE` text column | 0.46 ms · 4.5 MB | 0.61 ms · 4.9 MB |
-| `BETWEEN` on the primary key (1,000 rows) | 2.5 ms · 5.8 MB | 2.1 ms · 6.3 MB |
-| Numeric range, no index | 14 ms · 5.7 MB | 57 ms · 6.1 MB |
-| `JOIN` of one order with its customer | 0.45 ms · 5.0 MB | 0.51 ms · 5.4 MB |
-| `LEFT JOIN` of twenty orders | 3.2 ms · 5.6 MB | 3.4 ms · 5.9 MB |
-| `GROUP BY` with `SUM` | 24 ms · 5.8 MB | 118 ms · 6.3 MB |
-| `ORDER BY … LIMIT 20` | 14 ms · 5.9 MB | 65 ms · 6.3 MB |
-| `ORDER BY`, whole table | 36 ms · 15 MB | 219 ms · 52 MB |
-| `JOIN` of both tables, aggregated | 150 ms · 18 MB | 948 ms · 65 MB |
-| `INSERT` / `UPDATE` one row | 7.3 / 6.5 ms · 5.6 MB | 8.9 / 6.7 ms · 6.1 MB |
-| A repeated query on unchanged data (result cache) | 0.23 ms | 0.24 ms |
+| Lookup by primary key | 1.0 ms · 4.7 MB | 1.2 ms · 5.0 MB |
+| `IN` of ten primary keys | 0.45 ms · 4.8 MB | 0.55 ms · 5.1 MB |
+| Lookup by a `UNIQUE` text column | 0.24 ms · 4.7 MB | 0.35 ms · 5.1 MB |
+| `BETWEEN` on the primary key (1,000 rows) | 1.6 ms · 5.9 MB | 1.7 ms · 6.4 MB |
+| Numeric range, no index | 12 ms · 5.8 MB | 61 ms · 6.3 MB |
+| `JOIN` of one order with its customer | 0.43 ms · 5.2 MB | 0.48 ms · 5.6 MB |
+| `LEFT JOIN` of twenty orders | 2.7 ms · 5.8 MB | 3.5 ms · 6.1 MB |
+| `GROUP BY` with `SUM` | 19 ms · 6.0 MB | 103 ms · 6.5 MB |
+| `ORDER BY … LIMIT 20` | 12 ms · 6.0 MB | 68 ms · 6.5 MB |
+| `ORDER BY`, whole table | 22 ms · 15 MB | 143 ms · 52 MB |
+| `JOIN` of both tables, aggregated | 104 ms · 18 MB | 764 ms · 66 MB |
+| `INSERT` / `UPDATE` one row | 6.2 / 4.7 ms · 5.9 MB | 5.3 / 5.3 ms · 6.4 MB |
+| A repeated query on unchanged data (result cache) | 0.21 ms | 0.24 ms |
+
+The writes depend on the disk more than on anything else: in those same
+rounds 2.9.0 took 7.8 / 5.8 ms on 20,000 customers and 7.9 / 6.6 ms on
+100,000. Measured on their own (one-row writes in a process, the two versions
+taking turns), 2.10 takes on 200,000 rows 4.68 ms for an `INSERT`, 4.35 for an
+`UPDATE` and 4.40 for a `DELETE`, against 6.50, 5.33 and 6.39 in 2.9.0, with
+the same five `fsync` calls (see the [changelog](CHANGELOG.md)).
 
 The writes are measured on a disk where an `fsync` costs 0.1 ms; on a shared
 host's disk, where it costs 3 ms, each of the five a one-row `INSERT` makes
 adds that (about 28 ms in all, measured in 2.7 by making the kernel delay each
-one). The memory is that of the whole process: about 3.6 MB of it is
+one). The memory is that of the whole process: about 3.8 MB of it is
 the engine's code and what the process keeps between statements (four index
 pieces, the row offsets of 64 parts, the table structures), which with OPcache
 (the normal case on a web server) is partly in shared memory, and which is the
@@ -1136,7 +1210,7 @@ in the [changelog](CHANGELOG.md).
 Rows are read one part at a time and filtered as they arrive, and used as they
 come out of the cache without copying; aggregates are accumulated instead of
 collecting the rows of each group; `ORDER BY … LIMIT` keeps only the leading
-rows, and a whole `ORDER BY` only the columns it returns (2.9.1); a `JOIN`
+rows, and a whole `ORDER BY` only the columns it returns (2.10); a `JOIN`
 streams and loads only the columns the query names; `WHERE`
 conditions are compiled once; indexes decode only the parts where the matching
 rows live and are stored in pieces so a write rewrites one; `LIMIT` is pushed
@@ -1204,38 +1278,43 @@ HSTS.
 
 ## Tests
 
-Twenty-six suites, no dependencies, all using temporary directories — they
+Twenty-seven suites, no dependencies, all using temporary directories — they
 never touch your data. The ones that load dumps into other systems or run
 PowerShell scripts do more where those are installed (CI has them).
 
 ```
-php tests/f1_nucleo.php       → OK: 73    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 83    parser and bound parameters
-php tests/f2_select.php       → OK: 164   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 111   writes, DDL, keys, triggers, transactions and holes
-php tests/f4_api.php          → OK: 76    real requests against the API
-php tests/f5_esquema.php      → OK: 122   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 176   the panel, driven like a user
-php tests/f6_cortes.php       → OK: 35    crash recovery, killing real processes
+php tests/f1_nucleo.php       → OK: 76    storage, types, locking, direct access
+php tests/f2_parser.php       → OK: 86    parser and bound parameters
+php tests/f2_select.php       → OK: 165   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 122   writes, DDL, keys, triggers, transactions and holes
+php tests/f4_api.php          → OK: 84    real requests against the API
+php tests/f5_esquema.php      → OK: 125   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 189   the panel, driven like a user
+php tests/f6_cortes.php       → OK: 36    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 35    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 85    indexes, against a full scan every time
+php tests/f8_indices.php      → OK: 93    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 36    every intermediate state a crash can leave
-php tests/f10_indices_incrementales.php → OK: 21   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 41    panel setup wizard and direct connection
-php tests/f12_contra_sqlite.php → OK: 12   164 queries, 16 writes and 8 triggers that touch rows of their own statement, same results as SQLite
+php tests/f10_indices_incrementales.php → OK: 22   indexes corrected instead of rebuilt
+php tests/f11_asistente.php    → OK: 45    panel setup wizard and direct connection
+php tests/f12_contra_sqlite.php → OK: 16   238 queries, 32 writes and 8 triggers that touch rows of their own statement, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 57    dumps to and from SQLite, MySQL, PostgreSQL, SQL Server (more with the servers)
+php tests/f14_volcados.php     → OK: 65    dumps to and from SQLite, MySQL, PostgreSQL, SQL Server (more with the servers)
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
-php tests/f16_vistas_triggers.php → OK: 10  views and triggers exported to other systems (more with MySQL and PostgreSQL: they must do the same there)
-php tests/f17_rutinas_importadas.php → OK: 7 views and triggers imported from MySQL, PostgreSQL and SQL Server (more with the servers)
+php tests/f16_vistas_triggers.php → OK: 11  views and triggers exported to other systems (more with MySQL and PostgreSQL: they must do the same there)
+php tests/f17_rutinas_importadas.php → OK: 9 views and triggers imported from MySQL, PostgreSQL and SQL Server (more with the servers)
 php tests/f18_access.php       → OK: 10    Microsoft Access: import and export (more with PowerShell: the script)
 php tests/f19_escrituras_contra_sqlite.php → OK: 19  random writes and queries on tables of many parts, against SQLite
-php tests/f20_memoria.php      → OK: 31    the panel with 32 MB: export, import and backups of a larger database (also --directa)
-php tests/f21_compatibilidad.php → OK: 96  SQLite and MySQL syntax and functions, windows, recursion, COLLATE, against SQLite
+php tests/f20_memoria.php      → OK: 32    the panel with 32 MB: export, import and backups of a larger database (also --directa)
+php tests/f21_compatibilidad.php → OK: 132 SQLite and MySQL syntax and functions, windows, recursion, COLLATE, against SQLite
 php tests/f22_sqlserver.php    → OK: 4     SQL Server's script and import (more with PowerShell)
-php tests/f23_reparar.php      → OK: 28    hand-broken JSON files repaired, or set aside
+php tests/f23_reparar.php      → OK: 29    hand-broken JSON files repaired, or set aside; indexes checked against the rows
 php tests/f24_versiones_anteriores.php → OK: 28  every published version's database opened by this one (needs the git tags)
+php tests/f25_ficheros_abiertos.php → OK: 5  files another process holds open while a write replaces them (Windows; the CI runs it there too)
 ```
+
+The CI runs them all with PHP 8.0 to 8.5 on Linux; on Windows, `f25` and the
+engine's suites (`f1`, `f2_parser`, `f2_select`, `f3`, `f8`, `f9`, `f10` and
+`f23`, 2.10); and PHPStan.
 
 `f6_cortes.php` kills real processes with `SIGKILL` mid-write and demands that
 every row be either the old value or the new one, never a mix. `f9_journal.php`
@@ -1247,17 +1326,15 @@ literal results: it compares every indexed query against the same condition
 written so the index cannot be used, and the cheap write paths against a table
 without indexes.
 
-The engine, the API and the panel are checked with PHPStan at level 5 before
-each release. It does not come back clean, and this is what it reports: most
-warnings are about the configuration constants, which it evaluates with their
-default values and so calls every condition on them "always true" or "always
-false"; the rest are places where it cannot follow a type (a flag set by a nested
-call, a list built by a loop, a numeric string that has just been checked) or
-defensive calls it considers redundant. None of them is a bug; each was looked
-at. The PHPStan configuration is not committed — it is a development tool and
-the project needs nothing beyond PHP itself — but the source carries the
-`@phpstan-type` and `@phpstan-impure` annotations that make the analysis
-meaningful.
+The engine, the API and the panel are checked with PHPStan at level 5 in the
+CI (2.10, `phpstan.neon.dist`): anything new it finds fails the run. What it
+reported when it was added is in `phpstan-baseline.neon`, and each entry was
+looked at: places where it cannot follow a type (a flag set by a nested call, a
+list built by a loop, a numeric string that has just been checked) or defensive
+calls it considers redundant; none of them is a bug. The configuration constants
+are declared dynamic, so it does not take their default values for the only
+ones. PHPStan is downloaded by the CI, not a dependency: the project needs
+nothing beyond PHP itself.
 
 `f5_admin.php` needs cURL and starts two PHP built-in servers — one for the panel
 and one for the API, because the built-in server handles one request at a time

@@ -13,10 +13,11 @@ define('JSONSQLDB_CONEXION_DIRECTA', true);
 require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Catalog;
+use JsonSQLDB\CatalogDdl;
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
-use JsonSQLDB\StorageEscritura;
+use JsonSQLDB\StorageEntera;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f2';
 $base = 'tienda';
@@ -67,7 +68,7 @@ $st  = new Storage($raiz, $base);
 $cat = new Catalog($st);
 $st->bloquear(true);
 
-$cat->crearTabla('usuarios', ['columns' => [
+CatalogDdl::crearTabla($cat, 'usuarios', ['columns' => [
     ['name'=>'id','type'=>'INTEGER','pk'=>true,'autoincrement'=>true],
     ['name'=>'nombre','type'=>'VARCHAR(50)','notnull'=>true],
     ['name'=>'ciudad','type'=>'VARCHAR(50)'],
@@ -75,7 +76,7 @@ $cat->crearTabla('usuarios', ['columns' => [
     ['name'=>'telefono','type'=>'VARCHAR(20)'],
     ['name'=>'alta','type'=>'DATETIME'],
 ]]);
-$cat->crearTabla('pedidos', ['columns' => [
+CatalogDdl::crearTabla($cat, 'pedidos', ['columns' => [
     ['name'=>'id','type'=>'INTEGER','pk'=>true,'autoincrement'=>true],
     ['name'=>'usuario_id','type'=>'INTEGER','notnull'=>true],
     ['name'=>'total','type'=>'DECIMAL(10,2)','notnull'=>true],
@@ -88,7 +89,7 @@ $usuarios = [
     [1,'Ana',      'Madrid',    30, '600111222', '2026-01-15 08:30:00'],
     [2,'Luis',     'Valencia',  17, null,        '2026-02-01'],
     [3,'María',    'Madrid',    45, '600333444', '2026-02-20 12:00:00'],
-    [4,'Pedro',    'Torrevieja',22, null,        '2026-03-05'],
+    [4,'Pedro',    'Sevilla',   22, null,        '2026-03-05'],
     [5,'Marta',    'Valencia',  38, '600555666', '2026-03-11 09:15:00'],
     [6,'Óscar',    'Madrid',    17, '600777888', '2026-04-02'],
 ];
@@ -96,7 +97,7 @@ $filas = [];
 foreach ($usuarios as $u) {
     $filas[] = ['id'=>$u[0],'nombre'=>$u[1],'ciudad'=>$u[2],'edad'=>$u[3],'telefono'=>$u[4],'alta'=>$u[5]];
 }
-StorageEscritura::guardarFilas($st, 'usuarios', $filas);
+StorageEntera::guardarFilas($st, 'usuarios', $filas);
 
 $pedidos = [
     [1,1,120.50,'2026-01-20'],
@@ -110,7 +111,7 @@ $filas = [];
 foreach ($pedidos as $p) {
     $filas[] = ['id'=>$p[0],'usuario_id'=>$p[1],'total'=>$p[2],'fecha'=>$p[3]];
 }
-StorageEscritura::guardarFilas($st, 'pedidos', $filas);
+StorageEntera::guardarFilas($st, 'pedidos', $filas);
 $st->desbloquear();
 
 $bd = new Database($base, $raiz);
@@ -135,7 +136,7 @@ chk('alias AS', function () use ($bd) {
 });
 chk('DISTINCT', fn() => igual(
     $bd->consultar('SELECT DISTINCT ciudad FROM usuarios ORDER BY ciudad'),
-    [['Madrid'],['Torrevieja'],['Valencia']]
+    [['Madrid'],['Sevilla'],['Valencia']]
 ));
 chk('ORDER BY DESC y LIMIT', fn() => igual(
     $bd->consultar('SELECT nombre FROM usuarios ORDER BY edad DESC LIMIT 2'),
@@ -181,7 +182,7 @@ chk('IS NOT NULL', fn() => igual(
     [[4]]
 ));
 chk('AND / OR con precedencia', fn() => igual(
-    $bd->consultar("SELECT nombre FROM usuarios WHERE ciudad = 'Madrid' AND edad > 20 OR ciudad = 'Torrevieja' ORDER BY id"),
+    $bd->consultar("SELECT nombre FROM usuarios WHERE ciudad = 'Madrid' AND edad > 20 OR ciudad = 'Sevilla' ORDER BY id"),
     [['Ana'],['María'],['Pedro']]
 ));
 chk('NOT', fn() => igual(
@@ -209,7 +210,7 @@ chk('COUNT(DISTINCT)', fn() => igual(
 ));
 chk('GROUP BY', fn() => igual(
     $bd->consultar('SELECT ciudad, COUNT(*) AS cantidad FROM usuarios GROUP BY ciudad ORDER BY ciudad'),
-    [['Madrid',3],['Torrevieja',1],['Valencia',2]]
+    [['Madrid',3],['Sevilla',1],['Valencia',2]]
 ));
 chk('GROUP BY con HAVING', fn() => igual(
     $bd->consultar('SELECT ciudad, COUNT(*) AS n FROM usuarios GROUP BY ciudad HAVING COUNT(*) > 1 ORDER BY ciudad'),
@@ -217,11 +218,11 @@ chk('GROUP BY con HAVING', fn() => igual(
 ));
 chk('HAVING sobre alias de agregado', fn() => igual(
     $bd->consultar('SELECT ciudad FROM usuarios GROUP BY ciudad HAVING COUNT(*) = 1'),
-    [['Torrevieja']]
+    [['Sevilla']]
 ));
 chk('ORDER BY por alias de agregado', fn() => igual(
     $bd->consultar('SELECT ciudad, COUNT(*) AS n FROM usuarios GROUP BY ciudad ORDER BY n DESC, ciudad ASC'),
-    [['Madrid',3],['Valencia',2],['Torrevieja',1]]
+    [['Madrid',3],['Valencia',2],['Sevilla',1]]
 ));
 chk('agregado sobre tabla vacía', function () use ($bd) {
     $f = $bd->consultar("SELECT COUNT(*) AS n, SUM(total) AS s FROM pedidos WHERE total > 99999");
@@ -266,6 +267,21 @@ chk('UPPER / LOWER con acentos', fn() => igual(
     $bd->consultar("SELECT UPPER(nombre), LOWER(nombre) FROM usuarios WHERE id = 3"),
     [['MARÍA','maría']]
 ));
+chk('UPPER / LOWER sin mbstring dan lo mismo que con ella en las letras de su tabla, y LOWER no convierte la S en ß (2.10)', function () use ($bd) {
+    // Sin mbstring, la tabla de antes tenía la ß de más: LOWER('SALSA') daba 'ßalßa'
+    $q = "SELECT UPPER('straße ñandú çà œ'), LOWER('SALSA ÑÚÑEZ ÀB ÇÆ')";
+    $codigo = 'namespace JsonSQLDB { function function_exists(string $f): bool { return !str_starts_with($f, "mb_") && \\function_exists($f); } }'
+        . ' namespace { define("JSONSQLDB_CONEXION_DIRECTA", true); require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . ' $d = sys_get_temp_dir() . "/jsonsqldb_test_mayus" . getmypid(); @mkdir($d); JsonSQLDB\\Database::crear("m", $d);'
+        . ' echo json_encode(array_values((new JsonSQLDB\\Database("m", $d))->consultar(' . var_export($q, true) . ')[0]), JSON_UNESCAPED_UNICODE);'
+        . ' foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($d, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST) as $x) { $x->isDir() ? rmdir((string)$x) : unlink((string)$x); } rmdir($d); }';
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+    $sin = trim((string)stream_get_contents($tubos[1])) . trim((string)stream_get_contents($tubos[2]));
+    proc_close($p);
+    $con = json_encode(['STRASSE ÑANDÚ ÇÀ Œ', 'salsa ñúñez àb çæ'], JSON_UNESCAPED_UNICODE);
+    $aqui = (string)json_encode(array_values($bd->consultar($q)[0]), JSON_UNESCAPED_UNICODE);
+    return $sin === $con && $aqui === $con ?: "$sin / $aqui / $con";
+});
 chk('LENGTH cuenta caracteres, no bytes', fn() => igual(
     $bd->consultar('SELECT LENGTH(nombre) FROM usuarios WHERE id = 3'),
     [[5]]
@@ -279,7 +295,7 @@ chk('TRIM / REPLACE', fn() => igual(
     [['hola','Pedro Pérez']]
 ));
 chk('INSTR', fn() => igual(
-    $bd->consultar("SELECT INSTR('Torrevieja', 'vieja'), INSTR('abc', 'z')"),
+    $bd->consultar("SELECT INSTR('Valencia', 'cia'), INSTR('abc', 'z')"),
     [[6,0]]
 ));
 chk('concatenación ||', fn() => igual(
@@ -916,13 +932,24 @@ chk('los agregados acumulados dan lo mismo que calcularlos sobre las filas', fun
     $r = $bd->consultar('SELECT s, COUNT(*) AS c, COUNT(f) AS cf, SUM(f) AS sf, ROUND(AVG(n), 4) AS an, MIN(n) AS mn, MAX(f) AS mf,
                                 COUNT(DISTINCT n) AS dn, SUM(DISTINCT n) AS sdn, GROUP_CONCAT(DISTINCT n) AS gc
                          FROM ord GROUP BY s HAVING COUNT(*) > 1 ORDER BY SUM(f) DESC, s');
+    // La suma de los decimales, compensada como en SQLite (Kahan-Babuška-Neumaier),
+    // escrita aquí aparte para no comparar el motor consigo mismo (2.10)
+    $compensada = static function (array $xs): float {
+        $s = $e = 0.0;
+        foreach ($xs as $x) {
+            $t = $s + $x;
+            $e += abs($s) > abs($x) ? ($s - $t) + $x : ($x - $t) + $s;
+            $s = $t;
+        }
+        return $s + $e;
+    };
     foreach ($r as $fila) {
         $g = $grupos[$fila['s'] ?? "\0"];
         $f = array_values(array_filter(array_column($g, 'f'), static fn($v) => $v !== null));
         $n = array_values(array_filter(array_column($g, 'n'), static fn($v) => $v !== null));
         $dist = array_values(array_unique($n));
         $esperado = [
-            'c' => count($g), 'cf' => count($f), 'sf' => $f === [] ? null : array_sum($f),
+            'c' => count($g), 'cf' => count($f), 'sf' => $f === [] ? null : $compensada($f),
             'an' => $n === [] ? null : round(array_sum($n) / count($n), 4), 'mn' => $n === [] ? null : min($n),
             'mf' => $f === [] ? null : max($f), 'dn' => count($dist), 'sdn' => $dist === [] ? null : array_sum($dist),
             'gc' => $dist === [] ? null : implode(',', $dist),
@@ -1031,7 +1058,7 @@ chk('limpiar la tabla de orden', function () use ($bd) {
 echo "\n== Rendimiento ==\n";
 chk('10.000 filas: filtro, agrupación y join', function () use ($st, $cat, $bd) {
     $st->bloquear(true);
-    $cat->crearTabla('ventas', ['columns' => [
+    CatalogDdl::crearTabla($cat, 'ventas', ['columns' => [
         ['name'=>'id','type'=>'INTEGER','pk'=>true],
         ['name'=>'usuario_id','type'=>'INTEGER'],
         ['name'=>'importe','type'=>'DECIMAL(10,2)'],
@@ -1040,7 +1067,7 @@ chk('10.000 filas: filtro, agrupación y join', function () use ($st, $cat, $bd)
     for ($i = 1; $i <= 10000; $i++) {
         $filas[] = ['id'=>$i, 'usuario_id'=>($i % 6) + 1, 'importe'=>round($i / 7, 2)];
     }
-    StorageEscritura::guardarFilas($st, 'ventas', $filas);
+    StorageEntera::guardarFilas($st, 'ventas', $filas);
     $st->desbloquear();
 
     $t0 = microtime(true);
@@ -1181,9 +1208,9 @@ chk('ORDER BY un alias con el nombre de una columna ordena por el alias también
 $mezcla = [10, 9, 2.5, -3, 0, '10', '9', '100', ' 5 ', '1e1', '-2', '+7', '.5', '0.50', '1a', '2b', '12abc', '-x', '.', ' ', '', 'abc', 'ABC',
            'Zeta', 'ñu', 'árbol', '+', '9z', null];
 
-chk('Valor::comparar y compararOrden son un orden total (2.9): sin vueltas entre números, textos que lo son y textos que no', function () use ($mezcla) {
+chk('Valor::compararOrden y compararClase son un orden total: los números antes que los textos, y dos textos como textos (2.10, como SQLite)', function () use ($mezcla) {
     $vals = array_values(array_filter($mezcla, static fn($v) => $v !== null));
-    foreach (['comparar', 'compararOrden'] as $f) {
+    foreach (['compararOrden', 'compararClase'] as $f) {
         $c = static fn($a, $b): int => JsonSQLDB\Valor::$f($a, $b);
         foreach ($vals as $a) {
             foreach ($vals as $b) {
@@ -1194,12 +1221,16 @@ chk('Valor::comparar y compararOrden son un orden total (2.9): sin vueltas entre
             }
         }
     }
-    // Las dos clases: lo que es un número va antes que lo que no
-    return JsonSQLDB\Valor::comparar('9', '1a') === -1 && JsonSQLDB\Valor::comparar(5, '-x') === -1 && JsonSQLDB\Valor::comparar(' 5 ', 5) === 0
-        && JsonSQLDB\Valor::comparar('1a', '2b') === -1 ?: 'las clases';
+    // Para ordenar, cualquier número antes que cualquier texto; al comparar,
+    // dos textos byte a byte aunque sean números, y un número con un texto que
+    // lo es, como números (sin columna que decida, como antes: ver Valor)
+    $V = JsonSQLDB\Valor::class;
+    return $V::compararClase(10, '9') === -1 && $V::compararOrden(100, '1') === -1 && $V::comparar('9', '10') === 1
+        && $V::comparar('7', '007') !== 0 && $V::comparar(5, '-x') === -1 && $V::comparar(' 5 ', 5) === 0
+        && $V::comparar('1a', '2b') === -1 ?: 'las clases';
 });
 
-chk('Con textos que son números y textos que no, ORDER BY (entero, con LIMIT, con varias claves, por expresión, DESC, por el disco), MIN, MAX, ventanas, UNION, DISTINCT, GROUP BY y el WHERE dan el mismo orden (2.9)', function () use ($bd, $mezcla) {
+chk('Con textos que son números y textos que no, ORDER BY (entero, con LIMIT, con varias claves, por expresión, DESC, por el disco), MIN, MAX, ventanas, UNION, DISTINCT, GROUP BY y el WHERE dan el mismo orden (2.9; 2.10, todos como textos)', function () use ($bd, $mezcla) {
     $bd->consultar('CREATE TABLE tot (id INTEGER PRIMARY KEY, c TEXT, n INTEGER NOT NULL)');
     $bd->consultar('CREATE INDEX tot_n ON tot (n)');
     $v = [];
@@ -1209,14 +1240,16 @@ chk('Con textos que son números y textos que no, ORDER BY (entero, con LIMIT, c
     }
     $bd->consultar('INSERT INTO tot VALUES ' . implode(',', $v));
     $ref = $bd->consultar('SELECT id, c FROM tot');
-    // La referencia: NULL, luego los números por su valor, luego el resto como
-    // texto: con la colación en ORDER BY, byte a byte al comparar (MIN, MAX, <)
+    // La referencia: NULL, luego los textos, también los que son números
+    // (2.10, como SQLite: '10' antes que '9'): con la colación en ORDER BY,
+    // byte a byte al comparar (MIN, MAX, <)
     $orden = static function (bool $colacion) use ($ref): array {
-        $clave = static function ($c) use ($colacion): array {
-            if ($c === null) { return [0, 0, '', '']; }
-            return is_numeric(trim($c)) ? [1, trim($c) + 0, '', ''] : [2, 0, $colacion ? JsonSQLDB\Collation::clave($c) : '', $c];
+        // Con strcmp(): <=> compara como números dos textos que lo son
+        $cmp = static function ($x, $y) use ($colacion): int {
+            if ($x === null || $y === null) { return ($x !== null) <=> ($y !== null); }
+            return ($colacion ? strcmp(JsonSQLDB\Collation::clave($x), JsonSQLDB\Collation::clave($y)) <=> 0 : 0) ?: strcmp($x, $y) <=> 0;
         };
-        usort($ref, static fn(array $a, array $b): int => $clave($a['c']) <=> $clave($b['c']) ?: $a['id'] <=> $b['id']);
+        usort($ref, static fn(array $a, array $b): int => $cmp($a['c'], $b['c']) ?: $a['id'] <=> $b['id']);
         return array_column($ref, 'id');
     };
     $esperado = $orden(true);

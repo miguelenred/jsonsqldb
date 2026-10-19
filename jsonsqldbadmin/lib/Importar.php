@@ -181,7 +181,9 @@ final class Importar
     private static function olvidarCache(): void
     {
         if (function_exists('apcu_enabled') && apcu_enabled() && class_exists('APCUIterator')) {
-            apcu_delete(new APCUIterator('/^jsq2?:/'));     // jsq2: la del motor desde la 2.9
+            // jsq2: la del motor desde la 2.9. Solo las claves (2.10): con los
+            // valores, restaurar un ZIP cargaba en memoria la caché entera
+            apcu_delete(new APCUIterator('/^jsq2?:/', APC_ITER_KEY));
         }
     }
 
@@ -266,6 +268,23 @@ final class Importar
             }
             rewind($fh);
         }
+        // Una vista cuya tabla aún no está (va antes que ella en el volcado) se
+        // deja para el final; si entonces sigue sin estar (en Access, una tabla
+        // vinculada), no se importa y se dice (2.10: el motor ya no la crea)
+        $aplazadas = [];
+        $sinTabla  = [];
+        $vista = static function (string $sql) use (&$aplazadas, &$hechas, $base): void {
+            try {
+                Api::sql($base, $sql);
+                $hechas++;
+            } catch (RuntimeException $e) {
+                // El error del motor: «La vista 'v' usa 't', que no es una tabla ni una vista de la base…»
+                if (!preg_match("/La vista '([^']+)' usa '([^']+)', que no es una tabla ni una vista/", $e->getMessage(), $m)) {
+                    throw $e;
+                }
+                $aplazadas[] = [$sql, $m[1], $m[2]];
+            }
+        };
         try {
             self::$noUtf8 = 0;
             foreach (self::sentencias($fh, $dialecto) as [$sql, $en]) {
@@ -273,14 +292,14 @@ final class Importar
                 if ($traductor !== null) {
                     foreach ($traductor->traducir($sql) as $traducida) {
                         // Una vista traducida que el motor no acepta se salta y
-                        // se dice; el resto del volcado sigue
-                        if (preg_match('/^CREATE VIEW\s+("(?:[^"]|"")+")/', $traducida, $v)) {
+                        // se dice; el resto del volcado sigue. Con su nombre con
+                        // comillas o sin ellas (2.10): las de SQLite llegan tal cual
+                        if (preg_match('/^\s*CREATE\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")+"|`(?:[^`]|``)+`|\[[^\]]+\]|[^\s(]+)/i', $traducida, $v)) {
                             $vaciar();
                             try {
-                                Api::sql($base, $traducida);
-                                $hechas++;
+                                $vista($traducida);
                             } catch (RuntimeException $e) {
-                                $traductor->avisar(t("{que} '{n}' sin importar: {motivo}", ['que' => t('Vista'), 'n' => trim($v[1], '"'), 'motivo' => $e->getMessage()]));
+                                $traductor->avisar(t("{que} '{n}' sin importar: {motivo}", ['que' => t('Vista'), 'n' => trim($v[1], '"`[]'), 'motivo' => $e->getMessage()]));
                             }
                             continue;
                         }
@@ -294,7 +313,18 @@ final class Importar
                 if (preg_match('/^\s*(CREATE|DROP)\s+DATABASE\b/i', $sql)) {
                     throw new RuntimeException(t('El fichero intenta crear o borrar una base de datos; eso no se importa.'));
                 }
-                $ejecutar($sql);
+                if (preg_match('/^\s*CREATE\s+VIEW\b/i', $sql)) {
+                    $vaciar();
+                    $vista($sql);
+                    continue;
+                }
+                // El contador de un volcado de aquí para SQLite (2.10): su fila
+                // de sqlite_sequence, que en el motor es ALTER TABLE … AUTO_INCREMENT.
+                // Solo las sentencias sobre esa tabla: el texto en un dato no cuenta
+                $contador = preg_match('/^\s*(?:INSERT\s+INTO|DELETE\s+FROM)\s+["`\[]?sqlite_sequence\b/i', $sql) ? Traductor::secuencia($sql) : null;
+                foreach ($contador ?? [$sql] as $una) {
+                    $ejecutar($una);
+                }
             }
             $vaciar();
             // Las claves foráneas de un volcado ajeno, al final: ya están todas
@@ -316,6 +346,21 @@ final class Importar
                     }
                 }
             }
+            // Las vistas aplazadas, cuando ya están todas las tablas: una vuelta
+            // más mientras alguna entre (una puede usar otra aplazada)
+            $linea = t('el final (vistas)');
+            for ($otra = $aplazadas !== []; $otra;) {
+                $quedan    = $aplazadas;
+                $aplazadas = [];
+                foreach ($quedan as [$sql]) {
+                    $vista($sql);
+                }
+                $otra = $aplazadas !== [] && count($aplazadas) < count($quedan);
+            }
+            foreach ($aplazadas as [, $nombreVista, $falta]) {
+                $sinTabla[] = t("Vista '{n}' sin importar: usa la tabla '{t}', que no está en la base (en Access puede ser una tabla vinculada)",
+                    ['n' => $nombreVista, 't' => $falta]);
+            }
         } catch (Throwable $e) {
             $error = rtrim($e->getMessage(), '. ');
             // Un volcado solo de datos (mysqldump --no-create-info, pg_dump
@@ -333,7 +378,7 @@ final class Importar
         }
         $nombres = ['jsonsqldb' => 'jsonSQLDB', 'sqlite' => 'SQLite', 'mysql' => 'MySQL / MariaDB',
                     'postgresql' => 'PostgreSQL', 'sqlserver' => 'SQL Server', 'access' => 'Microsoft Access'];
-        $avisos = $traductor === null ? [] : $traductor->avisos();
+        $avisos = array_merge($traductor === null ? [] : $traductor->avisos(), $sinTabla);
         if (self::$noUtf8 > 0) {
             $avisos[] = t('Textos que no estaban en UTF-8, leídos como Latin-1 / Windows-1252 ({n}); los demás de las mismas sentencias, que sí lo estaban, se han dejado como venían. Si eran datos binarios (BLOB), no han llegado igual: vuelca con --hex-blob', ['n' => self::$noUtf8]);
         }
@@ -658,7 +703,9 @@ final class Importar
                     }
                     continue;
                 }
-                if ($c === '-' && ($l[$i + 1] ?? '') === '-') {                   // comentario hasta fin de línea
+                // Comentario hasta fin de línea: -- en todos, y # en MySQL (2.10:
+                // se tomaba por SQL, y su ; partía la sentencia y su ' abría una cadena)
+                if ($c === '-' && ($l[$i + 1] ?? '') === '-' || $mysql && $c === '#') {
                     $actual .= "\n";
                     break;
                 }
@@ -694,7 +741,8 @@ final class Importar
                 }
                 if ($c === "'" || $c === '"' || ($mysql && $c === '`') || ($ss && $c === '[')) {
                     $comilla = $c === '[' ? ']' : $c;
-                    $escapes = $c === "'" && ($mysql || ($pg && $i > 0 && ($l[$i - 1] === 'E' || $l[$i - 1] === 'e')
+                    // (en MySQL, también "…", que es un texto, 2.10)
+                    $escapes = ($c === "'" || $mysql && $c === '"') && ($mysql || ($pg && $i > 0 && ($l[$i - 1] === 'E' || $l[$i - 1] === 'e')
                         && ($i < 2 || !ctype_alnum($l[$i - 2]))));
                     $actual .= $c;
                     continue;
@@ -1150,8 +1198,9 @@ final class Importar
 
     /**
      * Los ficheros que niegan el acceso a la carpeta de una base desde el
-     * navegador, los mismos que pone el motor al crearla (Storage::crear()).
-     * Los de un ZIP no se restauran (2.9): uno a medida abría la carpeta.
+     * navegador, los mismos que pone el motor al crearla
+     * (StorageMantenimiento::crearBase()). Los de un ZIP no se restauran
+     * (2.9): uno a medida abría la carpeta.
      */
     private const PROTECCION = [
         '.htaccess'  => "Require all denied\nDeny from all\n",

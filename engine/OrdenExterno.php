@@ -12,7 +12,7 @@ namespace JsonSQLDB;
  * se sueltan. Al final se mezclan todos los tramos leyéndolos a la vez, fila a
  * fila: en memoria solo hay una fila por tramo.
  *
- * El orden es exactamente el de la ordenación en memoria (Select::
+ * El orden es exactamente el de la ordenación en memoria (SelectOrden::
  * comparadorDe()): Valor::compararOrden() clave a clave, DESC invertido, y a
  * igualdad, el orden de llegada; entre tramos, el que se escribió antes.
  *
@@ -152,7 +152,9 @@ final class OrdenExterno
             $y = $b[$i];
             // Dos números, aquí mismo: es lo que Valor::compararOrden() acabaría
             // haciendo, y la mezcla compara una vez por fila y tramo (2.9)
-            $c = (is_int($x) || is_float($x)) && (is_int($y) || is_float($y)) ? $x <=> $y : Valor::compararOrden($x, $y);
+            $c = (\is_int($x) || \is_float($x)) && (\is_int($y) || \is_float($y))
+                ? ($x <=> $y ?: (\is_int($x) === \is_int($y) ? 0 : Valor::mezclados($x, $y)))   // ver Valor::numeros()
+                : Valor::compararOrden($x, $y, !empty($this->orden[$i]['binaria']));
             if ($c !== 0) {
                 return $desc ? -$c : $c;
             }
@@ -209,8 +211,8 @@ final class OrdenExterno
             $bloque = '';
             foreach ($this->ordenadas() as $e) {
                 $s = serialize($e);
-                $bloque .= pack('N', strlen($s)) . $s;
-                if (strlen($bloque) >= 65536) {
+                $bloque .= pack('N', \strlen($s)) . $s;
+                if (\strlen($bloque) >= 65536) {
                     if (fwrite($fh, $bloque) === false) {
                         throw JsonSqlDbError::io("No se puede escribir el temporal de ordenación '$fichero'");
                     }
@@ -240,7 +242,7 @@ final class OrdenExterno
             $bloque = '';
             $pos    = 0;
             while (true) {
-                if ($pos + 4 > strlen($bloque) || $pos + 4 + ($largo = unpack('N', $bloque, $pos)[1]) > strlen($bloque)) {
+                if ($pos + 4 > \strlen($bloque) || $pos + 4 + ($largo = unpack('N', $bloque, $pos)[1]) > \strlen($bloque)) {
                     $mas = fread($fh, 65536);
                     if ($mas === false || $mas === '') {
                         break;

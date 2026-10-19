@@ -4,8 +4,9 @@ declare(strict_types=1);
 namespace JsonSQLDB;
 
 /**
- * UPDATE y DELETE: qué filas tocan (por un índice o recorriendo la tabla,
- * también con JOIN), y cambiarlas o quitarlas con sus índices. Métodos de
+ * UPDATE y DELETE: qué filas tocan (por un índice o recorriendo la tabla;
+ * el cruce con otras tablas y TRUNCATE, en WriterCambiosEspeciales), y
+ * cambiarlas o quitarlas con sus índices. Métodos de
  * Writer que reciben el ejecutor en $w. Van aparte para que un INSERT no
  * tenga que compilarlos (2.9): sin OPcache, PHP compila en cada petición lo
  * que carga. Hereda de Writer solo para llegar a lo protegido; no se
@@ -34,7 +35,7 @@ final class WriterCambios extends Writer
             $sets[] = ['col' => $col, 'expr' => $s['expr']['k'] === 'default' ? null : $s['expr']];
         }
         // Con otras tablas (2.9), lo que se asigna sale del cruce
-        $cruce = isset($ast['desde']) ? self::cruce($w, $ast, array_column($sets, 'expr')) : null;
+        $cruce = isset($ast['desde']) ? WriterCambiosEspeciales::cruce($w, $ast, array_column($sets, 'expr')) : null;
         if ($cruce === null) {
             foreach ($sets as $i => $s) {
                 if ($s['expr'] !== null) {
@@ -50,12 +51,26 @@ final class WriterCambios extends Writer
         // reescriben solo esas partes. Con otras tablas, las del cruce
         [$parcial, $candidatas] = self::candidatasDe($w, $tabla, $meta, $ast, $cruce);
         $indices = $w->indicesUnicos($tabla, $meta);
+        $vivos   = $w->indicesVivos;
+        $w->indicesVivos[$tabla] = &$indices;
         $sub     = $w->subconsultas($mapa);
         $conj    = $w->conjuntos($mapa);       // una vez, no en cada fila
         $tocadas = 0;
+        // OR IGNORE deja como estaba la fila que no cumpliría un NOT NULL, un
+        // CHECK o una clave única; OR REPLACE borra las filas con las que
+        // chocaría, y un NULL en una columna NOT NULL toma su valor por
+        // defecto. Como en SQLite, después de sus triggers BEFORE (2.10)
+        $modo    = $ast['conflicto'] ?? null;
+        $revisar = $modo !== null && (($meta['checks'] ?? []) !== [] || \in_array(true, array_column($meta['columns'], 'notnull'), true));
+        // Las filas que ha borrado OR REPLACE: con la tabla sin cargar, tramo()
+        // puede haber escrito ya su borrado y filaActual() no lo vería
+        $quitadas = [];
+        if ($modo === 'reemplazar') {
+            unset($w->unicas[$tabla], $w->defUnica[$tabla], $w->vacioUnica[$tabla]);
+        }
 
         foreach (self::objetivo($w, $ast, $mapa, $candidatas, $where, $simple, $sub, $conj) as $pos0 => $vieja) {
-            $vieja = self::filaActual($w, $tabla, $pos0, $vieja);
+            $vieja = isset($quitadas[$pos0]) ? null : self::filaActual($w, $tabla, $pos0, $vieja);
             if ($vieja === null) {
                 continue;                        // un trigger o una cascada ya la había borrado
             }
@@ -66,28 +81,60 @@ final class WriterCambios extends Writer
                     ? self::porDefecto($s['col'])
                     : ($cruce !== null ? $cruce[$pos0]["v$i"] : Evaluator::evaluar($s['expr'], $ctx));
             }
-            $nueva = $w->prepararFila($tabla, $meta, $nueva, false);
+            $nueva = $w->prepararFila($tabla, $meta, $nueva, false, !$revisar);
 
             $preparada = $nueva;
             $nueva = $w->lanzarTriggers($tabla, 'BEFORE', 'UPDATE', $nueva, $vieja);
-            if ($nueva !== $preparada) {
-                $nueva = $w->prepararFila($tabla, $meta, $nueva, false);
+            if ($nueva !== $preparada || $revisar) {
+                if ($modo === 'reemplazar') {
+                    $nueva = WriterConflictos::nulosPorDefecto($meta, $nueva);
+                }
+                try {
+                    $nueva = $w->prepararFila($tabla, $meta, $nueva, false);
+                } catch (JsonSqlDbError $e) {
+                    if ($modo !== 'nada' || $e->sqlState !== 'CONSTRAINT') {
+                        throw $e;
+                    }
+                    continue;                    // OR IGNORE: se queda como estaba
+                }
             }
             if (self::filaActual($w, $tabla, $pos0, $vieja) === null) {
                 continue;                        // la ha borrado su propio BEFORE
             }
-            $w->comprobarUnicos($tabla, $meta, $nueva, $indices, $vieja);
+            if ($modo === 'reemplazar') {
+                $quitadas += array_fill_keys(WriterConflictos::quitarChoques($w, $tabla, $meta, $pos0, $vieja, $nueva, $indices), true);
+                if (self::filaActual($w, $tabla, $pos0, $vieja) === null) {
+                    continue;                    // la ha borrado la cascada de las que choca, como en SQLite
+                }
+            }
+            try {
+                $w->comprobarUnicos($tabla, $meta, $nueva, $indices, $vieja);
+            } catch (JsonSqlDbError $e) {
+                if ($modo !== 'nada') {
+                    throw $e;
+                }
+                continue;                        // OR IGNORE
+            }
             $w->comprobarForaneas($tabla, $meta, $nueva);
 
             if ($parcial !== null && !isset($w->datos[$tabla])) {
+                if ($w->rowid !== [] || $w->foraneasPendientes !== []) {
+                    $w->filaCambia($tabla, $vieja, $nueva);
+                }
                 $w->cambios[$tabla][$pos0] = $nueva;
                 $w->sucioDatos[$tabla]     = true;
+                if (isset($w->idxCambios[$tabla])) {
+                    $w->cambiosSinMirar[$tabla][$pos0] = true;
+                }
             } else {
                 // Sin variable local con la tabla: una segunda referencia viva
                 // obligaría a PHP a copiarla entera en cada fila
                 $w->ponerFilaEn($tabla, $pos0, $nueva);
             }
             $w->cambiarEnIndices($meta, $vieja, $nueva, $indices);
+            if ($modo === 'reemplazar') {
+                WriterConflictos::apuntarUnicas($w, $tabla, $meta, $pos0, $vieja, $nueva);
+            }
             // Las cascadas, con la fila ya escrita, como en SQLite (2.9): las
             // hijas apuntan a la clave nueva, que ya está, y lo que cambien en
             // la misma tabla (una clave foránea hacia sí misma) no se pisa
@@ -102,6 +149,13 @@ final class WriterCambios extends Writer
                 $w->tramo($indices);
             }
         }
+        if ($modo === 'reemplazar') {
+            if ($quitadas !== [] && isset($w->datos[$tabla])) {
+                $w->porCompactar[$tabla] = true;  // al terminar la sentencia (ver filaActual())
+            }
+            unset($w->unicas[$tabla], $w->defUnica[$tabla], $w->vacioUnica[$tabla]);
+        }
+        $w->indicesVivos = $vivos;
 
         return $tocadas;
     }
@@ -111,10 +165,10 @@ final class WriterCambios extends Writer
         $tabla = $ast['tabla'];
         $meta  = $w->meta($tabla);
         if (!empty($ast['truncar'])) {
-            return self::vaciar($w, $tabla, $meta);
+            return WriterCambiosEspeciales::vaciar($w, $tabla, $meta);
         }
         $mapa  = $w->mapaColumnas($tabla, $meta, $ast['alias'] ?? null);
-        $cruce = isset($ast['desde']) ? self::cruce($w, $ast, []) : null;
+        $cruce = isset($ast['desde']) ? WriterCambiosEspeciales::cruce($w, $ast, []) : null;
         $where  = $ast['where'] === null || $cruce !== null ? null : Evaluator::resolver($ast['where'], $mapa);
         $simple = $where === null ? null : Valor::comparacionSimple($where);
         $sub   = $w->subconsultas($mapa);
@@ -127,7 +181,7 @@ final class WriterCambios extends Writer
         // juntaban todas, y cien mil filas agotaban la memoria)
         [$parcial, $candidatas] = self::candidatasDe($w, $tabla, $meta, $ast, $cruce);
         $objetivo = self::objetivo($w, $ast, $mapa, $candidatas, $where, $simple, $sub, $conj);
-        if ($parcial === null && !is_array($objetivo)) {
+        if ($parcial === null && !\is_array($objetivo)) {
             $objetivo = iterator_to_array($objetivo, true);
         }
 
@@ -147,6 +201,9 @@ final class WriterCambios extends Writer
             // apunte a ella es un error de clave foránea (antes se aceptaba, y
             // quedaba apuntando a una fila borrada)
             if ($parcial !== null && !isset($w->datos[$tabla])) {
+                if ($w->rowid !== [] || $w->foraneasPendientes !== []) {
+                    $w->filaCambia($tabla, $vieja, null);
+                }
                 $w->borradas[$tabla][$pos0] = true;
                 $w->sucioDatos[$tabla]      = true;
             } else {
@@ -207,11 +264,13 @@ final class WriterCambios extends Writer
             })();
         }
         $exprs  = array_map(static fn(array $o): array => Evaluator::resolver($o['expr'], $mapa), $orden);
+        // Con COLLATE BINARY escrito, byte a byte (2.10, como en un SELECT)
+        $binarias = array_map(static fn(array $e): bool => Parser::colacionEscrita($e) === 'BINARY', $exprs);
         $claves = [];
-        $ordenar = static function (array $elegidas) use (&$claves, $orden): array {
-            uksort($elegidas, static function (int $a, int $b) use ($claves, $orden): int {
+        $ordenar = static function (array $elegidas) use (&$claves, $orden, $binarias): array {
+            uksort($elegidas, static function (int $a, int $b) use ($claves, $orden, $binarias): int {
                 foreach ($orden as $i => $o) {
-                    $c = Valor::compararOrden($claves[$a][$i], $claves[$b][$i]);
+                    $c = Valor::compararOrden($claves[$a][$i], $claves[$b][$i], $binarias[$i]);
                     if ($c !== 0) {
                         return strtoupper((string)$o['dir']) === 'DESC' ? -$c : $c;
                     }
@@ -228,12 +287,12 @@ final class WriterCambios extends Writer
             $ctx = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conj];
             $claves[$pos]   = array_map(static fn(array $e) => Evaluator::evaluar($e, $ctx), $exprs);
             $elegidas[$pos] = $fila;
-            if ($cuantas !== null && count($elegidas) > 2 * $cuantas + 100) {
-                $elegidas = array_slice($ordenar($elegidas), 0, $cuantas, true);
+            if ($cuantas !== null && \count($elegidas) > 2 * $cuantas + 100) {
+                $elegidas = \array_slice($ordenar($elegidas), 0, $cuantas, true);
                 $claves   = array_intersect_key($claves, $elegidas);
             }
         }
-        return array_slice($ordenar($elegidas), $saltar, $limite, true);
+        return \array_slice($ordenar($elegidas), $saltar, $limite, true);
     }
 
     /**
@@ -272,7 +331,7 @@ final class WriterCambios extends Writer
      * y si se han leído sin cargar la tabla (las del índice, ver porIndice()).
      * Con otras tablas (2.9), las que salen en el cruce.
      *
-     * @param array<int, array>|null $cruce ver cruce()
+     * @param array<int, array>|null $cruce ver WriterCambiosEspeciales::cruce()
      * @return array{0: ?iterable, 1: iterable<int, array>}
      */
     private static function candidatasDe(Writer $w, string $tabla, array $meta, array $ast, ?array $cruce): array
@@ -299,7 +358,7 @@ final class WriterCambios extends Writer
         if ($porIndice === null) {
             return $filas;
         }
-        return array_intersect_key($filas, is_array($porIndice) ? $porIndice : iterator_to_array($porIndice, true));
+        return array_intersect_key($filas, \is_array($porIndice) ? $porIndice : iterator_to_array($porIndice, true));
     }
 
     /**
@@ -325,7 +384,7 @@ final class WriterCambios extends Writer
         $predicados = IndexesBusqueda::predicados($ast['where'], $alias)[$alias] ?? [];
         // Del mejor al peor: si uno no compensa, el siguiente
         foreach (IndexesBusqueda::candidatos($w->cat->indicesDe($tabla), $predicados) as $c) {
-            $posiciones = $st->posicionesPorIndice($tabla, $c['def'], $c['claves'], $c['prefijo']);
+            $posiciones = $st->posicionesPorIndice($tabla, $c['def'], $c['claves'], $c['prefijo'], null, $c['parcial']);
             if ($posiciones !== null) {
                 return StorageCambios::filasEnPosiciones($st, $tabla, $posiciones);
             }
@@ -344,7 +403,7 @@ final class WriterCambios extends Writer
             ?? StorageCambios::filasConPosicion($st, $tabla);
     }
 
-    protected static function quitarDeIndices(Writer $w, array $meta, array $fila, array &$indices): void
+    public static function quitarDeIndices(Writer $w, array $meta, array $fila, array &$indices): void
     {
         foreach ($w->unicos($meta) as $uq) {
             $clave = self::claveDe($fila, $uq['columns'], $uq['plegar']);
@@ -353,90 +412,5 @@ final class WriterCambios extends Writer
                 unset($indices[$uq['name']]['nuevas'][$clave]);
             }
         }
-    }
-
-    /**
-     * TRUNCATE TABLE de MySQL (2.9): todas las filas, sin triggers y con el
-     * autoincremento otra vez en 1; si otra tabla la referencia, error, y una
-     * clave foránea hacia sí misma no lo impide, como en MySQL. Sin leer las
-     * filas: la tabla se escribe vacía, y con el contador en su estructura,
-     * que guarda el mayor de los dos (ver Storage::leerMeta()), en la misma
-     * escritura. Antes se borraba fila a fila, la clave hacia sí misma daba
-     * error, y la estructura se guardaba antes y aparte: escrita por partes,
-     * la sentencia se repetía entera.
-     */
-    private static function vaciar(Writer $w, string $tabla, array $meta): int
-    {
-        foreach ($w->clavesHacia($tabla) as [$otra]) {
-            if (strcasecmp($otra, $tabla) !== 0) {
-                throw JsonSqlDbError::constraint("TRUNCATE TABLE '$tabla': '$otra' tiene una clave foránea hacia ella; usa DELETE FROM");
-            }
-        }
-        $n = isset($w->datos[$tabla]) ? count($w->datos[$tabla])
-            : StorageLectura::contarFilas($w->cat->storage(), $tabla) + count($w->anexo[$tabla] ?? []) - count($w->borradas[$tabla] ?? []);
-        $auto = Catalog::columnaAutoincremento($meta) !== null;
-        if ($n === 0 && !$auto) {
-            return 0;                            // nada que escribir
-        }
-        $w->datos[$tabla] = [];
-        unset($w->anexo[$tabla], $w->cambios[$tabla], $w->borradas[$tabla], $w->rowid[$tabla], $w->unicas[$tabla]);
-        $w->olvidarIndices($tabla);
-        $w->sucioDatos[$tabla] = true;
-        $w->sabe[$tabla]       = false;       // entera (ver volcar())
-        if ($auto) {
-            $w->autoinc[$tabla] = 1;
-            $w->metas[$tabla]['autoincrement']['next'] = 1;
-            $w->conMeta[$tabla] = true;
-        }
-        return $n;
-    }
-
-    /**
-     * UPDATE … FROM / JOIN y DELETE … USING / JOIN (2.9): el cruce se hace una
-     * vez con el motor del SELECT, con los datos de antes de la sentencia, y
-     * da cada fila de la tabla que se escribe por su posición, que es por
-     * donde se escribe después. Si sale varias veces cuenta la primera, como
-     * en SQLite y PostgreSQL.
-     *
-     * Lee del disco, con sus índices, salvo que la sentencia tenga algo a
-     * medias en memoria en alguna de sus tablas (un trigger): entonces de ahí.
-     *
-     * @param list<array|null> $exprs lo que asigna el SET (null: DEFAULT, no sale del cruce)
-     * @return array<int, array<string, mixed>> posición => ["v$i" => valor de $exprs[$i]], por posición
-     */
-    private static function cruce(Writer $w, array $ast, array $exprs): array
-    {
-        $sel = Parser::analizar('SELECT 1');
-        $sel['cols'] = [['star' => false, 'alias' => 'p',
-                         'expr' => ['k' => 'col', 'tabla' => $ast['alias'] ?? $ast['tabla'], 'nombre' => Select::POSICION]]];
-        foreach ($exprs as $i => $e) {
-            if ($e !== null) {
-                $sel['cols'][] = ['star' => false, 'alias' => "v$i", 'expr' => $e];
-            }
-        }
-        $sel['from']  = $ast['desde'];
-        $sel['where'] = $ast['where'];
-
-        $tablas  = Select::tablasDe($sel, $w->cat);
-        $memoria = $tablas === null;
-        $sucias  = array_change_key_case($w->sucioDatos);
-        foreach ($tablas ?? [] as $t) {
-            $memoria = $memoria || isset($sucias[strtolower($t)]);
-        }
-        $select = $memoria ? new Select($w->cat, $w->lectorSub()) : new Select($w->cat);
-
-        $out     = [];
-        $guardar = static function (array $f) use (&$out): void {
-            $p = $f['p'];
-            if ($p !== null && !isset($out[$p])) {
-                unset($f['p']);
-                $out[$p] = $f;
-            }
-        };
-        foreach ($select->ejecutarHacia($sel, $guardar) ?? [] as $f) {
-            $guardar($f);
-        }
-        ksort($out);
-        return $out;
     }
 }

@@ -256,6 +256,38 @@ final class Copias
         return array_keys($out);
     }
 
+    /** Bases con alguna copia en su carpeta, tengan programación o no. */
+    public static function basesConCopias(): array
+    {
+        $out = [];
+        foreach ((array)glob(self::carpeta() . '/*', GLOB_ONLYDIR) as $d) {
+            $b = basename((string)$d);
+            if (preg_match('/^[A-Za-z0-9_-]{1,64}$/', $b) && self::ficheros($b) !== []) {   // como nombreBase()
+                $out[] = $b;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Las copias de una base que ninguna programación borra (2.10): las de un
+     * formato sin programación de esa base, que se quedaban para siempre al
+     * quitarla o al cambiarla por otra en otro formato.
+     *
+     * @return list<string>
+     */
+    public static function sueltas(string $base): array
+    {
+        $formatos = [];
+        foreach (self::programaciones() as $p) {
+            if ($p['base'] === $base) {
+                $formatos[$p['formato']] = true;
+            }
+        }
+        return array_values(array_filter(self::ficheros($base),
+            static fn(string $f): bool => !isset($formatos[pathinfo($f, PATHINFO_EXTENSION)])));
+    }
+
     /** La hora de la última copia, en la zona horaria de esta petición. */
     public static function ultima(array $p): string
     {

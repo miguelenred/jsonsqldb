@@ -51,6 +51,35 @@ final class Integrity
     }
 
     /**
+     * CHECK INDEXES (2.10): cada índice, trozo a trozo, contra las filas de
+     * su parte (ver StorageMantenimiento::revisarIndices()). Una fila por
+     * problema: tabla, índice, problema y arreglo. Con $corregir (REPAIR
+     * INDEXES), los índices de cada tabla con alguno se rehacen con sus filas.
+     *
+     * @return list<array{tabla: string, indice: string, problema: string, arreglo: string}>
+     */
+    public function indices(?string $tabla = null, bool $corregir = false): array
+    {
+        if ($tabla !== null && !$this->cat->existe($tabla)) {
+            throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
+        }
+        $st  = $this->cat->storage();
+        $out = [];
+        foreach ($tabla !== null ? [$tabla] : $this->cat->tablas() as $t) {
+            $defs      = Indexes::definiciones($this->cat->meta($t));
+            $problemas = StorageMantenimiento::revisarIndices($st, $t, $defs);
+            if ($corregir && $problemas !== []) {
+                StorageMantenimiento::rehacerIndicesViejos($st, $t, $defs, true);
+                foreach ($problemas as $i => $p) {
+                    $problemas[$i]['arreglo'] = 'rehecho';
+                }
+            }
+            array_push($out, ...$problemas);
+        }
+        return $out;
+    }
+
+    /**
      * Revisa las claves foráneas y devuelve una fila por problema encontrado.
      *
      * @param string|null $tabla solo esa tabla; null = todas
@@ -80,11 +109,14 @@ final class Integrity
                 // Con la colación de las columnas del padre, como al escribir (2.9)
                 $plegar = $this->cat->existe((string)$fk['table'])
                     ? Catalog::plegarDe($this->cat->meta((string)$fk['table']), $fk['references']) : [];
+                // y la hija con la afinidad del padre (2.10)
+                $afin   = $this->cat->existe((string)$fk['table'])
+                    ? Catalog::afinidadesDe($this->cat->meta((string)$fk['table']), $fk['references']) : [];
                 $padres = $this->clavesDe((string)$fk['table'], $fk['references'], $plegar);
 
                 foreach ($this->cat->storage()->filas($t, true) as $i => $fila) {
                     $fila  = $cambios[$i] ?? $fila;
-                    $clave = Indexes::claveFila($fila, $fk['columns'], $plegar);
+                    $clave = Indexes::claveFila($fila, $fk['columns'], $plegar, $afin);
                     if ($clave === null || isset($padres[$clave])) {
                         continue;                       // NULL o padre encontrado
                     }

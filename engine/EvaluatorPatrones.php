@@ -30,9 +30,17 @@ final class EvaluatorPatrones extends Evaluator
         if ($v === null || $p === null) {
             return null;
         }
-        $escape = $n['escape'] === null ? null : Valor::aTexto(self::evaluar($n['escape'], $ctx));
+        $escape = null;
+        if ($n['escape'] !== null) {
+            // ESCAPE NULL da NULL, como en SQLite (2.10: era como sin ESCAPE)
+            $escape = self::evaluar($n['escape'], $ctx);
+            if ($escape === null) {
+                return null;
+            }
+            $escape = Valor::aTexto($escape);
+        }
         $regex  = empty($n['glob']) ? self::patronALike(Valor::aTexto($p), $escape) : self::patronAGlob(Valor::aTexto($p));
-        $t      = is_string($v) ? $v : Valor::aTexto($v);
+        $t      = \is_string($v) ? $v : Valor::aTexto($v);
         $r      = preg_match($regex, $t);
         return (($r === false ? self::casaSinRetroceso($regex, $t) : $r === 1) !== $n['not']) ? 1 : 0;
     }
@@ -100,7 +108,7 @@ final class EvaluatorPatrones extends Evaluator
         // '/^…$/' y sus opciones; un % es '.*' y nada más lo es (ver patronALike() y patronAGlob())
         $fin    = (int)strrpos($regex, '$/');
         $trozos = explode('.*', substr($regex, 2, $fin - 2));
-        if (count($trozos) > 2) {
+        if (\count($trozos) > 2) {
             $ultimo = array_pop($trozos);
             $regex  = '/^' . array_shift($trozos) . '(?>.*?' . implode(')(?>.*?', $trozos) . ').*' . $ultimo . substr($regex, $fin);
         }
@@ -124,7 +132,7 @@ final class EvaluatorPatrones extends Evaluator
             return self::$patrones[$clave];
         }
         $out = '';
-        $n   = strlen($patron);
+        $n   = \strlen($patron);
         for ($i = 0; $i < $n; $i++) {
             $c = $patron[$i];
             if ($c === '*') {
@@ -156,7 +164,7 @@ final class EvaluatorPatrones extends Evaluator
      */
     private static function claseGlob(string $patron, int &$i): ?string
     {
-        $n      = strlen($patron);
+        $n      = \strlen($patron);
         $j      = $i + 1;
         $no     = ($patron[$j] ?? '') === '^';
         $j     += $no ? 1 : 0;
@@ -168,9 +176,9 @@ final class EvaluatorPatrones extends Evaluator
         }
         // Un carácter UTF-8 entero cada vez: un rango puede ser á-é
         $siguiente = static function () use ($patron, &$j): string {
-            $b = ord($patron[$j]);
+            $b = \ord($patron[$j]);
             $c = substr($patron, $j, $b >= 0xF0 ? 4 : ($b >= 0xE0 ? 3 : ($b >= 0xC0 ? 2 : 1)));
-            $j += strlen($c);
+            $j += \strlen($c);
             return $c;
         };
         while ($j < $n) {
@@ -192,28 +200,51 @@ final class EvaluatorPatrones extends Evaluator
         return null;
     }
 
-    /** Convierte el patrón LIKE en expresión regular. % = varios, _ = uno. */
+    /**
+     * Convierte el patrón LIKE en expresión regular. % = varios, _ = uno.
+     * Como en SQLite (2.10), solo las letras de la A a la Z son iguales en
+     * mayúsculas y en minúsculas: cada una va como [aA], sin la opción i, que
+     * con UTF-8 también juntaba É y é (SQLite no). El carácter de ESCAPE es
+     * uno solo, aunque ocupe varios bytes (se tomaba su primer byte: con
+     * ESCAPE 'ñ', cualquier á o é escapaba lo que la seguía), y un patrón que
+     * acaba en él no casa con nada.
+     */
     public static function patronALike(string $patron, ?string $escape): string
     {
         $clave = 'l' . $patron . "\0" . ($escape ?? '');
         if (isset(self::$patrones[$clave])) {
             return self::$patrones[$clave];
         }
-
-        $esc = ($escape !== null && $escape !== '') ? $escape[0] : null;
-        $out = '';
-        $n   = strlen($patron);
+        if ($escape !== null && \strlen($escape) !== 1 && preg_match('/^.$/su', $escape) !== 1) {
+            throw JsonSqlDbError::syntax('ESCAPE tiene que ser un solo carácter');
+        }
+        $largo = $escape === null ? 0 : \strlen($escape);
+        $out   = '';
+        $n     = \strlen($patron);
         for ($i = 0; $i < $n; $i++) {
             $c = $patron[$i];
-            if ($esc !== null && $c === $esc && $i + 1 < $n) {
-                $out .= preg_quote($patron[++$i], '/');
+            if ($largo > 0 && $c === $escape[0] && substr($patron, $i, $largo) === $escape) {
+                $i += $largo;
+                if ($i >= $n) {
+                    $out = '(?!)';
+                    break;
+                }
+                // El carácter escapado, entero aunque sea de varios bytes
+                $b  = \ord($patron[$i]);
+                $c  = substr($patron, $i, $b >= 0xF0 ? 4 : ($b >= 0xE0 ? 3 : ($b >= 0xC0 ? 2 : 1)));
+                $i += \strlen($c) - 1;
+            } elseif ($c === '%') {
+                $out .= '.*';
+                continue;
+            } elseif ($c === '_') {
+                $out .= '.';
                 continue;
             }
-            if ($c === '%')      { $out .= '.*'; }
-            elseif ($c === '_')  { $out .= '.'; }
-            else                 { $out .= preg_quote($c, '/'); }
+            // Sin ctype_alpha() ni strtolower(), que dependen del locale
+            $o    = \strlen($c) === 1 ? \ord($c) | 0x20 : 0;
+            $out .= $o >= 0x61 && $o <= 0x7A ? '[' . \chr($o) . \chr($o ^ 0x20) . ']' : preg_quote($c, '/');
         }
-        return self::guardarPatron($clave, $patron, $out, 'is');
+        return self::guardarPatron($clave, $patron, $out, 's');
     }
 
     /**
@@ -232,11 +263,11 @@ final class EvaluatorPatrones extends Evaluator
                 throw JsonSqlDbError::syntax("Patrón de LIKE o GLOB no válido: '$patron'");
             }
         }
-        if (count(self::$patrones) >= 4096 || self::$tamPatrones > 1048576) {
+        if (\count(self::$patrones) >= 4096 || self::$tamPatrones > 1048576) {
             self::$patrones    = [];
             self::$tamPatrones = 0;
         }
-        self::$tamPatrones += strlen($clave) + strlen($regex);
+        self::$tamPatrones += \strlen($clave) + \strlen($regex);
         return self::$patrones[$clave] = $regex;
     }
 }

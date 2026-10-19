@@ -17,24 +17,31 @@ namespace JsonSQLDB;
  *
  *   rows  = registros mostrados (SELECT) o afectados (INSERT/UPDATE/DELETE)
  *   ms    = tiempo de ejecución en milisegundos
- *   origen= etiqueta de la API key que lanzó la consulta (vacío fuera de la API)
+ *   origen= etiqueta de la API key que lanzó la consulta, o el panel y su usuario
+ *           (vacío en una conexión directa, salvo con Logger::contexto())
  *
  * https://miguelenred.es/jsonsqldb
  */
 final class Logger
 {
-    private static string $origen = '';
-    private static ?string $ip    = null;
+    /** [quién ejecuta, desde dónde] que ha dado contexto(), o null */
+    private static ?array $contexto = null;
 
-    /** Contexto de la petición: quién ejecuta y desde dónde (lo fija la API). */
+    /**
+     * Contexto de la petición: quién ejecuta y desde dónde, para código propio.
+     * Manda sobre JSONSQLDB_REGISTRO, que es como se lo dicen la API y el panel
+     * (2.10: llamaban aquí, y cargaban esta clase en cada petición aunque no se
+     * escribiera ninguna línea).
+     */
     public static function contexto(string $origen, ?string $ip = null): void
     {
-        self::$origen = $origen;
-        self::$ip     = $ip;
+        self::$contexto = [$origen, $ip];
     }
 
     /**
-     * Registra una consulta.
+     * Registra una consulta. Quien llama ha mirado antes Config::seRegistra()
+     * (2.10: lo miraba aquí, y cargar Logger para no escribir nada era la mayor
+     * parte de lo que compilaba de más una lectura sin OPcache).
      *
      * @param string      $base   base de datos
      * @param string      $op     SELECT, INSERT, UPDATE, DELETE, CREATE, ...
@@ -42,6 +49,7 @@ final class Logger
      * @param int|null    $filas  registros mostrados o afectados
      * @param float       $ms     milisegundos empleados
      * @param string|null $error  mensaje de error, o null si fue bien
+     * @param array       $params sus parámetros (se apuntan con JSONSQLDB_LOG_PARAMS)
      */
     public static function registrar(
         string $base,
@@ -52,34 +60,22 @@ final class Logger
         ?string $error = null,
         array $params = []
     ): void {
-        if (!Config::logActivo()) {
-            return;
-        }
-        $nivel = Config::logNivel();
-        if ($nivel === 'errores' && $error === null) {
-            return;
-        }
-        // Lecturas: SELECT, UNION, SHOW y CHECK (2.9; antes solo se saltaba SELECT)
-        if ($nivel === 'escrituras' && $error === null
-            && ($op === 'SELECT' || $op === 'UNION' || $op === 'EXPLAIN' || strncmp($op, 'SHOW', 4) === 0 || strncmp($op, 'CHECK', 5) === 0)) {
-            return;
-        }
-
         $dir = Config::logPath();
         if ($dir === '' || (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir))) {
             return;   // sin log: el motor nunca falla por no poder escribirlo
         }
 
         $max = Config::logMaxSql();
+        [$origen, $ip] = self::$contexto ?? (\defined('JSONSQLDB_REGISTRO') ? \JSONSQLDB_REGISTRO : ['', null]);
         $entrada = [
             'ts'     => self::ahora(),
-            'ip'     => self::ip(),
+            'ip'     => $ip ?? self::ip(),
             'db'     => $base,
             'op'     => $op,
             'rows'   => $filas,
             'ms'     => round($ms, 2),
-            'origen' => self::$origen,
-            'sql'    => $max > 0 && strlen($sql) > $max ? self::cortar($sql, $max) . '…' : $sql,
+            'origen' => $origen,
+            'sql'    => $max > 0 && \strlen($sql) > $max ? self::cortar($sql, $max) . '…' : $sql,
         ];
         // Los valores solo se registran si se ha pedido expresamente: ahí viajan
         // contraseñas, tokens y datos personales.
@@ -100,7 +96,9 @@ final class Logger
         }
 
         $fichero = self::fichero($dir);
-        @file_put_contents($fichero, $linea . "\n", FILE_APPEND | LOCK_EX);
+        if (@file_put_contents($fichero, $linea . "\n", FILE_APPEND | LOCK_EX) === false) {
+            self::noSeEscribe($fichero);
+        }
 
         if (mt_rand(1, 200) === 1) {
             self::purgar($dir);
@@ -115,10 +113,25 @@ final class Logger
     private static function cortar(string $texto, int $max): string
     {
         $corte = $max;
-        while ($corte > 0 && $corte > $max - 3 && (ord($texto[$corte]) & 0xC0) === 0x80) {
+        while ($corte > 0 && $corte > $max - 3 && (\ord($texto[$corte]) & 0xC0) === 0x80) {
             $corte--;
         }
         return substr($texto, 0, $corte);
+    }
+
+    /**
+     * Un registro o un fichero de estado que no se puede escribir (permisos,
+     * cuota, disco lleno): la consulta sigue, pero se dice una vez por
+     * fichero y proceso en el registro de errores de PHP (2.10: se callaba, y
+     * si dejaba de escribirse el estado de la API nadie se enteraba).
+     */
+    public static function noSeEscribe(string $fichero): void
+    {
+        static $dichos = [];
+        if (!isset($dichos[$fichero])) {
+            $dichos[$fichero] = true;
+            error_log("jsonSQLDB: no se puede escribir $fichero (permisos, cuota o disco lleno)");
+        }
     }
 
     /** Fichero del día, rotando si supera el tamaño máximo. */
@@ -158,11 +171,8 @@ final class Logger
 
     private static function ip(): string
     {
-        if (self::$ip !== null) {
-            return self::$ip;
-        }
         // Conexión directa: no hay petición HTTP a la API de la que sacar la IP
-        if (!defined('JSONSQLDB_VIA_API')) {
+        if (!\defined('JSONSQLDB_VIA_API')) {
             return 'local';
         }
         return (string)($_SERVER['REMOTE_ADDR'] ?? (PHP_SAPI === 'cli' ? 'cli' : 'desconocida'));

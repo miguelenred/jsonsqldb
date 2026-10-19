@@ -36,7 +36,7 @@ final class SelectJoin extends Select
      */
     public static function semiJoin(Select $sel, array $sub, array $mapaFuera): ?array
     {
-        if ($sub['k'] !== 'select' || isset($sub['with']) || count($sub['from']) !== 1 || $sub['from'][0]['tipo'] !== 'tabla'
+        if ($sub['k'] !== 'select' || isset($sub['with']) || \count($sub['from']) !== 1 || $sub['from'][0]['tipo'] !== 'tabla'
             || $sub['where'] === null || $sub['group'] !== null || $sub['having'] !== null || $sub['limit'] !== null
             || ($sub['offset'] ?? 0) > 0 || !empty($sub['ventanas'])) {
             return null;
@@ -68,7 +68,7 @@ final class SelectJoin extends Select
                 }
                 foreach ([['i', 'd'], ['d', 'i']] as [$a, $b]) {
                     if ($r[$a]['k'] === 'col' && !isset($r[$a]['externa']) && self::soloDeFuera($r[$b])) {
-                        $par = [$c[$a], $c[$b]];
+                        $par = [$c[$a], $c[$b], Evaluator::afinidadDe($r[$a])];
                         break;
                     }
                 }
@@ -85,12 +85,36 @@ final class SelectJoin extends Select
         if ($par === null) {
             return null;
         }
-        [$valores] = $sel->valoresDe(['k' => 'select', 'distinct' => false, 'cols' => [['star' => false, 'alias' => null, 'expr' => $par[0]]],
-            'from' => $sub['from'], 'where' => $resto, 'group' => null, 'having' => null, 'order' => [], 'limit' => null, 'offset' => null]);
-        if ($sel->cat->storage()->traza !== null) {
-            SelectAvanzada::apuntar($sel, $nombre, 'EXISTS, una vez para todas las filas de fuera (semi-join)', null, count($valores));
+        // Una subconsulta dentro del resto puede mirar a la consulta de fuera
+        // o más allá: con la fila de fuera vacía se nota, y entonces no vale un
+        // conjunto para todas (2.10: daba «Columna desconocida»)
+        $externo    = $sel->externo;
+        $marca      = Evaluator::$correlacionada;
+        $externas   = Evaluator::$externas;
+        $st         = $sel->cat->storage();
+        $pasos      = $st->traza === null ? null : \count($st->traza);
+        Evaluator::$externas = [];
+        $sel->externo = ['mapa' => $externo === null ? $mapaFuera : $mapaFuera + self::masFuera($externo)['mapa'], 'fila' => []];
+        try {
+            [$valores] = $sel->valoresDe(['k' => 'select', 'distinct' => false, 'cols' => [['star' => false, 'alias' => null, 'expr' => $par[0]]],
+                'from' => $sub['from'], 'where' => $resto, 'group' => null, 'having' => null, 'order' => [], 'limit' => null, 'offset' => null]);
+            $miraFuera = Evaluator::$externas !== [];
+        } finally {
+            $sel->externo = $externo;
+            Evaluator::$correlacionada = $marca;
+            Evaluator::$externas       = $externas;
         }
-        return [IndexesBusqueda::conjunto($valores), $fuera];
+        if ($miraFuera) {
+            if ($pasos !== null) {
+                $st->traza = \array_slice($st->traza, 0, $pasos);     // lo leído para nada, fuera del EXPLAIN
+            }
+            return null;
+        }
+        if ($st->traza !== null) {
+            SelectAvanzada::apuntar($sel, $nombre, 'EXISTS, una vez para todas las filas de fuera (semi-join)', null, \count($valores));
+        }
+        // Con la afinidad de la igualdad (2.10, ver IndexesBusqueda::conjuntoDeIn())
+        return [IndexesBusqueda::conjuntoDeIn($valores, null, null, $par[2], Evaluator::afinidadDe($fuera)), $fuera];
     }
 
     /** ¿Solo columnas de fuera, y ninguna subconsulta, en esta expresión ya resuelta? */
@@ -103,7 +127,7 @@ final class SelectJoin extends Select
             return false;
         }
         foreach ($n as $v) {
-            if (is_array($v) && !self::soloDeFuera($v)) {
+            if (\is_array($v) && !self::soloDeFuera($v)) {
                 return false;
             }
         }
@@ -141,7 +165,7 @@ final class SelectJoin extends Select
         // RIGHT JOIN = mismo algoritmo con los papeles cambiados. El lado
         // interno se recorre varias veces y se indexa por posición: entero.
         $derecho     = $tipo === 'RIGHT';
-        if ($derecho && !is_array($izq)) {
+        if ($derecho && !\is_array($izq)) {
             $izq = iterator_to_array($izq, false);
         }
         $externas    = $derecho ? $der['filas'] : $izq;
@@ -149,12 +173,14 @@ final class SelectJoin extends Select
         $clavesExt   = [];
         $clavesInt   = [];
         $plegar      = [];                  // la colación de cada igualdad que la tiene (2.9)
-        foreach ($pares as $j => [$ki, $kd, $c]) {
+        $modos       = [];                  // y cómo iguala (2.10, ver claveHash())
+        foreach ($pares as $j => [$ki, $kd, $c, $m]) {
             $clavesExt[] = $derecho ? $kd : $ki;
             $clavesInt[] = $derecho ? $ki : $kd;
             if ($c !== null) {
                 $plegar[$j] = $c;
             }
+            $modos[$j] = $m;
         }
         $nulos = array_fill_keys($derecho ? $clavesIzq : $clavesDer, null);
         [$sub, $conjunto] = $sel->subconsultasDelOn();
@@ -165,7 +191,7 @@ final class SelectJoin extends Select
         if ($clavesInt !== []) {
             $indice = [];
             foreach ($internas as $i => $fila) {
-                $clave = self::claveHash($sel, $fila, $clavesInt, $plegar);
+                $clave = self::claveHash($sel, $fila, $clavesInt, $plegar, $modos);
                 if ($clave === null) {
                     continue;
                 }
@@ -173,7 +199,7 @@ final class SelectJoin extends Select
                 // son todas, y una lista de uno por fila cuesta el triple
                 if (!isset($indice[$clave])) {
                     $indice[$clave] = $i;
-                } elseif (is_int($indice[$clave])) {
+                } elseif (\is_int($indice[$clave])) {
                     $indice[$clave] = [$indice[$clave], $i];
                 } else {
                     $indice[$clave][] = $i;
@@ -197,9 +223,9 @@ final class SelectJoin extends Select
                 $candidatas = $todas;
             } else {
                 // Una sola llamada: claveHash() recorre la fila y no es gratis
-                $clave      = self::claveHash($sel, $ext, $clavesExt, $plegar);
+                $clave      = self::claveHash($sel, $ext, $clavesExt, $plegar, $modos);
                 $candidatas = $clave === null ? [] : ($indice[$clave] ?? []);
-                if (is_int($candidatas)) {
+                if (\is_int($candidatas)) {
                     $candidatas = [$candidatas];
                 }
             }
@@ -266,13 +292,14 @@ final class SelectJoin extends Select
             yield from self::unir($sel, $izq, $fuentesIzq, $der, $o);
             return;
         }
-        $clavesIzq = $clavesInt = $plegar = [];
-        foreach ($pares as $j => [$ki, $kd, $c]) {
+        $clavesIzq = $clavesInt = $plegar = $modos = [];
+        foreach ($pares as $j => [$ki, $kd, $c, $m]) {
             $clavesIzq[] = $ki;
             $clavesInt[] = $kd;
             if ($c !== null) {
                 $plegar[$j] = $c;
             }
+            $modos[$j] = $m;
         }
         $nulos  = array_fill_keys($clavesDer, null);
         $carpeta = $sel->cat->storage()->carpetaOrden();
@@ -280,13 +307,13 @@ final class SelectJoin extends Select
         $fuera  = new Volcado($carpeta);
         try {
             foreach ($der['filas'] as $fila) {
-                $k = self::claveHash($sel, $fila, $clavesInt, $plegar);
+                $k = self::claveHash($sel, $fila, $clavesInt, $plegar, $modos);
                 if ($k !== null) {
                     $dentro->anadir($fila, crc32($k) % self::PARTICIONES);
                 }
             }
             foreach ($izq as $fila) {
-                $k = self::claveHash($sel, $fila, $clavesIzq, $plegar);
+                $k = self::claveHash($sel, $fila, $clavesIzq, $plegar, $modos);
                 if ($k !== null) {
                     $fuera->anadir($fila, crc32($k) % self::PARTICIONES);
                 } elseif (($o['join'] ?? '') === 'LEFT') {
@@ -306,15 +333,21 @@ final class SelectJoin extends Select
     /**
      * Clave de igualdad de una fila; null si algún valor es NULL (NULL nunca casa).
      *
-     * Iguala lo mismo que el = del WHERE (Valor::comparar()): un texto numérico
-     * vale por su número, así que 1, 1.0, '1' y ' 1' casan entre sí. Con
-     * Valor::clave() a secas, que distingue 1 de '1' para DISTINCT y GROUP BY,
-     * un JOIN entre un entero y un decimal o un texto numérico no devolvía
-     * ninguna fila. El booleano va como número, igual que en los índices.
+     * Iguala lo mismo que el = del WHERE (Valor::comparar() con la afinidad
+     * de cada lado, 2.10), según el modo de cada igualdad (ver
+     * Select::igualdades()): 'T', como textos, con un número pasado a su
+     * texto ('7' y '007' no casan); 'N', con un texto que es un número pasado
+     * a número, así que 1, 1.0, '1' y ' 1' casan entre sí. Con Valor::clave()
+     * a secas, que distingue 1 de '1' para DISTINCT y GROUP BY, un JOIN entre
+     * un entero y un decimal o un texto numérico no devolvía ninguna fila. Con
+     * '' (ninguno de los dos lados sabe), como 'N', y la igualdad se vuelve a
+     * comprobar con Valor::comparar(). El booleano va como número, igual que
+     * en los índices.
      *
      * @param array<int, string> $plegar la colación de las que la tienen, por posición (2.9)
+     * @param array<int, string> $modos  cómo iguala cada una, por posición (2.10)
      */
-    private static function claveHash(Select $sel, array $fila, array $claves, array $plegar = []): ?string
+    private static function claveHash(Select $sel, array $fila, array $claves, array $plegar = [], array $modos = []): ?string
     {
         $k = '';
         foreach ($claves as $j => $c) {
@@ -325,9 +358,13 @@ final class SelectJoin extends Select
             if (isset($plegar[$j])) {
                 $v = Functions::plegar($v, $plegar[$j]);
             }
-            if (is_string($v) && (is_numeric($v) || is_numeric(trim($v)))) {
+            if (($modos[$j] ?? 'N') === 'T') {
+                if (\is_int($v) || \is_float($v)) {
+                    $v = Valor::aTexto($v);
+                }
+            } elseif (\is_string($v) && (is_numeric($v) || is_numeric(trim($v)))) {
                 $v = trim($v) + 0;
-            } elseif (is_bool($v)) {
+            } elseif (\is_bool($v)) {
                 $v = (int)$v;
             }
             $k .= Valor::clave($v) . "\0";
@@ -387,7 +424,7 @@ final class SelectJoin extends Select
         $derecha = ($o['join'] ?? '') !== 'RIGHT';
         $comunes = array_map('strtolower', $o['usingCols']);
         foreach ($fuentes as $i => $f) {
-            if (!empty($f[3]) || !in_array(strtolower($f[1]), $comunes, true)) {
+            if (!empty($f[3]) || !\in_array(strtolower($f[1]), $comunes, true)) {
                 continue;
             }
             if ((strtolower($f[0]) === $alias) === $derecha) {

@@ -10,9 +10,11 @@ declare(strict_types=1);
 require_once __DIR__ . '/../engine/bootstrap.php';
 
 use JsonSQLDB\Catalog;
+use JsonSQLDB\CatalogDdl;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
 use JsonSQLDB\StorageCambios;
+use JsonSQLDB\StorageEntera;
 use JsonSQLDB\StorageEscritura;
 use JsonSQLDB\Types;
 
@@ -25,6 +27,7 @@ function chk(string $titulo, callable $fn): void {
     try {
         $r = $fn();
         if ($r === true) { $ok++; echo "  OK   $titulo\n"; }
+        elseif ($r === null) { echo "  --   $titulo (se salta con este PHP)\n"; }
         else { $ko++; echo "  FALLO $titulo -> " . var_export($r, true) . "\n"; }
     } catch (Throwable $e) {
         global $ko; $ko++;
@@ -70,12 +73,12 @@ $st  = new Storage($raiz, $base);
 $cat = new Catalog($st);
 
 echo "\n== Estructura ==\n";
-esperaError('escribir sin bloqueo exclusivo', 'LOCK', fn() => $cat->crearTabla('x', ['columns'=>[['name'=>'a','type'=>'INT']]]));
+esperaError('escribir sin bloqueo exclusivo', 'LOCK', fn() => CatalogDdl::crearTabla($cat, 'x', ['columns'=>[['name'=>'a','type'=>'INT']]]));
 
 $st->bloquear(true);
 
 chk('crear usuarios', function () use ($cat) {
-    $cat->crearTabla('usuarios', [
+    CatalogDdl::crearTabla($cat, 'usuarios', [
         'columns' => [
             ['name'=>'id',     'type'=>'INTEGER',      'pk'=>true, 'autoincrement'=>true],
             ['name'=>'nombre', 'type'=>'VARCHAR(50)',  'notnull'=>true],
@@ -88,7 +91,7 @@ chk('crear usuarios', function () use ($cat) {
 });
 
 chk('crear pedidos con FK', function () use ($cat) {
-    $cat->crearTabla('pedidos', [
+    CatalogDdl::crearTabla($cat, 'pedidos', [
         'columns' => [
             ['name'=>'id',         'type'=>'INTEGER','pk'=>true,'autoincrement'=>true],
             ['name'=>'usuario_id', 'type'=>'INTEGER','notnull'=>true],
@@ -101,17 +104,17 @@ chk('crear pedidos con FK', function () use ($cat) {
     return $cat->meta('pedidos')['foreign_keys'][0]['name'] === 'fk_pedidos_usuario_id';
 });
 
-esperaError('FK a tabla inexistente', 'SCHEMA', fn() => $cat->crearTabla('t1', [
+esperaError('FK a tabla inexistente', 'SCHEMA', fn() => CatalogDdl::crearTabla($cat, 't1', [
     'columns'=>[['name'=>'a','type'=>'INT']],
     'foreign_keys'=>[['columns'=>['a'],'table'=>'nohay','references'=>['id']]],
 ]));
-esperaError('AUTOINCREMENT no entero', 'SCHEMA', fn() => $cat->crearTabla('t2', [
+esperaError('AUTOINCREMENT no entero', 'SCHEMA', fn() => CatalogDdl::crearTabla($cat, 't2', [
     'columns'=>[['name'=>'a','type'=>'TEXT','autoincrement'=>true]],
 ]));
-esperaError('columna duplicada', 'SCHEMA', fn() => $cat->crearTabla('t3', [
+esperaError('columna duplicada', 'SCHEMA', fn() => CatalogDdl::crearTabla($cat, 't3', [
     'columns'=>[['name'=>'a','type'=>'INT'],['name'=>'A','type'=>'INT']],
 ]));
-esperaError('borrar tabla referenciada', 'CONSTRAINT', fn() => $cat->borrarTabla('usuarios'));
+esperaError('borrar tabla referenciada', 'CONSTRAINT', fn() => CatalogDdl::borrarTabla($cat, 'usuarios'));
 
 chk('clave primaria', fn() => Catalog::clavePrimaria($cat->meta('usuarios')) === ['id']);
 chk('conjuntos únicos', fn() => count(Catalog::conjuntosUnicos($cat->meta('usuarios'))) === 2);
@@ -128,7 +131,7 @@ chk('insertar y releer', function () use ($st, $cat) {
         }
         $filas[] = $fila;
     }
-    StorageEscritura::guardarFilas($st, 'usuarios', $filas);
+    StorageEntera::guardarFilas($st, 'usuarios', $filas);
     $leidas = StorageEscritura::leerFilas($st, 'usuarios');
     return count($leidas) === 2
         && $leidas[0]['id'] === 1 && $leidas[1]['id'] === 2
@@ -145,28 +148,28 @@ chk('fichero de datos legible (una fila por línea)', function () use ($raiz, $b
 
 echo "\n== ALTER TABLE ==\n";
 chk('añadir columna', function () use ($cat, $st) {
-    $cat->anadirColumna('usuarios', ['name'=>'ciudad','type'=>'VARCHAR(60)','default'=>'Torrevieja']);
+    CatalogDdl::anadirColumna($cat, 'usuarios', ['name'=>'ciudad','type'=>'VARCHAR(60)','default'=>'Malaga']);
     $filas = StorageEscritura::leerFilas($st, 'usuarios');
-    return $filas[0]['ciudad'] === 'Torrevieja' && Catalog::columna($cat->meta('usuarios'), 'ciudad') !== null;
+    return $filas[0]['ciudad'] === 'Malaga' && Catalog::columna($cat->meta('usuarios'), 'ciudad') !== null;
 });
 chk('renombrar columna', function () use ($cat, $st) {
-    $cat->renombrarColumna('usuarios', 'ciudad', 'poblacion');
+    CatalogDdl::renombrarColumna($cat, 'usuarios', 'ciudad', 'poblacion');
     return array_key_exists('poblacion', StorageEscritura::leerFilas($st, 'usuarios')[0]);
 });
 chk('borrar columna', function () use ($cat, $st) {
-    $cat->borrarColumna('usuarios', 'poblacion');
+    CatalogDdl::borrarColumna($cat, 'usuarios', 'poblacion');
     return !array_key_exists('poblacion', StorageEscritura::leerFilas($st, 'usuarios')[0])
         && Catalog::columna($cat->meta('usuarios'), 'poblacion') === null;
 });
-esperaError('borrar columna referenciada por FK', 'CONSTRAINT', fn() => $cat->borrarColumna('usuarios', 'id'));
-esperaError('borrar columna de una FK propia', 'CONSTRAINT', fn() => $cat->borrarColumna('pedidos', 'usuario_id'));
+esperaError('borrar columna referenciada por FK', 'CONSTRAINT', fn() => CatalogDdl::borrarColumna($cat, 'usuarios', 'id'));
+esperaError('borrar columna de una FK propia', 'CONSTRAINT', fn() => CatalogDdl::borrarColumna($cat, 'pedidos', 'usuario_id'));
 
 echo "\n== Triggers ==\n";
 /** Los triggers de pedidos para INSERT en un momento (BEFORE o AFTER) */
 $disparos = static fn(string $momento): array => array_values(array_filter($cat->meta('pedidos')['triggers'],
     static fn(array $t): bool => $t['timing'] === $momento && $t['event'] === 'INSERT'));
 chk('crear trigger', function () use ($cat, $disparos) {
-    $cat->crearTrigger('pedidos', [
+    CatalogDdl::crearTrigger($cat, 'pedidos', [
         'name'=>'trg_pedidos_ins','timing'=>'AFTER','event'=>'INSERT',
         'when'=>'NEW.total > 0',
         'body'=>['UPDATE usuarios SET saldo = saldo + NEW.total WHERE id = NEW.usuario_id'],
@@ -174,17 +177,17 @@ chk('crear trigger', function () use ($cat, $disparos) {
     ]);
     return count($disparos('AFTER')) === 1 && $disparos('BEFORE') === [];
 });
-esperaError('trigger duplicado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos', [
+esperaError('trigger duplicado', 'SCHEMA', fn() => CatalogDdl::crearTrigger($cat, 'pedidos', [
     'name'=>'trg_pedidos_ins','timing'=>'AFTER','event'=>'INSERT','body'=>['DELETE FROM usuarios'],
 ]));
-esperaError('evento no soportado', 'SCHEMA', fn() => $cat->crearTrigger('pedidos', [
+esperaError('evento no soportado', 'SCHEMA', fn() => CatalogDdl::crearTrigger($cat, 'pedidos', [
     'name'=>'trg_x','timing'=>'AFTER','event'=>'TRUNCATE','body'=>['DELETE FROM usuarios'],
 ]));
-chk('borrar trigger', fn() => $cat->borrarTrigger('trg_pedidos_ins') === 'pedidos' && $disparos('AFTER') === []);
+chk('borrar trigger', fn() => CatalogDdl::borrarTrigger($cat, 'trg_pedidos_ins') === 'pedidos' && $disparos('AFTER') === []);
 
 echo "\n== Renombrar tabla ==\n";
 chk('renombrar propaga FK', function () use ($cat) {
-    $cat->renombrarTabla('usuarios', 'clientes');
+    CatalogDdl::renombrarTabla($cat, 'usuarios', 'clientes');
     return $cat->existe('clientes') && !$cat->existe('usuarios')
         && $cat->meta('pedidos')['foreign_keys'][0]['table'] === 'clientes'
         && $cat->meta('clientes')['autoincrement']['next'] === 1;
@@ -192,7 +195,7 @@ chk('renombrar propaga FK', function () use ($cat) {
 
 echo "\n== Paginación y rendimiento ==\n";
 chk('una tabla grande se reparte en las partes que tocan', function () use ($cat, $st, $raiz, $base) {
-    $cat->crearTabla('log', ['columns'=>[
+    CatalogDdl::crearTabla($cat, 'log', ['columns'=>[
         ['name'=>'id','type'=>'INTEGER','pk'=>true],
         ['name'=>'texto','type'=>'TEXT'],
         ['name'=>'fecha','type'=>'DATETIME'],
@@ -202,7 +205,7 @@ chk('una tabla grande se reparte en las partes que tocan', function () use ($cat
         $filas[] = ['id'=>$i, 'texto'=>"línea $i", 'fecha'=>'2026-08-19 12:00:00'];
     }
     $t0 = microtime(true);
-    StorageEscritura::guardarFilas($st, 'log', $filas);
+    StorageEntera::guardarFilas($st, 'log', $filas);
     $tw = microtime(true) - $t0;
 
     // Cuántas partes salen depende de JSONSQLDB_FILAS_POR_PARTE, así que se
@@ -226,7 +229,7 @@ chk('una tabla grande se reparte en las partes que tocan', function () use ($cat
 });
 
 chk('reducir filas elimina partes sobrantes', function () use ($st, $raiz, $base) {
-    StorageEscritura::guardarFilas($st, 'log', array_slice(StorageEscritura::leerFilas($st, 'log'), 0, 10));
+    StorageEntera::guardarFilas($st, 'log', array_slice(StorageEscritura::leerFilas($st, 'log'), 0, 10));
     return !is_file("$raiz/$base/log.part2.json") && count(StorageEscritura::leerFilas($st, 'log')) === 10;
 });
 
@@ -235,7 +238,7 @@ chk('la caché devuelve datos actualizados tras escribir', function () use ($st)
     $antes = count(StorageEscritura::leerFilas($st, 'log'));
     $filas = StorageEscritura::leerFilas($st, 'log');
     $filas[] = ['id'=>999,'texto'=>'nueva','fecha'=>null];
-    StorageEscritura::guardarFilas($st, 'log', $filas);
+    StorageEntera::guardarFilas($st, 'log', $filas);
     return count(StorageEscritura::leerFilas($st, 'log')) === $antes + 1;
 });
 
@@ -492,6 +495,33 @@ chk('el registro, por defecto, apunta las escrituras y los errores, no las lectu
 });
 chk('sin JSONSQLDB_LOG_NIVEL (un config.php de antes de la 2.9), el registro apunta las escrituras y los errores, como dice la documentación (2.9)', fn() =>
     !defined('JSONSQLDB_LOG_NIVEL') && JsonSQLDB\Config::logNivel() === 'escrituras' ?: JsonSQLDB\Config::logNivel());
+chk('con el registro de config.php (escrituras y errores), una lectura no carga Logger, que no va a escribir nada, y una escritura sí y queda registrada; con el nivel errores, una escritura no lo carga y un error sí (2.10)', function () {
+    // Con el config.php de la raíz, que enciende el registro con el nivel
+    // escrituras; si cambia lo que trae, cambia lo que se espera aquí
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_log3';
+    exec('rm -rf ' . escapeshellarg($dir));
+    $codigo = static fn(string $sql, string $nivel): string => 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_LOG_PATH", ' . var_export("$dir/logs", true) . ');'
+        . ($nivel === '' ? '' : 'define("JSONSQLDB_LOG_NIVEL", ' . var_export($nivel, true) . ');')
+        . 'require ' . var_export(dirname(__DIR__) . '/config.php', true) . ';'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . 'if (!is_dir(' . var_export("$dir/l", true) . ')) { JsonSQLDB\\Database::crear("l", ' . var_export($dir, true) . '); }'
+        . 'try { (new JsonSQLDB\\Database("l", ' . var_export($dir, true) . '))->consultar(' . var_export($sql, true) . '); } catch (JsonSQLDB\\JsonSqlDbError $e) {}'
+        . 'echo (int)in_array("Logger", array_map(fn($f) => basename($f, ".php"), get_included_files()), true);';
+    $cargado = [];
+    foreach ([['CREATE TABLE t (x INTEGER)', ''], ['SELECT 1', ''], ['SELECT x FROM t', ''], ['INSERT INTO t VALUES (1)', ''],
+              ['INSERT INTO t VALUES (2)', 'errores'], ['SELECT nada FROM t', 'errores']] as [$sql, $nivel]) {
+        $cargado[] = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo($sql, $nivel)) . ' 2>&1'));
+    }
+    $ops = [];
+    foreach ((array)glob("$dir/logs/consultas-*.json") as $f) {
+        foreach (file((string)$f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) {
+            $e = json_decode($l, true);
+            $ops[] = ($e['op'] ?? '?') . (isset($e['error']) && $e['error'] !== null ? ' (error)' : '');
+        }
+    }
+    exec('rm -rf ' . escapeshellarg($dir));
+    return $cargado === ['1', '0', '0', '1', '0', '1'] && $ops === ['CREATE TABLE', 'INSERT', 'SELECT (error)'] ?: json_encode([$cargado, $ops]);
+});
 chk('el registro escribe la línea aunque el corte de la SQL caiga en medio de una letra o lleve bytes que no son UTF-8, y la corta sin partir letras (2.9)', function () {
     $dir = sys_get_temp_dir() . '/jsonsqldb_test_log2';
     exec('rm -rf ' . escapeshellarg($dir));
@@ -683,7 +713,7 @@ chk('la caché en disco no confunde la parte 1 en la revisión 13 con la 11 en l
     exec('rm -rf ' . escapeshellarg($r));
     return $salida === '[13,13,10]' ?: $salida;
 });
-chk('cada petición carga solo las clases que usa, y sin OPcache compila menos código que la 2.8.0 (2.9)', function () use ($raiz) {
+chk('cada petición carga solo las clases que usa, y sin OPcache no compila más código que en la 2.10, que es menos que en la 2.9.0 o, en un INSERT con su id, lo mismo (2.10); una consulta carga Evaluator antes de leer las filas (2.10)', function () use ($raiz) {
     // Sin OPcache, PHP compila en cada petición todo lo que carga. Cada
     // sentencia, en un proceso nuevo, con la caché de resultados apagada. Con
     // 300 filas en c, el JOIN de una fila de p busca su cliente por la clave
@@ -702,25 +732,43 @@ chk('cada petición carga solo las clases que usa, y sin OPcache compila menos c
     $aparte = ['ParserEscritura', 'ParserSentencias', 'ParserAvanzado', 'CatalogDdl', 'StorageEscritura', 'StorageCambios',
                'StorageMantenimiento', 'StorageRangos', 'FunctionsAmpliadas', 'EvaluatorPatrones', 'SelectOrden', 'SelectAgrupada',
                'SelectCompuesta', 'SelectJoin', 'SelectAvanzada', 'DatabaseAvanzada', 'Writer', 'WriterCambios', 'WriterForaneas',
-               'WriterConflictos', 'WriterTriggers', 'WriterDdl'];
+               'WriterConflictos', 'WriterTriggers', 'WriterDdl', 'StorageBarrido', 'StorageCompartida', 'StorageBusquedas',
+               'StorageOrden', 'CatalogBloqueos', 'SelectJoinIndice', 'ParserFunciones', 'IndexesEscritura', 'StorageCompactacion',
+               'SelectEnDisco', 'StorageOrdenTexto', 'EvaluatorIn', 'TypesCast', 'WriterCambiosEspeciales', 'StorageEntera', 'WriterAvanzado',
+               'ParserEscrituraAvanzada', 'Logger', 'WriterInsercion', 'ParserCambios', 'StorageMayores', 'EvaluatorConjunto'];
     $escritura = ['ParserSentencias', 'ParserAvanzado', 'ParserConsulta', 'CatalogDdl', 'StorageMantenimiento', 'StorageRangos',
-                  'Select', 'SelectAvanzada', 'DatabaseAvanzada', 'WriterForaneas', 'WriterConflictos', 'WriterTriggers', 'WriterDdl'];
-    // Lo que no puede cargar cada sentencia, y lo que compilaba la 2.8.0 con
-    // ella en esta misma base: piezas de código, sin espacios ni comentarios
+                  'Select', 'SelectAvanzada', 'DatabaseAvanzada', 'WriterForaneas', 'WriterConflictos', 'WriterTriggers', 'WriterDdl',
+                  'StorageBarrido', 'StorageCompartida', 'StorageBusquedas', 'StorageOrden', 'CatalogBloqueos', 'SelectJoinIndice',
+                  'ParserFunciones', 'StorageCompactacion', 'SelectEnDisco', 'StorageOrdenTexto', 'EvaluatorIn', 'TypesCast',
+                  'WriterCambiosEspeciales', 'StorageEntera', 'WriterAvanzado', 'ParserEscrituraAvanzada', 'Logger', 'StorageMayores',
+                  'EvaluatorConjunto'];
+    // Lo que no puede cargar cada sentencia, y su tope de piezas de código
+    // (sin espacios ni comentarios): lo que compila en la 2.10 en esta misma
+    // base, con 40 de margen: las lecturas, entre 1.100 y 3.550 menos que la
+    // 2.9.0 (un WHERE con IN, 2.100: solo carga lo que busca en el conjunto,
+    // no el IN fila a fila); un UPDATE y un DELETE, 1.700 menos; un INSERT con su id, lo
+    // mismo, y uno sin él, 2.450 menos (no lee filas para saber el id). Lo
+    // que va aparte y vuelve a una clase que se carga siempre pasa el tope.
+    // Sin config.php el registro está apagado, así que ninguna carga Logger
+    // (con el de config.php, lo mira la prueba del registro)
     $casos = [
-        'SELECT * FROM c WHERE id = 2'                                       => [$aparte, 70606],
-        "SELECT id FROM c WHERE email = '2@x'"                               => [$aparte, 70606],
-        'SELECT p.id, c.email FROM p JOIN c ON c.id = p.cid WHERE p.id = 2'  => [$aparte, 70606],
-        'SELECT COUNT(*) FROM c'                                             => [$aparte, 58465],
-        'SELECT id FROM c WHERE id BETWEEN 1 AND 2'                          => [array_diff($aparte, ['StorageRangos']), 70606],
-        'SELECT UPPER(email) FROM c WHERE id = 2'                            => [$aparte, 73587],
-        'SELECT n, COUNT(*), MAX(id) FROM c GROUP BY n'                      => [array_merge(array_diff($aparte, ['SelectAgrupada']), ['Functions']), 73587],
-        'SELECT id FROM c ORDER BY n DESC LIMIT 3'                           => [array_diff($aparte, ['SelectOrden']), 70890],
-        'SELECT id FROM c WHERE id < 3 UNION SELECT cid FROM p'              => [array_diff($aparte, ['SelectCompuesta', 'StorageRangos']), 70606],
-        'WITH t AS (SELECT id FROM c) SELECT id FROM t WHERE id = 2'         => [array_diff($aparte, ['SelectCompuesta']), 70606],
-        "INSERT INTO c VALUES (301, 'z@x', -4)"                              => [array_merge($escritura, ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator']), 68886],
-        'UPDATE c SET n = n + 1 WHERE id = 301'                              => [$escritura, 82205],
-        'DELETE FROM c WHERE id = 301'                                       => [$escritura, 82205],
+        'SELECT * FROM c WHERE id = 2'                                       => [$aparte, 58645],
+        "SELECT id FROM c WHERE email = '2@x'"                               => [$aparte, 58645],
+        'SELECT p.id, c.email FROM p JOIN c ON c.id = p.cid WHERE p.id = 2'  => [array_diff($aparte, ['SelectJoinIndice']), 62848],
+        'SELECT COUNT(*) FROM c'                                             => [$aparte, 45592],
+        'SELECT id FROM c WHERE id BETWEEN 1 AND 2'                          => [array_diff($aparte, ['StorageRangos']), 58239],
+        'SELECT UPPER(email) FROM c WHERE id = 2'                            => [$aparte, 62062],
+        'SELECT id FROM c WHERE n IN (1, 2)'                                 => [array_diff($aparte, ['EvaluatorConjunto']), 58983],
+        'SELECT n, COUNT(*), MAX(id) FROM c GROUP BY n'                      => [array_merge(array_diff($aparte, ['SelectAgrupada']), ['Functions']), 62121],
+        'SELECT id FROM c ORDER BY n DESC LIMIT 3'                           => [array_diff($aparte, ['SelectOrden']), 57859],
+        'SELECT id FROM c ORDER BY id DESC LIMIT 3'                          => [array_diff($aparte, ['SelectOrden', 'StorageOrden']), 61066],
+        'SELECT id FROM c LIMIT 2 OFFSET 150'                                => [$aparte, 56972],
+        'SELECT id FROM c WHERE id < 3 UNION SELECT cid FROM p'              => [array_diff($aparte, ['SelectCompuesta', 'StorageRangos']), 61113],
+        'WITH t AS (SELECT id FROM c) SELECT id FROM t WHERE id = 2'         => [array_diff($aparte, ['SelectCompuesta']), 59119],
+        "INSERT INTO c VALUES (301, 'z@x', -4)"                              => [array_merge($escritura, ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator', 'ParserCambios']), 52294],
+        "INSERT INTO c (email, n) VALUES ('y@x', 5)"                         => [array_merge(array_diff($escritura, ['StorageMayores']), ['StorageLectura', 'StorageCambios', 'WriterCambios', 'Evaluator', 'ParserCambios']), 52699],
+        'UPDATE c SET n = n + 1 WHERE id = 301'                              => [array_merge($escritura, ['WriterInsercion']), 67205],
+        'DELETE FROM c WHERE id = 301'                                       => [array_merge($escritura, ['WriterInsercion']), 67205],
     ];
     $medir = 'echo json_encode(array_map(static function (string $f): array { $n = 0;'
         . ' foreach (token_get_all((string)file_get_contents($f)) as $t) { $n += (int)!(is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)); }'
@@ -730,7 +778,15 @@ chk('cada petición carga solo las clases que usa, y sin OPcache compila menos c
         $cargadas = json_decode($correr($ini . '$b->consultar(' . var_export($sql, true) . ');' . $medir), true);
         if (!is_array($cargadas)) { $mal[] = "$sql: no respondió"; continue; }
         if (($sobra = array_intersect($no, array_column($cargadas, 0))) !== []) { $mal[] = "$sql carga " . implode(', ', $sobra); }
-        if (($n = array_sum(array_column($cargadas, 1))) >= $tope) { $mal[] = "$sql compila $n piezas (la 2.8.0, $tope)"; }
+        if (($n = array_sum(array_column($cargadas, 1))) > $tope) { $mal[] = "$sql compila $n piezas (tope, $tope)"; }
+    }
+    // Evaluator, antes que lo que lee las filas: sin OPcache, compilarlo con
+    // ellas y con esas clases ya en memoria subía el pico de una consulta por
+    // clave 0,09 MB sobre la 2.9.0 (2.10)
+    $orden = array_column((array)json_decode($correr($ini . '$b->consultar("SELECT * FROM c WHERE id = 2");' . $medir), true), 0);
+    $ev    = array_search('Evaluator', $orden, true);
+    if ($ev === false || $ev > array_search('StorageLectura', $orden, true)) {
+        $mal[] = 'Evaluator se carga después de leer las filas: ' . implode(', ', $orden);
     }
     // Y lo que va aparte se carga cuando hace falta
     $cargadas = json_decode($correr($ini . '$b->consultar("CREATE TABLE x (a INTEGER)");'
@@ -740,6 +796,55 @@ chk('cada petición carga solo las clases que usa, y sin OPcache compila menos c
     }
     exec('rm -rf ' . escapeshellarg($r));
     return $mal === [] ?: implode(' | ', $mal);
+});
+chk('el JIT de OPcache se enciende si php.ini le da memoria y lo deja en "off" o 0; con off sin comillas, que php.ini lee como vacío y PHP toma por "disable", no se puede; JSONSQLDB_JIT = false lo deja como está, y sin ini_set() no pasa nada (2.10)', function () {
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_jit_' . getmypid();
+    $codigo = static fn(string $antes): string => $antes . 'define("JSONSQLDB_CONEXION_DIRECTA", true);'
+        . 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+        . '@mkdir(' . var_export($dir, true) . '); if (!is_dir(' . var_export("$dir/b", true) . ')) { JsonSQLDB\Database::crear("b", ' . var_export($dir, true) . '); }'
+        . 'new JsonSQLDB\Database("b", ' . var_export($dir, true) . ');'
+        . 'echo function_exists("opcache_get_status") && is_array($s = opcache_get_status(false)) ? (int)!empty($s["jit"]["on"]) : "sin";';
+    $correr = static function (string $php, string $jit = '"off"', array $mas = []) use ($codigo): string {
+        $p = proc_open([PHP_BINARY, '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit_buffer_size=32M', '-d', "opcache.jit=$jit", ...$mas, '-r', $php],
+                       [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+        $s = trim((string)stream_get_contents($tubos[1])) . trim((string)stream_get_contents($tubos[2]));
+        proc_close($p);
+        return $s;
+    };
+    $r = [$correr($codigo('')), $correr($codigo(''), '0'), $correr($codigo(''), 'off'), $correr($codigo('define("JSONSQLDB_JIT", false);')),
+          $correr($codigo(''), '"off"', ['-d', 'disable_functions=ini_set'])];
+    exec('rm -rf ' . escapeshellarg($dir));
+    if ($r[0] === 'sin') {
+        return null;                    // este PHP no tiene OPcache para la línea de comandos
+    }
+    return $r === ['1', '1', '0', '0', '0'] ?: json_encode($r);
+});
+chk('el motor llama con \\ a las funciones que PHP compila a una instrucción propia (strlen, is_int, count…): sin ella, en un namespace, cada una es una llamada de verdad (2.10)', function () {
+    // Las de zend_try_compile_special_func() de PHP 8.0 a 8.5 (sprintf, desde 8.4)
+    $especiales = array_flip(['strlen', 'is_null', 'is_bool', 'is_long', 'is_int', 'is_integer', 'is_float', 'is_double', 'is_string', 'is_array',
+        'is_object', 'is_resource', 'is_scalar', 'boolval', 'intval', 'floatval', 'doubleval', 'strval', 'defined', 'chr', 'ord', 'call_user_func_array',
+        'call_user_func', 'in_array', 'count', 'sizeof', 'get_class', 'get_called_class', 'gettype', 'func_num_args', 'func_get_args', 'array_slice',
+        'array_key_exists', 'sprintf']);
+    $mal = [];
+    foreach ((array)glob(dirname(__DIR__) . '/engine/*.php') as $f) {
+        $t = token_get_all((string)file_get_contents((string)$f));
+        $previo = null;
+        foreach ($t as $i => $tk) {
+            if (is_array($tk) && in_array($tk[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+            if (is_array($tk) && $tk[0] === T_STRING && isset($especiales[strtolower($tk[1])])
+                && !in_array($previo, [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION, T_NEW, T_CONST], true)) {
+                for ($j = $i + 1; isset($t[$j]) && is_array($t[$j]) && $t[$j][0] === T_WHITESPACE; $j++) {
+                }
+                if (($t[$j] ?? null) === '(') {
+                    $mal[] = basename((string)$f) . ":{$tk[2]} {$tk[1]}";
+                }
+            }
+            $previo = is_array($tk) ? $tk[0] : $tk;
+        }
+    }
+    return $mal === [] ?: count($mal) . ' sin \\: ' . implode(', ', array_slice($mal, 0, 10));
 });
 chk('la carpeta temporal queda vacía y se elimina', function () use ($raiz) {
     clearstatcache();

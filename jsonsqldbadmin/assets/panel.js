@@ -265,6 +265,33 @@ document.querySelectorAll('[data-visible-si]').forEach(function (bloque) {
         .catch(function () { /* la próxima visita lo vuelve a intentar */ });
 })();
 
+// Con la conexión directa, ¿se pueden descargar los ficheros de datos? (2.10)
+// Se pide sin cookies un fichero real de una base (data-comprobar-datos, una
+// dirección de este mismo sitio) y se mira qué contesta el servidor, como lo
+// vería cualquiera de fuera. Con HEAD, aunque se pueda no se descarga nada
+document.querySelectorAll('[data-comprobar-datos]').forEach(function (el) {
+    var url = new URL(el.getAttribute('data-comprobar-datos'), window.location.href).href;
+    function poner(clase, cual, codigo) {
+        var texto = el.getAttribute('data-texto-' + cual).replace('{url}', url).replace('{codigo}', codigo);
+        el.className = clase;
+        el.textContent = texto;
+        if (cual === 'mal') {
+            document.querySelectorAll('[data-aviso-datos]').forEach(function (aviso) {
+                aviso.querySelector('span').textContent = texto;
+                aviso.hidden = false;
+            });
+        }
+    }
+    if (!window.fetch) { poner('text-body-secondary', 'sin', ''); return; }
+    fetch(url, { method: 'HEAD', credentials: 'omit', cache: 'no-store', redirect: 'manual' })
+        .then(function (r) {
+            if (r.status === 200) { poner('text-danger', 'mal', '200'); }
+            else if ([401, 403, 404].indexOf(r.status) >= 0) { poner('text-success', 'bien', String(r.status)); }
+            else { poner('text-body-secondary', 'duda', r.type === 'opaqueredirect' ? '3xx' : String(r.status)); }
+        })
+        .catch(function () { poner('text-body-secondary', 'sin', ''); });
+});
+
 // Una ventana que tiene que abrirse al cargar la página (data-abrir): la de
 // ejemplos de importar, que se pide con un formulario GET (2.9)
 document.querySelectorAll('.modal[data-abrir]').forEach(function (m) {

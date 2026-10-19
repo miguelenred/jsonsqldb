@@ -1,0 +1,91 @@
+# Análisis estático (2.10): la CI lo pasa con PHPStan, que descarga allí (no
+# es una dependencia del proyecto). Lo que ya había al añadirlo está en
+# phpstan-baseline.neon; un fallo nuevo para la CI.
+#   php phpstan.phar analyse -c phpstan.neon.dist
+parameters:
+    level: 5
+    phpVersion: 80000
+    paths:
+        - engine
+        - api
+        - jsonsqldbadmin
+        - configurar.php
+    # Las de cada instalación: no están en el repositorio (ver .gitignore),
+    # así que pueden faltar, y con (?) PHPStan no falla por eso
+    excludePaths:
+        - api/jsonsqldb_api_config.php (?)
+        - jsonsqldbadmin/config.php (?)
+    # Las constantes de configuración: las de los .dist y las del motor
+    bootstrapFiles:
+        - config.php
+        - api/jsonsqldb_api_config.dist.php
+        - jsonsqldbadmin/config.dist.php
+    # Las de configuración valen lo que diga cada instalación, no lo de los .dist
+    dynamicConstantNames:
+        - ADMIN_API_KEY
+        - ADMIN_API_KEY_LECTURA
+        - ADMIN_API_URL
+        - ADMIN_AUDIT_DIAS
+        - ADMIN_BCRYPT_COSTE
+        - ADMIN_CELDA_MAX
+        - ADMIN_CONEXION
+        - ADMIN_CONFIAR_EN_PROXY
+        - ADMIN_CSV_SEPARADOR
+        - ADMIN_DATA_PATH
+        - ADMIN_EXIGIR_HTTPS
+        - ADMIN_FILAS_PAGINA
+        - ADMIN_HMAC_SECRET
+        - ADMIN_HMAC_SECRET_LECTURA
+        - ADMIN_IPS_PERMITIDAS
+        - ADMIN_LOGIN_BLOQUEO_MIN
+        - ADMIN_LOGIN_MAX_FALLOS
+        - ADMIN_MOTOR_RUTA
+        - ADMIN_RUTA_DATOS_MOTOR
+        - ADMIN_SESION_MINUTOS
+        - ADMIN_SESION_NOMBRE
+        - ADMIN_SSL_AUTOFIRMADO
+        - ADMIN_SSL_CA
+        - ADMIN_TIMEOUT
+        - ANTI_REPLAY_ACTIVO
+        - API_ESTADO_PATH
+        - CONFIAR_EN_PROXY
+        - DEVOLVER_ERRORES
+        - EXIGIR_HTTPS
+        - HSTS_ACTIVO
+        - IPS_PERMITIDAS
+        - JSONSQLDB_API_ACTIVA
+        - JSONSQLDB_CACHE_ACTIVA
+        - JSONSQLDB_CACHE_APCU
+        - JSONSQLDB_CACHE_OPCACHE
+        - JSONSQLDB_CACHE_RESULTADOS
+        - JSONSQLDB_COLACION
+        - JSONSQLDB_COLACION_MAPA
+        - JSONSQLDB_CONEXION_DIRECTA
+        - JSONSQLDB_DATA_PATH
+        - JSONSQLDB_ESCRITURA_POR_PARTES
+        - JSONSQLDB_FILAS_POR_PARTE
+        - JSONSQLDB_INDICES
+        - JSONSQLDB_JIT
+        - JSONSQLDB_LOG_ACTIVO
+        - JSONSQLDB_LOG_DIAS
+        - JSONSQLDB_LOG_MAX_SIZE
+        - JSONSQLDB_LOG_MAX_SQL
+        - JSONSQLDB_LOG_NIVEL
+        - JSONSQLDB_LOG_PARAMS
+        - JSONSQLDB_LOG_PATH
+        - JSONSQLDB_MEMORIA_MARGEN
+        - JSONSQLDB_MEMORIA_VIGILAR
+        - MAX_PARAMS
+        - MAX_PARAMS_LENGTH
+        - MAX_POST_SIZE
+        - MAX_SQL_LENGTH
+        - MEMORY_LIMIT
+        - RATE_LIMIT_ACTIVO
+        - RATE_LIMIT_FALLOS_IP
+        - RATE_LIMIT_MAX
+        - RATE_LIMIT_POR_CLAVE
+        - RATE_LIMIT_SECONDS
+        - RATE_TIMESTAMP_DIFF
+        - TIME_LIMIT
+includes:
+    - phpstan-baseline.neon

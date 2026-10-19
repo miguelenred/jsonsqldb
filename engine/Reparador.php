@@ -34,11 +34,11 @@ final class Reparador
     {
         $texto = self::sinBom($texto);
         $json = json_decode($texto, true);
-        if (is_array($json) && is_array($json['rows'] ?? null) && self::esLista($json['rows'])) {
+        if (\is_array($json) && \is_array($json['rows'] ?? null) && self::esLista($json['rows'])) {
             $filas = [];
             $dudosas = [];
             foreach ($json['rows'] as $i => $fila) {
-                if ($fila === null || (is_array($fila) && $fila !== [] && !self::esLista($fila))) {
+                if ($fila === null || (\is_array($fila) && $fila !== [] && !self::esLista($fila))) {
                     $filas[] = $fila;
                 } else {
                     $dudosas[] = [0, 'fila ' . ($i + 1) . ': ' . substr((string)json_encode($fila), 0, 80)];
@@ -77,7 +77,7 @@ final class Reparador
      */
     private static function esEstructura(string $l): bool
     {
-        return in_array(rtrim($l, ','), ['{', '}', ']', '[', '],', '}]', ']}'], true)
+        return \in_array(rtrim($l, ','), ['{', '}', ']', '[', '],', '}]', ']}'], true)
             || (bool)preg_match('/^"(table|rows|offsets|offsets_at)"\s*:/', $l);
     }
 
@@ -93,7 +93,7 @@ final class Reparador
     /** array_is_list(), que solo existe desde PHP 8.1 */
     private static function esLista(array $a): bool
     {
-        return $a === [] || array_keys($a) === range(0, count($a) - 1);
+        return $a === [] || array_keys($a) === range(0, \count($a) - 1);
     }
 
     /** Una línea de fila, si es un objeto JSON tal cual o con su llave final arreglada. */
@@ -111,9 +111,9 @@ final class Reparador
         }
         foreach ($candidatas as $c) {
             $v = json_decode($c, true);
-            if (is_array($v) && $v !== [] && !self::esLista($v)) {
+            if (\is_array($v) && $v !== [] && !self::esLista($v)) {
                 foreach ($v as $dato) {
-                    if (is_array($dato)) {
+                    if (\is_array($dato)) {
                         return null;                        // una fila solo lleva valores sueltos
                     }
                 }
@@ -134,14 +134,14 @@ final class Reparador
     {
         $texto = self::sinBom($texto);
         $v = json_decode($texto, true);
-        if (is_array($v) && !self::esLista($v)) {
+        if (\is_array($v) && !self::esLista($v)) {
             return $v;
         }
         $out     = '';
         $pila    = [];
         $cadena  = false;
         $escape  = false;
-        $largo   = strlen($texto);
+        $largo   = \strlen($texto);
         for ($i = 0; $i < $largo; $i++) {
             $c = $texto[$i];
             if ($cadena) {
@@ -180,11 +180,11 @@ final class Reparador
         // Al final solo puede faltar la llave que cierra el fichero: si faltan
         // más cierres, el fichero puede estar cortado y completarlo daría por
         // buena una estructura a la que le falta algo
-        if (count($pila) > 1 || ($pila !== [] && $pila[0] !== '}')) {
+        if (\count($pila) > 1 || ($pila !== [] && $pila[0] !== '}')) {
             return null;
         }
         $out .= $pila === [] ? '' : '}';
         $v = json_decode($out, true);
-        return is_array($v) && !self::esLista($v) ? $v : null;
+        return \is_array($v) && !self::esLista($v) ? $v : null;
     }
 }

@@ -42,7 +42,7 @@ $bd = new Database('bench', $raiz);
 $bd->consultar('CREATE TABLE clientes (id INTEGER PRIMARY KEY, email VARCHAR(60) UNIQUE, nombre VARCHAR(60),
                                        ciudad VARCHAR(20), edad INTEGER, saldo DECIMAL(10,2))');
 mt_srand(1);
-$ciudades = ['Madrid', 'Barcelona', 'Valencia', 'Sevilla', 'Elche', 'Rojales', 'Torrevieja', 'Alicante', 'Murcia', 'Bilbao'];
+$ciudades = ['Madrid', 'Barcelona', 'Valencia', 'Sevilla', 'Elche', 'Zaragoza', 'Malaga', 'Alicante', 'Murcia', 'Bilbao'];
 $lote = [];
 for ($i = 1; $i <= 20000; $i++) {
     $lote[] = [$i, "c$i@ejemplo.es", "Nombre $i", $ciudades[mt_rand(0, 9)], mt_rand(18, 85), mt_rand(0, 500000) / 100];

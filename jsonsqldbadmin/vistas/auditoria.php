@@ -3,12 +3,12 @@ $dias  = Audit::dias();
 $dia   = get('dia', $dias[0] ?? date('Y-m-d'));
 $busca = minus(get('q'));
 
-$eventos = in_array($dia, $dias, true) ? Audit::dia($dia) : [];
-if ($busca !== '') {
-    $eventos = array_values(array_filter($eventos, static function (array $e) use ($busca): bool {
-        return str_contains(minus(implode(' ', array_map('strval', $e))), $busca);
-    }));
-}
+// De 500 en 500, de los más recientes a los más antiguos (2.10: el día
+// entero, que con muchos eventos no cabía en la memoria ni en la página)
+$porPagina = 500;
+$desde = max(0, (int)get('desde', '0'));
+[$eventos, $hayMas] = in_array($dia, $dias, true) ? Audit::dia($dia, $porPagina, $busca, $desde) : [[], false];
+$conservan = ADMIN_AUDIT_DIAS > 0 ? t('{n} días', ['n' => (int)ADMIN_AUDIT_DIAS]) : t('siempre');
 ?>
 <div class="page-head">
   <div>
@@ -35,7 +35,8 @@ if ($busca !== '') {
   </div>
   <div class="col-auto"><button class="btn btn-sm btn-outline-primary"><?= h(t('Filtrar')) ?></button></div>
   <div class="col-auto text-body-secondary small pb-2">
-    <?= t('{1} evento(s) · se conservan {2}', [1 => count($eventos), 2 => ADMIN_AUDIT_DIAS > 0 ? t('{n} días', ['n' => (int)ADMIN_AUDIT_DIAS]) : t('siempre')]) ?>
+    <?= $desde === 0 && !$hayMas ? t('{1} evento(s) · se conservan {2}', [1 => count($eventos), 2 => $conservan])
+        : t('Eventos del {1} al {2}, del más reciente al más antiguo · se conservan {3}', [1 => $desde + 1, 2 => $desde + count($eventos), 3 => $conservan]) ?>
   </div>
 </form>
 
@@ -65,3 +66,15 @@ if ($busca !== '') {
     </table>
   </div>
 </div>
+<?php if ($desde > 0 || $hayMas): ?>
+  <p class="mt-2 d-flex gap-2">
+    <?php if ($desde > 0): ?>
+      <a class="btn btn-sm btn-outline-secondary" href="<?= h(url(['p' => 'auditoria', 'dia' => $dia, 'q' => get('q'), 'desde' => max(0, $desde - $porPagina)])) ?>">
+        <?= h(t('Más recientes')) ?></a>
+    <?php endif; ?>
+    <?php if ($hayMas): ?>
+      <a class="btn btn-sm btn-outline-secondary" href="<?= h(url(['p' => 'auditoria', 'dia' => $dia, 'q' => get('q'), 'desde' => $desde + $porPagina])) ?>">
+        <?= h(t('Anteriores')) ?></a>
+    <?php endif; ?>
+  </p>
+<?php endif; ?>

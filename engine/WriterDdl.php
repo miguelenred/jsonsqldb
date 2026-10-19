@@ -36,7 +36,7 @@ final class WriterDdl extends Writer
                 return self::borrarTrigger($w, $ast);
 
             case 'create_index':
-                $creado = $w->cat->crearIndice(
+                $creado = CatalogDdl::crearIndice($w->cat,
                     $ast['tabla'], $ast['nombre'], $ast['columnas'], $ast['si_no_existe']
                 );
                 return ['filas' => 0, 'mensaje' => $creado
@@ -48,12 +48,12 @@ final class WriterDdl extends Writer
                 foreach ($ast['tabla'] === null ? $w->cat->tablas() : [$ast['tabla']] as $t) {
                     foreach ($w->cat->meta($t)['unique'] as $uq) {
                         if (strcasecmp((string)($uq['name'] ?? ''), $ast['nombre']) === 0) {
-                            $w->cat->borrarRestriccion($t, $ast['nombre']);
+                            CatalogDdl::borrarRestriccion($w->cat, $t, $ast['nombre']);
                             return ['filas' => 0, 'mensaje' => "Índice único '{$ast['nombre']}' borrado de '$t'"];
                         }
                     }
                 }
-                $tabla = $w->cat->borrarIndice($ast['tabla'], $ast['nombre'], $ast['si_existe']);
+                $tabla = CatalogDdl::borrarIndice($w->cat, $ast['tabla'], $ast['nombre'], $ast['si_existe']);
                 return ['filas' => 0, 'mensaje' => $tabla !== null
                     ? "Índice '{$ast['nombre']}' borrado de '$tabla'"
                     : "El índice '{$ast['nombre']}' no existía"];
@@ -64,7 +64,7 @@ final class WriterDdl extends Writer
                 foreach ($problemas as $p) {
                     if ($p['accion'] === 'puesta a NULL') { $arreglados++; }
                 }
-                $quedan = count($problemas) - $arreglados;
+                $quedan = \count($problemas) - $arreglados;
                 return ['filas' => $arreglados, 'mensaje' =>
                     $problemas === []
                         ? 'Las claves foráneas están bien: no hay filas huérfanas'
@@ -73,8 +73,9 @@ final class WriterDdl extends Writer
 
             case 'vacuum':
                 // Las tablas con huecos de filas borradas se reescriben sin
-                // ellos, y las de índices sin filtro (de la 2.8 o antes) rehacen
-                // sus índices (2.9); las demás no se tocan
+                // ellos, y las de índices sin filtro (de la 2.8 o antes, 2.9)
+                // o con claves de texto de antes de la 2.10 rehacen sus
+                // índices; las demás no se tocan
                 $st      = $w->cat->storage();
                 $tablas  = 0;
                 $huecos  = 0;
@@ -86,13 +87,17 @@ final class WriterDdl extends Writer
                         StorageMantenimiento::compactar($st, $t, $defs);
                         $tablas++;
                         $huecos += $n;
-                    } elseif (StorageMantenimiento::rehacerIndicesSinFiltro($st, $t, $defs)) {
+                    } elseif (StorageMantenimiento::rehacerIndicesViejos($st, $t, $defs)) {
                         $indices++;
                     }
                 }
+                // Y las escrituras vuelven a mirar qué tablas hay (2.10, ver
+                // StorageEscritura::tablasEsquema()): una copiada a mano o
+                // creada por una versión anterior cuenta desde ya
+                StorageMantenimiento::anotarEsquema($st);
                 $hecho = array_filter([
                     $tablas === 0 ? '' : "$huecos hueco(s) de filas borradas quitados en $tablas tabla(s)",
-                    $indices === 0 ? '' : "índices de $indices tabla(s) rehechos con el filtro de la 2.9",
+                    $indices === 0 ? '' : "índices de $indices tabla(s) rehechos con el filtro de la 2.9 y las claves de la 2.10",
                 ]);
                 return ['filas' => $huecos, 'mensaje' => $hecho === [] ? 'VACUUM: no había huecos que quitar ni índices que rehacer'
                     : 'VACUUM: ' . implode('; ', $hecho)];
@@ -102,7 +107,7 @@ final class WriterDdl extends Writer
                     return ['filas' => 1, 'mensaje' => "Fila apartada {$p['id']} de '{$p['tabla']}' olvidada: sigue en la copia de .reparados/"];
                 }
                 $problemas = (new Integrity($w->cat))->ficheros($ast['tabla'], true);
-                $tablas    = count(array_unique(array_column($problemas, 'tabla')));
+                $tablas    = \count(array_unique(array_column($problemas, 'tabla')));
                 // Las filas apartadas, con su fichero y su línea: para saber qué
                 // volver a meter, corregido, sin tener que buscarlo en la copia
                 $apartadas = [];
@@ -111,20 +116,27 @@ final class WriterDdl extends Writer
                         $apartadas[] = ['id' => $p['apartada'], 'tabla' => $p['tabla'], 'fichero' => $p['fichero'], 'fila' => $p['problema']];
                     }
                 }
-                return ['filas' => count($problemas), 'apartadas' => $apartadas, 'mensaje' => $problemas === []
+                return ['filas' => \count($problemas), 'apartadas' => $apartadas, 'mensaje' => $problemas === []
                     ? 'Los ficheros de las tablas están bien: no hay nada que reparar'
-                    : count($problemas) . " problema(s) reparado(s) en $tablas tabla(s)"
-                      . ($apartadas === [] ? '' : ', ' . count($apartadas) . ' fila(s) apartada(s)')
+                    : \count($problemas) . " problema(s) reparado(s) en $tablas tabla(s)"
+                      . ($apartadas === [] ? '' : ', ' . \count($apartadas) . ' fila(s) apartada(s)')
                       . '; los originales están en .reparados/'];
 
+            case 'repair_indexes':
+                $problemas = (new Integrity($w->cat))->indices($ast['tabla'], true);
+                $tablas    = \count(array_unique(array_column($problemas, 'tabla')));
+                return ['filas' => \count($problemas), 'mensaje' => $problemas === []
+                    ? 'Los índices cuadran con las filas: no hay nada que rehacer'
+                    : \count($problemas) . " problema(s): los índices de $tablas tabla(s), rehechos con sus filas"];
+
             case 'create_view':
-                $creada = $w->cat->crearVista($ast['nombre'], $ast['sql'], $ast['si_no_existe']);
+                $creada = CatalogDdl::crearVista($w->cat, $ast['nombre'], $ast['sql'], $ast['si_no_existe']);
                 return ['filas' => 0, 'mensaje' => $creada
                     ? "Vista '{$ast['nombre']}' creada"
                     : "La vista '{$ast['nombre']}' ya existía"];
 
             case 'drop_view':
-                $borrada = $w->cat->borrarVista($ast['nombre'], $ast['si_existe']);
+                $borrada = CatalogDdl::borrarVista($w->cat, $ast['nombre'], $ast['si_existe']);
                 return ['filas' => 0, 'mensaje' => $borrada
                     ? "Vista '{$ast['nombre']}' borrada"
                     : "La vista '{$ast['nombre']}' no existía"];
@@ -145,7 +157,7 @@ final class WriterDdl extends Writer
             }
             throw JsonSqlDbError::schema("La tabla '$tabla' ya existe");
         }
-        $w->cat->exigirNombreLibreDeVista($tabla);
+        CatalogDdl::exigirNombreLibreDeVista($w->cat, $tabla);
 
         if (isset($ast['como'])) {
             // Como MySQL: columnas, clave primaria, claves únicas, índices y
@@ -154,7 +166,7 @@ final class WriterDdl extends Writer
             $origen = $w->cat->meta((string)$ast['como']);
             $def = ['columns' => $origen['columns'], 'unique' => $origen['unique'], 'foreign_keys' => [],
                     'indexes' => $origen['indexes'], 'checks' => $origen['checks'] ?? []];
-            $w->cat->crearTabla($tabla, $def);
+            CatalogDdl::crearTabla($w->cat, $tabla, $def);
             return ['filas' => 0, 'mensaje' => "Tabla '$tabla' creada como '{$ast['como']}'"];
         }
         if ($ast['def'] === null) {
@@ -202,7 +214,7 @@ final class WriterDdl extends Writer
             $usados[strtolower($nombre)] = true;
             $def['indexes'][] = ['name' => $nombre, 'columns' => $ix['columns']];
         }
-        $w->cat->crearTabla($tabla, $def);
+        CatalogDdl::crearTabla($w->cat, $tabla, $def);
         return ['filas' => 0, 'mensaje' => "Tabla '$tabla' creada"];
     }
 
@@ -224,9 +236,9 @@ final class WriterDdl extends Writer
         $vacia['limit']  = 0;
         $vacia['offset'] = null;
         $cols  = (new Select($w->cat))->ejecutarConColumnas($vacia)['cols'];
-        $tipos = self::tiposDeOrigen($w, $select, count($cols));
-        if (count($tipos) < count($cols)) {
-            $vistos = array_fill(0, count($cols), null);
+        $tipos = self::tiposDeOrigen($w, $select, \count($cols));
+        if (\count($tipos) < \count($cols)) {
+            $vistos = array_fill(0, \count($cols), null);
             $anotar = static function (array $fila) use (&$vistos): void {
                 foreach (array_values($fila) as $i => $v) {
                     $vistos[$i] = self::tipoMas($vistos[$i], $v);
@@ -242,7 +254,7 @@ final class WriterDdl extends Writer
                                  'autoincrement' => false, 'unique' => false]
                               + ($tipos[$i] ?? ['type' => $vistos[$i] ?? Types::TEXT, 'length' => null, 'scale' => null]);
         }
-        $w->cat->crearTabla($tabla, $def);
+        CatalogDdl::crearTabla($w->cat, $tabla, $def);
 
         $st       = $w->cat->storage();
         // Las que toman el tipo de sus valores, por posición: cada valor que
@@ -269,7 +281,7 @@ final class WriterDdl extends Writer
                 $claves ??= array_keys($fila);
                 foreach ($castear as $i => [$col, $php]) {
                     $v = $fila[$claves[$i]];
-                    if ($v !== null && gettype($v) !== $php) {
+                    if ($v !== null && \gettype($v) !== $php) {
                         $fila[$claves[$i]] = Types::cast($v, $col);
                     }
                 }
@@ -302,7 +314,7 @@ final class WriterDdl extends Writer
         $porAlias = [];
         foreach ($select['from'] ?? [] as $o) {
             $nombre = $o['nombre'] ?? null;
-            $porAlias[strtolower((string)($o['alias'] ?? $nombre))] = ($o['tipo'] ?? '') === 'tabla' && is_string($nombre)
+            $porAlias[strtolower((string)($o['alias'] ?? $nombre))] = ($o['tipo'] ?? '') === 'tabla' && \is_string($nombre)
                 && $w->cat->existe($nombre) && !$w->cat->esVista($nombre) ? $w->meta($nombre) : null;
         }
         $tipo = static fn(array $c): array => ['type' => $c['type'], 'length' => $c['length'] ?? null, 'scale' => $c['scale'] ?? null];
@@ -341,13 +353,13 @@ final class WriterDdl extends Writer
             }
             $tipos[] = $col === null ? null : $tipo($col);
         }
-        return count($tipos) === $cuantas ? array_filter($tipos) : [];
+        return \count($tipos) === $cuantas ? array_filter($tipos) : [];
     }
 
     /** El tipo de una columna de valores tras ver uno más: enteros, números o texto; TEXT si se mezclan. */
     private static function tipoMas(?string $tipo, $v): ?string
     {
-        $t = $v === null ? null : (is_int($v) || is_bool($v) ? Types::INTEGER : (is_float($v) ? Types::DOUBLE : Types::TEXT));
+        $t = $v === null ? null : (\is_int($v) || \is_bool($v) ? Types::INTEGER : (\is_float($v) ? Types::DOUBLE : Types::TEXT));
         if ($t === null || $t === $tipo || $tipo === Types::TEXT) {
             return $tipo;
         }
@@ -366,7 +378,7 @@ final class WriterDdl extends Writer
             }
             throw JsonSqlDbError::schema("La tabla '$tabla' no existe");
         }
-        $w->cat->borrarTabla($tabla);
+        CatalogDdl::borrarTabla($w->cat, $tabla);
         unset($w->datos[$tabla], $w->metas[$tabla]);
         return ['filas' => 0, 'mensaje' => "Tabla '$tabla' eliminada"];
     }
@@ -376,15 +388,15 @@ final class WriterDdl extends Writer
         $tabla = $ast['tabla'];
         switch ($ast['accion']) {
             case 'add':
-                $w->cat->anadirColumna($tabla, $ast['def']);
+                CatalogDdl::anadirColumna($w->cat, $tabla, $ast['def']);
                 $mensaje = "Columna '{$ast['def']['name']}' añadida a '$tabla'";
                 break;
             case 'drop':
-                $w->cat->borrarColumna($tabla, $ast['col']);
+                CatalogDdl::borrarColumna($w->cat, $tabla, $ast['col']);
                 $mensaje = "Columna '{$ast['col']}' eliminada de '$tabla'";
                 break;
             case 'rename':
-                $w->cat->renombrarTabla($tabla, $ast['nuevo']);
+                CatalogDdl::renombrarTabla($w->cat, $tabla, $ast['nuevo']);
                 $mensaje = "Tabla '$tabla' renombrada a '{$ast['nuevo']}'";
                 break;
             case 'add_constraint':
@@ -397,38 +409,43 @@ final class WriterDdl extends Writer
                     }
                 }
                 foreach ($ast['unique'] as $uq) {
-                    $nombres[] = $w->cat->anadirUnico($tabla, $uq);
+                    $nombres[] = CatalogDdl::anadirUnico($w->cat, $tabla, $uq);
                 }
                 foreach ($ast['foreign_keys'] as $fk) {
-                    $nombres[] = $w->cat->anadirFk($tabla, $fk);
+                    $nombres[] = CatalogDdl::anadirFk($w->cat, $tabla, $fk);
                 }
                 foreach ($ast['checks'] ?? [] as $ck) {
-                    $nombres[] = $w->cat->anadirCheck($tabla, $ck);
+                    $nombres[] = CatalogDdl::anadirCheck($w->cat, $tabla, $ck);
                 }
                 $mensaje = "Restricción '" . implode("', '", $nombres) . "' añadida a '$tabla'";
                 break;
             case 'modify':
-                $w->cat->modificarColumna($tabla, $ast['def']);
+                CatalogDdl::modificarColumna($w->cat, $tabla, $ast['def']);
                 $mensaje = "Columna '{$ast['def']['name']}' modificada en '$tabla'";
                 break;
             case 'change':
-                $w->cat->modificarColumna($tabla, $ast['def'], $ast['col']);
+                CatalogDdl::modificarColumna($w->cat, $tabla, $ast['def'], $ast['col']);
                 $mensaje = "Columna '{$ast['col']}' cambiada a '{$ast['def']['name']}' en '$tabla'";
                 break;
             case 'add_pk':
-                $w->cat->anadirClavePrimaria($tabla, $ast['columnas']);
+                CatalogDdl::anadirClavePrimaria($w->cat, $tabla, $ast['columnas']);
                 $mensaje = "Clave primaria de '$tabla' creada sobre (" . implode(', ', $ast['columnas']) . ')';
                 break;
             case 'drop_pk':
-                $w->cat->borrarClavePrimaria($tabla);
+                CatalogDdl::borrarClavePrimaria($w->cat, $tabla);
                 $mensaje = "Clave primaria de '$tabla' eliminada";
                 break;
             case 'drop_constraint':
-                $w->cat->borrarRestriccion($tabla, $ast['nombre']);
+                CatalogDdl::borrarRestriccion($w->cat, $tabla, $ast['nombre']);
                 $mensaje = "Restricción '{$ast['nombre']}' eliminada de '$tabla'";
                 break;
+            case 'autoinc':
+                $siguiente = CatalogDdl::subirAutoincremento($w->cat, $tabla, $ast['valor']);
+                unset($w->autoinc[$tabla]);
+                $mensaje = "El siguiente AUTO_INCREMENT de '$tabla' es $siguiente";
+                break;
             default:
-                $w->cat->renombrarColumna($tabla, $ast['col'], $ast['nuevo']);
+                CatalogDdl::renombrarColumna($w->cat, $tabla, $ast['col'], $ast['nuevo']);
                 $mensaje = "Columna '{$ast['col']}' renombrada a '{$ast['nuevo']}'";
         }
         unset($w->datos[$tabla], $w->metas[$tabla]);
@@ -455,7 +472,7 @@ final class WriterDdl extends Writer
             self::exigirFila($ast['trg'], WriterTriggers::analizarExpr($w, $ast['trg']['when']));
         }
         self::comprobarCuerpo($w, $ast['trg'], $ast['trg']['body']);
-        $w->cat->crearTrigger($ast['tabla'], $ast['trg']);
+        CatalogDdl::crearTrigger($w->cat, $ast['tabla'], $ast['trg']);
         unset($w->metas[$ast['tabla']]);
         return ['filas' => 0, 'mensaje' => "Trigger '$nombre' creado"];
     }
@@ -464,7 +481,7 @@ final class WriterDdl extends Writer
     private static function comprobarCuerpo(Writer $w, array $trg, array $cuerpo): void
     {
         foreach ($cuerpo as $paso) {
-            if (is_array($paso)) {
+            if (\is_array($paso)) {
                 foreach ($paso['si'] as [$cond, $sentencias]) {
                     self::exigirFila($trg, WriterTriggers::analizarExpr($w, $cond));
                     self::comprobarCuerpo($w, $trg, $sentencias);
@@ -474,12 +491,16 @@ final class WriterDdl extends Writer
                 if ($trg['timing'] !== 'BEFORE' || $trg['event'] === 'DELETE') {
                     throw JsonSqlDbError::syntax("SET NEW solo vale en un trigger BEFORE INSERT o BEFORE UPDATE ('{$trg['name']}')");
                 }
-                self::exigirFila($trg, ParserEscritura::analizarSetNew($paso));
+                self::exigirFila($trg, ParserEscrituraAvanzada::analizarSetNew($paso));
             } else {
                 $ast = Parser::analizar($paso);
                 // Lo que no podría ejecutar (WriterTriggers::ejecutarSinVolcar()) se rechaza al crearlo (2.9)
-                if (!in_array($ast['k'], ['insert', 'update', 'delete', 'select', 'union'], true)) {
+                if (!\in_array($ast['k'], ['insert', 'update', 'delete', 'select', 'union'], true)) {
                     throw JsonSqlDbError::syntax("El trigger '{$trg['name']}' solo puede hacer INSERT, UPDATE, DELETE o SELECT");
+                }
+                // Como en SQLite (2.10: sus filas salían en el RETURNING de la sentencia de fuera)
+                if (($ast['returning'] ?? null) !== null) {
+                    throw JsonSqlDbError::syntax("El trigger '{$trg['name']}' no puede usar RETURNING");
                 }
                 self::exigirFila($trg, $ast);
             }
@@ -493,14 +514,14 @@ final class WriterDdl extends Writer
      */
     private static function exigirFila(array $trg, array $n): void
     {
-        if (($n['k'] ?? null) === 'col' && is_string($n['tabla'] ?? null)) {
+        if (($n['k'] ?? null) === 'col' && \is_string($n['tabla'] ?? null)) {
             $cual = strtoupper($n['tabla']);
             if (($cual === 'NEW' && $trg['event'] === 'DELETE') || ($cual === 'OLD' && $trg['event'] === 'INSERT')) {
                 throw JsonSqlDbError::syntax("$cual no está disponible en un trigger {$trg['event']} ('{$trg['name']}')");
             }
         }
         foreach ($n as $hijo) {
-            if (is_array($hijo)) {
+            if (\is_array($hijo)) {
                 self::exigirFila($trg, $hijo);
             }
         }
@@ -510,7 +531,7 @@ final class WriterDdl extends Writer
     {
         $nombre = $ast['nombre'];
         try {
-            $tabla = $w->cat->borrarTrigger($nombre);
+            $tabla = CatalogDdl::borrarTrigger($w->cat, $nombre);
         } catch (JsonSqlDbError $e) {
             if ($ast['si_existe'] && $e->sqlState === 'SCHEMA') {
                 return ['filas' => 0, 'mensaje' => "El trigger '$nombre' no existía"];

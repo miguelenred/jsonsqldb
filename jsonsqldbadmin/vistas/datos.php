@@ -6,6 +6,22 @@ $admin    = Auth::esAdmin();
 // fila. De cada columna, y no de la lista de SHOW KEYS separada por comas, que
 // partía en dos un nombre con una coma (2.9)
 $pk = array_column(array_filter($columnas, static fn(array $c): bool => (int)$c['pk'] === 1), 'columna');
+// Los campos ocultos que dicen qué fila se edita o se borra: su clave
+// primaria, o sin ella (2.10) todos sus valores, en JSON para que lleguen con
+// su tipo (un decimal con todas sus cifras, NULL distinto de '')
+$identificar = static function (array $f) use ($pk, $columnas): void {
+    if ($pk === []) {
+        $valores = [];
+        foreach ($columnas as $c) {
+            $valores[campo($c['columna'])] = $f[$c['columna']] ?? null;
+        }
+        echo '<input type="hidden" name="fila" value="' . h(json_encode($valores, JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION)) . '">';
+        return;
+    }
+    foreach ($pk as $c) {
+        echo '<input type="hidden" name="pk[' . campo($c) . ']" value="' . h($f[$c] ?? '') . '">';
+    }
+};
 
 // Filtro: busca el texto en todas las columnas a la vez
 $filtro = get('q');
@@ -69,9 +85,14 @@ require __DIR__ . '/_pestanas.php';
   </div>
 </div>
 
+<?php if ($admin && !Api::directa() && !Lotes::porClave($columnas, $orden)): ?>
+  <p class="text-body-secondary small mb-2">
+    <?= h(t('Por la API, una tabla grande se exporta por partes, y salvo ordenada por su clave primaria numérica, cada parte se pide por su posición: si alguien la cambia mientras se descarga, pueden faltar o repetirse filas. Para una copia exacta, el ZIP de la base.')) ?>
+  </p>
+<?php endif; ?>
 <?php if ($admin && $pk === []): ?>
-  <div class="alert alert-warning py-2 small">
-    <?= h(t('Esta tabla no tiene clave primaria, así que no se pueden editar ni borrar filas sueltas desde el panel. Usa la pestaña SQL.')) ?>
+  <div class="alert alert-info py-2 small">
+    <?= h(t('Esta tabla no tiene clave primaria: cada fila se edita o se borra por todos sus valores. Si hay dos filas iguales, el cambio se hace en una de ellas.')) ?>
   </div>
 <?php endif; ?>
 
@@ -93,7 +114,7 @@ require __DIR__ . '/_pestanas.php';
             </a>
           </th>
         <?php endforeach; ?>
-        <?php if ($admin && $pk !== []): ?><th class="text-end"><?= h(t('Acciones')) ?></th><?php endif; ?>
+        <?php if ($admin): ?><th class="text-end"><?= h(t('Acciones')) ?></th><?php endif; ?>
       </tr></thead>
       <tbody>
       <?php if ($filas === []): ?>
@@ -105,7 +126,7 @@ require __DIR__ . '/_pestanas.php';
           <?php foreach ($columnas as $c): ?>
             <td><?= celda($f[$c['columna']] ?? null) ?></td>
           <?php endforeach; ?>
-          <?php if ($admin && $pk !== []): ?>
+          <?php if ($admin): ?>
             <td class="text-end">
               <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal"
                       data-bs-target="#edit<?= $i ?>"><?= icono('pencil') ?></button>
@@ -115,9 +136,7 @@ require __DIR__ . '/_pestanas.php';
                 <input type="hidden" name="db" value="<?= h($base) ?>">
                 <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
                 <input type="hidden" name="volver" value="datos">
-                <?php foreach ($pk as $c): ?>
-                  <input type="hidden" name="pk[<?= campo($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
-                <?php endforeach; ?>
+                <?php $identificar($f); ?>
                 <button class="btn btn-sm btn-outline-danger"><?= icono('trash') ?></button>
               </form>
             </td>
@@ -228,7 +247,7 @@ require __DIR__ . '/_pestanas.php';
 </div>
 
 <!-- Editar -->
-<?php if ($pk !== []): foreach ($filas as $i => $f): ?>
+<?php foreach ($filas as $i => $f): ?>
 <div class="modal fade" id="edit<?= $i ?>" tabindex="-1">
   <div class="modal-dialog modal-lg"><div class="modal-content">
     <form method="post">
@@ -237,9 +256,7 @@ require __DIR__ . '/_pestanas.php';
       <input type="hidden" name="db" value="<?= h($base) ?>">
       <input type="hidden" name="tabla" value="<?= h($tabla) ?>">
       <input type="hidden" name="volver" value="datos">
-      <?php foreach ($pk as $c): ?>
-        <input type="hidden" name="pk[<?= campo($c) ?>]" value="<?= h($f[$c] ?? '') ?>">
-      <?php endforeach; ?>
+      <?php $identificar($f); ?>
       <div class="modal-header"><h5 class="modal-title"><?= h(t('Editar fila')) ?></h5></div>
       <div class="modal-body"><?php $campos($columnas, $f, (string)$i); ?></div>
       <div class="modal-footer">
@@ -249,5 +266,5 @@ require __DIR__ . '/_pestanas.php';
     </form>
   </div></div>
 </div>
-<?php endforeach; endif; ?>
+<?php endforeach; ?>
 <?php endif; ?>

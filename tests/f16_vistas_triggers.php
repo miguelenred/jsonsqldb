@@ -323,6 +323,26 @@ chk('SQL Server: el BEFORE DELETE (o UPDATE) de una tabla con una clave foránea
         && str_contains($s, 'CREATE TRIGGER [q_bu] ON [q] INSTEAD OF UPDATE AS') && str_contains($s, 'CREATE TRIGGER [c_bd] ON [c] INSTEAD OF DELETE AS')
         && str_contains($s, 'CREATE TRIGGER [e_bd] ON [e] INSTEAD OF DELETE AS') ?: $s;
 });
+chk('un trigger que no se puede escribir en SQL Server va comentado con su motivo, y los demás de su tabla se escriben: el AFTER INSERT de una tabla sin clave primaria sí, su AFTER UPDATE no; los BEFORE de un evento, juntos en su INSTEAD OF (2.10: iban todos comentados, con el motivo de otro)', function () use ($raiz) {
+    Database::crear('vt4', $raiz);
+    $b = new Database('vt4', $raiz);
+    foreach (['CREATE TABLE t (a INTEGER, b TEXT)',
+              'CREATE TABLE lg (id INTEGER PRIMARY KEY, que TEXT)',
+              "CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN INSERT INTO lg (que) VALUES ('alta'); END",
+              "CREATE TRIGGER t_au AFTER UPDATE ON t BEGIN INSERT INTO lg (que) VALUES ('cambio'); END",
+              'CREATE TRIGGER t_bi1 BEFORE INSERT ON t BEGIN SET NEW.b = UPPER(NEW.b); END',
+              'CREATE TRIGGER t_bi2 BEFORE INSERT ON t BEGIN SET NEW.a = NEW.a + 1; END'] as $q) {
+        $b->consultar($q);
+    }
+    [$tablas, $trgs, $vs, $ixs] = reunir($b);
+    $s = Exportar::volcado('vt4', $tablas, $trgs, $vs, $ixs, 'sqlserver');
+    unset($b);
+    Database::borrar('vt4', $raiz);
+    return str_contains($s, 'CREATE TRIGGER [t_ai] ON [t] AFTER INSERT AS') && !str_contains($s, '-- CREATE TRIGGER t_ai')
+        && str_contains($s, "-- Sin traducir: SQL Server: sin clave primaria en 't'") && str_contains($s, '-- CREATE TRIGGER t_au AFTER UPDATE ON t')
+        && substr_count($s, '-- Sin traducir:') === 1 && str_contains($s, 'CREATE TRIGGER [t_antes_insert] ON [t] INSTEAD OF INSERT AS')
+        && strpos($s, '[t_antes_insert]') > strpos($s, '-- CREATE TRIGGER t_au') ?: $s;
+});
 chk('WITH RECURSIVE y las columnas con nombre de un WITH: RECURSIVE en MySQL y PostgreSQL, sin él y con el aviso de los 100 niveles en SQL Server; lo que no se puede escribir, sin traducir', function () {
     $cnt = 'WITH RECURSIVE cnt(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM cnt WHERE n < 5) SELECT n FROM cnt';
     $r = [];

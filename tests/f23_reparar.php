@@ -465,6 +465,45 @@ chk('la reparación sola y REPAIR TABLES reescriben una tabla más grande que la
     return $r === ['[{"n":60000}]', true, 1, true, '[{"n":8572}]'] && $copias >= 1 ?: json_encode([$r, $copias]);
 });
 
+chk('CHECK INDEXES compara cada índice con las filas: una clave quitada a mano de un trozo (que hace dar filas de menos), un filtro que no deja verlas, un trozo que falta y un rango del estado más estrecho que sus claves; REPAIR INDEXES los rehace y todo cuadra (2.10)', function () use ($raiz) {
+    $dir = nueva();
+    $bd  = static fn(): Database => new Database('b', $raiz);
+    $trozo = static function (int $p, callable $cambiar) use ($dir): void {
+        $f = "$dir/t.idx.ix_ciudad" . ($p > 1 ? ".part$p" : '') . '.json';
+        $idx = json_decode((string)file_get_contents($f), true);
+        $cambiar($idx);
+        file_put_contents($f, json_encode($idx) . "\n");
+        touch($f, time() - 30);              // con otro sello que el que se escribió (ver nueva())
+    };
+    $cuantas = static fn(): array => [$bd()->consultar("SELECT COUNT(*) AS n FROM t WHERE ciudad = 'C3'")[0]['n'],
+                                      $bd()->consultar("SELECT COUNT(*) AS n FROM t WHERE ciudad || '' = 'C3'")[0]['n']];
+    $problemas = static fn(): array => array_column($bd()->consultar('CHECK INDEXES'), 'problema');
+    $r = [$problemas()];
+    $trozo(1, static function (array &$idx): void { unset($idx['keys']['t2:C3']); });
+    $r[] = $cuantas();                                         // por el índice, de menos
+    $r[] = $problemas();
+    $r[] = $bd()->consultar('REPAIR INDEXES FROM t')['filas'];
+    $r[] = [$problemas(), $cuantas()];
+    $trozo(2, static function (array &$idx): void { $idx['filtro'] = base64_encode(str_repeat("\0", strlen((string)base64_decode($idx['filtro'])))); });
+    $r[] = $problemas();
+    @unlink("$dir/t.idx.ix_ciudad.part2.json");
+    $r[] = $problemas();
+    $r[] = $bd()->consultar('REPAIR INDEXES')['filas'];
+    $r[] = [$problemas(), $cuantas()];
+    // El rango de un trozo de la clave primaria en el estado, más estrecho que sus claves
+    $e = json_decode((string)file_get_contents("$dir/t.rev.json"), true);
+    $e['rangos'][array_key_first($e['rangos'])][0] = [5000, 6000];
+    file_put_contents("$dir/t.rev.json", json_encode($e) . "\n");
+    touch("$dir/t.rev.json", time() - 30);
+    $r[] = $problemas();
+    $bien = $r[0] === [] && $r[1][0] < $r[1][1] && count($r[2]) === 1 && str_contains($r[2][0], 'el trozo 1 tiene 0 clave(s) que sus filas no tienen y le faltan')
+        && $r[3] === 1 && $r[4] === [[], [$r[1][1], $r[1][1]]]
+        && $r[5] !== [] && str_contains($r[5][0], 'el filtro del trozo 2 no deja ver')
+        && $r[6] !== [] && str_contains($r[6][0], 'el trozo 2 no se puede leer') && $r[7] >= 1 && $r[8] === [[], [$r[1][1], $r[1][1]]]
+        && $r[9] === ['el rango del trozo 1 en el estado no cubre sus claves'];
+    return $bien ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+
 exec('rm -rf ' . escapeshellarg($raiz));
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";

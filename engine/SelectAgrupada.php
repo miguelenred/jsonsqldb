@@ -18,10 +18,11 @@ final class SelectAgrupada extends Select
     /**
      * Cómo acumula cada agregado al agrupar (ver agrupar()): 'lista' guarda
      * los valores, 'mejor' uno (MIN, MAX, ANY_VALUE), 'cuad' la suma de
-     * cuadrados (varianzas), 'bits' las operaciones de bits; el resto, 'suma'.
+     * cuadrados (varianzas), 'bits' las operaciones de bits, 'cuenta' nada
+     * (COUNT(x), ver agrupar(); 2.10: sumaba también, sin usarlo); el resto, 'suma'.
      * Los JSON cuentan también los NULL, como en SQLite y MySQL.
      */
-    private const MODO_AGREGADO = ['GROUP_CONCAT' => 'lista', 'JSON_GROUP_ARRAY' => 'lista', 'JSON_ARRAYAGG' => 'lista',
+    private const MODO_AGREGADO = ['COUNT' => 'cuenta', 'GROUP_CONCAT' => 'lista', 'JSON_GROUP_ARRAY' => 'lista', 'JSON_ARRAYAGG' => 'lista',
         'JSON_GROUP_OBJECT' => 'lista', 'JSON_OBJECTAGG' => 'lista', 'MIN' => 'mejor', 'MAX' => 'mejor', 'ANY_VALUE' => 'mejor',
         'STD' => 'cuad', 'STDDEV' => 'cuad', 'STDDEV_POP' => 'cuad', 'STDDEV_SAMP' => 'cuad', 'VARIANCE' => 'cuad',
         'VAR_POP' => 'cuad', 'VAR_SAMP' => 'cuad', 'BIT_AND' => 'bits', 'BIT_OR' => 'bits', 'BIT_XOR' => 'bits'];
@@ -57,29 +58,30 @@ final class SelectAgrupada extends Select
         if ($carpeta !== null && self::distintosEnDisco($defs) !== []) {
             return self::distintosPorParticiones($filas, $defs, $sub, $conjunto, $externa, $carpeta);
         }
+        // Cada argumento y cada clave de grupo, como se lee de la fila (ver lectura())
         $args    = [];
         $filtros = [];                          // FILTER (WHERE …) de cada agregado (2.9)
         foreach ($defs as $id => $d) {
-            $args[$id]    = $d['arg'] === null ? null : (EvaluatorCompilado::compilar($d['arg']) ?? $d['arg']);
+            $args[$id]    = $d['arg'] === null ? null : self::lectura($d['arg']);
             $filtros[$id] = $d['filtro'] === null ? null : (EvaluatorCompilado::compilar($d['filtro']) ?? $d['filtro']);
         }
         $claves = [];
         foreach ($exprs as $e) {
-            $claves[] = EvaluatorCompilado::compilar($e) ?? $e;
+            $claves[] = self::lectura($e);
         }
 
         // ¿Hace falta el contexto del evaluador? Si todo está compilado, no: se
         // ahorra construir un array por fila
         $conCtx = false;
         foreach (array_merge($claves, array_values($args), array_values($filtros)) as $e) {
-            $conCtx = $conCtx || ($e !== null && !($e instanceof \Closure));
+            $conCtx = $conCtx || \is_array($e);
         }
         foreach ($defs as $d) {
             $conCtx = $conCtx || ($d['orden'] ?? []) !== [];
         }
 
-        // Por grupo: la primera fila, cuántas filas, y por acumulador la suma
-        // y el recuento de no nulos (SUM, AVG, COUNT), el mejor valor visto
+        // Por grupo: la primera fila, cuántas filas, y por acumulador cuántas
+        // no entran (FILTER y NULL), la suma (SUM, AVG, TOTAL), el mejor valor visto
         // (MIN, MAX) o la lista de valores (DISTINCT, GROUP_CONCAT). Cada
         // grupo se toca por referencia: escribir $grupos[$clave]['suma'][$id]
         // buscaba el grupo tres veces por fila y acumulador
@@ -93,34 +95,61 @@ final class SelectAgrupada extends Select
             // llamada costaba un 8 % de un GROUP BY (2.9)
             $clave = '';
             foreach ($claves as $e) {
-                $clave .= Valor::clave($e instanceof \Closure ? $e($fila) : Evaluator::evaluar($e, $ctx)) . "\0";
+                $clave .= Valor::clave(\is_string($e) ? $fila[$e] ?? null : ($e instanceof \Closure ? $e($fila) : Evaluator::evaluar($e, $ctx))) . "\0";
             }
             if (!isset($grupos[$clave])) {
-                $grupos[$clave] = ['fila' => $fila, 'n' => 0, 'suma' => [], 'cuenta' => [], 'mejor' => [], 'lista' => []];
+                $grupos[$clave] = ['fila' => $fila, 'n' => 0, 'suma' => [], 'fuera' => [], 'mejor' => [], 'lista' => []];
                 Memoria::comprobar('la agrupación');
             }
             $g = &$grupos[$clave];
             $g['n']++;
+            // De cada acumulador se cuentan las filas que no entran, que son
+            // pocas (las del FILTER y los NULL): las que entran son las del
+            // grupo menos esas (2.10: se contaban las que entraban, una suma
+            // más en cada valor de SUM, AVG, TOTAL, COUNT y las varianzas)
             foreach ($defs as $id => $d) {
                 $f = $filtros[$id];
                 if ($f !== null && Valor::verdadero($f instanceof \Closure ? $f($fila) : Evaluator::evaluar($f, $ctx)) !== true) {
+                    $g['fuera'][$id] = ($g['fuera'][$id] ?? 0) + 1;
                     continue;
                 }
                 if ($d['star']) {
-                    if ($f !== null) {
-                        $g['cuenta'][$id] = ($g['cuenta'][$id] ?? 0) + 1;
-                    }
                     continue;                           // COUNT(*): basta con contar filas
                 }
                 $a = $args[$id];
-                $v = $a instanceof \Closure ? $a($fila) : Evaluator::evaluar($a, $ctx);
+                $v = \is_string($a) ? $fila[$a] ?? null : ($a instanceof \Closure ? $a($fila) : Evaluator::evaluar($a, $ctx));
                 if ($v === null && !$d['nulos']) {
+                    $g['fuera'][$id] = ($g['fuera'][$id] ?? 0) + 1;
                     continue;                           // los agregados ignoran los NULL (los JSON, no)
                 }
                 $modo = $d['modo'];
-                if ($modo === 'suma') {                 // COUNT(x), SUM, AVG, TOTAL
-                    $g['suma'][$id]   = ($g['suma'][$id] ?? 0) + (is_int($v) || is_float($v) ? $v : Valor::aNumero($v));
-                    $g['cuenta'][$id] = ($g['cuenta'][$id] ?? 0) + 1;
+                if ($modo === 'suma') {                 // SUM, AVG, TOTAL
+                    // Como SQLite (ver sumar()): los enteros, exactos mientras
+                    // caben; lo demás, al par compensado, que va en el mismo
+                    // sitio. Aquí, los dos casos corrientes; el resto, sumar()
+                    if (\is_int($v) || (!\is_float($v) && \is_int($v = self::sumando($v)))) {
+                        // PHP pasa a decimal la suma de enteros que no cabe
+                        // @phpstan-ignore booleanAnd.rightAlwaysTrue
+                        if (\is_int($s = $g['suma'][$id] ?? 0) && \is_int($x = $s + $v)) {
+                            $g['suma'][$id] = $x;
+                        } else {
+                            self::sumar($g['suma'][$id], $v, $g['n'] - 1 - ($g['fuera'][$id] ?? 0));
+                        }
+                    } else {
+                        // Por referencia: dos búsquedas en vez de ocho
+                        $k = &$g['suma'][$id];
+                        if (\is_array($k)) {
+                            $sp = $k[0];                // ver sumarDecimal()
+                            $t  = $sp + $v;
+                            $k[1] += ($sp < 0 ? -$sp : $sp) > ($v < 0 ? -$v : $v) ? ($sp - $t) + $v : ($v - $t) + $sp;
+                            $k[0] = $t;
+                        } else {
+                            self::sumar($k, $v, $g['n'] - 1 - ($g['fuera'][$id] ?? 0));
+                        }
+                        unset($k);
+                    }
+                } elseif ($modo === 'cuenta') {         // COUNT(x): nada más
+                    continue;
                 } elseif ($modo === 'lista') {
                     Memoria::comprobar('la agrupación');    // un grupo puede juntar muchos (2.9)
                     if ($d['distinct'] && $d['orden'] === null) {
@@ -142,20 +171,20 @@ final class SelectAgrupada extends Select
                         $g['claves'][$id][$i][] = Evaluator::evaluar($o['expr'], $ctx);
                     }
                 } elseif ($modo === 'mejor') {          // MIN, MAX y ANY_VALUE (el primero)
-                    if (!array_key_exists($id, $g['mejor'])) {
+                    if (!\array_key_exists($id, $g['mejor'])) {
                         $g['mejor'][$id] = $v;
                     } elseif ($d['nombre'] !== 'ANY_VALUE') {
-                        $c = $d['colacion'] === null ? Valor::comparar($v, $g['mejor'][$id])
-                            : Valor::comparar(Functions::plegar($v, $d['colacion']), Functions::plegar($g['mejor'][$id], $d['colacion']));
+                        // Por clase, como en SQLite: los números antes que los textos (2.10)
+                        $c = $d['colacion'] === null ? Valor::compararClase($v, $g['mejor'][$id])
+                            : Valor::compararClase(Functions::plegar($v, $d['colacion']), Functions::plegar($g['mejor'][$id], $d['colacion']));
                         if ($c !== null && (($d['nombre'] === 'MIN' && $c < 0) || ($d['nombre'] === 'MAX' && $c > 0))) {
                             $g['mejor'][$id] = $v;
                         }
                     }
-                } elseif ($modo === 'cuad') {           // varianzas: suma, cuadrados y cuenta
-                    $x = is_int($v) || is_float($v) ? $v : Valor::aNumero($v);
+                } elseif ($modo === 'cuad') {           // varianzas: suma y cuadrados
+                    $x = \is_int($v) || \is_float($v) ? $v : Valor::aNumero($v);
                     $g['suma'][$id]   = ($g['suma'][$id] ?? 0) + $x;
                     $g['cuad'][$id]   = ($g['cuad'][$id] ?? 0) + $x * $x;
-                    $g['cuenta'][$id] = ($g['cuenta'][$id] ?? 0) + 1;
                 } else {                                // BIT_AND, BIT_OR, BIT_XOR
                     $g['mejor'][$id] = self::bits($d['nombre'], $g['mejor'][$id] ?? ($d['nombre'] === 'BIT_AND' ? -1 : 0), $v);
                 }
@@ -164,16 +193,16 @@ final class SelectAgrupada extends Select
         }
         if ($exprs === [] && $grupos === []) {
             // Agregación total: una fila aunque no haya datos
-            $grupos[''] = ['fila' => [], 'n' => 0, 'suma' => [], 'cuenta' => [], 'mejor' => [], 'lista' => []];
+            $grupos[''] = ['fila' => [], 'n' => 0, 'suma' => [], 'fuera' => [], 'mejor' => [], 'lista' => []];
         }
 
         $out = [];
         foreach ($grupos as $g) {
             $valores = [];
             foreach ($defs as $id => $d) {
-                $cuenta = $g['cuenta'][$id] ?? 0;
+                $cuenta = $g['n'] - ($g['fuera'][$id] ?? 0);
                 if ($d['star']) {
-                    $valores[$id] = $d['filtro'] === null ? $g['n'] : $cuenta;
+                    $valores[$id] = $cuenta;
                 } elseif ($d['modo'] === 'lista') {
                     $sep = ',';
                     if ($d['sep'] !== null) {
@@ -182,11 +211,11 @@ final class SelectAgrupada extends Select
                     }
                     $lista = $g['lista'][$id] ?? [];
                     if ($d['distinct'] && $d['orden'] === null) {
-                        $valores[$id] = $d['nombre'] === 'COUNT' ? count($lista)
+                        $valores[$id] = $d['nombre'] === 'COUNT' ? \count($lista)
                             : self::agregado($d['nombre'], array_values($lista), $g['n'], false, $sep, $d['colacion']);
                         continue;
                     }
-                    if (($d['orden'] ?? null) !== null && count($lista) > 1) {
+                    if (($d['orden'] ?? null) !== null && \count($lista) > 1) {
                         // El mismo orden que el ORDER BY de una consulta
                         $claves = $g['claves'][$id];
                         $indices = array_keys($lista);
@@ -197,14 +226,8 @@ final class SelectAgrupada extends Select
                     $valores[$id] = self::agregado($d['nombre'], $lista, $g['n'], $d['distinct'], $sep, $d['colacion']);
                 } elseif ($d['nombre'] === 'COUNT') {
                     $valores[$id] = $cuenta;
-                } elseif ($d['nombre'] === 'SUM') {
-                    $valores[$id] = $cuenta === 0 ? null : $g['suma'][$id];
-                } elseif ($d['nombre'] === 'TOTAL') {
-                    $valores[$id] = (float)($g['suma'][$id] ?? 0);   // 0.0 sin valores, como SQLite
-                } elseif ($d['nombre'] === 'AVG') {
-                    // Siempre decimal, como SQLite y MySQL: con / de PHP, una
-                    // media exacta salía entera (-10) y otra decimal (-5.33)
-                    $valores[$id] = $cuenta === 0 ? null : (float)($g['suma'][$id] / $cuenta);
+                } elseif ($d['nombre'] === 'SUM' || $d['nombre'] === 'TOTAL' || $d['nombre'] === 'AVG') {
+                    $valores[$id] = self::sumaFinal($d['nombre'], $g['suma'][$id] ?? 0, $cuenta);
                 } elseif ($d['modo'] === 'cuad') {
                     $valores[$id] = self::varianza($d['nombre'], $cuenta, $g['suma'][$id] ?? 0, $g['cuad'][$id] ?? 0);
                 } elseif ($d['modo'] === 'bits') {
@@ -216,6 +239,19 @@ final class SelectAgrupada extends Select
             $out[] = [$g['fila'], $valores];
         }
         return $out;
+    }
+
+    /**
+     * Cómo agrupar() lee una expresión de cada fila: si es una columna, su
+     * clave en la fila, que se lee sin más (2.10: llamar a la función
+     * compilada costaba más que lo que la 2.10 añadió a SUM, TOTAL y AVG para
+     * sumar como SQLite); si no, compilada, o su árbol para Evaluator.
+     *
+     * @return string|\Closure|array
+     */
+    private static function lectura(array $n)
+    {
+        return Evaluator::claveDirecta($n) ?? EvaluatorCompilado::compilar($n) ?? $n;
     }
 
     /**
@@ -264,7 +300,7 @@ final class SelectAgrupada extends Select
     public static function distintosEnDisco(array $defs): array
     {
         return array_filter($defs, static fn(array $d): bool => $d['distinct'] && $d['orden'] === null
-            && in_array($d['nombre'], ['COUNT', 'SUM', 'TOTAL', 'AVG', 'MIN', 'MAX'], true));
+            && \in_array($d['nombre'], ['COUNT', 'SUM', 'TOTAL', 'AVG', 'MIN', 'MAX'], true));
     }
 
     /**
@@ -274,6 +310,11 @@ final class SelectAgrupada extends Select
      * clave, y los demás agregados se acumulan como siempre. Un valor está
      * siempre en la misma partición, así que los distintos de cada una, que
      * caben, son los distintos de todos; al final se suman los de cada una.
+     * SUM, TOTAL y AVG suman los distintos en el orden en que aparecieron, como
+     * en memoria y en SQLite (2.10, antes de publicarla: en el de las
+     * particiones, y el redondeo o el error de desbordamiento podían ser
+     * otros): cada partición los escribe, con su posición, en otro temporal
+     * repartido por tramos de posiciones, y cada tramo se ordena en memoria.
      *
      * @return list<array{0: array, 1: array<string,mixed>}>
      */
@@ -282,14 +323,19 @@ final class SelectAgrupada extends Select
     {
         $distintos = self::distintosEnDisco($defs);
         $volcado   = new Volcado($carpeta);
+        $enOrden   = null;                      // los distintos de SUM, TOTAL y AVG, con su posición (ver arriba)
         try {
             $args = $filtros = [];
             foreach ($distintos as $id => $d) {
                 $args[$id]    = EvaluatorCompilado::compilar($d['arg']) ?? $d['arg'];
                 $filtros[$id] = $d['filtro'] === null ? null : (EvaluatorCompilado::compilar($d['filtro']) ?? $d['filtro']);
             }
-            $repartir = static function () use ($filas, $distintos, $args, $filtros, $sub, $conjunto, $externa, $volcado): \Generator {
+            // La posición de cada fila, solo si hay SUM, TOTAL o AVG: suman en ese orden
+            $sumas = array_filter($distintos, static fn(array $d): bool => \in_array($d['nombre'], ['SUM', 'TOTAL', 'AVG'], true));
+            $total = 0;                         // filas, para repartir sus posiciones en tramos
+            $repartir = static function () use ($filas, $distintos, $args, $filtros, $sub, $conjunto, $externa, $volcado, $sumas, &$total): \Generator {
                 foreach ($filas as $fila) {
+                    $total++;
                     $ctx = ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa];
                     foreach ($distintos as $id => $d) {
                         $f = $filtros[$id];
@@ -299,7 +345,7 @@ final class SelectAgrupada extends Select
                         $v = $args[$id] instanceof \Closure ? $args[$id]($fila) : Evaluator::evaluar($args[$id], $ctx);
                         if ($v !== null) {
                             $k = Valor::clave($d['colacion'] === null ? $v : Functions::plegar($v, $d['colacion']));
-                            $volcado->anadir([$id, $k, $v], crc32($k) % self::PARTICIONES);
+                            $volcado->anadir(isset($sumas[$id]) ? [$id, $k, $v, $total] : [$id, $k, $v], crc32($k) % self::PARTICIONES);
                         }
                     }
                     yield $fila;
@@ -309,32 +355,76 @@ final class SelectAgrupada extends Select
             foreach (self::agrupar($repartir(), [], array_diff_key($defs, $distintos), $sub, $conjunto, $externa) as $g) {
                 $grupo = $g;                            // sin GROUP BY, un grupo
             }
-            // Los de cada partición, y de ellos, el de todas
-            $parciales = [];
+            // Los de cada partición, y de ellos, el de todas. SUM, TOTAL y AVG,
+            // con una suma para todas (2.10: cada partición se pasaba a decimal
+            // por su cuenta y se perdía lo que la suma compensada guarda)
+            $parciales = $hechos = [];
+            /** @var array<string, int|array<int, int|float>> $suma lo sumado de cada SUM, TOTAL y AVG (ver sumar()) */
+            $suma = [];
             for ($p = 0; $p < self::PARTICIONES; $p++) {
-                $vistos = [];
-                foreach ($volcado->leer($p) as [$id, $k, $v]) {
-                    $vistos[$id][$k] ??= $v;
+                $vistos = $posiciones = [];
+                foreach ($volcado->leer($p) as $r) {
+                    // El primero, y de SUM, TOTAL y AVG la posición en que apareció,
+                    // aparte: un par por valor ocupaba cuatro veces más
+                    if (!isset($vistos[$r[0]][$r[1]])) {
+                        $vistos[$r[0]][$r[1]] = $r[2];
+                        if (isset($r[3])) {
+                            $posiciones[$r[0]][$r[1]] = $r[3];
+                        }
+                    }
                 }
                 foreach ($vistos as $id => $unicos) {
                     $d = $distintos[$id];
-                    $parciales[$id]['n'][] = count($unicos);
-                    $parciales[$id]['v'][] = self::agregado($d['nombre'] === 'AVG' || $d['nombre'] === 'COUNT' ? 'SUM' : $d['nombre'],
-                        $d['nombre'] === 'COUNT' ? [] : array_values($unicos), count($unicos), false, ',', $d['colacion']);
+                    $parciales[$id]['n'][] = \count($unicos);
+                    if (isset($sumas[$id])) {
+                        $enOrden ??= new Volcado($carpeta);
+                        foreach ($unicos as $k => $v) {
+                            $pos = $posiciones[$id][$k];
+                            $enOrden->anadir([$pos, $id, $v], intdiv(($pos - 1) * self::PARTICIONES, $total));
+                        }
+                    } else {
+                        $parciales[$id]['v'][] = self::agregado($d['nombre'] === 'COUNT' ? 'SUM' : $d['nombre'],
+                            $d['nombre'] === 'COUNT' ? [] : array_values($unicos), \count($unicos), false, ',', $d['colacion']);
+                    }
+                }
+            }
+            // Cada tramo de posiciones, en orden, y en él cada agregado por la
+            // posición de sus valores (cada uno tiene uno por fila como mucho)
+            for ($p = 0; $enOrden !== null && $p < self::PARTICIONES; $p++) {
+                $tramo = [];
+                foreach ($enOrden->leer($p) as [$pos, $id, $v]) {
+                    $tramo[$id][$pos] = $v;
+                }
+                foreach ($tramo as $id => $deUno) {
+                    ksort($deUno);
+                    foreach ($deUno as $v) {
+                        $suma[$id] ??= 0;
+                        $k = &$suma[$id];
+                        if (\is_float($v) && \is_array($k)) {      // lo de siempre, como en agrupar()
+                            $sp = $k[0];
+                            $t  = $sp + $v;
+                            $k[1] += ($sp < 0 ? -$sp : $sp) > ($v < 0 ? -$v : $v) ? ($sp - $t) + $v : ($v - $t) + $sp;
+                            $k[0] = $t;
+                        } else {
+                            self::sumar($k, \is_int($v) || \is_float($v) ? $v : self::sumando($v), $hechos[$id] ?? 0);
+                        }
+                        unset($k);
+                        $hechos[$id] = ($hechos[$id] ?? 0) + 1;
+                    }
                 }
             }
             foreach ($distintos as $id => $d) {
                 $n = array_sum($parciales[$id]['n'] ?? []);
-                $v = $parciales[$id]['v'] ?? [];
                 $grupo[1][$id] = match ($d['nombre']) {
-                    'COUNT' => $n,
-                    'AVG'   => $n === 0 ? null : (float)(self::agregado('SUM', $v, 0, false) / $n),
-                    default => self::agregado($d['nombre'], $v, $n, false, ',', $d['colacion']),
+                    'COUNT'               => $n,
+                    'SUM', 'TOTAL', 'AVG' => self::sumaFinal($d['nombre'], $suma[$id] ?? 0, $n),
+                    default               => self::agregado($d['nombre'], $parciales[$id]['v'] ?? [], $n, false, ',', $d['colacion']),
                 };
             }
             return [$grupo];
         } finally {
             $volcado->borrar();
+            $enOrden?->borrar();
         }
     }
 
@@ -361,7 +451,7 @@ final class SelectAgrupada extends Select
             return $alias[strtolower((string)$n['nombre'])];
         }
         foreach ($n as $k => $v) {
-            if (is_array($v) && $k !== 'select') {
+            if (\is_array($v) && $k !== 'select') {
                 $n[$k] = self::sustituirAlias($v, $alias);
             }
         }
@@ -456,7 +546,8 @@ final class SelectAgrupada extends Select
                     $n['base'] = self::marcarAgregados($n['base'], $defs);
                 }
                 foreach ($n['when'] as $i => [$c, $r]) {
-                    $n['when'][$i] = [self::marcarAgregados($c, $defs), self::marcarAgregados($r, $defs)];
+                    // Con lo que lleve detrás (la marca de afinidad, ver Evaluator::resolver())
+                    $n['when'][$i] = [self::marcarAgregados($c, $defs), self::marcarAgregados($r, $defs)] + $n['when'][$i];
                 }
                 if ($n['else'] !== null) {
                     $n['else'] = self::marcarAgregados($n['else'], $defs);
@@ -475,6 +566,176 @@ final class SelectAgrupada extends Select
     {
         $c = $n['star'] ? null : Evaluator::colacionSalida($n['args'][0]);
         return $c === 'BINARY' ? null : $c;
+    }
+
+    /**
+     * SUM, TOTAL o AVG de unos valores (ver sumar()).
+     *
+     * @param list<mixed> $valores
+     * @return int|float|null
+     */
+    public static function suma(string $nombre, array $valores)
+    {
+        // Con decimales, el par de sumar() va suelto: la suma en $s y el
+        // error en $e, sin escribir en un array a cada valor (2.10, antes de
+        // publicarla: un 15 % más en una ventana que se mueve)
+        $s = 0;
+        $e = null;
+        foreach ($valores as $i => $v) {
+            if (\is_int($v) || (!\is_float($v) && \is_int($v = self::sumando($v)))) {
+                // @phpstan-ignore booleanAnd.rightAlwaysTrue (PHP pasa a decimal la suma que no cabe)
+                if ($e === null && \is_int($s) && \is_int($x = $s + $v)) {
+                    $s = $x;
+                    continue;
+                }
+            } elseif ($e !== null) {
+                $t = $s + $v;                   // ver sumarDecimal()
+                $e += ($s < 0 ? -$s : $s) > ($v < 0 ? -$v : $v) ? ($s - $t) + $v : ($v - $t) + $s;
+                $s = $t;
+                continue;
+            } elseif (\is_int($s) && $s > -self::PARTIR && $s < self::PARTIR) {
+                // El primer decimal tras unos enteros pequeños, aquí (en una
+                // ventana que se mueve, esta suma se hace en cada fila)
+                $d = (float)$s;
+                $s = $d + $v;
+                $e = ($d < 0 ? -$d : $d) > ($v < 0 ? -$v : $v) ? ($d - $s) + $v : ($v - $s) + $d;
+                continue;
+            }
+            if ($e !== null) {
+                [$s, $e] = [[$s, $e], null];
+            }
+            self::sumar($s, $v, $i);
+            if (\is_array($s) && !isset($s[2])) {
+                [$s, $e] = $s;                  // sin enteros que no caben, vuelve a ir suelto
+            }
+        }
+        return self::sumaFinal($nombre, $e === null ? $s : [$s, $e], \count($valores));
+    }
+
+    /** 2^52: desde ahí un entero se suma al par en dos partes, como en SQLite */
+    private const PARTIR = 4503599627370496;
+
+    /**
+     * Un valor más en una suma, como sumStep() de SQLite 3.45 (2.10): los
+     * enteros, exactos, hasta el primer decimal o hasta que dejan de caber en
+     * 64 bits; desde ahí, todo en orden de llegada al par [suma, error], que
+     * ocupa el sitio de la suma, con el error de cada suma guardado aparte (la
+     * suma compensada de Kahan-Babuska-Neumaier). Antes de la 2.10 PHP pasaba
+     * la suma a decimal sin más: TOTAL de 1e100, 3 y -1e100 daba 0 (SQLite,
+     * 3). SUM da el error de los enteros que no caben si se salió de los 64
+     * bits y no llegó un decimal después, como allí: el par apunta entonces
+     * cuántos valores iban antes ($antes) y cuántos enteros desde ahí, y así
+     * quien suma un decimal no tiene que mirarlo. Quien suma lleva delante los
+     * casos corrientes, sin llamar a esta.
+     *
+     * @param int|array<int, int|float>|null $s
+     * @param-out int|array<int, int|float> $s
+     * @param int|float $v ya con sumando()
+     */
+    public static function sumar(&$s, $v, int $antes): void
+    {
+        if (!\is_array($s)) {
+            $s ??= 0;
+            // @phpstan-ignore booleanAnd.rightAlwaysTrue (PHP pasa a decimal la suma que no cabe)
+            if (\is_int($v) && \is_int($x = $s + $v)) {
+                $s = $x;
+                return;
+            }
+            // Un entero que no cabe o el primer decimal: lo de antes, al par
+            // (kahanBabuskaNeumaierInit de SQLite)
+            $s = $s <= -self::PARTIR || $s >= self::PARTIR ? [(float)($s - $s % 16384), (float)($s % 16384)] : [(float)$s, 0.0];
+            if (\is_int($v)) {
+                $s[2] = $antes;
+                $s[3] = 0;
+            }
+        }
+        if (\is_int($v)) {
+            if (isset($s[3])) {
+                $s[3]++;
+            }
+            if ($v <= -self::PARTIR || $v >= self::PARTIR) {
+                $b = $v % 16384;                // en dos partes, cada una exacta en un decimal
+                self::sumarDecimal($s, (float)($v - $b));
+                $v = $b;
+            }
+            $v = (float)$v;
+        }
+        self::sumarDecimal($s, $v);
+    }
+
+    /**
+     * Un decimal más en el par: el error de la suma, exacto, como lo calcula
+     * SQLite (kahanBabuskaNeumaierStep(), con los valores absolutos y sin
+     * llamar a abs()). Con números, lo mismo que TwoSum, que no compara; al
+     * desbordar a infinito no: el error queda en -INF y la suma más el error
+     * da NaN, que es NULL, como en SQLite 3.45 (2.10, antes de publicarla:
+     * infinito).
+     *
+     * @param array<int, int|float> $k
+     */
+    private static function sumarDecimal(array &$k, float $v): void
+    {
+        $d = $k[0];
+        $t = $d + $v;
+        $k[1] += ($d < 0 ? -$d : $d) > ($v < 0 ? -$v : $v) ? ($d - $t) + $v : ($v - $t) + $d;
+        $k[0] = $t;
+    }
+
+    /**
+     * Lo que dan SUM, TOTAL y AVG con lo sumado en $s (ver sumar()), de $n
+     * valores: como sumFinalize(), totalFinalize() y avgFinalize() de SQLite.
+     * Del par, la suma más el error si este es un número; SUM, el error si
+     * desde que no cupo un entero todos fueron enteros (ver sumar()).
+     *
+     * @param int|array<int, int|float> $s
+     * @return int|float|null
+     */
+    public static function sumaFinal(string $nombre, $s, int $n)
+    {
+        if (\is_array($s)) {
+            if ($nombre === 'SUM' && isset($s[2]) && $n - $s[2] === $s[3]) {
+                throw self::desbordamiento();
+            }
+            // El error, si es un número o infinito (ver sumarDecimal()), como sumFinalize() de SQLite 3.45
+            $s = is_nan($s[1]) ? $s[0] : $s[0] + $s[1];
+            if (is_nan($s)) {
+                return null;                    // NaN (+INF y -INF): NULL, como en SQLite (2.10)
+            }
+        }
+        if ($nombre === 'TOTAL') {
+            return (float)$s;                   // 0.0 sin valores, como SQLite
+        }
+        if ($n === 0) {
+            return null;
+        }
+        // AVG, siempre decimal, como SQLite y MySQL: con / de PHP, una media
+        // exacta salía entera (-10) y otra decimal (-5.33); y pasando antes la
+        // suma a decimal, como allí (2.10: la división de enteros exacta daba
+        // otro redondeo)
+        return $nombre === 'AVG' ? (float)$s / $n : $s;
+    }
+
+    /**
+     * Un valor que no es número, como lo suma SUM: un texto que es un entero,
+     * como entero, y lo demás como decimal ('1.5', '12abc' o 'abc', que es
+     * 0.0), igual que SQLite, para el que solo los enteros pueden desbordar.
+     *
+     * @return int|float
+     */
+    public static function sumando($v)
+    {
+        if (\is_string($v) && is_numeric($t = trim($v))) {
+            return $t + 0;
+        }
+        // Un booleano (de un JSON editado a mano), como el entero 1 o 0 (2.10: 0.0)
+        return \is_bool($v) ? (int)$v : (float)Valor::aNumero($v);
+    }
+
+    /** El error de SUM cuando una suma de enteros no cabe en 64 bits */
+    public static function desbordamiento(): JsonSqlDbError
+    {
+        return JsonSqlDbError::type('SUM se sale de los enteros de 64 bits (integer overflow, como en SQLite): '
+            . 'usa TOTAL(), que suma en decimal');
     }
 
     /**
@@ -515,7 +776,7 @@ final class SelectAgrupada extends Select
                 }
             }
             if ($nombre === 'COUNT') {
-                return count($vistos);
+                return \count($vistos);
             }
         } else {
             foreach ($valores as $v) {
@@ -525,22 +786,11 @@ final class SelectAgrupada extends Select
 
         switch ($nombre) {
             case 'COUNT':
-                return count($limpios);
+                return \count($limpios);
             case 'SUM':
-                if ($limpios === []) { return null; }
-                $s = 0;
-                foreach ($limpios as $v) { $s += Valor::aNumero($v); }
-                return $s;
             case 'TOTAL':
-                // Como SUM, pero siempre decimal y 0.0 sin valores (SQLite)
-                $s = 0;
-                foreach ($limpios as $v) { $s += Valor::aNumero($v); }
-                return (float)$s;
             case 'AVG':
-                if ($limpios === []) { return null; }
-                $s = 0;
-                foreach ($limpios as $v) { $s += Valor::aNumero($v); }
-                return (float)($s / count($limpios));        // siempre decimal, como SQLite y MySQL
+                return self::suma($nombre, $limpios);
             case 'GROUP_CONCAT':
                 if ($limpios === []) { return null; }
                 // El orden es el de las filas del grupo. SQLite no lo garantiza;
@@ -553,7 +803,7 @@ final class SelectAgrupada extends Select
                 $res = null;
                 foreach ($limpios as $v) {
                     if ($res === null) { $res = $v; continue; }
-                    $c = $colacion === null ? Valor::comparar($v, $res) : Valor::comparar(Functions::plegar($v, $colacion), Functions::plegar($res, $colacion));
+                    $c = $colacion === null ? Valor::compararClase($v, $res) : Valor::compararClase(Functions::plegar($v, $colacion), Functions::plegar($res, $colacion));
                     if ($c !== null && (($nombre === 'MIN' && $c < 0) || ($nombre === 'MAX' && $c > 0))) {
                         $res = $v;
                     }
@@ -582,7 +832,7 @@ final class SelectAgrupada extends Select
                     $s += $x;
                     $c += $x * $x;
                 }
-                return self::varianza($nombre, count($limpios), $s, $c);
+                return self::varianza($nombre, \count($limpios), $s, $c);
             case 'BIT_AND':
             case 'BIT_OR':
             case 'BIT_XOR':
@@ -609,7 +859,7 @@ final class SelectAgrupada extends Select
         }
         $media = $suma / $n;
         $var   = max(0.0, ($cuadrados - $n * $media * $media) / ($muestra ? $n - 1 : $n));
-        return in_array($nombre, ['VARIANCE', 'VAR_POP', 'VAR_SAMP'], true) ? (float)$var : sqrt($var);
+        return \in_array($nombre, ['VARIANCE', 'VAR_POP', 'VAR_SAMP'], true) ? (float)$var : sqrt($var);
     }
 
     /** Un paso de BIT_AND, BIT_OR o BIT_XOR, con enteros de 64 bits */

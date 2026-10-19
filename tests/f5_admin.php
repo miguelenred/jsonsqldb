@@ -91,7 +91,9 @@ foreach ([$puertoPanel, $puertoApi] as $p) {
             array_filter(get_defined_functions()['internal'], static fn(string $f): bool => str_starts_with($f, 'mb_') || str_starts_with($f, 'curl_'))
         ));
     }
-    $cmd = escapeshellarg(PHP_BINARY) . $limitado . ' -d auto_prepend_file=' . escapeshellarg($prepend)
+    // Con serialize_precision a 10, como un php.ini que lo baja: el panel y la
+    // API tienen que dar igual los decimales enteros (2.10)
+    $cmd = escapeshellarg(PHP_BINARY) . $limitado . ' -d serialize_precision=10 -d auto_prepend_file=' . escapeshellarg($prepend)
          . " -S 127.0.0.1:$p -t " . escapeshellarg($raizProyecto);
     // Con exec, el shell se convierte en el servidor: si no, proc_terminate()
     // mata el shell y el servidor se queda funcionando, huérfano
@@ -286,6 +288,8 @@ chk('crear una base', fn() =>
     str_contains(enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'tienda']), 'tienda&#039; creada'));
 chk('la base aparece en el listado', fn() =>
     str_contains(pedir('p=bases'), '>tienda</a>') || str_contains(pedir('p=bases'), 'tienda'));
+chk('el administrador ve en la portada el estado de la carpeta de datos (2.10)', fn() =>
+    str_contains(pedir('p=bases'), 'Carpeta de datos') ?: 'no está');
 chk('nombre de base no válido', fn() =>
     str_contains(enviar('p=bases', ['accion' => 'crear_base', 'nombre' => 'con espacio']), 'no válido'));
 
@@ -336,7 +340,7 @@ chk('la estructura muestra tipos y claves', function () {
 chk('añadir columna', function () {
     enviar('p=estructura&db=tienda&tabla=clientes', [
         'accion' => 'anadir_columna', 'db' => 'tienda', 'tabla' => 'clientes',
-        'nombre' => 'ciudad', 'tipo' => 'TEXT', 'longitud' => '60', 'defecto' => 'Torrevieja',
+        'nombre' => 'ciudad', 'tipo' => 'TEXT', 'longitud' => '60', 'defecto' => 'Malaga',
     ]);
     return str_contains(pedir('p=estructura&db=tienda&tabla=clientes'), 'ciudad');
 });
@@ -344,7 +348,7 @@ chk('renombrar columna', function () {
     enviar('p=estructura&db=tienda&tabla=clientes', [
         'accion' => 'editar_columna', 'db' => 'tienda', 'tabla' => 'clientes',
         'columna' => 'ciudad', 'nombre' => 'poblacion', 'tipo' => 'TEXT', 'longitud' => '60',
-        'defecto' => 'Torrevieja',
+        'defecto' => 'Malaga',
     ]);
     $html = pedir('p=estructura&db=tienda&tabla=clientes');
     return str_contains($html, 'poblacion') && !str_contains($html, '<strong>ciudad</strong>');
@@ -413,7 +417,7 @@ chk('cambiar el tipo de una columna', function () {
     enviar('p=estructura&db=tienda&tabla=clientes', [
         'accion' => 'editar_columna', 'db' => 'tienda', 'tabla' => 'clientes',
         'columna' => 'poblacion', 'nombre' => 'poblacion', 'tipo' => 'TEXT', 'longitud' => '80',
-        'notnull' => '1', 'defecto' => 'Torrevieja',
+        'notnull' => '1', 'defecto' => 'Malaga',
     ]);
     $r = enviar('p=sql&db=tienda', ['sql' => 'SHOW SCHEMA clientes']);
     return str_contains($r, '<td>80</td>');
@@ -581,6 +585,25 @@ chk('con la tabla vacía el ejemplo es inventado, y una fila apartada se puede d
     array_map('unlink', glob($raizDatos . '/tienda/.reparados/*') ?: []);
     @rmdir($raizDatos . '/tienda/.reparados');
     return $inventada && str_contains($tras, 'olvidada') && !str_contains($tras, 'Filas apartadas pendientes') ?: [$inventada, mensajeDe($tras)];
+});
+chk('un índice que no cuadra con sus filas sale en Integridad, y el botón lo rehace (2.10)', function () use ($raizDatos) {
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE TABLE idx_i (id INTEGER PRIMARY KEY, x TEXT)']);
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE INDEX ix_x_i ON idx_i (x)']);
+    enviar('p=sql&db=tienda', ['sql' => "INSERT INTO idx_i VALUES (1, 'uno'), (2, 'dos'), (3, 'tres')"]);
+    // Editado a mano más tarde que su escritura, como de verdad: con el mismo
+    // tamaño y en el mismo segundo, su sello no cambiaría y valdría su caché
+    $f = $raizDatos . '/tienda/idx_i.idx.ix_x_i.json';
+    touch($f, time() - 10);
+    $bien = pedir('p=integridad&db=tienda');
+    file_put_contents($f, str_replace('"t3:dos"', '"t3:doz"', (string)file_get_contents($f)));
+    $html = pedir('p=integridad&db=tienda');
+    $tras = enviar('p=integridad&db=tienda', ['reparar_indices' => '1']);
+    $fila = enviar('p=sql&db=tienda', ['sql' => "SELECT id FROM idx_i WHERE x = 'dos'"]);
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE idx_i']);
+    return str_contains($bien, 'Cada índice cuadra con las filas de su tabla') && str_contains($html, 'problema(s) en los índices')
+        && str_contains($html, 'ix_x_i') && str_contains($tras, 'los índices de 1 tabla(s), rehechos con sus filas')
+        && str_contains($tras, 'Cada índice cuadra con las filas de su tabla') && str_contains($fila, '<td>2</td>')
+        ?: [mensajeDe($html), mensajeDe($tras)];
 });
 chk('limpiar las tablas de integridad', function () {
     enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE hijas_i']);
@@ -766,7 +789,10 @@ chk('borrar fila arrastra los hijos por CASCADE', function () {
     enviar('p=datos&db=tienda&tabla=clientes', [
         'accion' => 'borrar_fila', 'db' => 'tienda', 'tabla' => 'clientes', 'pk' => hx(['id' => '1']),
     ]);
-    return !str_contains(pedir('p=datos&db=tienda&tabla=pedidos'), 'R1');
+    // Se cuenta con SQL (2.10): buscar «R1» en la página fallaba de vez en
+    // cuando, cuando el nonce aleatorio de la página (base64) lo contenía
+    $r = enviar('p=sql&db=tienda', ['sql' => "SELECT (SELECT COUNT(*) FROM pedidos WHERE ref = 'R1') || '/' || (SELECT COUNT(*) FROM clientes WHERE id = 1) AS n"]);
+    return str_contains($r, '<td>0/0</td>') ?: mensajeDe($r);
 });
 
 chk('con «]» o «,» en el nombre de una columna, editar y borrar desde Datos tocan la fila que es (2.9: tocaban otras)', function () {
@@ -781,6 +807,27 @@ chk('con «]» o «,» en el nombre de una columna, editar y borrar desde Datos 
     enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE raros']);
     return $campos && str_contains($r, '<td>1/5/p</td>') && str_contains($r, '<td>9/5/cambiada</td>') && !str_contains($r, '5/7/q')
         ?: [$campos, mensajeDe($r)];
+});
+chk('una tabla sin clave primaria también se edita y se borra fila a fila, por todos sus valores: con NULL, un decimal con todas sus cifras y de dos filas iguales solo una (2.10: no se podía)', function () {
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE TABLE sinpk (a INTEGER, b TEXT, c DOUBLE)']);
+    enviar('p=sql&db=tienda', ['sql' => "INSERT INTO sinpk VALUES (1, 'x', 0.1 + 0.2), (1, 'x', 0.1 + 0.2), (2, NULL, 1.5), (3, 'y', NULL)"]);
+    $html = pedir('p=datos&db=tienda&tabla=sinpk');
+    $filas = preg_match_all('/name="fila" value="([^"]*)"/', $html, $m)
+        ? array_map(static fn(string $v): string => html_entity_decode($v, ENT_QUOTES, 'UTF-8'), $m[1]) : [];
+    $aviso = !str_contains($html, 'Usa la pestaña SQL');
+    if (count($filas) !== 8) {
+        return [count($filas), $aviso];
+    }
+    enviar('p=datos&db=tienda&tabla=sinpk', ['accion' => 'actualizar_fila', 'db' => 'tienda', 'tabla' => 'sinpk', 'fila' => $filas[2],
+        'valor' => hx(['a' => '2', 'b' => 'z', 'c' => '1.5'])]);
+    enviar('p=datos&db=tienda&tabla=sinpk', ['accion' => 'actualizar_fila', 'db' => 'tienda', 'tabla' => 'sinpk', 'fila' => $filas[3],
+        'valor' => hx(['a' => '3', 'b' => 'w'])]);
+    $borrar = enviar('p=datos&db=tienda&tabla=sinpk', ['accion' => 'borrar_fila', 'db' => 'tienda', 'tabla' => 'sinpk', 'fila' => $filas[0]]);
+    $r = enviar('p=sql&db=tienda', ['sql' => "SELECT a || '/' || IFNULL(b, 'N') || '/' || IFNULL(c, 'N') AS f FROM sinpk ORDER BY 1"]);
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE sinpk']);
+    return $aviso && str_contains($borrar, '1 fila(s) borrada(s)') && str_contains($r, '<td>1/x/0.3</td>')
+        && substr_count($r, '<td>1/x/') === 1 && str_contains($r, '<td>2/z/1.5</td>') && str_contains($r, '<td>3/w/N</td>')
+        ?: [$aviso, mensajeDe($borrar), preg_match_all('/<td>([^<]*)<\/td>/', $r, $mm) ? $mm[1] : $r];
 });
 chk('un texto con saltos de línea se edita en un área de texto y se guarda igual, con los saltos que tenía (2.9: el campo de una línea los quitaba)', function () {
     enviar('p=sql&db=tienda', ['sql' => "CREATE TABLE notas (id INTEGER PRIMARY KEY, t TEXT, w TEXT, d TEXT DEFAULT 'uno\ndos')"]);
@@ -900,6 +947,13 @@ chk('un filtro sin coincidencias lo dice', fn() =>
 chk('el filtro no se puede usar para inyectar', function () {
     $html = pedir("p=datos&db=tienda&tabla=clientes&q=" . rawurlencode("' OR 1=1 --"));
     return str_contains($html, 'Ninguna fila coincide con el filtro');
+});
+chk('el filtro busca % y _ tal cual, no como comodines (2.10)', function () {
+    // «%» devolvía la tabla entera y «_» cualquier carácter
+    $todo  = pedir('p=datos&db=tienda&tabla=clientes&q=' . rawurlencode('%'));
+    $guion = pedir('p=datos&db=tienda&tabla=clientes&q=' . rawurlencode('Sin_saldo'));
+    return str_contains($todo, 'Ninguna fila coincide con el filtro')
+        && str_contains($guion, 'Ninguna fila coincide con el filtro') ?: 'la tabla entera, o «Sin saldo» con _';
 });
 chk('la exportación respeta el filtro', function () {
     $csv = enviar('p=datos&db=tienda&tabla=clientes', [
@@ -1139,6 +1193,17 @@ chk('el CSV entrecomilla lo que lleva el separador', function () {
         'accion' => 'exportar', 'formato' => 'csv', 'db' => 'tienda', 'tabla' => 'clientes',
     ]);
     return str_contains($csv, '"Uno; dos"');
+});
+chk('con serialize_precision a 10 en php.ini, el panel exporta los decimales con las cifras justas: CSV, JSON y sentencias INSERT (2.10: 0.30000000000000004 salía 0.3)', function () {
+    enviar('p=sql&db=tienda', ['sql' => 'CREATE TABLE dsp (id INTEGER PRIMARY KEY, x REAL)']);
+    enviar('p=sql&db=tienda', ['sql' => 'INSERT INTO dsp VALUES (1, 0.1 + 0.2)']);
+    $r = [];
+    foreach (['csv', 'json', 'sql'] as $formato) {
+        $r[$formato] = descargar('p=datos&db=tienda&tabla=dsp', ['accion' => 'exportar', 'formato' => $formato, 'db' => 'tienda', 'tabla' => 'dsp']);
+    }
+    enviar('p=sql&db=tienda', ['sql' => 'DROP TABLE dsp']);
+    $mal = array_keys(array_filter($r, static fn(string $s): bool => !str_contains($s, '0.30000000000000004')));
+    return $mal === [] ?: implode(', ', $mal) . ': ' . json_encode($r, JSON_UNESCAPED_UNICODE);
 });
 chk('exportar la tabla a sentencias INSERT', function () {
     $sql = enviar('p=datos&db=tienda&tabla=clientes', [
@@ -1774,6 +1839,81 @@ chk('el panel usa la zona horaria del motor, también si la de php.ini es otra (
     $zona = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d date.timezone=UTC -r ' . escapeshellarg($codigo) . ' 2>&1'));
     return $zona === 'Europe/Madrid' ?: $zona;
 });
+chk('con la conexión directa, el navegador comprueba la carpeta de datos pidiendo un fichero real de una base, en la dirección que le corresponde junto al panel (2.10)', function () {
+    $t = sys_get_temp_dir() . '/jsonsqldb_test_web_' . getmypid();
+    foreach (['www/jsonsqldbadmin', 'www/data/zeta', 'www/data/alfa', 'www/sub dir/jsonsqldbadmin', 'www/sub dir/datos ñ/b1',
+              'fuera/b1', 'www/solo', 'www/vacia'] as $d) {
+        @mkdir("$t/$d", 0775, true);
+    }
+    foreach (['www/data/zeta', 'www/data/alfa', 'www/sub dir/datos ñ/b1', 'fuera/b1'] as $d) {
+        file_put_contents("$t/$d/_database.json", '{}');
+    }
+    // Con bases, el fichero de una, aunque también esté el web.config de la carpeta
+    file_put_contents("$t/www/data/web.config", '<configuration/>');
+    file_put_contents("$t/www/solo/web.config", '<configuration/>');
+    $probar = static function (string $datos, string $panel, string $script) use ($t): ?array {
+        $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=/no/existe"); define("ADMIN_DATA_PATH", ' . var_export("$t/admin", true) . ');'
+            . 'define("ADMIN_CONEXION", "directa"); define("ADMIN_MOTOR_RUTA", ' . var_export(dirname(__DIR__), true) . ');'
+            . 'define("JSONSQLDB_DATA_PATH", ' . var_export("$t/$datos", true) . ');'
+            . '$_SERVER["SCRIPT_FILENAME"] = ' . var_export("$t/$panel/index.php", true) . '; $_SERVER["SCRIPT_NAME"] = ' . var_export($script, true) . ';'
+            . 'require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/arranque.php', true) . ';'
+            . 'echo json_encode(Instalador::estadoDatos(), JSON_UNESCAPED_UNICODE);';
+        // Sin pasar por la shell: en PHP 8.0, escapeshellarg() quita la «ñ»
+        // con la configuración regional C, y la ruta ya no existía
+        $proc = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $tubos);
+        $salida = (string)stream_get_contents($tubos[1]);
+        fclose($tubos[1]);
+        proc_close($proc);
+        return json_decode($salida, true);
+    };
+    $casos = [
+        // datos, carpeta del panel, su dirección => la que se comprueba (null: ninguna) y el estado sin comprobar
+        ['www/data', 'www/jsonsqldbadmin', '/jsonsqldbadmin/index.php', '/data/alfa/_database.json', null],
+        ['www/data', 'www/jsonsqldbadmin', '/~ana/jsonsqldbadmin/index.php', '/~ana/data/alfa/_database.json', null],
+        ['www/sub dir/datos ñ', 'www/sub dir/jsonsqldbadmin', '/sub dir/jsonsqldbadmin/index.php', '/sub%20dir/datos%20%C3%B1/b1/_database.json', null],
+        ['www/data', 'www/sub dir/jsonsqldbadmin', '/sub dir/jsonsqldbadmin/index.php', '/data/alfa/_database.json', null],
+        ['fuera', 'www/jsonsqldbadmin', '/jsonsqldbadmin/index.php', null, true],
+        ['www/data', 'www/jsonsqldbadmin', '/index.php', null, true],    // el panel es la raíz del sitio: lo de arriba no se sirve
+        ['www/solo', 'www/jsonsqldbadmin', '/jsonsqldbadmin/index.php', '/solo/web.config', null],
+        ['www/vacia', 'www/jsonsqldbadmin', '/jsonsqldbadmin/index.php', null, null],
+    ];
+    $mal = [];
+    foreach ($casos as [$datos, $panel, $script, $url, $estado]) {
+        $r = $probar($datos, $panel, $script);
+        if (!is_array($r) || $r[2] !== $url || $r[0] !== $estado) {
+            $mal[] = "$datos con $script: " . json_encode($r, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+    }
+    borrarArbol($t);
+    return $mal === [] ?: implode(' · ', $mal);
+});
+chk('por la API, la portada comprueba la carpeta de datos una vez por sesión; Configuración, cada vez (2.10)', function () {
+    $oyente = stream_socket_server('tcp://127.0.0.1:0');
+    $puerto = (int)substr((string)strrchr((string)stream_socket_get_name($oyente, false), ':'), 1);
+    $t = sys_get_temp_dir() . '/jsonsqldb_test_sesion_' . getmypid();
+    @mkdir($t, 0775, true);
+    $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=/no/existe"); define("ADMIN_DATA_PATH", ' . var_export($t, true) . ');'
+        . 'define("ADMIN_API_URL", "http://127.0.0.1:' . $puerto . '/api/jsonsqldb_api.php");'
+        . 'require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/arranque.php', true) . ';'
+        . '$_SESSION = []; echo json_encode([Instalador::estadoDatos(), Instalador::estadoDatos(), Instalador::estadoDatos(true)], JSON_UNESCAPED_UNICODE);';
+    $proc = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+    // Contesta 403 a la primera petición y 404 a la segunda
+    foreach ([403, 404] as $codigoHttp) {
+        $cliente = @stream_socket_accept($oyente, 10);
+        if ($cliente !== false) {
+            fread($cliente, 4096);
+            fwrite($cliente, "HTTP/1.1 $codigoHttp No\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            fclose($cliente);
+        }
+    }
+    $r = json_decode((string)stream_get_contents($tubos[1]), true);
+    proc_close($proc);
+    $otra = @stream_socket_accept($oyente, 0);
+    fclose($oyente);
+    borrarArbol($t);
+    return is_array($r) && $r[0] === $r[1] && str_contains((string)$r[0][1], '403') && str_contains((string)$r[2][1], '404') && $otra === false
+        ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
 chk('con open_basedir solo en la carpeta del panel, arrancar no da avisos al no poder leer el config.php del motor (2.9)', function () {
     $panel = dirname(__DIR__) . '/jsonsqldbadmin';
     $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=' . sys_get_temp_dir() . '/no-existe.php"); require ' . var_export("$panel/lib/arranque.php", true) . '; echo date_default_timezone_get();';
@@ -1825,6 +1965,26 @@ chk('los intentos fallidos caducan pasado el tiempo del bloqueo sin fallar más;
     @rmdir($dir);
     return $r === '[0,0,true]' && ($intentos['8.8.8.8']['fallos'] ?? null) === 1 ?: $r . ' ' . json_encode($intentos);
 });
+chk('intentos.json guarda como mucho 1.000 IPs: con 1.500 distintas fallando, las bloqueadas y las más recientes (2.10: crecía sin tope)', function () {
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_intentos4_' . getmypid();
+    @mkdir($dir, 0775, true);
+    $antes = ['7.7.7.7' => ['fallos' => 5, 'ultimo' => time() - 600, 'usuarios' => ['x' => 5]]];     // bloqueada, de hace 10 minutos
+    for ($i = 0; $i < 1500; $i++) {
+        $antes['10.0.' . intdiv($i, 250) . '.' . ($i % 250)] = ['fallos' => 1, 'ultimo' => time() - 1500 + $i, 'usuarios' => ['x' => 1]];
+    }
+    file_put_contents("$dir/intentos.json", json_encode($antes));
+    $lib = dirname(__DIR__) . '/jsonsqldbadmin';
+    $prog = 'define("ADMIN_DATA_PATH", ' . var_export($dir, true) . '); require ' . var_export("$lib/config.dist.php", true) . ';'
+          . 'foreach (["util", "Idioma", "Store", "Auth"] as $c) { require ' . var_export("$lib/lib/", true) . ' . $c . ".php"; }'
+          . '$f = Closure::bind(static fn(string $ip) => Auth::apuntarIntento($ip, "x"), null, Auth::class);'
+          . 'echo json_encode([$f("1.2.3.4"), $f("7.7.7.7") > 0]);';
+    $r = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($prog) . ' 2>&1');
+    $intentos = json_decode((string)@file_get_contents("$dir/intentos.json"), true);
+    array_map('unlink', (array)glob("$dir/*"));
+    @rmdir($dir);
+    return $r === '[0,true]' && count($intentos) === 1000 && isset($intentos['7.7.7.7'], $intentos['1.2.3.4'], $intentos['10.0.5.249'])
+        && !isset($intentos['10.0.0.0']) ?: $r . ' ' . count((array)$intentos);
+});
 chk('entrar con una cuenta no quita los intentos fallidos de otra desde la misma IP (2.9: los quitaba todos)', function () {
     $dir = sys_get_temp_dir() . '/jsonsqldb_test_intentos2_' . getmypid();
     @mkdir($dir, 0775, true);
@@ -1870,6 +2030,8 @@ chk('el de lectura entra', function () {
     return str_contains(peticion('', ['csrf' => csrfActual(''), 'usuario' => 'consulta', 'clave' => 'otra-clave-larga-2']),
                         'Bases de datos');
 });
+chk('el de lectura no ve el estado de la carpeta de datos en la portada: arreglarlo es cosa de un administrador (2.10)', fn() =>
+    !str_contains(pedir('p=bases'), 'Carpeta de datos') ?: 'lo ve');
 chk('el de lectura no ve los botones de administración', fn() =>
     !str_contains(pedir('p=bases'), 'Nueva base de datos'));
 chk('el de lectura no puede crear vistas', fn() =>
@@ -1886,7 +2048,15 @@ chk('el de lectura no puede lanzar un DELETE', fn() =>
 chk('el de lectura no puede colar una escritura detrás de un SELECT en la consola (2.9)', function () {
     $r = enviar('p=sql&db=tienda', ['sql' => "SELECT 1; DELETE FROM clientes"]);
     $n = enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM clientes']);
-    return str_contains($r, 'solo se pueden lanzar SELECT') && !str_contains($n, '<td>0</td>') ?: substr(strip_tags($r), 0, 200);
+    return str_contains($r, 'solo se pueden lanzar consultas') && !str_contains($n, '<td>0</td>') ?: substr(strip_tags($r), 0, 200);
+});
+chk('el de lectura puede lanzar WITH, EXPLAIN, CHECK y DESCRIBE, que el motor le deja (2.10)', function () {
+    foreach (['WITH c AS (SELECT 1 AS x) SELECT x FROM c', 'EXPLAIN SELECT * FROM clientes', 'CHECK TABLES', 'DESCRIBE clientes'] as $q) {
+        if (str_contains(enviar('p=sql&db=tienda', ['sql' => $q]), 'solo se pueden lanzar')) {
+            return "rechazada: $q";
+        }
+    }
+    return true;
 });
 chk('el de lectura sí puede lanzar un SELECT', fn() =>
     str_contains(enviar('p=sql&db=tienda', ['sql' => 'SELECT COUNT(*) AS n FROM clientes']), 'fila(s)'));
@@ -1902,6 +2072,26 @@ chk('el de lectura no puede exportar ni volcar, ni ve los botones (2.9)', functi
         }
     }
     return !str_contains($pantallas, 'value="exportar"') && !str_contains($pantallas, 'value="exportar_base"') ?: 'se ven botones de exportar';
+});
+chk('el de lectura no puede lanzar ninguna acción de administrador, y una acción desconocida o en mayúsculas no se ejecuta (2.10: una función por acción)', function () {
+    preg_match_all('/^function accion_([a-z_]+)\(/m', (string)file_get_contents(__DIR__ . '/../jsonsqldbadmin/lib/acciones.php'), $m);
+    $propias = ['cambiar_clave', 'ejecutar_copias', 'subir_trozo'];      // las que lo miran ellas mismas
+    if (count($m[1]) < 40) {
+        return 'no se encuentran las acciones';
+    }
+    foreach (array_diff($m[1], $propias) as $accion) {
+        $r = mensajeDe(enviar('p=bases', ['accion' => $accion, 'db' => 'tienda', 'tabla' => 'clientes', 'nombre' => 'tienda'], true, 'p=sql&db=tienda'));
+        if (!str_contains($r, 'permiso de administrador')) {
+            return "$accion: $r";
+        }
+    }
+    foreach (['no_existe', 'CREAR_BASE', 'Borrar_Base'] as $accion) {
+        $r = mensajeDe(enviar('p=bases', ['accion' => $accion, 'nombre' => 'prohibida'], true, 'p=sql&db=tienda'));
+        if (!str_contains($r, 'Acción desconocida')) {
+            return "'$accion': $r";
+        }
+    }
+    return true;
 });
 
 echo "\n== Auditoría ==\n";
@@ -1922,6 +2112,38 @@ chk('un acceso sin token no se apunta, y el nombre de un fallido va recortado (2
     $html = pedir('p=auditoria');
     return !str_contains($html, 'intruso-sin-token') && str_contains($html, 'largo' . str_repeat('y', 59))
         && !str_contains($html, 'largo' . str_repeat('y', 60)) ?: 'sin token apuntado, o el nombre entero';
+});
+chk('la auditoría de un día enorme se ve de 500 en 500 leyendo desde el final, y los días viejos se borran con el primer evento de cada día (2.10)', function () {
+    // Se leía el día entero (aquí 60.000 eventos, 9 MB) en memoria, y la purga
+    // solo pasaba en uno de cada cien eventos, al azar
+    $dir = sys_get_temp_dir() . '/jsonsqldb_test_auditoria_' . getmypid();
+    @mkdir($dir, 0775, true);
+    $hoy = date('Y-m-d');
+    $f = fopen("$dir/auditoria-$hoy.json", 'wb');
+    for ($i = 1; $i <= 60000; $i++) {
+        fwrite($f, json_encode(['ts' => "$hoy 10:00:00", 'usuario' => $i % 1000 === 0 ? 'raro' : 'jefe', 'ip' => '192.0.2.1', 'base' => 'b',
+                                'accion' => 'consulta', 'detalle' => "evento $i " . str_repeat('x', 100)]) . "\n");
+    }
+    fclose($f);
+    file_put_contents("$dir/auditoria-2000-01-01.json", "{}\n");
+    $codigo = 'define("ADMIN_DATA_PATH", ' . var_export($dir, true) . '); define("ADMIN_AUDIT_DIAS", 30);'
+        . 'require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/config.dist.php', true) . ';'
+        . 'foreach (["util", "Idioma", "Store", "Auth", "Audit"] as $c) { require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/', true) . ' . "$c.php"; }'
+        . 'ini_set("memory_limit", "8M");'
+        . '[$a, $masA] = Audit::dia(' . var_export($hoy, true) . ', 500);'
+        . '[$b, $masB] = Audit::dia(' . var_export($hoy, true) . ', 500, "", 59800);'
+        . '[$c, $masC] = Audit::dia(' . var_export($hoy, true) . ', 500, "raro");'
+        . 'Audit::registrar("prueba");'
+        . 'unlink(' . var_export("$dir/auditoria-$hoy.json", true) . '); Audit::registrar("primero_del_dia");'
+        . 'echo json_encode([count($a), $a[0]["detalle"] ?? "", $masA, count($b), $b[199]["detalle"] ?? "", $masB, count($c), $masC,'
+        . ' is_file(' . var_export("$dir/auditoria-2000-01-01.json", true) . '), memory_get_peak_usage() < 6000000]);';
+    $salida = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+    array_map('unlink', glob("$dir/*") ?: []);
+    @rmdir($dir);
+    $r = json_decode($salida, true);
+    return is_array($r) && $r[0] === 500 && str_starts_with($r[1], 'evento 60000 ') && $r[2] === true && $r[3] === 200
+        && str_starts_with($r[4], 'evento 1 ') && $r[5] === false && $r[6] === 60 && $r[7] === false && $r[8] === false && $r[9] === true
+        ?: substr($salida, 0, 300);
 });
 
 echo "\n== Borrado ==\n";
@@ -1965,6 +2187,40 @@ chk('en HTTP el certificado se ignora', function () use ($raizDatos, $url) {
         . "catch (Throwable \$e) { echo \$e->getMessage(); }"
     ) . ' 2>&1');
     return str_contains((string)$salida, 'conectado');
+});
+
+chk('con la conexión directa, una lectura del panel no carga Logger, que no va a escribir nada; una escritura sí, y queda con el panel como origen (2.10: lo cargaba en cada consulta para decirle quién era)', function () {
+    $t = sys_get_temp_dir() . '/jsonsqldb_test_reg_' . getmypid();
+    borrarArbol($t);
+    @mkdir("$t/datos", 0775, true);
+    $correr = static function (string $base, string $sql) use ($t): string {
+        $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=/no/existe"); define("ADMIN_DATA_PATH", ' . var_export("$t/admin", true) . ');'
+            . 'define("ADMIN_CONEXION", "directa"); define("ADMIN_MOTOR_RUTA", ' . var_export(dirname(__DIR__), true) . ');'
+            . 'define("JSONSQLDB_DATA_PATH", ' . var_export("$t/datos", true) . '); define("JSONSQLDB_LOG_PATH", ' . var_export("$t/logs", true) . ');'
+            . 'require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/arranque.php', true) . ';'
+            . 'Api::sql(' . var_export($base, true) . ', ' . var_export($sql, true) . ');'
+            . 'echo class_exists(' . var_export('JsonSQLDB\\Logger', true) . ', false) ? "con Logger" : "sin Logger";';
+        $proc = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $tubos);
+        $salida = trim((string)stream_get_contents($tubos[1]));
+        fclose($tubos[1]);
+        proc_close($proc);
+        return $salida;
+    };
+    $correr('', 'CREATE DATABASE b');
+    $correr('b', 'CREATE TABLE x (a INTEGER)');
+    $lee = $correr('b', 'SELECT COUNT(*) FROM x');
+    $esc = $correr('b', 'INSERT INTO x VALUES (7)');
+    $origen = null;
+    foreach ((array)glob("$t/logs/consultas-*.json") as $f) {
+        foreach (array_filter(explode("\n", (string)file_get_contents((string)$f))) as $l) {
+            $e = json_decode($l, true);
+            if (($e['op'] ?? '') === 'INSERT') {
+                $origen = $e['origen'] ?? null;
+            }
+        }
+    }
+    borrarArbol($t);
+    return $lee === 'sin Logger' && $esc === 'con Logger' && $origen === 'jsonSQLDBadmin' ?: json_encode([$lee, $esc, $origen]);
 });
 
 echo "\n== Sin restos ==\n";

@@ -382,7 +382,7 @@ final class Exportar
      * Estructura de cada tabla de la base y cuántas filas tiene, para
      * volcado(): las filas se piden después, tabla a tabla, con cargador().
      *
-     * @return list<array{tabla:string,columnas:array,claves:array,n:int}>
+     * @return list<array{tabla:string,columnas:array,claves:array,n:int,siguiente:?int}>
      */
     public static function tablasDe(string $base): array
     {
@@ -394,6 +394,7 @@ final class Exportar
                 'columnas' => Api::sql($base, 'SHOW SCHEMA ' . cita($tabla)),
                 'claves'   => Api::sql($base, 'SHOW KEYS FROM ' . cita($tabla)),
                 'n'        => (int)$t['filas'],
+                'siguiente' => isset($t['autoincremento']) ? (int)$t['autoincremento'] : null,
             ];
         }
         return $tablas;
@@ -407,6 +408,45 @@ final class Exportar
     {
         $n = array_column($tablas, 'n', 'tabla');
         return static fn(string $tabla): iterable => Lotes::filas($base, 'SELECT * FROM ' . cita($tabla), [], $n[$tabla] ?? 0);
+    }
+
+    /**
+     * El contador del autoincremento, detrás de las filas de su tabla (2.10):
+     * sin él, la copia daba otra vez los id de las últimas filas borradas, y
+     * con AUTOINCREMENT un id no se repite nunca. En SQLite, su fila de
+     * sqlite_sequence (como su .dump), si la columna es INTEGER PRIMARY KEY
+     * (si no, allí no hay AUTOINCREMENT); en MySQL, ALTER TABLE …
+     * AUTO_INCREMENT; en PostgreSQL, setval() de su secuencia (sin el
+     * contador, detrás del mayor id, como antes); en SQL Server, DBCC
+     * CHECKIDENT, que con filas da el siguiente al indicado; en Access, que no
+     * lo puede fijar con su SQL, un comentario con el valor.
+     */
+    private static function contador(string $tabla, string $col, ?int $siguiente, bool $conFilas, array $claves): string
+    {
+        $lit = static fn(string $s): string => "'" . str_replace("'", "''", $s) . "'";
+        if (self::$d === 'postgresql') {
+            return 'SELECT setval(pg_get_serial_sequence(' . $lit(self::q($tabla)) . ', ' . $lit($col) . '), '
+                . ($siguiente ?? 'COALESCE((SELECT MAX(' . self::q($col) . ') FROM ' . self::q($tabla) . '), 0) + 1') . ", false);\n";
+        }
+        if ($siguiente === null || $siguiente <= 1) {
+            return '';
+        }
+        switch (self::$d) {
+            case 'sqlite':
+                $pk = [];
+                foreach ($claves as $k) {
+                    if ($k['tipo'] === 'PRIMARY') { $pk = self::columnasDe($k['columnas']); }
+                }
+                return $pk === [$col] ? 'DELETE FROM sqlite_sequence WHERE name = ' . $lit($tabla) . ";\n"
+                    . 'INSERT INTO sqlite_sequence (name, seq) VALUES (' . $lit($tabla) . ', ' . ($siguiente - 1) . ");\n" : '';
+            case 'mysql':
+                return 'ALTER TABLE ' . self::q($tabla) . ' AUTO_INCREMENT = ' . $siguiente . ";\n";
+            case 'sqlserver':
+                return 'DBCC CHECKIDENT (' . $lit($tabla) . ', RESEED, ' . ($conFilas ? $siguiente - 1 : $siguiente) . ");\n";
+            default:
+                return self::comentario(t('El siguiente valor del autonumérico de {tabla} era {n}: Access no deja fijarlo con SQL.',
+                    ['tabla' => $tabla, 'n' => $siguiente]));
+        }
     }
 
     /** @var list<string> lo que la sintaxis ANSI-89 de Access no deja escribir en la sentencia que viene */
@@ -629,12 +669,8 @@ final class Exportar
                 }
                 $out .= $identidad ? 'SET IDENTITY_INSERT ' . self::q($nombre) . " OFF;\n" : '';
             }
-            // En PostgreSQL la secuencia de una columna IDENTITY no se entera de
-            // los id insertados a mano: se pone detrás del último
-            if (self::$d === 'postgresql' && $auto !== null) {
-                $out .= "SELECT setval(pg_get_serial_sequence('" . str_replace("'", "''", self::q($nombre)) . "', '"
-                      . str_replace("'", "''", $auto) . "'), COALESCE((SELECT MAX(" . self::q($auto) . ') FROM '
-                      . self::q($nombre) . "), 0) + 1, false);\n";
+            if ($auto !== null) {
+                $out .= self::contador($nombre, $auto, $t['siguiente'] ?? null, $est['filas'] > 0, $t['claves']);
             }
             foreach ($propios as $i) {
                 if ($i['tabla'] !== $nombre) {
@@ -679,7 +715,9 @@ final class Exportar
             if ($vistas !== []) {
                 $out .= "\n-- ------------------------------------------------------------\n-- " . t('Vistas') . "\n";
                 $out .= "-- ------------------------------------------------------------\n";
-                foreach ($gen === null ? $vistas : GeneradorSql::ordenarVistas($vistas) as $v) {
+                // Cada vista detrás de las que usa, también en el de jsonSQLDB: desde
+                // la 2.10 el motor no crea una vista antes que lo que usa
+                foreach (GeneradorSql::ordenarVistas($vistas) as $v) {
                     $sql = 'CREATE VIEW ' . self::q((string)$v['vista']) . ' AS ' . rtrim(trim((string)$v['sql']), ';') . ';';
                     if ($gen === null) {
                         $out .= $sql . "\n";
@@ -713,13 +751,27 @@ final class Exportar
                                 $pk = self::columnasDe($k['columnas']);
                             }
                         }
-                        try {
-                            $out .= $gen->triggers($tabla, $lista, $t['columnas'] ?? [], $pk, $t['claves'] ?? []);
-                        } catch (Throwable $e) {
-                            foreach ($lista as $trg) {
-                                $sinTraducir[] = (string)$trg['nombre'];
-                                $out .= self::comentario(t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()])
-                                      . "\n" . rtrim(trim((string)$trg['sql']), ';') . ';');
+                        // Cada trigger aparte: uno que no se puede escribir allí ya no
+                        // se lleva comentados a los demás de su tabla, con su motivo
+                        // (2.10). En SQL Server los BEFORE de un evento son un solo
+                        // INSTEAD OF, y van juntos, detrás de los demás
+                        $grupos = $antes = [];
+                        foreach ($lista as $trg) {
+                            if (self::$d === 'sqlserver' && $trg['timing'] === 'BEFORE') {
+                                $antes[$trg['evento']][] = $trg;
+                            } else {
+                                $grupos[] = [$trg];
+                            }
+                        }
+                        foreach (array_merge($grupos, array_values($antes)) as $grupo) {
+                            try {
+                                $out .= $gen->triggers($tabla, $grupo, $t['columnas'] ?? [], $pk, $t['claves'] ?? []);
+                            } catch (Throwable $e) {
+                                foreach ($grupo as $trg) {
+                                    $sinTraducir[] = (string)$trg['nombre'];
+                                    $out .= self::comentario(t('Sin traducir: {motivo}', ['motivo' => $e->getMessage()])
+                                          . "\n" . rtrim(trim((string)$trg['sql']), ';') . ';');
+                                }
                             }
                         }
                     }

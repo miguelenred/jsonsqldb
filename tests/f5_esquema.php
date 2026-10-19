@@ -15,6 +15,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageEscritura;
 use JsonSQLDB\StorageLectura;
 
 $raiz = sys_get_temp_dir() . '/jsonsqldb_test_f5';
@@ -415,6 +416,7 @@ chk('un corte a mitad de una escritura se termina al volver a abrir', function (
 chk('un corte antes del manifiesto no toca nada: los temporales sobran', function () use ($raiz) {
     $dir = "$raiz/tienda";
     file_put_contents("$dir/diario2.json.999999.tmp", 'a medias');
+    file_put_contents("$dir/.diario2.lock", 'escribiendo: pid 999999 desde ' . date('Y-m-d H:i:s') . "\n");   // como lo deja quien muere a medias (2.10)
     @mkdir("$dir/.tx/_base", 0775, true);                // carpeta sin manifiesto
 
     $bd2 = new Database('tienda', $raiz);
@@ -1027,23 +1029,28 @@ function enBaseNueva(string $raiz, array $sentencias): array {
     Database::borrar($nombre, $raiz);
     return $r;
 }
-chk("ADD UNIQUE, ADD PRIMARY KEY, ADD FOREIGN KEY y REPAIR KEYS comparan las claves como al escribir: '5' y '05' son la misma (2.9: REPAIR KEYS ponía a NULL una hija que sí tenía su fila)", function () use ($raiz) {
+chk("ADD UNIQUE, ADD PRIMARY KEY, ADD FOREIGN KEY, REPAIR KEYS y CHECK KEYS comparan las claves como al escribir (2.9); desde la 2.10, como SQLite: '5' y '05' son distintos, y la hija se compara con la afinidad del padre ('05' es el 5 de uno INTEGER)", function () use ($raiz) {
     $r = enBaseNueva($raiz, [
         'CREATE TABLE p (code TEXT PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, pcode TEXT REFERENCES p (code))',
-        "INSERT INTO p VALUES ('5')", "INSERT INTO h VALUES (1, '05')",
-        'REPAIR KEYS', 'SELECT pcode FROM h', 'CHECK KEYS',
+        "INSERT INTO p VALUES ('5')", "INSERT INTO h VALUES (1, '05')", 'INSERT INTO h VALUES (1, 5)',          // 3, 4
+        'REPAIR KEYS', 'SELECT pcode FROM h', 'CHECK KEYS',                                                       // 5, 6, 7
         'CREATE TABLE t (code TEXT, n INTEGER)', "INSERT INTO t VALUES ('5', 1), ('05', 2)",
-        'ALTER TABLE t ADD UNIQUE (code)', 'ALTER TABLE t ADD PRIMARY KEY (code)', 'ALTER TABLE t ADD UNIQUE (code, n)',
-        'CREATE TABLE h2 (id INTEGER PRIMARY KEY, pcode TEXT)', "INSERT INTO h2 VALUES (1, '5.0')",
-        'ALTER TABLE h2 ADD FOREIGN KEY (pcode) REFERENCES p (code)',
-        "INSERT INTO h2 VALUES (2, '6')",
-        'ALTER TABLE h2 DROP FOREIGN KEY fk_h2_pcode', "INSERT INTO h2 VALUES (3, '6')", 'ALTER TABLE h2 ADD FOREIGN KEY (pcode) REFERENCES p (code)',
+        'ALTER TABLE t ADD UNIQUE (code)', "INSERT INTO t VALUES ('05', 3)",                                     // 10, 11
+        'CREATE TABLE pn (code INTEGER PRIMARY KEY)', 'INSERT INTO pn VALUES (5)',
+        'CREATE TABLE h2 (id INTEGER PRIMARY KEY, pcode TEXT)', "INSERT INTO h2 VALUES (1, '05')",
+        'ALTER TABLE h2 ADD FOREIGN KEY (pcode) REFERENCES pn (code)',                                           // 16
+        "INSERT INTO h2 VALUES (2, '6')", "INSERT INTO h2 VALUES (3, '5.0')",                                    // 17, 18
+        'DELETE FROM pn', 'CHECK KEYS', 'REPAIR KEYS', 'SELECT id, pcode FROM h2 ORDER BY id',                  // 19-22
+        'ALTER TABLE h2 DROP FOREIGN KEY fk_h2_pcode', "INSERT INTO h2 VALUES (4, '6')",
+        'ALTER TABLE h2 ADD FOREIGN KEY (pcode) REFERENCES pn (code)',                                           // 25
     ]);
-    return $r[4] === 'ok' && $r[5] === [['pcode' => '05']] && $r[6] === []
-        && $r[9] === 'error: Los datos de \'t\' repiten el valor ("05") en (code)'
-        && $r[10] === 'error: Los datos de \'t\' repiten el valor ("05") en (code)' && $r[11] === 'ok'
-        && $r[14] === 'ok' && str_starts_with((string)$r[15], 'error:') && $r[17] === 'ok'
-        && $r[18] === 'error: Los datos de \'h2\' apuntan a ("6") y no existe en \'p\'' ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+    return str_starts_with((string)$r[3], "error: 'h.pcode' = (05) no existe en 'p'") && $r[4] === 'ok'
+        && $r[5] === 'ok' && $r[6] === [['pcode' => '5']] && $r[7] === []
+        && $r[10] === 'ok' && str_starts_with((string)$r[11], 'error: Valor duplicado')
+        && $r[16] === 'ok' && str_starts_with((string)$r[17], 'error:') && $r[18] === 'ok'
+        && str_starts_with((string)$r[19], "error: 'h2' tiene 2 fila(s) que dependen") && $r[20] === [] && $r[21] === 'ok'
+        && $r[22] === [['id' => 1, 'pcode' => '05'], ['id' => 3, 'pcode' => '5.0']]
+        && $r[25] === 'error: Los datos de \'h2\' apuntan a ("6") y no existe en \'pn\'' ?: json_encode($r, JSON_UNESCAPED_UNICODE);
 });
 chk('ADD COLUMN … PRIMARY KEY DEFAULT x en una tabla de dos filas o más es un error, como UNIQUE: todas tendrían la misma clave (2.9); con una clave primaria ya puesta, se suma a ella', function () use ($raiz) {
     $r = enBaseNueva($raiz, [
@@ -1184,10 +1191,74 @@ chk('CREATE TRIGGER rechaza en su cuerpo lo que un trigger no puede hacer (DDL, 
     return $mal === [] && $r[6] === 'ok' && $r[8] === [['v' => 5]] && count($r[9]) === 1 ?: json_encode($r, JSON_UNESCAPED_UNICODE);
 });
 
+echo "\n== Lista de tablas sin mirar la carpeta (2.10) ==\n";
+chk('una tabla que otro proceso crea con una clave foránea se ve en la escritura siguiente, aunque la lista de tablas esté guardada: _database.json cuenta el cambio («esquema») y sigue siendo legible; una tabla borrada a mano no rompe nada', function () use ($raiz) {
+    Database::crear('esq', $raiz);
+    $a = new Database('esq', $raiz);
+    $a->consultar('CREATE TABLE padre (id INTEGER PRIMARY KEY, v TEXT)');
+    $a->consultar("INSERT INTO padre VALUES (1, 'x'), (2, 'y')");
+    $a->consultar("UPDATE padre SET v = 'z' WHERE id = 2");          // la lista queda guardada
+    $antes = json_decode((string)file_get_contents("$raiz/esq/_database.json"), true)['esquema'] ?? 0;
+    $b = new Database('esq', $raiz);
+    $b->consultar('CREATE TABLE hija (id INTEGER PRIMARY KEY, p INTEGER, FOREIGN KEY (p) REFERENCES padre (id) ON DELETE CASCADE)');
+    $b->consultar('INSERT INTO hija VALUES (10, 1), (20, 2)');
+    $info = json_decode((string)file_get_contents("$raiz/esq/_database.json"), true);
+    $a->consultar('DELETE FROM padre WHERE id = 1');
+    $hijas = array_column($a->consultar('SELECT id FROM hija ORDER BY id'), 'id');
+    // Una tabla borrada a mano, sin pasar por el motor
+    $a->consultar('CREATE TABLE suelta (id INTEGER PRIMARY KEY)');
+    foreach ((array)glob("$raiz/esq/suelta.*") as $f) { @unlink((string)$f); }
+    $a->consultar("UPDATE padre SET v = 'w' WHERE id = 2");
+    $sigue = $a->consultar('SELECT v FROM padre') === [['v' => 'w']];
+    return $hijas === [20] && is_array($info) && ($info['esquema'] ?? 0) === $antes + 1 && ($info['database'] ?? '') === 'esq' && $sigue
+        ?: json_encode([$hijas, $antes, $info, $sigue]);
+});
+
+chk('una tabla copiada a mano en la carpeta cuenta para las claves foráneas desde el VACUUM siguiente, aunque la lista de tablas esté guardada (2.10)', function () use ($raiz) {
+    Database::crear('esq2', $raiz);
+    Database::crear('esq3', $raiz);
+    $a = new Database('esq2', $raiz);
+    $c = new Database('esq3', $raiz);
+    foreach ([$a, $c] as $b) {
+        $b->consultar('CREATE TABLE padre (id INTEGER PRIMARY KEY, v TEXT)');
+        $b->consultar("INSERT INTO padre VALUES (1, 'x'), (2, 'y')");
+    }
+    $a->consultar("UPDATE padre SET v = 'z' WHERE id = 2");          // la lista queda guardada
+    $c->consultar('CREATE TABLE hija (id INTEGER PRIMARY KEY, p INTEGER, FOREIGN KEY (p) REFERENCES padre (id) ON DELETE CASCADE)');
+    $c->consultar('INSERT INTO hija VALUES (10, 1), (20, 2)');
+    foreach ((array)glob("$raiz/esq3/hija.*") as $f) { copy((string)$f, "$raiz/esq2/" . basename((string)$f)); }
+    $a->consultar('VACUUM');
+    $a->consultar('DELETE FROM padre WHERE id = 1');
+    $hijas = array_column($a->consultar('SELECT id FROM hija ORDER BY id'), 'id');
+    Storage::borrarBase($raiz, 'esq3');
+    return $hijas === [20] ?: json_encode($hijas);
+});
+
+chk('al confirmar una escritura, _database.json se pone el último: quien lea su cuenta de cambios ya ve las tablas como quedan (2.10: se ponía antes que la estructura de una tabla nueva, y otro proceso podía guardar la lista sin ella)', function () use ($raiz) {
+    Database::crear('esq4', $raiz);
+    $st  = (new Database('esq4', $raiz))->catalogo()->storage();
+    $dir = "$raiz/esq4";
+    $antes = (string)file_get_contents("$dir/_database.json");
+    file_put_contents("$dir/_database.json.1.tmp", "{}\n");
+    // El segundo no tiene temporal: falla, y lo que va detrás no se pone
+    try {
+        StorageEscritura::rehacer($st, ["$dir/_database.json.1.tmp" => "$dir/_database.json", "$dir/t.meta.json.1.tmp" => "$dir/t.meta.json"], []);
+        $r = 'sin error';
+    } catch (JsonSqlDbError $e) {
+        $r = 'error';
+    }
+    $sigue = file_get_contents("$dir/_database.json") === $antes && is_file("$dir/_database.json.1.tmp");
+    @unlink("$dir/_database.json.1.tmp");
+    Storage::borrarBase($raiz, 'esq4');
+    return $r === 'error' && $sigue ?: json_encode([$r, $sigue]);
+});
+
 echo "\n== Limpieza ==\n";
 chk('borrar las bases de prueba', function () use ($raiz) {
     Storage::borrarBase($raiz, 'tienda');
     Storage::borrarBase($raiz, 'otra');
+    Storage::borrarBase($raiz, 'esq');
+    Storage::borrarBase($raiz, 'esq2');
     clearstatcache();
     return @rmdir($raiz) && !is_dir($raiz) ?: 'quedan: ' . implode(',', array_diff((array)scandir($raiz), ['.', '..']));
 });

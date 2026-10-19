@@ -368,6 +368,181 @@ foreach ($casos as $n => [$trigger, $sentencia]) {
     });
 }
 
+echo "\n== Textos que son números (2.10): como textos, y cada lado con la afinidad de su columna; y ORDER BY … COLLATE BINARY, byte a byte ==\n";
+// Lo que va distinto a propósito (ver Valor y docs/02-queries.md): un número
+// y un texto que es un número, sin ninguna columna que decida, son iguales
+// aquí ('7' = 7) y distintos en SQLite. Va comprobado aparte, abajo
+$afinidad = <<<'SQL'
+SELECT '7' = '007', '10' < '9', 7 < 'a', '7' = '7.0'
+SELECT s FROM n WHERE s = 7 ORDER BY id
+SELECT s FROM n WHERE s = '7' ORDER BY id
+SELECT s FROM n WHERE s = 7.0 ORDER BY id
+SELECT s FROM n WHERE s IN (7, 9) ORDER BY id
+SELECT s FROM n WHERE s IN ('7', '007') ORDER BY id
+SELECT s FROM n WHERE s NOT IN (7, '10') ORDER BY id
+SELECT s FROM n WHERE s IN (7, i + 100) ORDER BY id
+SELECT s FROM n WHERE s NOT IN (7, i + 100) ORDER BY id
+SELECT i FROM n WHERE i IN ('7', s) ORDER BY id
+SELECT i FROM n WHERE i IN ('7', i + 100) ORDER BY id
+SELECT s FROM n WHERE s IN (9, 7, '10') ORDER BY id
+SELECT i FROM n WHERE i IN ('7', '9') ORDER BY id
+SELECT r FROM n WHERE r IN ('7', r + 100) ORDER BY id
+SELECT s FROM n WHERE s BETWEEN 7 AND 9 ORDER BY id
+SELECT s FROM n WHERE 7 BETWEEN s AND s ORDER BY id
+SELECT s FROM n WHERE s > 8 ORDER BY id
+SELECT s FROM n WHERE s > '8' ORDER BY id
+SELECT s FROM n WHERE s < '10' ORDER BY id
+SELECT s FROM n WHERE s >= '7' AND s < '9' ORDER BY id
+SELECT s, CASE s WHEN 7 THEN 'si' ELSE 'no' END FROM n ORDER BY id
+SELECT s, CASE 7 WHEN s THEN 'si' ELSE 'no' END FROM n ORDER BY id
+SELECT s FROM n WHERE s = i ORDER BY id
+SELECT s FROM n WHERE s = i + 0 ORDER BY id
+SELECT s FROM n WHERE s COLLATE NOCASE = 7 ORDER BY id
+SELECT s FROM n WHERE CAST(s AS INTEGER) = '7' ORDER BY id
+SELECT s FROM n WHERE s = CAST('7' AS INTEGER) ORDER BY id
+SELECT i FROM n WHERE i = ' 7 ' ORDER BY id
+SELECT i FROM n WHERE i = '7.0' ORDER BY id
+SELECT i FROM n WHERE i = '7abc' ORDER BY id
+SELECT r FROM n WHERE r = '7' ORDER BY id
+SELECT s FROM n ORDER BY s, id
+SELECT s FROM n ORDER BY s DESC, id
+SELECT s FROM n ORDER BY s LIMIT 3
+SELECT s FROM n ORDER BY s COLLATE BINARY, id
+SELECT MAX(s), MIN(s) FROM n
+SELECT MAX(10, '9'), MIN(10, '9'), MAX(10, 9.5)
+SELECT NULLIF('7', '007')
+SELECT DISTINCT x FROM (SELECT 7 x UNION ALL SELECT '7' UNION ALL SELECT 7.0) ORDER BY 1
+SELECT s FROM n GROUP BY s HAVING s = 7
+SELECT COUNT(*) FROM n WHERE s = '7'
+SELECT COUNT(*) FROM n WHERE s = 7
+SELECT COUNT(*) FROM n WHERE s IN ('7', '007')
+SELECT s FROM v_n WHERE s = 7 ORDER BY id
+SELECT s FROM (SELECT id, s FROM n) WHERE s = 7 ORDER BY id
+WITH c AS (SELECT id, s FROM n) SELECT s FROM c WHERE s = 7 ORDER BY id
+SELECT s FROM (SELECT * FROM n) WHERE s = 7 ORDER BY id
+SELECT s FROM n WHERE s IN (SELECT k FROM m) ORDER BY id
+SELECT i FROM n WHERE i IN (SELECT s FROM m) ORDER BY id
+SELECT s FROM n WHERE 7 IN (SELECT s FROM n) ORDER BY id
+SELECT s FROM n WHERE s IN (SELECT 7) ORDER BY id
+SELECT n.s FROM n JOIN m ON n.s = m.k ORDER BY n.id
+SELECT n.i FROM n JOIN m ON n.i = m.s ORDER BY n.id
+SELECT n.s FROM n JOIN m ON n.s = m.s ORDER BY n.id
+SELECT n.s FROM n LEFT JOIN m ON n.s = m.s ORDER BY n.id
+SELECT n.id FROM n WHERE EXISTS (SELECT 1 FROM m WHERE m.s = n.s) ORDER BY n.id
+SELECT n.id FROM n WHERE EXISTS (SELECT 1 FROM m WHERE m.k = n.s) ORDER BY n.id
+SELECT n.id FROM n WHERE EXISTS (SELECT 1 FROM m WHERE m.s = n.i) ORDER BY n.id
+SELECT n.id FROM n WHERE EXISTS (SELECT 1 FROM m WHERE m.s = n.i + 0) ORDER BY n.id
+SELECT id FROM n WHERE 9 IN (SELECT s FROM m) ORDER BY id
+SELECT x FROM (SELECT * FROM l2) WHERE x = 'ANA'
+SELECT x FROM v_l2 WHERE x = 'ana' ORDER BY x
+SELECT x FROM (SELECT s x FROM m UNION ALL SELECT s FROM n) WHERE x = 7 ORDER BY 1
+SELECT GROUP_CONCAT(s) FROM (SELECT s FROM n ORDER BY s, id)
+SELECT t FROM l ORDER BY t COLLATE BINARY
+SELECT t FROM l ORDER BY t COLLATE BINARY DESC LIMIT 3
+SELECT t FROM l ORDER BY 1 COLLATE BINARY
+SELECT t, ROW_NUMBER() OVER (ORDER BY t COLLATE BINARY) AS r FROM l ORDER BY r
+SELECT GROUP_CONCAT(t ORDER BY t COLLATE BINARY) FROM l
+SELECT t FROM l UNION SELECT 'C' ORDER BY 1 COLLATE BINARY
+SQL;
+$listaAfin = array_values(array_filter(array_map('trim', explode("\n", $afinidad)), static fn($l) => $l !== ''));
+foreach ([false, true] as $indices) {
+    chk('consultas ' . ($indices ? 'con índices' : 'sin índices') . ' (' . count($listaAfin) . '): las mismas que SQLite', function () use ($raiz, $indices, $listaAfin) {
+        borrarArbol($raiz);
+        mkdir($raiz, 0775, true);
+        Database::crear('a', $raiz);
+        $j = new Database('a', $raiz);
+        $s = new SQLite3(':memory:');
+        $s->enableExceptions(true);
+        $prep = ['CREATE TABLE n (id INTEGER PRIMARY KEY, i INTEGER, s TEXT, r REAL)',
+                 "INSERT INTO n VALUES (1, 7, '007', 7.0), (2, 10, '10', 10.5), (3, 9, '9', 9.0), (4, 1, ' 7 ', 1.0), (5, 2, '7', 2.0), (6, 3, 'x', 3.5), (7, NULL, NULL, NULL), (8, 7, '7.0', 7.0)",
+                 'CREATE TABLE m (k INTEGER, s TEXT)', "INSERT INTO m VALUES (7, '7'), (9, '009'), (10, 'x')", 'CREATE VIEW v_n AS SELECT * FROM n',
+                 'CREATE TABLE l (t TEXT)', "INSERT INTO l VALUES ('b'), ('A'), ('a'), ('B'), ('é'), ('E'), ('z'), ('Z'), ('10'), ('9')",
+                 'CREATE TABLE l2 (x TEXT COLLATE NOCASE)', "INSERT INTO l2 VALUES ('Ana'), ('ANA'), ('Bea')", 'CREATE VIEW v_l2 AS SELECT * FROM l2'];
+        foreach ($indices ? array_merge($prep, ['CREATE INDEX n_s ON n (s)', 'CREATE INDEX n_i ON n (i)', 'CREATE INDEX m_s ON m (s)', 'CREATE INDEX m_k ON m (k)']) : $prep as $q) {
+            $j->consultar($q);
+            $s->exec($q);
+        }
+        $mal = [];
+        foreach ($listaAfin as $q) {
+            $ordenada = stripos($q, 'ORDER BY') !== false;
+            try { $a = comparable($j->consultar($q), $ordenada); } catch (Throwable $e) { $a = ['ERROR ' . $e->getMessage()]; }
+            try { $b = comparable(enSqlite($s, $q), $ordenada); } catch (Throwable $e) { $b = ['ERROR ' . $e->getMessage()]; }
+            if ($a !== $b) { $mal[] = $q . ' -> ' . implode(' ', $a) . ' / SQLite ' . implode(' ', $b); }
+        }
+        // Lo que va distinto a propósito: sin columna que decida, '7' = 7; y
+        // en x IN (lista) cada valor de la lista con su columna, como en x =
+        // valor (SQLite solo mira la de x: 7 IN (s) no casa con s = '7')
+        $aqui = $j->consultar("SELECT 7 = '7' AS a, 7 = '007' AS b, '7' = '007' AS c")[0];
+        if ($aqui !== ['a' => 1, 'b' => 1, 'c' => 0]) { $mal[] = 'sin columna que decida: ' . json_encode($aqui); }
+        $en = array_column($j->consultar("SELECT id FROM n WHERE 7 IN (s, 'zz') ORDER BY id"), 'id');
+        $fuera = array_column($j->consultar("SELECT id FROM n WHERE 7 NOT IN (s, 'zz') ORDER BY id"), 'id');
+        if ($en !== [5] || $fuera !== [1, 2, 3, 4, 6, 8]) { $mal[] = '7 IN (s): ' . json_encode([$en, $fuera]); }
+        // Y sin columna que decida, el texto que es un número es ese número
+        // también en una lista (2.10): en SQLite, ninguna
+        $sinColumna = array_column($j->consultar("SELECT id FROM n WHERE i + 0 IN ('7', 'zz') ORDER BY id"), 'id');
+        if ($sinColumna !== [1, 8]) { $mal[] = "i + 0 IN ('7', 'zz'): " . json_encode($sinColumna); }
+        return $mal === [] ?: count($mal) . ' distinta(s): ' . implode(' | ', array_slice($mal, 0, 3));
+    });
+}
+chk('JOIN buscando cada fila en el índice de la tabla de dentro: de texto con texto, por su clave de texto; de texto con números, fila a fila; numérica con textos, cada uno como número (2.10)', function () use ($raiz) {
+    borrarArbol($raiz);
+    mkdir($raiz, 0775, true);
+    Database::crear('x', $raiz);
+    $j = new Database('x', $raiz);
+    $s = new SQLite3(':memory:');
+    $s->enableExceptions(true);
+    $grande = [];
+    for ($i = 1; $i <= 2400; $i++) {
+        $grande[] = "($i, " . ($i % 40) . ", '" . ($i % 3 === 0 ? sprintf('%03d', $i % 40) : ($i % 3 === 1 ? (string)($i % 40) : ' ' . ($i % 40))) . "')";
+    }
+    foreach (['CREATE TABLE n (id INTEGER PRIMARY KEY, i INTEGER, s TEXT)', "INSERT INTO n VALUES (1, 7, '007'), (2, 10, '10'), (3, 9, ' 9'), (4, 39, '39'), (5, NULL, 'x')",
+              'CREATE TABLE g (id INTEGER PRIMARY KEY, k INTEGER, s TEXT)', 'INSERT INTO g VALUES ' . implode(', ', $grande)] as $q) {
+        $j->consultar($q);
+        $s->exec($q);
+    }
+    $j->consultar('CREATE INDEX g_s ON g (s)');
+    $j->consultar('CREATE INDEX g_k ON g (k)');
+    $mal = [];
+    foreach (['SELECT n.id AS a, g.id AS b FROM n JOIN g ON g.s = n.s ORDER BY n.id, g.id' => true,
+              'SELECT n.id AS a, g.id AS b FROM n LEFT JOIN g ON g.s = n.s ORDER BY n.id, g.id' => true,
+              'SELECT n.id AS a, g.id AS b FROM n JOIN g ON g.s = n.i ORDER BY n.id, g.id' => false,
+              'SELECT n.id AS a, g.id AS b FROM n JOIN g ON g.k = n.s ORDER BY n.id, g.id' => true] as $q => $porIndice) {
+        if (comparable($j->consultar($q), true) !== comparable(enSqlite($s, $q), true)) { $mal[] = "$q distinto"; }
+        $via = implode(' | ', array_column($j->consultar("EXPLAIN $q"), 'acceso'));
+        if ($porIndice !== str_contains($via, 'buscando cada fila en el índice')) { $mal[] = "$q: $via"; }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk("escrituras: UNIQUE en una columna de texto admite '7', '007' y '7.0', una clave foránea compara la hija con la afinidad del padre, y NEW.col en un trigger lo compara la columna, como SQLite", function () use ($raiz) {
+    borrarArbol($raiz);
+    mkdir($raiz, 0775, true);
+    Database::crear('w', $raiz);
+    $j = new Database('w', $raiz);
+    $s = new SQLite3(':memory:');
+    $s->enableExceptions(true);
+    $s->exec('PRAGMA foreign_keys = ON');
+    $mal = [];
+    foreach (['CREATE TABLE u (v TEXT UNIQUE)', "INSERT INTO u VALUES ('7')", "INSERT INTO u VALUES ('007')", "INSERT INTO u VALUES ('7.0')",
+              'INSERT INTO u VALUES (7)', "INSERT INTO u VALUES ('007')", "INSERT OR IGNORE INTO u VALUES ('07'), ('7')",
+              'CREATE TABLE p (c TEXT PRIMARY KEY)', 'CREATE TABLE pn (c INTEGER PRIMARY KEY)', "INSERT INTO p VALUES ('5')", 'INSERT INTO pn VALUES (5)',
+              'CREATE TABLE h (id INTEGER PRIMARY KEY, a TEXT REFERENCES p (c), b TEXT REFERENCES pn (c))',
+              "INSERT INTO h VALUES (1, '5', '05')", "INSERT INTO h VALUES (2, '05', NULL)", "INSERT INTO h VALUES (3, 5, '5.0')",
+              "INSERT INTO h VALUES (4, NULL, '6')", 'DELETE FROM pn', "UPDATE h SET b = '5 ' WHERE id = 1",
+              // NEW.col en un trigger no tiene afinidad, como en SQLite: lo decide la columna con que se compara
+              'CREATE TABLE lg (id INTEGER)', 'CREATE TABLE tr (id INTEGER, s TEXT, i INTEGER)', "INSERT INTO u VALUES ('9')",
+              'CREATE TRIGGER t_tr AFTER INSERT ON tr BEGIN INSERT INTO lg SELECT NEW.id FROM u WHERE v = NEW.i; END',
+              "INSERT INTO tr VALUES (1, '007', 7), (2, '7', 9), (3, ' 7', 0)"] as $q) {
+        $ej = $es = null;
+        try { $j->consultar($q); } catch (Throwable $e) { $ej = $e->getMessage(); }
+        try { $s->exec($q); } catch (Throwable $e) { $es = $e->getMessage(); }
+        if (($ej === null) !== ($es === null)) { $mal[] = "$q: jsonSQLDB " . ($ej ?? 'bien') . ', SQLite ' . ($es ?? 'bien'); }
+    }
+    foreach (['SELECT v FROM u ORDER BY v', 'SELECT * FROM h ORDER BY id', 'SELECT id FROM lg ORDER BY id'] as $q) {
+        if (comparable($j->consultar($q), true) !== comparable(enSqlite($s, $q), true)) { $mal[] = "$q distinto"; }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
 borrarArbol($raiz);
 echo "\n---------------------------------------\n";
 echo "OK: $ok   FALLOS: $ko\n";

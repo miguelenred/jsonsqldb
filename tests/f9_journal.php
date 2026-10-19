@@ -27,6 +27,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
 use JsonSQLDB\Storage;
+use JsonSQLDB\StorageEntera;
 use JsonSQLDB\StorageEscritura;
 use JsonSQLDB\Catalog;
 
@@ -244,6 +245,8 @@ chk('sin manifiesto no se toca nada, sea cual sea el estado de los temporales', 
     foreach (['ninguno', 'algunos', 'rotos'] as $caso) {
         $original = preparar($raiz);
         @mkdir("$dir/.tx/_base", 0775, true);
+        // Como los deja un proceso muerto a mitad (2.10): con su línea en el .lock de la tabla
+        file_put_contents("$dir/.t.lock", 'escribiendo: pid 999999 desde ' . date('Y-m-d H:i:s') . "\n");
         if ($caso === 'algunos') {
             file_put_contents("$dir/t.json.999999.tmp", '{"table":"t","rows":[]}');
             file_put_contents("$dir/t.rev.json.999999.tmp", '{"rev":99}');
@@ -683,7 +686,7 @@ function conRevisionTocada(string $raiz, callable $tocar): bool|string
     $st->bloquear(true);
     $cat  = new Catalog($st);
     $meta = $cat->meta('t');
-    StorageEscritura::guardarTabla($st, 't', StorageEscritura::leerFilas($st, 't', true), null, Indexes::definiciones($meta));
+    StorageEntera::guardarTabla($st, 't', StorageEscritura::leerFilas($st, 't', true), null, Indexes::definiciones($meta));
     $st->desbloquear();
     unset($st, $cat);
 

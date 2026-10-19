@@ -410,7 +410,7 @@ final class TraductorRutinas
                     $deEste[] = $b[$i];
                 }
             }
-            $sentencias = $this->bloque($deEste, $momento);
+            $sentencias = $this->bloque($this->casosSabidos($deEste), $momento);
             if ($sentencias === '') {
                 continue;                           // en este evento no hace nada
             }
@@ -1017,7 +1017,7 @@ final class TraductorRutinas
             }
             if ($u === 'IF') {
                 [$texto, $k] = $this->siMysql($t, $k, $momento);
-                $out .= $texto . '; ';
+                $out .= $texto;
                 continue;
             }
             if ($u === 'BEGIN') {
@@ -1037,37 +1037,230 @@ final class TraductorRutinas
         return $out;
     }
 
-    /** IF cond THEN … [ELSEIF cond THEN …] [ELSE …] END IF, con su ;. @return array{0: string, 1: int} */
+    /**
+     * IF cond THEN … [ELSEIF cond THEN …] [ELSE …] END IF, con su ;. Sin las
+     * ramas que se sabe que no se toman, ni las que van detrás de una que
+     * siempre se toma (2.10: con TG_OP ya sustituido, ver triggerPg(), cada
+     * trigger llevaba las ramas de los demás eventos y las miraba en cada
+     * fila); si queda una sola que siempre se toma, sus sentencias sin el IF.
+     *
+     * @return array{0: string, 1: int} el texto (vacío si no queda nada) y dónde sigue
+     */
     private function siMysql(array $t, int $k, string $momento): array
     {
-        $texto = '';
-        $palabra = 'IF';
+        $ramas = [];                                // [condición, o null si siempre; sentencias]
         while (true) {
             $then = $this->buscar($t, $k + 1, ['THEN']);
-            $cond = $this->expr(array_slice($t, $k + 1, $then - $k - 1));
+            $sabido = $this->sabido(array_slice($t, $k + 1, $then - $k - 1));
             $fin = $this->buscar($t, $then + 1, ['ELSEIF', 'ELSIF', 'ELSE', 'END'], true);
-            $texto .= "$palabra $cond THEN " . $this->bloqueONulo(array_slice($t, $then + 1, $fin - $then - 1), $momento);
+            if ($sabido !== false) {
+                $ramas[] = [$sabido === true ? null : $this->expr($sabido), $this->bloque(array_slice($t, $then + 1, $fin - $then - 1), $momento)];
+            }
             $u = $this->palabra($t[$fin]);
+            if ($sabido === true) {
+                $fin = $this->buscar($t, $fin, ['END'], true);
+                break;
+            }
             if ($u === 'ELSEIF' || $u === 'ELSIF') {
-                $palabra = 'ELSEIF';
                 $k = $fin;
                 continue;
             }
             if ($u === 'ELSE') {
                 $finElse = $this->buscar($t, $fin + 1, ['END'], true);
-                $texto .= 'ELSE ' . $this->bloqueONulo(array_slice($t, $fin + 1, $finElse - $fin - 1), $momento);
+                $ramas[] = [null, $this->bloque(array_slice($t, $fin + 1, $finElse - $fin - 1), $momento)];
                 $fin = $finElse;
             }
-            // END IF ;
-            return [$texto . 'END IF', $fin + 2];
+            break;
         }
+        // END IF ;
+        if ($ramas === [] || $ramas[0][0] === null) {
+            return [$ramas[0][1] ?? '', $fin + 2];
+        }
+        $texto = '';
+        foreach ($ramas as $i => [$cond, $sentencias]) {
+            if ($cond === null) {
+                $texto .= $sentencias !== '' ? "ELSE $sentencias" : '';
+                break;
+            }
+            // Una rama vacía (lo que había no se traduce a nada) necesita una sentencia que no haga nada
+            $texto .= ($i === 0 ? 'IF' : 'ELSEIF') . " $cond THEN " . ($sentencias !== '' ? $sentencias : 'SELECT 0; ');
+        }
+        return [$texto . 'END IF; ', $fin + 2];
     }
 
-    /** Una rama vacía (lo que había no se traduce a nada) necesita una sentencia que no haga nada. */
-    private function bloqueONulo(array $t, string $momento): string
+    /**
+     * Lo que se sabe de una condición sin ejecutarla (2.10): comparaciones de
+     * dos textos escritos, como las que deja TG_OP sustituido por su evento
+     * ('INSERT' = 'DELETE' es falso), con AND, OR y paréntesis. True o false
+     * si se sabe; si no, los tokens de lo que queda por mirar ('UPDATE' =
+     * 'UPDATE' AND OLD.x <> NEW.x deja OLD.x <> NEW.x). Dos textos se
+     * comparan aquí byte a byte, como hace el motor al ejecutarla.
+     *
+     * @param list<array> $t
+     * @return bool|list<array>
+     */
+    private function sabido(array $t)
     {
-        $b = $this->bloque($t, $momento);
-        return $b !== '' ? $b : 'SELECT 0; ';
+        while (count($t) > 2 && self::esOp($t[0], '(') && $this->cierre($t, 0) === count($t) - 1) {
+            $t = array_slice($t, 1, -1);
+        }
+        foreach (['OR' => true, 'AND' => false] as $op => $corta) {
+            $partes = $this->partirPor($t, $op);
+            if (count($partes) < 2) {
+                continue;
+            }
+            $quedan = [];
+            foreach ($partes as $parte) {
+                $s = $this->sabido($parte);
+                if ($s === $corta) {
+                    return $corta;
+                }
+                if ($s !== !$corta) {
+                    $quedan[] = $s;
+                }
+            }
+            if ($quedan === []) {
+                return !$corta;
+            }
+            if (count($quedan) === 1) {
+                return $quedan[0];
+            }
+            $unidas = [];
+            foreach ($quedan as $i => $parte) {
+                if ($i > 0) {
+                    $unidas[] = ['k' => 'id', 'v' => $op];
+                }
+                array_push($unidas, ['k' => 'op', 'v' => '('], ...$parte);
+                $unidas[] = ['k' => 'op', 'v' => ')'];
+            }
+            return $unidas;
+        }
+        // 'a' = 'b', 'a' <> 'b'
+        if (count($t) === 3 && $t[0]['k'] === 'str' && $t[2]['k'] === 'str' && $t[1]['k'] === 'op'
+            && in_array($t[1]['v'], ['=', '<>', '!='], true)) {
+            return ($t[0]['v'] === $t[2]['v']) === ($t[1]['v'] === '=');
+        }
+        // 'a' [NOT] IN ('b', 'c')
+        $no = $this->palabra($t[1] ?? []) === 'NOT';
+        $in = $no ? 2 : 1;
+        if (($t[0]['k'] ?? '') === 'str' && $this->palabra($t[$in] ?? []) === 'IN' && self::esOp($t[$in + 1] ?? [], '(')
+            && $this->cierre($t, $in + 1) === count($t) - 1) {
+            $valores = [];
+            foreach ($this->separar(array_slice($t, $in + 2, -1)) as $e) {
+                if (count($e) !== 1 || $e[0]['k'] !== 'str') {
+                    return $t;
+                }
+                $valores[] = $e[0]['v'];
+            }
+            return in_array($t[0]['v'], $valores, true) !== $no;
+        }
+        return $t;
+    }
+
+    /**
+     * Los trozos de una condición separados por los AND (o los OR) de su
+     * nivel: sin entrar en paréntesis ni en un CASE, y sin el AND de un
+     * BETWEEN.
+     *
+     * @return list<list<array>>
+     */
+    private function partirPor(array $t, string $palabra): array
+    {
+        $partes = [[]];
+        $nivel = 0;
+        $casos = 0;
+        $entre = 0;
+        foreach ($t as $x) {
+            if (self::esOp($x, '(')) {
+                $nivel++;
+            } elseif (self::esOp($x, ')')) {
+                $nivel--;
+            } elseif ($nivel === 0) {
+                $u = $this->palabra($x);
+                if ($u === 'CASE') {
+                    $casos++;
+                } elseif ($u === 'END' && $casos > 0) {
+                    $casos--;
+                } elseif ($casos === 0 && $u === 'BETWEEN') {
+                    $entre++;
+                } elseif ($casos === 0 && $u === 'AND' && $entre > 0) {
+                    $entre--;
+                } elseif ($casos === 0 && $u === $palabra) {
+                    $partes[] = [];
+                    continue;
+                }
+            }
+            $partes[count($partes) - 1][] = $x;
+        }
+        return $partes;
+    }
+
+    /**
+     * CASE 'x' WHEN 'a' THEN … [WHEN …] [ELSE …] END con textos escritos,
+     * como el CASE TG_OP de una función de PostgreSQL ya sustituido (ver
+     * triggerPg()): lo de la rama que toca, entre paréntesis (2.10).
+     *
+     * @param list<array> $t
+     * @return list<array>
+     */
+    private function casosSabidos(array $t): array
+    {
+        $out = [];
+        for ($k = 0, $n = count($t); $k < $n; $k++) {
+            if ($this->palabra($t[$k]) === 'CASE' && ($t[$k + 1]['k'] ?? '') === 'str' && $this->palabra($t[$k + 2] ?? []) === 'WHEN') {
+                $caso = $this->casoSabido($t, $k);
+                if ($caso !== null) {
+                    array_push($out, ['k' => 'op', 'v' => '('], ...$this->casosSabidos($caso[0]));
+                    $out[] = ['k' => 'op', 'v' => ')'];
+                    $k = $caso[1];
+                    continue;
+                }
+            }
+            $out[] = $t[$k];
+        }
+        return $out;
+    }
+
+    /** @return array{0: list<array>, 1: int}|null lo que vale el CASE de $k y dónde está su END; null si no se sabe */
+    private function casoSabido(array $t, int $k): ?array
+    {
+        $marcas = [];                               // [palabra, posición] de este CASE
+        $nivel = 0;
+        $casos = 0;
+        for ($i = $k + 2, $n = count($t); $i < $n; $i++) {
+            if (self::esOp($t[$i], '(')) { $nivel++; continue; }
+            if (self::esOp($t[$i], ')')) { $nivel--; continue; }
+            $u = $nivel === 0 ? $this->palabra($t[$i]) : '';
+            if ($u === 'CASE') {
+                $casos++;
+            } elseif ($u === 'END' && $casos > 0) {
+                $casos--;
+            } elseif ($casos === 0 && in_array($u, ['WHEN', 'THEN', 'ELSE', 'END'], true)) {
+                $marcas[] = [$u, $i];
+                if ($u === 'END') {
+                    break;
+                }
+            }
+        }
+        if (end($marcas)[0] !== 'END') {
+            return null;
+        }
+        $base = $t[$k + 1]['v'];
+        $elegido = null;
+        for ($m = 0; $marcas[$m][0] === 'WHEN'; $m += 2) {
+            $valor = array_slice($t, $marcas[$m][1] + 1, $marcas[$m + 1][1] - $marcas[$m][1] - 1);
+            if (count($valor) !== 1 || $valor[0]['k'] !== 'str' || $marcas[$m + 1][0] !== 'THEN') {
+                return null;
+            }
+            if ($elegido === null && $valor[0]['v'] === $base) {
+                $elegido = array_slice($t, $marcas[$m + 1][1] + 1, $marcas[$m + 2][1] - $marcas[$m + 1][1] - 1);
+            }
+        }
+        $fin = end($marcas)[1];
+        if ($elegido === null) {
+            $elegido = $marcas[$m][0] === 'ELSE' ? array_slice($t, $marcas[$m][1] + 1, $fin - $marcas[$m][1] - 1) : [['k' => 'id', 'v' => 'NULL']];
+        }
+        return [$elegido, $fin];
     }
 
     /**
@@ -1310,12 +1503,26 @@ final class TraductorRutinas
             $x = $t[$k];
             $u = $this->palabra($x);
             $esIntervalo = $x['k'] === 'op' && in_array($x['v'], ['+', '-'], true) && $this->palabra($t[$k + 1] ?? []) === 'INTERVAL';
-            // a MOD b y a DIV b (MOD(a, b) es una función, no esto)
-            $infijo = in_array($u, ['MOD', 'DIV'], true) && !self::esOp($t[$k + 1] ?? [], '(');
+            // a MOD b y a DIV b, de MySQL y Access (MOD(a, b) es una función, no
+            // esto; a MOD (b), sí: detrás de un operando y sin coma dentro,
+            // 2.10: se tomaba por la función y la vista se saltaba con un
+            // aviso de PHP). En los demás, mod y div solo pueden ser nombres
+            $infijo = in_array($u, ['MOD', 'DIV'], true) && ($this->d === 'mysql' || $this->d === 'access')
+                && (!self::esOp($t[$k + 1] ?? [], '(')
+                    || $this->acabaOperando($t[$k - 1]) && count($this->separar(array_slice($t, $k + 2, $this->cierre($t, $k + 1) - $k - 2))) === 1);
             if (!$esIntervalo && !$infijo && !($x['k'] === 'op' && $x['v'] === '<=>')) {
                 continue;
             }
-            $ini = $this->inicioOperando($t, $k - 1);
+            // Cada lado, hasta donde se une antes que el operador (2.10: solo el
+            // operando de al lado, y a * 2 MOD 3 salía a * (2 MOD 3)): a MOD b
+            // y a DIV b van con * y /, por la izquierda en MySQL; en Access, Mod
+            // va después; a <=> b, después de toda la cuenta y de los bits, y
+            // a la izquierda con las comparaciones, que en MySQL van a la par
+            // (2.10: n = 7 <=> 1 salía n = (7 <=> 1))
+            $antes = $u === '' ? array_merge(self::CUENTA, ['MOD', 'DIV', '&', '|', '<<', '>>'])
+                : ($u === 'MOD' && $this->d === 'access' ? ['*', '/', '^'] : ['*', '/', '%', '^']);
+            $ini = $esIntervalo ? $this->inicioOperando($t, $k - 1)
+                : $this->inicioLado($t, $k - 1, $u === '' ? array_merge($antes, ['=', '<', '>', '<=', '>=', '<>', '!=']) : $antes);
             $izq = $this->expr(array_slice($t, $ini, $k - $ini));
             if ($esIntervalo) {
                 // INTERVAL cantidad UNIDAD: la cantidad es un operando y la unidad, una palabra
@@ -1326,9 +1533,11 @@ final class TraductorRutinas
                 $texto = $this->sumarFecha($x['v'] === '-' ? 'DATE_SUB' : 'DATE_ADD', $args);
                 $fin = $finCant + 1;
             } else {
-                $fin = $this->finOperando($t, $k + 1);
+                $fin = $this->finCuenta($t, $k + 1, $u === '' || $this->d === 'access' ? $antes : ['^']);
                 $der = $this->expr(array_slice($t, $k + 1, $fin - $k));
-                $texto = ['MOD' => "($izq % $der)", 'DIV' => "CAST($izq / $der AS INTEGER)"][$u]
+                // Cada lado, entre paréntesis: el de Mod en Access llega hasta
+                // un * (2.10: [n] Mod 4 * 3 salía n % 4 * 3)
+                $texto = ['MOD' => "(($izq) % ($der))", 'DIV' => "CAST(($izq) / ($der) AS INTEGER)"][$u]
                     // <=> da 1 o 0, nunca NULL: 2 <=> NULL es 0
                     ?? "(CASE WHEN ($izq) IS NULL AND ($der) IS NULL THEN 1 WHEN ($izq) IS NULL OR ($der) IS NULL THEN 0 WHEN ($izq) = ($der) THEN 1 ELSE 0 END)";
             }
@@ -1420,9 +1629,14 @@ final class TraductorRutinas
                 throw new NoTraducible(t('el operador ^ con valores calculados'));
             }
             if (($x['k'] === 'op' && in_array($x['v'], ['&', '\\'], true)) || $u === 'LIKE' || $u === 'ALIKE') {
-                $ini = $this->inicioOperando($t, $k - 1);
+                // Cada lado llega hasta donde se une antes que el operador, como
+                // en Access: a + 1 & b es (a + 1) & b, a * 2 \ 3 es (a * 2) \ 3,
+                // y a LIKE "x" & b es a LIKE ("x" & b) (2.10: solo el operando
+                // de al lado, y a + 1 & b salía a + (1 & b))
+                $antes = $x['v'] === '\\' ? ['*', '/', '^'] : array_merge(self::CUENTA, ['\\', 'MOD'], $u !== '' ? ['&'] : []);
+                $ini = $this->inicioLado($t, $k - 1, $antes);
                 $no = $u !== '' && $this->palabra($t[$ini - 1] ?? []) === 'NOT';
-                $fin = $this->finOperando($t, $k + 1);
+                $fin = $this->finCuenta($t, $k + 1, $antes);
                 $a = $this->expr(array_slice($t, $ini, $k - $ini));
                 $der = array_slice($t, $k + 1, $fin - $k);
                 if ($x['v'] === '&') {
@@ -1432,7 +1646,7 @@ final class TraductorRutinas
                     $partes = [$a, $this->expr($der)];
                     while (($t[$fin + 1]['k'] ?? '') === 'op' && ($t[$fin + 1]['v'] ?? '') === '&') {
                         $desde = $fin + 2;
-                        $fin = $this->finOperando($t, $desde);
+                        $fin = $this->finCuenta($t, $desde, $antes);
                         $partes[] = $this->expr(array_slice($t, $desde, $fin - $desde + 1));
                     }
                     $texto = '(CASE WHEN COALESCE(' . implode(', ', $partes) . ') IS NULL THEN NULL ELSE '
@@ -1533,6 +1747,10 @@ final class TraductorRutinas
     private const NO_FUNCIONES = ['AND', 'OR', 'NOT', 'WHEN', 'THEN', 'ELSE', 'SELECT', 'WHERE', 'ON', 'IN', 'BY', 'AS', 'FROM',
         'DISTINCT', 'ORDER', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'CASE', 'IS', 'LIKE', 'BETWEEN', 'EXISTS', 'ALL', 'ANY', 'SOME',
         'RETURN', 'SET', 'VALUES', 'INTO', 'JOIN', 'USING', 'IF', 'ELSEIF', 'ELSIF', 'END', 'UNION', 'EXCEPT', 'INTERSECT', 'WITH'];
+
+    /** Lo que, hacia atrás, acaba la lista de un SET o dice que no se está en una (ver esAsignacion()) */
+    private const FIN_SET = ['SET', 'SELECT', 'WHERE', 'FROM', 'ON', 'HAVING', 'VALUES', 'ORDER', 'GROUP', 'LIMIT',
+        'RETURNING', 'INTO', 'JOIN', 'USING', 'UNION', 'BEGIN', 'DO'];
 
     /** Los operadores de una cuenta de PostgreSQL, que allí se unen antes que || */
     private const CUENTA = ['+', '-', '*', '/', '%', '^'];
@@ -1852,17 +2070,34 @@ final class TraductorRutinas
         return $mods;
     }
 
-    /** Dónde empieza el operando que acaba en $k: un nombre (a.b), una llamada f(…), un (…) o un valor. */
+    /**
+     * Dónde empieza el operando que acaba en $k: un nombre (a.b), una llamada
+     * f(…), también IF(a, b, c) (2.10: el IF se quedaba fuera), un (…), un
+     * CASE … END (2.10) o un valor.
+     */
     private function inicioOperando(array $t, int $k): int
     {
         if (self::esOp($t[$k] ?? [], ')')) {
+            $fin = $k;
             $nivel = 0;
             for (; $k >= 0; $k--) {
                 if (self::esOp($t[$k], ')')) { $nivel++; }
                 if (self::esOp($t[$k], '(') && --$nivel === 0) { break; }
             }
-            return $k > 0 && $t[$k - 1]['k'] === 'id' && empty($t[$k - 1]['q']) && $this->palabra($t[$k - 1]) !== ''
-                && !in_array($this->palabra($t[$k - 1]), self::NO_FUNCIONES, true) ? $k - 1 : $k;
+            $antes = $k > 0 && $t[$k - 1]['k'] === 'id' && empty($t[$k - 1]['q']) ? $this->palabra($t[$k - 1]) : '';
+            return $antes !== '' && (!in_array($antes, self::NO_FUNCIONES, true)
+                || $antes === 'IF' && count($this->separar(array_slice($t, $k + 1, $fin - $k - 1))) === 3) ? $k - 1 : $k;
+        }
+        if ($this->palabra($t[$k] ?? []) === 'END') {
+            for ($j = $k - 1, $nivel = 0; $j >= 0; $j--) {
+                $u = $this->palabra($t[$j]);
+                if ($u === 'END') {
+                    $nivel++;
+                } elseif ($u === 'CASE' && $nivel-- === 0) {
+                    return $j;
+                }
+            }
+            return $k;
         }
         while ($k >= 2 && self::esOp($t[$k - 1] ?? [], '.') && ($t[$k - 2]['k'] ?? '') === 'id') {
             $k -= 2;
@@ -1873,7 +2108,8 @@ final class TraductorRutinas
     /** ¿Acaba un operando en el token $x? (un -, un + o un AND delante de algo, no) */
     private function acabaOperando(array $x): bool
     {
-        return $x['k'] === 'op' ? $x['v'] === ')' : !in_array($this->palabra($x), self::NO_FUNCIONES, true);
+        // END, el de un CASE: el de un bloque no va delante de un operador (2.10)
+        return $x['k'] === 'op' ? $x['v'] === ')' : $this->palabra($x) === 'END' || !in_array($this->palabra($x), self::NO_FUNCIONES, true);
     }
 
     /**
@@ -1891,13 +2127,72 @@ final class TraductorRutinas
         return $ini;
     }
 
+    /**
+     * Dónde empieza el lado izquierdo de un operador binario que acaba en $k:
+     * la cuenta con los operadores $ops, que se unen antes que él, y con su
+     * signo delante (-a & b es (-a) & b) (2.10).
+     */
+    private function inicioLado(array $t, int $k, array $ops): int
+    {
+        for ($ini = $this->inicioOperando($t, $k); ; $ini = $this->inicioOperando($t, $ini - 2)) {
+            if ($ini >= 1 && ($t[$ini - 1]['k'] ?? '') === 'op' && in_array($t[$ini - 1]['v'], ['-', '+'], true)
+                && ($ini === 1 || !$this->acabaOperando($t[$ini - 2]))) {
+                $ini--;
+            }
+            if (!($ini >= 2 && $this->esOperador($t[$ini - 1], $ops) && $this->acabaOperando($t[$ini - 2]))
+                || self::esOp($t[$ini - 1], '=') && $this->esAsignacion($t, $ini - 1)) {
+                return $ini;
+            }
+        }
+    }
+
+    /**
+     * ¿Es el = de $k el de una asignación (SET col = …, también NEW.col y
+     * cada una de la lista de SET), no una comparación? (2.10: el lado
+     * izquierdo de <=> se lo saltaba, y SET e = a <=> b salía roto)
+     */
+    private function esAsignacion(array $t, int $k): bool
+    {
+        if (($t[$k - 1]['k'] ?? '') !== 'id') {
+            return false;
+        }
+        $j = $k - 2;                                // delante de la columna, y de su tabla
+        while ($j >= 1 && self::esOp($t[$j], '.') && $t[$j - 1]['k'] === 'id') {
+            $j -= 2;
+        }
+        if ($j < 0 || $this->palabra($t[$j]) === 'SET') {
+            return $j >= 0;
+        }
+        if (!self::esOp($t[$j], ',')) {
+            return false;
+        }
+        // La lista, hasta su SET; lo de en medio son los valores de las
+        // anteriores, que pueden llevar CASE … END, AND, IS, IN, IF(…)…
+        for ($nivel = 0, $j--; $j >= 0; $j--) {
+            if (self::esOp($t[$j], ')')) {
+                $nivel++;
+            } elseif (self::esOp($t[$j], '(') && --$nivel < 0 || $nivel === 0 && self::esOp($t[$j], ';')) {
+                return false;
+            } elseif ($nivel === 0 && ($u = $this->palabra($t[$j])) !== '' && in_array($u, self::FIN_SET, true)) {
+                return $u === 'SET';
+            }
+        }
+        return false;
+    }
+
     private function finCuenta(array $t, int $k, array $ops): int
     {
         $fin = $this->finOperando($t, $k);
-        while (($t[$fin + 1]['k'] ?? '') === 'op' && in_array($t[$fin + 1]['v'], $ops, true) && isset($t[$fin + 2])) {
+        while ($this->esOperador($t[$fin + 1] ?? [], $ops) && isset($t[$fin + 2])) {
             $fin = $this->finOperando($t, $fin + 2);
         }
         return $fin;
+    }
+
+    /** ¿Es $x uno de los operadores $ops, de signo o de palabra (MOD, DIV: 2.10)? */
+    private function esOperador(array $x, array $ops): bool
+    {
+        return in_array(($x['k'] ?? '') === 'op' ? $x['v'] : $this->palabra($x), $ops, true);
     }
 
     /** Dónde acaba el operando que empieza en $k. */

@@ -124,10 +124,13 @@ final class EscritorXlsx
     /** Borra los ficheros temporales de las hojas (también si la exportación se para). */
     public function borrarTemporales(): void
     {
-        if ($this->actual !== null) {
+        // La hoja puede estar ya cerrada: si PHP se para justo después de
+        // cerrarla en cerrarHoja(), aún sin olvidarla (2.10: fclose() daba un
+        // error y las hojas temporales se quedaban en el disco)
+        if (is_resource($this->actual)) {
             fclose($this->actual);
-            $this->actual = null;
         }
+        $this->actual = null;
         foreach ($this->hojas as $f) {
             if (is_file($f)) {
                 @unlink($f);

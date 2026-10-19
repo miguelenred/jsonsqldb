@@ -51,6 +51,16 @@ final class Types
         'BINARY' => self::TEXT, 'VARBINARY' => self::TEXT, 'UUID' => self::TEXT,
     ];
 
+    /**
+     * La afinidad de un tipo interno (2.10, como en SQLite): 'T' el texto y
+     * 'N' los demás, números y fechas. Decide cómo se compara una columna con
+     * lo que no lo es (ver Valor).
+     */
+    public static function afinidad(string $tipo): string
+    {
+        return $tipo === self::TEXT ? 'T' : 'N';
+    }
+
     /** ¿Es el nombre de un tipo? (para no confundir una columna llamada key con un índice) */
     public static function esTipo(string $nombre): bool
     {
@@ -107,25 +117,25 @@ final class Types
         // ENUM y UNSIGNED (2.9), aparte: el camino de siempre, sin una llamada
         // más por valor, que en un INSERT de muchas filas se notaba
         if (isset($col['enum']) || !empty($col['unsigned'])) {
-            return self::castMarcado($valor, $col);
+            return TypesCast::castMarcado($valor, $col);
         }
-        if (is_array($valor) || is_object($valor)) {
+        if (\is_array($valor) || \is_object($valor)) {
             throw JsonSqlDbError::type("Valor no escalar para la columna '{$col['name']}'");
         }
-        if (is_bool($valor)) {
+        if (\is_bool($valor)) {
             $valor = $valor ? 1 : 0;
         }
 
         switch ($col['type']) {
             case self::INTEGER:
-                if (is_int($valor)) return $valor;
+                if (\is_int($valor)) return $valor;
                 // Fuera del rango de un entero de PHP no se guarda otro número:
                 // PHP lo convertiría en el máximo sin avisar, y eso es un error
-                if (is_float($valor) && floor($valor) === $valor) {
+                if (\is_float($valor) && floor($valor) === $valor) {
                     if ($valor >= -9.2233720368547758E18 && $valor < 9.2233720368547758E18) return (int)$valor;
                     throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
                 }
-                if (is_string($valor) && preg_match('/^([+-]?)0*(\d+)$/', trim($valor), $m)) {
+                if (\is_string($valor) && preg_match('/^([+-]?)0*(\d+)$/', trim($valor), $m)) {
                     // Se mira antes de convertir: PHP 8.5 avisa al convertir lo que no cabe
                     if (Lexer::cifrasCaben($m[2], $m[1] === '-')) return (int)trim($valor);
                     throw JsonSqlDbError::type("Entero fuera de rango para '{$col['name']}': " . self::texto($valor));
@@ -133,48 +143,26 @@ final class Types
                 throw JsonSqlDbError::type("Valor no entero para '{$col['name']}': " . self::texto($valor));
 
             case self::DOUBLE:
-                if (is_int($valor) || is_float($valor)) return (float)$valor;
-                if (is_string($valor) && is_numeric(trim($valor))) return (float)trim($valor);
+                if (\is_int($valor) || \is_float($valor)) return (float)$valor;
+                if (\is_string($valor) && is_numeric(trim($valor))) return (float)trim($valor);
                 throw JsonSqlDbError::type("Valor no numérico para '{$col['name']}': " . self::texto($valor));
 
             case self::DECIMAL:
-                if (is_int($valor) || is_float($valor)) return round((float)$valor, $col['scale']);
-                if (is_string($valor) && is_numeric(trim($valor))) return round((float)trim($valor), $col['scale']);
+                if (\is_int($valor) || \is_float($valor)) return round((float)$valor, $col['scale']);
+                if (\is_string($valor) && is_numeric(trim($valor))) return round((float)trim($valor), $col['scale']);
                 throw JsonSqlDbError::type("Valor no numérico para '{$col['name']}': " . self::texto($valor));
 
             case self::DATETIME:
                 return self::fecha((string)$valor, $col['name']);
 
             default: // TEXT
-                $s = (string)$valor;
+                // Un decimal, con las 15 cifras de SQLite (2.10, ver Valor::aTexto())
+                $s = \is_float($valor) ? Valor::aTexto($valor) : (string)$valor;
                 if ($col['length'] !== null && self::longitud($s) > $col['length']) {
                     throw JsonSqlDbError::type("Texto demasiado largo para '{$col['name']}' (máx {$col['length']})");
                 }
                 return $s;
         }
-    }
-
-    /** cast() de una columna ENUM o UNSIGNED (2.9) */
-    private static function castMarcado($valor, array $col)
-    {
-        if (isset($col['enum'])) {
-            // ENUM: uno de sus valores, sin distinguir mayúsculas, y se guarda
-            // escrito como en la lista. Con el valor entero: recortado a 40
-            // caracteres, como en el mensaje, uno más largo no entraba nunca (2.9)
-            foreach ($col['enum'] as $e) {
-                if (strcasecmp($e, (string)$valor) === 0) {
-                    return $e;
-                }
-            }
-            throw JsonSqlDbError::type("'" . self::texto($valor) . "' no es un valor permitido en '{$col['name']}': "
-                . implode(', ', array_map(static fn($e) => "'$e'", $col['enum'])));
-        }
-        $col['unsigned'] = false;
-        $v = self::cast($valor, $col);
-        if ($v < 0) {
-            throw JsonSqlDbError::type("Número negativo en una columna UNSIGNED: '{$col['name']}' = " . self::texto($v));
-        }
-        return $v;
     }
 
     /**
@@ -213,60 +201,6 @@ final class Types
         return $out;
     }
 
-    /**
-     * CAST(expr AS tipo).
-     *
-     * Los nombres de tipo son los mismos que admite CREATE TABLE, con sus alias,
-     * más los de SQLite. NULL se queda en NULL, como en cualquier motor.
-     *
-     * @param mixed $v
-     * @return mixed
-     */
-    public static function convertirCast($v, string $tipo)
-    {
-        if ($v === null) {
-            return null;
-        }
-        if ($tipo === 'UNSIGNED') {
-            // CAST(x AS UNSIGNED) de MySQL: un entero, y negativo es un error
-            // (MySQL le daría la vuelta: -1 sería 18446744073709551615)
-            $n = Valor::entero(Valor::aNumero($v));
-            if ($n < 0) {
-                throw JsonSqlDbError::type("CAST a UNSIGNED de un número negativo: $n");
-            }
-            return $n;
-        }
-        $decl = self::parse($tipo);
-        $base = $decl['type'];
-
-        switch ($base) {
-            case 'INTEGER':
-                // Se trunca hacia cero, no se redondea: CAST(1.9 AS INTEGER) = 1;
-                // y lo que no cabe se queda en el máximo o el mínimo, como en SQLite
-                return Valor::entero(Valor::aNumero($v));
-
-            case 'DOUBLE':
-                return (float)Valor::aNumero($v);
-
-            case 'DECIMAL':
-                return round((float)Valor::aNumero($v), (int)($decl['scale'] ?? 2));
-
-            case 'TEXT':
-                return Valor::aTexto($v);
-
-            case 'DATETIME':
-                $t = trim(Valor::aTexto($v));
-                if (!self::esFecha($t)) {
-                    throw JsonSqlDbError::type(
-                        "CAST a $base: '$t' no es una fecha: se espera AAAA-MM-DD, con hora opcional HH:MM[:SS[.fff]] tras un espacio o una T"
-                    );
-                }
-                return $t;
-        }
-
-        throw JsonSqlDbError::syntax("CAST a un tipo desconocido: '$tipo'");
-    }
-
     /** ¿La cadena tiene forma de fecha jsonSQLDB? (usado por funciones de fecha) */
     public static function esFecha(string $valor): bool
     {
@@ -283,10 +217,11 @@ final class Types
     {
         return function_exists('mb_strlen')
             ? mb_strlen($s, 'UTF-8')
-            : strlen((string)preg_replace('/[\x80-\xBF]/', '', $s));
+            : \strlen((string)preg_replace('/[\x80-\xBF]/', '', $s));
     }
 
-    private static function texto($valor): string
+    /** Un valor para un mensaje de error: sus primeros 40 caracteres */
+    public static function texto($valor): string
     {
         return substr((string)$valor, 0, 40);
     }

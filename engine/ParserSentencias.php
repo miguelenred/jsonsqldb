@@ -6,8 +6,9 @@ namespace JsonSQLDB;
 /**
  * Las sentencias que no son consultas ni escrituras de filas: CREATE, DROP,
  * ALTER, SHOW, CHECK, REPAIR, EXPLAIN y las de MySQL y SQLite que se aceptan.
- * Hereda el análisis de consultas y expresiones de Parser, y el de INSERT,
- * UPDATE y DELETE de ParserEscritura (lo usan los cuerpos de los triggers).
+ * Hereda el análisis de consultas y expresiones de Parser, y el de INSERT de
+ * ParserEscritura, que lleva a ParserCambios el de UPDATE y DELETE (lo usan
+ * los cuerpos de los triggers).
  * Parser::analizar() la elige al ver la primera palabra. Va aparte para que
  * una consulta o una escritura no tengan que compilarla (2.9).
  *
@@ -253,7 +254,7 @@ final class ParserSentencias extends ParserEscritura
                 $this->avanzar();
                 $opcion = 'CHARSET';
             }
-            if (!in_array($opcion, ['ENGINE', 'CHARSET', 'COLLATE', 'AUTO_INCREMENT', 'COMMENT', 'ROW_FORMAT'], true)) {
+            if (!\in_array($opcion, ['ENGINE', 'CHARSET', 'COLLATE', 'AUTO_INCREMENT', 'COMMENT', 'ROW_FORMAT'], true)) {
                 throw JsonSqlDbError::syntax("Opción de tabla no soportada: {$tk['v']}");
             }
             $this->avanzar();
@@ -263,7 +264,7 @@ final class ParserSentencias extends ParserEscritura
                 $def['autoinc_inicio'] = $this->enteroPositivo('AUTO_INCREMENT');
                 continue;
             }
-            if ($opcion === 'COMMENT' ? $v['t'] !== 'str' : !in_array($v['t'], ['id', 'str'], true)) {
+            if ($opcion === 'COMMENT' ? $v['t'] !== 'str' : !\in_array($v['t'], ['id', 'str'], true)) {
                 throw JsonSqlDbError::syntax("Falta el valor de $opcion");
             }
             $this->avanzar();
@@ -413,7 +414,7 @@ final class ParserSentencias extends ParserEscritura
             }
             if ($this->comer('id', 'DEFAULT')) {
                 $v = $this->valorPorDefecto();
-                if (is_array($v)) {
+                if (\is_array($v)) {
                     $col['default_expr'] = $v['expr'];     // se calcula al insertar
                 } else {
                     $col['default'] = $v;
@@ -444,7 +445,7 @@ final class ParserSentencias extends ParserEscritura
             // compara, se ordena, se agrupa y se indexa la columna
             if ($this->comer('id', 'COLLATE')) {
                 $c = strtoupper($this->nombreSimple('colación'));
-                if (!in_array($c, ['NOCASE', 'RTRIM', 'BINARY'], true)) {
+                if (!\in_array($c, ['NOCASE', 'RTRIM', 'BINARY'], true)) {
                     throw JsonSqlDbError::syntax("COLLATE $c no está soportado: NOCASE, RTRIM o BINARY");
                 }
                 $col['collate'] = $c;
@@ -567,7 +568,7 @@ final class ParserSentencias extends ParserEscritura
     private function valorPorDefecto()
     {
         $tk = $this->actual();
-        if ($tk['t'] === 'id' && !$tk['q'] && in_array($tk['u'], ['CURRENT_TIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIME'], true)) {
+        if ($tk['t'] === 'id' && !$tk['q'] && \in_array($tk['u'], ['CURRENT_TIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIME'], true)) {
             $this->avanzar();
             return ['expr' => $tk['u']];
         }
@@ -626,7 +627,7 @@ final class ParserSentencias extends ParserEscritura
             return true;
         }
         foreach ($n as $v) {
-            if (is_array($v) && self::usaColumnas($v)) {
+            if (\is_array($v) && self::usaColumnas($v)) {
                 return true;
             }
         }
@@ -734,7 +735,7 @@ final class ParserSentencias extends ParserEscritura
                 $cuerpo[] = ['si' => $si, 'sino' => $sino];
             } elseif ($this->es('id', 'SET')) {
                 $ini = $this->actual()['p'];
-                $this->setNew();
+                ParserEscrituraAvanzada::setNew($this);
                 $cuerpo[] = $this->textoEntre($ini, $this->actual()['p']);
             } else {
                 $ini = $this->actual()['p'];
@@ -797,11 +798,16 @@ final class ParserSentencias extends ParserEscritura
      * CHECK TABLES [FROM t]   revisa los ficheros JSON y solo informa (2.9)
      * REPAIR TABLES [FROM t]  además los repara (ver StorageMantenimiento::revisarFicheros())
      * REPAIR TABLES FORGET n  deja de tener pendiente la fila apartada n (2.9)
+     * CHECK INDEXES [FROM t]  revisa los índices contra las filas y solo informa (2.10)
+     * REPAIR INDEXES [FROM t] además rehace los que no cuadran
      */
     private function check(bool $corregir): array
     {
         $this->exigir('id', $corregir ? 'REPAIR' : 'CHECK');
         $que = $this->comer('id', 'TABLES') ? 'tables' : null;
+        if ($que === null && ($this->comer('id', 'INDEXES') || $this->comer('id', 'INDEX'))) {
+            $que = 'indexes';
+        }
         if ($que === 'tables' && $corregir && $this->comer('id', 'FORGET')) {
             return ['k' => 'repair_tables', 'tabla' => null, 'olvidar' => $this->enteroPositivo('REPAIR TABLES FORGET')];
         }
@@ -870,6 +876,13 @@ final class ParserSentencias extends ParserEscritura
         $this->exigir('id', 'TABLE');
         $tabla = $this->nombreTabla();
 
+        // AUTO_INCREMENT = n de MySQL (2.10): sube el contador, nunca lo baja.
+        // Es lo que lleva un volcado para que un id no se vuelva a dar
+        if ($this->comer('id', 'AUTO_INCREMENT')) {
+            $this->comer('op', '=');
+            return ['k' => 'alter_table', 'tabla' => $tabla, 'accion' => 'autoinc',
+                    'valor' => $this->enteroPositivo('AUTO_INCREMENT')];
+        }
         if ($this->comer('id', 'ADD')) {
             if ($this->esRestriccionDeTabla()) {
                 $def = ['pk' => [], 'unique' => [], 'foreign_keys' => []];
@@ -942,7 +955,7 @@ final class ParserSentencias extends ParserEscritura
             return ['k' => 'alter_table', 'tabla' => $tabla, 'accion' => 'rename_col',
                     'col' => $col, 'nuevo' => $this->nombreSimple('columna')];
         }
-        throw JsonSqlDbError::syntax('ALTER TABLE solo admite ADD, MODIFY, DROP o RENAME');
+        throw JsonSqlDbError::syntax('ALTER TABLE solo admite ADD, MODIFY, CHANGE, DROP, RENAME o AUTO_INCREMENT');
     }
 
     private function textoEntre(int $desde, int $hasta): string

@@ -57,6 +57,27 @@ function secreto(): string
     return bin2hex(random_bytes(32));
 }
 
+/**
+ * Escribe un fichero con claves: el temporal, al lado, nace ya solo para su
+ * dueño (tempnam, 0600) con un nombre que no se puede adivinar, y se pone en su
+ * sitio con rename, que no sigue un enlace que hubiera allí (2.10: se escribía
+ * con los permisos del umask y el chmod llegaba después).
+ */
+function escribirPrivado(string $destino, string $texto): bool
+{
+    $dir = dirname($destino);
+    $tmp = @tempnam($dir, basename($destino) . '.');
+    if ($tmp === false || realpath(dirname($tmp)) !== realpath($dir)) {
+        if ($tmp !== false) { @unlink($tmp); }   // sin sitio en $dir, tempnam lo crea en el temporal del sistema
+        return false;
+    }
+    if (@file_put_contents($tmp, $texto) !== strlen($texto) || !@rename($tmp, $destino)) {
+        @unlink($tmp);
+        return false;
+    }
+    return true;
+}
+
 // Los marcadores del panel y los de su cuenta en la API son los mismos, así que
 // se generan una vez y se sustituyen en los dos ficheros con el mismo valor.
 $valores = [];
@@ -86,13 +107,13 @@ foreach ($ficheros as $destino => $plantilla) {
         );
     }
 
-    if (file_put_contents("$raiz/$destino", $texto) === false) {
+    if (!escribirPrivado("$raiz/$destino", $texto)) {
         echo "No se pudo escribir $destino. Comprueba los permisos de la carpeta.\n";
         exit(1);
     }
-    // Estos dos ficheros son el secreto entero del sistema. Con el umask
-    // habitual saldrían 0644, o sea legibles por los demás usuarios de la
-    // máquina, que en un hosting compartido son desconocidos.
+    // Estos dos ficheros son el secreto entero del sistema, y los demás
+    // usuarios de la máquina, en un hosting compartido, son desconocidos: ya
+    // nacen con 0600, y si el sistema de ficheros no admite ponérselos, se dice
     if (!@chmod("$raiz/$destino", 0600)) {
         echo "  aviso: no se pudieron restringir los permisos de $destino.\n";
         echo "  Hazlo a mano (chmod 600): contiene las claves de acceso.\n";
@@ -135,8 +156,15 @@ $ficheroCodigo = "$raiz/jsonsqldbadmin/datos/codigo-instalacion.txt";
 $codigo = is_file($ficheroCodigo) ? trim((string)file_get_contents($ficheroCodigo)) : '';
 if (!preg_match('/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/', $codigo)) {
     $codigo = implode('-', str_split(bin2hex(random_bytes(8)), 4));
-    file_put_contents($ficheroCodigo, $codigo . "\n");
-    @chmod($ficheroCodigo, 0600);
+    // Si no se puede guardar, se dice (2.10: se enseñaba un código que el
+    // panel no iba a conocer). La carpeta, como la crea el panel si falta
+    if (!is_dir(dirname($ficheroCodigo))) {
+        @mkdir(dirname($ficheroCodigo), 0775, true);
+    }
+    if (!escribirPrivado($ficheroCodigo, $codigo . "\n")) {
+        fwrite(STDERR, "\nNo se pudo guardar el código de instalación en $ficheroCodigo: comprueba los permisos de esa carpeta.\n");
+        exit(1);
+    }
 }
 
 echo "\nAhora abre jsonsqldbadmin/ en el navegador: te pedirá crear el usuario\n";

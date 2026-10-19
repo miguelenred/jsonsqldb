@@ -211,15 +211,27 @@ final class Instalador
     public static function codigo(): string
     {
         $ruta = self::rutaCodigo();
-        $codigo = is_file($ruta) ? trim((string)file_get_contents($ruta)) : '';
-        if (!preg_match('/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/', $codigo)) {
-            $codigo = implode('-', str_split(bin2hex(random_bytes(8)), 4));
-            if (@file_put_contents($ruta, $codigo . "\n", LOCK_EX) === false) {
-                throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => self::rutaVisible($ruta)]));
-            }
-            @chmod($ruta, 0600);
+        $leer = static fn(): string => is_file($ruta) ? trim((string)@file_get_contents($ruta)) : '';
+        $valido = static fn(string $c): bool => preg_match('/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/', $c) === 1;
+        $codigo = $leer();
+        if ($valido($codigo)) {
+            return $codigo;
         }
-        return $codigo;
+        // Se crea con el bloqueo puesto y se vuelve a mirar dentro (2.10: dos
+        // peticiones a la vez creaban dos códigos, y el del fichero podía no
+        // ser el que se comprobaba)
+        return Store::conBloqueo(self::FICHERO_CODIGO, static function () use ($ruta, $leer, $valido): string {
+            $codigo = $leer();
+            if (!$valido($codigo)) {
+                $codigo = implode('-', str_split(bin2hex(random_bytes(8)), 4));
+                try {
+                    Store::escribirAtomico($ruta, $codigo . "\n", 0600);
+                } catch (RuntimeException $e) {
+                    throw new RuntimeException(t('No se pudo escribir {destino}', ['destino' => self::rutaVisible($ruta)]), 0, $e);
+                }
+            }
+            return $codigo;
+        });
     }
 
     /** Comprueba el código que se ha escrito en el asistente. */
@@ -236,6 +248,7 @@ final class Instalador
     public static function borrarCodigo(): void
     {
         @unlink(self::rutaCodigo());
+        @unlink(self::rutaCodigo() . '.lock');
     }
 
     private static function rutaCodigo(): string
@@ -367,10 +380,7 @@ final class Instalador
             if ($ip === '') {
                 continue;
             }
-            [$dir, $bits] = array_pad(explode('/', $ip, 2), 2, null);
-            $esV6 = filter_var($dir, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
-            if (filter_var($dir, FILTER_VALIDATE_IP) === false
-                || ($bits !== null && (!ctype_digit($bits) || (int)$bits > ($esV6 ? 128 : 32)))) {
+            if (util_rango_ip($ip) === null) {
                 throw new RuntimeException(t('No es una IP ni un rango válido: {ip}', ['ip' => $ip]));
             }
             $ips[] = $ip;
@@ -521,7 +531,8 @@ final class Instalador
         // sesión de un administrador (2.9): en el asistente, que ve cualquiera
         // sin haber entrado, quien pide escribe la cabecera, y hacía que el
         // servidor pidiera lo que quisiera a cualquier máquina y puerto de su
-        // red. Así se comprueba también la conexión directa, que no tiene URL
+        // red. La conexión directa ya instalada lo comprueba desde el navegador
+        // (datosDirecta())
         $api = trim((string)ADMIN_API_URL);
         if ($api === '') {
             if (!Auth::esAdmin()) {
@@ -547,6 +558,86 @@ final class Instalador
         }
         return [null, $codigo !== null ? t('no se ha podido comprobar ({url} responde {codigo})', ['url' => $url, 'codigo' => $codigo])
                                        : t('no se ha podido comprobar ({url} no contesta)', ['url' => $url])];
+    }
+
+    /**
+     * Estado de la carpeta de datos para la portada y la Configuración (2.10).
+     * Con la conexión directa, lo comprueba el navegador (datosDirecta()); por
+     * la API, el servidor (datosExpuestos()), una vez por sesión: puede tardar
+     * unos segundos si la dirección no contesta. $deNuevo, en Configuración,
+     * la repite y guarda lo nuevo.
+     *
+     * @return array{0: ?bool, 1: string, 2: ?string} estado, texto y, si la comprueba el navegador, la dirección que pide
+     */
+    public static function estadoDatos(bool $deNuevo = false): array
+    {
+        if (Api::directa()) {
+            return self::datosDirecta();
+        }
+        if ($deNuevo || !isset($_SESSION['datos_expuestos'])) {
+            $_SESSION['datos_expuestos'] = self::datosExpuestos();
+        }
+        return $_SESSION['datos_expuestos'] + [2 => null];
+    }
+
+    /**
+     * Con la conexión directa, la dirección en este mismo sitio de un fichero
+     * real de una base, para que assets/panel.js la pida como la pediría
+     * cualquiera y mire qué contesta el servidor (2.10). El servidor no se
+     * llama a sí mismo, que falla tras un NAT, un cortafuegos o un proxy, y
+     * sirve aunque el motor esté en otra carpeta que el panel.
+     *
+     * La dirección sale de la del panel: subiendo a la vez por su carpeta y por
+     * su dirección hasta la carpeta que contiene la de datos (lo mismo que
+     * supone Api::urlDeducida(): la carpeta de arriba se sirve en la dirección
+     * de arriba). Si no cuelga de ninguna, la web del panel no la sirve.
+     *
+     * @return array{0: ?bool, 1: string, 2: ?string} como estadoDatos()
+     */
+    public static function datosDirecta(): array
+    {
+        try {
+            Api::cargarMotor();
+        } catch (RuntimeException $e) {
+            return [null, $e->getMessage(), null];
+        }
+        $datos = realpath((string)JSONSQLDB_DATA_PATH);
+        $dir   = realpath(dirname((string)($_SERVER['SCRIPT_FILENAME'] ?? '')));
+        if ($datos === false || $dir === false) {
+            return [null, t('no se puede comprobar: no se encuentra la carpeta de datos o la del panel'), null];
+        }
+        $datos = str_replace('\\', '/', $datos);
+        $dir   = rtrim(str_replace('\\', '/', $dir), '/');
+        $tramos = array_values(array_filter(explode('/', dirname(str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? '')))), 'strlen'));
+        for ($n = count($tramos); !str_starts_with("$datos/", "$dir/"); $n--) {
+            if ($n === 0 || dirname($dir) === $dir) {
+                return [true, t('no está en la web del panel'), null];
+            }
+            $dir = rtrim(dirname($dir), '/');
+        }
+        $fichero = self::ficheroDePrueba($datos);
+        if ($fichero === null) {
+            return [null, t('se comprobará cuando haya una base'), null];
+        }
+        $ruta = array_merge(array_slice($tramos, 0, $n), explode('/', trim(substr($datos, strlen($dir)), '/')), $fichero);
+        return [null, t('comprobando…'), '/' . implode('/', array_map('rawurlencode', array_filter($ruta, 'strlen')))];
+    }
+
+    /**
+     * Un fichero que está siempre en la carpeta de datos: los metadatos de la
+     * primera base o, si no hay ninguna, su web.config (el .htaccess no vale:
+     * Apache no entrega ningún .ht* aunque lo demás esté al descubierto).
+     *
+     * @return ?list<string> su ruta dentro de la carpeta, por tramos
+     */
+    private static function ficheroDePrueba(string $datos): ?array
+    {
+        foreach (scandir($datos) ?: [] as $nombre) {
+            if ($nombre[0] !== '.' && is_file("$datos/$nombre/_database.json")) {
+                return [$nombre, '_database.json'];
+            }
+        }
+        return is_file("$datos/web.config") ? ['web.config'] : null;
     }
 
     /** Carga el motor de esa carpeta y lista sus bases. Devuelve cuántas hay. */
@@ -620,13 +711,14 @@ final class Instalador
     /** Escribe un fichero de configuración de una pieza y lo deja legible solo por su dueño. */
     private static function escribir(string $ruta, string $texto): void
     {
-        $tmp = $ruta . '.' . getmypid() . '.tmp';
-        if (@file_put_contents($tmp, $texto) === false || !@rename($tmp, $ruta)) {
-            @unlink($tmp);
-            throw new RuntimeException(t('No se pudo escribir {ruta}. Comprueba los permisos de la carpeta.', ['ruta' => self::rutaVisible($ruta)]));
-        }
         // Contiene las claves de acceso: en un hosting compartido, los demás
-        // usuarios de la máquina no deben poder leerlo
-        @chmod($ruta, 0600);
+        // usuarios de la máquina no deben poder leerlo; el temporal nace ya
+        // solo para su dueño (2.10: los permisos se ponían después de dejarlo
+        // en su sitio; ver Store::temporalPrivado())
+        try {
+            Store::escribirAtomico($ruta, $texto, 0600);
+        } catch (RuntimeException $e) {
+            throw new RuntimeException(t('No se pudo escribir {ruta}. Comprueba los permisos de la carpeta.', ['ruta' => self::rutaVisible($ruta)]), 0, $e);
+        }
     }
 }

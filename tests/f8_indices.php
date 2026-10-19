@@ -68,7 +68,7 @@ $bd->consultar('CREATE TABLE gente (id INTEGER PRIMARY KEY AUTOINCREMENT,
                                     dni VARCHAR(12) UNIQUE, ciudad VARCHAR(20),
                                     edad INTEGER, mote VARCHAR(20))');
 $vals = [];
-$ciudades = ['Madrid', 'Elche', 'Rojales', 'Torrevieja'];
+$ciudades = ['Madrid', 'Elche', 'Zaragoza', 'Malaga'];
 for ($i = 1; $i <= 600; $i++) {
     $vals[] = sprintf("(%d,'D%04d','%s',%d,%s)",
         $i, $i, $ciudades[$i % 4], 18 + ($i % 60),
@@ -115,7 +115,7 @@ chk('col = texto sin índice salta las partes que no lo contienen y da lo mismo 
     $bd->consultar("UPDATE gente SET mote = '00123' WHERE id = 401");           // parece un número
     $casos = ["mote = 'm599'", "mote = 'm1'", "mote = 'no está'", "mote IN ('m3', 'm598', 'nada')",
               "mote = 'raro/ñ\"x'", "mote = '00123'", "mote = 'm599' AND edad > 0", "mote = 'Madrid'",
-              "ciudad = 'Rojales' AND mote = 'm2'", "mote = 'm' || '599'"];
+              "ciudad = 'Zaragoza' AND mote = 'm2'", "mote = 'm' || '599'"];
     foreach ($casos as $c) {
         $sin = str_replace('mote ', "mote || '' ", $c);
         if (!igual($bd, "SELECT * FROM gente WHERE $c ORDER BY id", "SELECT * FROM gente WHERE $sin ORDER BY id")) {
@@ -189,8 +189,8 @@ chk('CREATE INDEX sobre dos columnas', function () use ($bd) {
 chk('COUNT(*) con igualdades que cubre un índice cuenta lo mismo que recorriendo (2.7.5)', function () use ($bd) {
     // Se cuentan las posiciones del índice sin leer filas; con números u
     // otras condiciones va por el camino normal. Todas contra el recorrido
-    $casos = ["ciudad = 'Elche'", "ciudad = 'Nadie'", "ciudad IN ('Elche', 'Rojales', 'x')", "dni = 'D0007'",
-              "dni IN ('D0001', 'D0001', 'D9999')", "ciudad = 'Elche' AND edad > 30", "edad = 30", "ciudad = 'Elche' AND ciudad = 'Rojales'"];
+    $casos = ["ciudad = 'Elche'", "ciudad = 'Nadie'", "ciudad IN ('Elche', 'Zaragoza', 'x')", "dni = 'D0007'",
+              "dni IN ('D0001', 'D0001', 'D9999')", "ciudad = 'Elche' AND edad > 30", "edad = 30", "ciudad = 'Elche' AND ciudad = 'Zaragoza'"];
     foreach ($casos as $c) {
         $sin = preg_replace("/\\b(ciudad|dni|edad) /", "\$1 || '' ", $c);
         $a = $bd->consultar("SELECT COUNT(*) AS n FROM gente WHERE $c");
@@ -200,11 +200,11 @@ chk('COUNT(*) con igualdades que cubre un índice cuenta lo mismo que recorriend
     return true;
 });
 chk('las dos columnas igual que el escaneo', fn() => igual($bd,
-    "SELECT id FROM gente WHERE ciudad = 'Rojales' AND edad = 30 ORDER BY id",
-    "SELECT id FROM gente WHERE ciudad LIKE 'Rojales' AND edad + 0 = 30 ORDER BY id"));
+    "SELECT id FROM gente WHERE ciudad = 'Zaragoza' AND edad = 30 ORDER BY id",
+    "SELECT id FROM gente WHERE ciudad LIKE 'Zaragoza' AND edad + 0 = 30 ORDER BY id"));
 chk('solo la primera columna: se usa por prefijo', fn() => igual($bd,
-    "SELECT id FROM gente WHERE ciudad = 'Torrevieja' ORDER BY id",
-    "SELECT id FROM gente WHERE ciudad LIKE 'Torrevieja' ORDER BY id"));
+    "SELECT id FROM gente WHERE ciudad = 'Malaga' ORDER BY id",
+    "SELECT id FROM gente WHERE ciudad LIKE 'Malaga' ORDER BY id"));
 chk('solo la segunda columna: no sirve, y el resultado es el mismo', fn() => igual($bd,
     'SELECT id FROM gente WHERE edad = 40 ORDER BY id',
     'SELECT id FROM gente WHERE edad + 0 = 40 ORDER BY id'));
@@ -216,7 +216,7 @@ chk('combinación con IN en las dos', fn() => igual($bd,
 chk('LIMIT con un WHERE que el índice cubre entero da las mismas filas, en el mismo orden, que recorriendo, y deja de mirar trozos en cuanto las tiene (2.9)', function () use ($bd) {
     // Con LIMIT y OFFSET, una clave, IN, las dos columnas del índice, y una
     // condición de más (que no cubre: el WHERE la aplica después, sin cortar)
-    $casos = ["ciudad = 'Elche' LIMIT 5", "ciudad = 'Elche' LIMIT 7 OFFSET 20", "ciudad IN ('Elche', 'Rojales') LIMIT 50",
+    $casos = ["ciudad = 'Elche' LIMIT 5", "ciudad = 'Elche' LIMIT 7 OFFSET 20", "ciudad IN ('Elche', 'Zaragoza') LIMIT 50",
               "ciudad = 'Madrid' AND edad = 30 LIMIT 3", "ciudad = 'Elche' AND edad > 60 LIMIT 4", "dni IN ('D0500', 'D0003', 'D0100') LIMIT 2",
               "ciudad = 'Elche' AND ciudad = 'Elche' LIMIT 3", "ciudad = 'Nadie' LIMIT 3", "ciudad = 'Elche' LIMIT 0", "ciudad = 'Elche' LIMIT 1000"];
     foreach ($casos as $c) {
@@ -237,9 +237,10 @@ chk('buscar un número encuentra la fila que guarda el texto', function () use (
     $b = $bd->consultar('SELECT id FROM gente WHERE ciudad + 0 = 42 AND ciudad LIKE \'42\'');
     return $a === $b && count($a) === 1;
 });
-chk('5 y 5.0 son la misma clave', fn() =>
+chk('5 y 5.0 son la misma clave; un texto, aunque sea un número, va con la suya (2.10: \'5.0\' y \'05\' no son \'5\')', fn() =>
     Indexes::clave([5]) === Indexes::clave([5.0])
-    && Indexes::clave([5]) === Indexes::clave(['5.0']));
+    && Indexes::clave([5]) !== Indexes::clave(['5']) && Indexes::clave(['05']) !== Indexes::clave(['5'])
+    && Indexes::clave(['5.0']) !== Indexes::clave(['5']));
 chk('un número y un texto no numérico no colisionan', fn() =>
     Indexes::clave([5]) !== Indexes::clave(['cinco']));
 chk('las claves compuestas no son ambiguas', fn() =>
@@ -248,16 +249,26 @@ chk('un NULL no se indexa', fn() => Indexes::clave(['x', null]) === null);
 chk('un booleano y su número son la misma clave', fn() =>
     Indexes::clave([true]) === Indexes::clave([1])
     && Indexes::clave([false]) === Indexes::clave([0]));
-chk('ningún valor igual para el motor cae en dos claves distintas', function () {
+chk('ningún valor igual para el motor cae en dos claves distintas, buscado con la afinidad de su columna (2.10)', function () {
     // La clave tiene que respetar Valor::comparar(). Si dos valores que el
     // motor da por iguales acabaran en claves distintas, el índice devolvería
     // de menos, que es el fallo que no se nota. Al revés —de más— lo arregla
-    // el WHERE, que se aplica igual después.
-    $vals = [true, false, 1, 0, '1', '0', 1.0, '1.0', 5, '5', '5.0', '', 'abc', 'ABC', -3, '-3.00'];
-    foreach ($vals as $a) {
-        foreach ($vals as $b) {
-            if (Valor::comparar($a, $b) === 0 && Indexes::clave([$a]) !== Indexes::clave([$b])) {
-                return 'falso negativo: ' . var_export($a, true) . ' vs ' . var_export($b, true);
+    // el WHERE, que se aplica igual después. Lo que hay en la columna es de
+    // su tipo (en una de texto, textos; en una numérica, números, booleanos
+    // de un JSON editado a mano, o textos que no son números, como una fecha),
+    // y lo que se busca va con su afinidad (ver Valor::conAfinidad())
+    $vals = [true, false, 1, 0, '1', '0', 1.0, '1.0', 5, '5', '5.0', '05', ' 5 ', '', 'abc', 'ABC', -3, '-3.00'];
+    foreach (['N', 'T'] as $afin) {
+        foreach ($vals as $x) {
+            $guardado = Valor::conAfinidad($x, $afin);
+            if ($afin === 'T' && !is_string($guardado)) {
+                continue;                           // en una columna de texto solo hay textos
+            }
+            foreach ($vals as $buscado) {
+                $b = Valor::conAfinidad($buscado, $afin);
+                if (Valor::comparar($guardado, $b) === 0 && Indexes::clave([$guardado]) !== Indexes::clave([$b])) {
+                    return "falso negativo ($afin): " . var_export($guardado, true) . ' vs ' . var_export($b, true);
+                }
             }
         }
     }
@@ -799,7 +810,7 @@ chk('COUNT(*) de una igualdad sobre un índice cuenta las posiciones sin juntarl
     return $mal === [] ?: implode(' | ', $mal);
 });
 
-chk('COUNT(*) de una igualdad numérica sobre columnas INTEGER, DOUBLE y DECIMAL con índice cuenta en el índice y da lo que contar las filas: 5 y 5.0, textos numéricos, IN, borradas y cambiadas; en una columna sin tipo numérico o con un booleano cuenta las filas (2.9.1)', function () use ($raiz) {
+chk('COUNT(*) de una igualdad numérica sobre columnas INTEGER, DOUBLE y DECIMAL con índice cuenta en el índice y da lo que contar las filas: 5 y 5.0, textos numéricos, IN, borradas y cambiadas (2.10); y en una de texto, cada texto con su clave (2.10)', function () use ($raiz) {
     $dir = $raiz . '/cuentan';
     @mkdir($dir, 0775, true);
     Database::crear('k', $dir);
@@ -817,14 +828,15 @@ chk('COUNT(*) de una igualdad numérica sobre columnas INTEGER, DOUBLE y DECIMAL
     $bd->consultar('UPDATE t SET e = 3, d = 1.5 WHERE id % 37 = 0');
     $mal = [];
     $conds = ['e = 3', 'e = 3.0', "e = '3'", "e = ' 3 '", 'e = 3.5', 'e IN (1, 2, 2, 6)', 'e = 99', 'd = 1.5', 'd = 2', "d = '0.5'",
-              'p = 2.5', 'p = 3.75', "p = '1.25'", 'p IN (0, 6.25)', "x = '3'", "x = 3"];
+              'p = 2.5', 'p = 3.75', "p = '1.25'", 'p IN (0, 6.25)', "x = '3'", "x = 3", "x = '03'", "x IN ('1', '01', 2)"];
     foreach ($conds as $cond) {
         $a = $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE $cond")[0]['n'];
-        $b = $bd->consultar('SELECT COUNT(*) AS n FROM t WHERE ' . preg_replace('/^(\w+)/', '$1 + 0', $cond))[0]['n'];
+        // Lo mismo sin índice: x + 0 compara como la columna numérica, y
+        // CAST(x AS TEXT) como la de texto ('03' no es 3, 2.10)
+        $sin = $cond[0] === 'x' ? preg_replace('/^(\w+)/', 'CAST($1 AS TEXT)', $cond) : preg_replace('/^(\w+)/', '$1 + 0', $cond);
+        $b = $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE $sin")[0]['n'];
         $via = $bd->consultar("EXPLAIN SELECT COUNT(*) AS n FROM t WHERE $cond")[0]['acceso'];
-        // En x (texto) no: allí '03' y 3 tienen la misma clave y el WHERE los separa
-        $esperada = $cond[0] === 'x' ? 'índice (=)' : 'recuento en el índice, sin leer filas';
-        if ($a !== $b || ($via !== $esperada && !str_starts_with($via, 'recorrido'))) { $mal[] = "$cond: $a / $b ($via)"; }
+        if ($a !== $b || ($via !== 'recuento en el índice, sin leer filas' && !str_starts_with($via, 'recorrido'))) { $mal[] = "$cond: $a / $b ($via)"; }
     }
     $conBool = $bd->consultar('SELECT COUNT(*) AS n FROM t WHERE e = ?', [true])[0]['n'];
     $sinBool = $bd->consultar('SELECT COUNT(*) AS n FROM t WHERE e + 0 = ?', [true])[0]['n'];
@@ -873,12 +885,13 @@ chk('con dos índices que cubren una columna cada uno, gana el único: «id = ? 
     // 600 claves numéricas sí (cada una se busca en un solo trozo); 5.000, no
     $c = IndexesBusqueda::candidatos($defs, ['id' => range(1, 5000), 'ciudad' => ['Oslo']]);
     $d = IndexesBusqueda::candidatos($defs, ['id' => range(1, 600), 'ciudad' => ['Oslo']]);
-    // Si edad admite NULL, (ciudad, edad) no sirve para buscar solo por ciudad (2.9.1)
+    // Si edad admite NULL, (ciudad, edad) no sirve para buscar solo por ciudad
+    // en toda la tabla: va el último, solo para las partes sin NULL (2.10)
     $defs[2]['minimo'] = 2;
     $e = IndexesBusqueda::candidatos($defs, ['id' => [5], 'ciudad' => ['Oslo']]);
-    $nombres = static fn($l) => implode(',', array_map(static fn($x) => $x['def']['name'], $l));
+    $nombres = static fn($l) => implode(',', array_map(static fn($x) => $x['def']['name'] . ($x['parcial'] ? '*' : ''), $l));
     return $nombres($a) === 'auto_id,ix_ciudad,ix_ciudad_edad' && $nombres($b) === 'ix_ciudad_edad,ix_ciudad'
-        && $nombres($c) === 'ix_ciudad,ix_ciudad_edad' && $nombres($d) === 'auto_id,ix_ciudad,ix_ciudad_edad' && $nombres($e) === 'auto_id,ix_ciudad'
+        && $nombres($c) === 'ix_ciudad,ix_ciudad_edad' && $nombres($d) === 'auto_id,ix_ciudad,ix_ciudad_edad' && $nombres($e) === 'auto_id,ix_ciudad,ix_ciudad_edad*'
         ?: $nombres($a) . ' | ' . $nombres($b) . ' | ' . $nombres($c) . ' | ' . $nombres($d) . ' | ' . $nombres($e);
 });
 
@@ -892,7 +905,7 @@ chk('MIN y MAX de columnas con índice salen de los rangos del índice y coincid
     $bd = new Database('m', $dir);
     $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, e INTEGER, d DOUBLE, p DECIMAL(10,2), s TEXT NOT NULL)');
     $bd->consultar('CREATE INDEX ie ON t (e)');
-    $bd->consultar('CREATE INDEX idd ON t (d, s)');      // la primera columna es la que cuenta, con s NOT NULL (2.9.1)
+    $bd->consultar('CREATE INDEX idd ON t (d, s)');      // la primera columna es la que cuenta, con s NOT NULL (2.10)
     $bd->consultar('CREATE INDEX ip ON t (p)');
     mt_srand(7);
     $consulta = 'SELECT MIN(e) AS a, MAX(e) AS b, MIN(d) AS c, MAX(d), MIN(p) AS f, MAX(p) AS g, MAX(id) AS h, MIN(id) FROM t';
@@ -1264,7 +1277,109 @@ chk('ORDER BY col [DESC] LIMIT n con índice da lo mismo que ordenar la tabla en
     return true;
 });
 
-chk('un índice de varias columnas con NULL en las de detrás no se usa para buscar solo por las primeras: =, IN, COUNT, rangos, MIN/MAX, ORDER BY … LIMIT, JOIN, UPDATE y DELETE dan lo mismo que recorriendo (2.9.1: perdían esas filas UPDATE y DELETE desde la 2.5.0, y SELECT y COUNT desde la 2.7.4); con las de detrás NOT NULL sí se usa', function () use ($raiz) {
+chk('WHERE col > n ORDER BY col LIMIT k (y DESC con <) lee el índice desde el límite y da lo mismo que ordenar la tabla, con varias partes, empates, NULL, borradas y >=, también escrito n < col, y con pocas filas detrás del límite, por el rango, que cuesta menos (2.10: leía todo el rango)', function () use ($raiz) {
+    // Es lo que hace quien recorre una tabla por su clave, lote a lote
+    $dir = "$raiz/ordlim";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('o', $dir);
+    $bd = new Database('o', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, nn INTEGER NOT NULL, d DOUBLE, s TEXT)');
+    $bd->consultar('CREATE INDEX i_nn ON t (nn)');
+    $bd->consultar('CREATE INDEX i_d ON t (d)');
+    mt_srand(17);
+    $v = [];
+    for ($i = 1; $i <= 4500; $i++) {
+        $v[] = '(' . ($i * 3) . ', ' . mt_rand(0, 300) . ', ' . (mt_rand(0, 9) ? mt_rand(-800, 800) / 4 : 'NULL') . ", 'x$i')";
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(', ', $v));
+    $bd->consultar('DELETE FROM t WHERE id % 7 = 0');
+    $consultas = [];
+    foreach ([0, 2999, 3000, 6001, 13499, 13500, 20000] as $x) {
+        $consultas[] = "SELECT * FROM t WHERE id > $x ORDER BY id LIMIT 50";
+        $consultas[] = "SELECT id FROM t WHERE id >= $x ORDER BY id LIMIT 7";
+        $consultas[] = "SELECT * FROM t WHERE id < $x ORDER BY id DESC LIMIT 40";
+        $consultas[] = "SELECT id, s FROM t WHERE $x < id ORDER BY id LIMIT 20 OFFSET 3";
+        $consultas[] = "SELECT id FROM t WHERE id < $x ORDER BY id LIMIT 10";           // el límite al otro lado: como siempre
+        $consultas[] = "SELECT id FROM t WHERE id > $x ORDER BY id DESC LIMIT 10";
+    }
+    foreach ([-1, 0, 150, 299, 300] as $x) {
+        $consultas[] = "SELECT * FROM t WHERE nn > $x ORDER BY nn LIMIT 30";
+        $consultas[] = "SELECT * FROM t WHERE nn <= $x ORDER BY nn DESC LIMIT 25";
+        $consultas[] = "SELECT * FROM t WHERE d > " . ($x - 150) . ".5 ORDER BY d LIMIT 15";
+        $consultas[] = "SELECT * FROM t WHERE d < " . ($x - 150) . " ORDER BY d DESC LIMIT 15";
+    }
+    $mal = [];
+    foreach ($consultas as $q) {
+        $sinIndice = (string)preg_replace('/ORDER BY (\w+)/', 'ORDER BY CASE WHEN 1 THEN $1 END', $q);
+        if ($bd->consultar($q) !== $bd->consultar($sinIndice)) { $mal[] = $q; }
+    }
+    $via = $bd->consultar('EXPLAIN SELECT * FROM t WHERE id > 6000 ORDER BY id LIMIT 50')[0]['acceso'] ?? '';
+    // Con pocas filas detrás del límite, por el rango, que cuesta menos
+    $cerca = $bd->consultar('EXPLAIN SELECT * FROM t WHERE id > 13000 ORDER BY id LIMIT 50')[0]['acceso'] ?? '';
+    // Un ORDER BY que no es una columna no pasa por aquí, sin avisos de PHP
+    $avisos = [];
+    set_error_handler(static function (int $n, string $m) use (&$avisos): bool { $avisos[] = $m; return true; });
+    try {
+        foreach (['SELECT id FROM t WHERE id > 5 ORDER BY id + 0 LIMIT 3', 'SELECT id FROM t WHERE id > 5 ORDER BY 1 LIMIT 3'] as $q) {
+            if ($bd->consultar($q) !== $bd->consultar(str_replace(' LIMIT 3', '', $q) . ' LIMIT 3 OFFSET 0')) { $mal[] = $q; }
+        }
+    } finally {
+        restore_error_handler();
+    }
+    if ($avisos !== []) { $mal[] = $avisos; }
+    borrarArbol($dir);
+    return $mal === [] && str_contains($via, 'desde el límite del WHERE') && $cerca === 'índice, rango'
+        ?: json_encode([$mal, $via, $cerca], JSON_UNESCAPED_UNICODE);
+});
+
+chk('ORDER BY col [DESC] LIMIT n de una columna de texto con índice da lo mismo que ordenar la tabla entera, con la colación general y con la binaria, con empates, mayúsculas y acentos (2.10: se leía la tabla)', function () use ($raiz) {
+    $dir = "$raiz/ordtxt";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('o', $dir);
+    $bd = new Database('o', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, tn TEXT NOT NULL, tx TEXT, tc TEXT COLLATE NOCASE NOT NULL)');
+    foreach (['tn', 'tx', 'tc'] as $c) {
+        $bd->consultar("CREATE INDEX i_$c ON t ($c)");
+    }
+    mt_srand(11);
+    $textos = ['ana', 'Ana', 'ÁNA', 'ána', 'bea', 'Bea', 'beá', 'zoe', 'Zoe', '10', '9', '007', 'ñu', 'Ñu', 'nu', 'a b', 'a-b'];
+    $v = [];
+    for ($i = 1; $i <= 2600; $i++) {
+        $t = $textos[mt_rand(0, count($textos) - 1)] . (mt_rand(0, 3) ? '' : (string)mt_rand(0, 40));
+        $v[] = "($i, '$t', " . (mt_rand(0, 5) ? "'" . $textos[mt_rand(0, count($textos) - 1)] . "'" : 'NULL') . ", '$t')";
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(', ', $v));
+    $bd->consultar('DELETE FROM t WHERE id % 97 = 0');
+    unset($bd);
+    // Con índice las primeras cinco; las otras, por el camino de siempre (NULL en
+    // orden ascendente, COLLATE en la columna o en el ORDER BY)
+    $consultas = ['SELECT * FROM t ORDER BY tn LIMIT 9', 'SELECT id, tn FROM t ORDER BY tn DESC LIMIT 12 OFFSET 5',
+                  'SELECT * FROM t ORDER BY tn COLLATE BINARY LIMIT 7', 'SELECT * FROM t ORDER BY tn COLLATE BINARY DESC LIMIT 40',
+                  'SELECT id, tx FROM t ORDER BY tx DESC LIMIT 6', 'SELECT * FROM t ORDER BY tx LIMIT 5',
+                  'SELECT * FROM t ORDER BY tc LIMIT 5', 'SELECT * FROM t ORDER BY tn COLLATE NOCASE LIMIT 5'];
+    $mal = [];
+    foreach (['general', 'binaria'] as $colacion) {
+        $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0); define("JSONSQLDB_COLACION", "' . $colacion . '");'
+            . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . ' $bd = new JsonSQLDB\Database("o", ' . var_export($dir, true) . '); $r = [];'
+            . ' foreach (' . var_export($consultas, true) . ' as $q) {'
+            . '   $sin = preg_replace("/ORDER BY (\\\\w+)/", "ORDER BY CASE WHEN 1 THEN $1 END", $q);'
+            . '   $r[] = [$bd->consultar("EXPLAIN $q")[0]["acceso"], $bd->consultar($q) === $bd->consultar($sin)];'
+            . ' } echo json_encode($r, JSON_UNESCAPED_UNICODE);';
+        $r = json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'), true);
+        foreach ($consultas as $i => $q) {
+            $porIndice = str_starts_with((string)($r[$i][0] ?? ''), 'índice, en orden');
+            if (!is_array($r) || $r[$i][1] !== true || $porIndice !== $i < 5) {
+                $mal[] = "$colacion, $q: " . json_encode($r[$i] ?? $r, JSON_UNESCAPED_UNICODE);
+            }
+        }
+    }
+    borrarArbol($dir);
+    return $mal === [] ?: implode(' · ', $mal);
+});
+chk('un índice de varias columnas con NULL en las de detrás no se usa para buscar solo por las primeras: =, IN, COUNT, rangos, MIN/MAX, ORDER BY … LIMIT, JOIN, UPDATE y DELETE dan lo mismo que recorriendo (2.10: perdían esas filas UPDATE y DELETE desde la 2.5.0, y SELECT y COUNT desde la 2.7.4); con las de detrás NOT NULL sí se usa', function () use ($raiz) {
     $dir = "$raiz/compuesto";
     borrarArbol($dir);
     @mkdir($dir, 0775, true);
@@ -1322,6 +1437,53 @@ chk('un índice de varias columnas con NULL en las de detrás no se usa para bus
     return $usados === ['', 'auto_e_id'] ?: json_encode($usados);
 });
 
+chk('un índice de varias columnas con NULL en las de detrás se usa en las partes donde no falta ninguna fila, y de las demás se leen todas: =, IN, UPDATE y DELETE dan lo mismo que recorriendo, también las filas con NULL (2.10)', function () use ($raiz) {
+    $dir = "$raiz/porpartes";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER NOT NULL, b INTEGER, s TEXT, UNIQUE (a, b))');
+    // Cinco partes: NULL en b solo en la cuarta, y la quinta sin llenar
+    $v = [];
+    for ($i = 1; $i <= 4600; $i++) {
+        $v[] = "($i, " . ($i % 50) . ', ' . ($i > 3000 && $i <= 4000 && $i % 7 === 0 ? 'NULL' : $i) . ", 's$i')";
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(', ', $v));
+    $sin = static fn(string $q): string => preg_replace('/\ba (=|IN)/', '(a + 0) $1', $q);
+    $consultas = ['SELECT * FROM t WHERE a = 7', 'SELECT id, b FROM t WHERE a IN (7, 14, 49)', 'SELECT id FROM t WHERE a = 7 AND b IS NULL',
+                  'SELECT COUNT(*) AS n FROM t WHERE a = 21'];
+    $comparar = static function () use ($bd, $consultas, $sin): ?string {
+        foreach ($consultas as $q) {
+            if ($bd->consultar($q) !== $bd->consultar($sin($q))) {
+                return "$q: " . json_encode($bd->consultar($q)) . ' / ' . json_encode($bd->consultar($sin($q)));
+            }
+        }
+        return null;
+    };
+    $via = static fn(): string => (string)$bd->consultar('EXPLAIN SELECT * FROM t WHERE a = 7')[0]['acceso'];
+    if (($r = $comparar()) !== null || !str_contains($via(), 'partes sin NULL')) {
+        return $r ?? $via();
+    }
+    // Las filas con NULL de la cuarta parte también se cambian y se borran
+    foreach (['UPDATE t SET s = ? WHERE a = 7' => 'a + 0 = 7', 'DELETE FROM t WHERE a IN (14, 28)' => 'a + 0 IN (14, 28)'] as $q => $condicion) {
+        $antes = (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE $condicion")[0]['n'];
+        $hechas = $bd->consultar($q, str_contains($q, '?') ? ['cambiada'] : [])['filas'];
+        if ($antes === 0 || $hechas !== $antes) {
+            return "$q: cambió $hechas de $antes";
+        }
+    }
+    if (($r = $comparar()) !== null || (int)$bd->consultar("SELECT COUNT(*) AS n FROM t WHERE a = 7 AND s = 'cambiada'")[0]['n'] !== 92) {
+        return $r ?? 'el UPDATE no llegó a todas';
+    }
+    // Con NULL en casi todas las partes, se recorre la tabla
+    $bd->consultar('UPDATE t SET b = NULL WHERE id IN (5, 1005, 2005)');
+    $recorre = $via() === 'recorrido';
+    $r = $comparar();
+    borrarArbol($dir);
+    return $r === null && $recorre ?: ($r ?? 'no recorre');
+});
+
 echo "\n== DISTINCT sin juntar la tabla (2.9) ==\n";
 
 chk('SELECT DISTINCT descarta las repetidas según llegan: con 16 MB de memoria contesta sobre una tabla que no cabe', function () use ($raiz) {
@@ -1350,7 +1512,7 @@ chk('SELECT DISTINCT descarta las repetidas según llegan: con 16 MB de memoria 
 
 echo "\n== ORDER BY en disco cuando no cabe (2.9) ==\n";
 
-chk('con 16 a 30 filas por parte una igualdad va por el índice, y ORDER BY … LIMIT con empates lee solo las filas que salen; lo mismo que recorriendo (2.9.1: se recorría la tabla, de 9 a 13 veces más lento, y se leían todas las del valor del corte)', function () use ($raiz) {
+chk('con 16 a 30 filas por parte una igualdad va por el índice, y ORDER BY … LIMIT con empates lee solo las filas que salen; lo mismo que recorriendo (2.10: se recorría la tabla, de 9 a 13 veces más lento, y se leían todas las del valor del corte)', function () use ($raiz) {
     $dir = "$raiz/coste";
     borrarArbol($dir);
     @mkdir($dir, 0775, true);
@@ -1375,7 +1537,7 @@ chk('con 16 a 30 filas por parte una igualdad va por el índice, y ORDER BY … 
     return $mal === [] ?: implode(' | ', $mal);
 });
 
-chk('un ORDER BY sin LIMIT proyecta cada fila al leerla: con filas anchas y una columna en la salida, menos de la mitad de memoria y el mismo resultado (2.9.1: juntaba la tabla entera antes de ordenar)', function () use ($raiz) {
+chk('un ORDER BY sin LIMIT proyecta cada fila al leerla: con filas anchas y una columna en la salida, menos de la mitad de memoria y el mismo resultado (2.10: juntaba la tabla entera antes de ordenar)', function () use ($raiz) {
     $dir = "$raiz/proy";
     borrarArbol($dir);
     @mkdir($dir, 0775, true);
@@ -1401,6 +1563,36 @@ chk('un ORDER BY sin LIMIT proyecta cada fila al leerla: con filas anchas y una 
     usort($ids, static fn(int $a, int $b): int => [($b * 7919) % 500, $a] <=> [($a * 7919) % 500, $b]);
     borrarArbol($dir);
     return is_array($r) && $r[0] < 16 && $r[1] === md5(json_encode(array_map(static fn(int $i): array => ['id' => $i], $ids))) ?: json_encode($r);
+});
+
+chk('una función de ventana guarda de cada fila solo las columnas que usa: con filas anchas, menos de la mitad de memoria y el mismo resultado (2.10: la fila entera, y su contexto)', function () use ($raiz) {
+    $dir = "$raiz/vent";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('p', $dir);
+    $bd = new Database('p', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, r TEXT)');
+    for ($k = 0; $k < 20; $k++) {
+        $v = [];
+        for ($i = $k * 1000 + 1; $i <= ($k + 1) * 1000; $i++) {
+            $v[] = "($i, " . (($i * 7919) % 500) . ", '" . str_repeat('r', 500) . "')";
+        }
+        $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    }
+    unset($bd);
+    $q = 'SELECT id, ROW_NUMBER() OVER (ORDER BY n DESC) AS k FROM t';
+    $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0);'
+            . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . ' $bd = new JsonSQLDB\Database("p", ' . var_export($dir, true) . '); $bd->consultar("' . $q . '");'
+            . ' $b = memory_get_usage(); $r = $bd->consultar("' . $q . '");'
+            . ' echo json_encode([round((memory_get_peak_usage() - $b) / 1048576), md5(json_encode($r))]);';
+    $r = json_decode((string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1'), true);
+    // Lo esperado: por n de mayor a menor y, en un empate, en el orden de la tabla, numeradas
+    $ids = range(1, 20000);
+    usort($ids, static fn(int $a, int $b): int => [($b * 7919) % 500, $a] <=> [($a * 7919) % 500, $b]);
+    borrarArbol($dir);
+    return is_array($r) && $r[0] < 16 && $r[1] === md5(json_encode(array_map(static fn(int $i, int $k): array => ['id' => $i, 'k' => $k + 1], $ids, array_keys($ids))))
+        ?: json_encode($r);
 });
 
 chk('un ORDER BY que no cabe en 24 MB se ordena en disco en pocos tramos y sale igual que con memoria de sobra, sin dejar temporales', function () use ($raiz) {
@@ -1596,6 +1788,184 @@ chk('JOIN, GROUP BY, subconsultas del FROM, UNION, IN, EXISTS, WITH, ventanas y 
     }
     borrarArbol($dir);
     return true;
+});
+
+chk("un rango sobre una columna de texto con textos que son números ('00012') va por su índice como texto, también con un número escrito (5990 es '5990'), y da lo mismo que recorriendo (2.10)", function () use ($raiz) {
+    $dir = "$raiz/rangotexto";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('r', $dir);
+    $bd = new Database('r', $dir);
+    $bd->consultar('CREATE TABLE g (id INTEGER PRIMARY KEY, s TEXT)');
+    $v = [];
+    for ($i = 1; $i <= 6000; $i++) {
+        $v[] = "($i, '" . sprintf('%05d', $i) . "')";
+    }
+    $bd->consultar('INSERT INTO g VALUES ' . implode(',', $v));
+    $bd->consultar('CREATE INDEX g_s ON g (s)');
+    $mal = [];
+    foreach (["SELECT id FROM g WHERE s > '05990'" => 10, 'SELECT id FROM g WHERE s >= 5990' => 0, "SELECT id FROM g WHERE s BETWEEN '00010' AND '00020'" => 11, 'SELECT id FROM g WHERE s BETWEEN 10 AND 20' => 0,
+              "SELECT id FROM g WHERE s < '00005'" => 4] as $q => $n) {
+        $r   = array_column($bd->consultar($q), 'id');
+        $sin = array_column($bd->consultar(str_replace('WHERE s ', 'WHERE CAST(s AS TEXT) ', $q)), 'id');
+        $via = $bd->consultar("EXPLAIN $q")[0]['acceso'];
+        if (count($r) !== $n || $r !== $sin || $via !== 'índice, comparación') { $mal[] = "$q: " . count($r) . " filas, $via"; }
+    }
+    borrarArbol($dir);
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
+chk('un índice de texto con las claves de antes de la 2.10 no se usa hasta rehacerlo: sin «textos» en el estado (una base de la 2.9) o con un trozo reescrito después por una versión anterior, la consulta da sus filas leyendo la tabla, CHECK INDEXES lo dice y queda rehecho; «textos» (la revisión hasta la que están las claves de la 2.10) va solo en los índices con una columna de texto, y una escritura que no toca sus trozos lo deja válido (2.10)', function () use ($raiz) {
+    $dir = "$raiz/huella";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('h', $dir);
+    $abrir = static fn(): Database => new Database('h', $dir);
+    $bd    = $abrir();
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, c TEXT, n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_c ON t (c)');
+    $bd->consultar('CREATE INDEX ix_n ON t (n)');
+    $v = [];
+    for ($i = 1; $i <= 150; $i++) {
+        $v[] = "($i, '" . ['007', '7', '7.0', 'abc'][$i % 4] . "', $i)";
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    $estado = static fn(): array => json_decode((string)file_get_contents("$dir/h/t.rev.json"), true);
+    $mal    = [];
+    // «textos» dice hasta qué revisión están las claves como en la 2.10: vale si
+    // no pasa de la de la tabla y ningún trozo es de después
+    $vale = static fn(array $e): bool => is_int($e['textos']['ix_c'] ?? null) && $e['textos']['ix_c'] <= $e['rev']
+        && $e['textos']['ix_c'] >= max($e['indexes']['ix_c']);
+    $e = $estado();
+    if (array_keys($e['textos'] ?? []) !== ['ix_c'] || $e['textos']['ix_c'] !== $e['rev'] || !$vale($e)) { $mal[] = 'la marca al escribir: ' . json_encode($e['textos'] ?? null); }
+    $bd->consultar('UPDATE t SET n = n + 1000 WHERE id = 5');
+    $f = $estado();
+    if ($f['indexes']['ix_c'] !== $e['indexes']['ix_c'] || !$vale($f)) { $mal[] = 'la marca tras un UPDATE que no toca ix_c'; }
+    $bien = array_column($bd->consultar("SELECT id FROM t WHERE c = '007' ORDER BY id"), 'id');
+    unset($bd);
+    // Las claves de antes: un texto que es un número, a la clave de ese número
+    $aLaAntigua = static function () use ($dir): void {
+        foreach ((array)glob("$dir/h/t.idx.ix_c*.json") as $fichero) {
+            $trozo = json_decode((string)file_get_contents($fichero), true);
+            $keys  = [];
+            foreach ($trozo['keys'] as $k => $pos) {
+                $valor = substr((string)$k, strpos((string)$k, ':') + 1);
+                $k     = is_numeric($valor) ? 'n' . strlen((string)($valor + 0)) . ':' . ($valor + 0) : $k;
+                $keys[$k] = array_merge((array)($keys[$k] ?? []), (array)$pos);
+            }
+            $trozo['keys'] = $keys;
+            file_put_contents($fichero, json_encode($trozo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        }
+    };
+    $probar = static function (string $caso) use ($abrir, $bien, $estado, $vale, &$mal): void {
+        $bd = $abrir();
+        $antes = array_column($bd->consultar('CHECK INDEXES FROM t'), 'problema');
+        // Con un comentario propio, para que no la sirva la caché de
+        // resultados: la consulta tiene que correr para que el índice se rehaga
+        $filas = array_column($bd->consultar("SELECT id FROM t WHERE c = '007' ORDER BY id -- $caso"), 'id');
+        $tras  = $bd->consultar('CHECK INDEXES FROM t');
+        $via   = $bd->consultar("EXPLAIN SELECT id FROM t WHERE c = '007'")[0]['acceso'];
+        $e     = $estado();
+        if (count($antes) !== 1 || !str_contains($antes[0], 'antes de la 2.10') || $filas !== $bien || $tras !== [] || !str_starts_with($via, 'índice')
+            || !$vale($e)) {
+            $mal[] = "$caso: " . json_encode([$antes, count($filas), $tras, $via], JSON_UNESCAPED_UNICODE);
+        }
+    };
+    // Una base de la 2.9: sin «textos»
+    $aLaAntigua();
+    $e = $estado();
+    unset($e['textos']);
+    file_put_contents("$dir/h/t.rev.json", json_encode($e));
+    $probar('sin textos');
+    // Con «textos», y un trozo reescrito por la 2.9 (otra revisión, y «textos» sin tocar)
+    $aLaAntigua();
+    $e = $estado();
+    $r = (int)$e['rev'] + 1;
+    $e['rev'] = $e['indexes']['ix_c'][1] = $r;
+    $trozo = json_decode((string)file_get_contents("$dir/h/t.idx.ix_c.part2.json"), true);
+    $trozo['rev'] = $r;
+    file_put_contents("$dir/h/t.idx.ix_c.part2.json", json_encode($trozo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    file_put_contents("$dir/h/t.rev.json", json_encode($e));
+    $probar('un trozo de otra versión');
+    borrarArbol($dir);
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
+chk('un índice con una columna decimal y las claves de antes de la 2.10 (un decimal entero de 9·10^18 a 2^63, con clave de decimal) no se usa hasta rehacerlo: sin «textos» en el estado, la consulta da sus filas leyendo la tabla, CHECK INDEXES lo dice y queda rehecho; uno sobre una columna INTEGER no lleva «textos» y vale (2.10)', function () use ($raiz) {
+    $dir = "$raiz/huellad";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('h', $dir);
+    $bd = new Database('h', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, r REAL, n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_r ON t (r)');
+    $bd->consultar('CREATE INDEX ix_n ON t (n)');
+    $v = [];
+    for ($i = 1; $i <= 150; $i++) {
+        $v[] = "($i, " . ($i % 3 === 0 ? '9.1e18' : "$i.5") . ", $i)";
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $v));
+    unset($bd);
+    // Las claves de la 2.9: ese decimal, a una de decimal
+    foreach ((array)glob("$dir/h/t.idx.ix_r*.json") as $fichero) {
+        $trozo = json_decode((string)file_get_contents($fichero), true);
+        $keys  = [];
+        foreach ($trozo['keys'] as $k => $pos) {
+            $keys[$k === 'n19:9100000000000000000' ? 'n7:9.1E+18' : $k] = $pos;
+        }
+        $trozo['keys'] = $keys;
+        file_put_contents($fichero, json_encode($trozo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+    $e      = json_decode((string)file_get_contents("$dir/h/t.rev.json"), true);
+    $textos = array_keys($e['textos'] ?? []);
+    unset($e['textos']);
+    file_put_contents("$dir/h/t.rev.json", json_encode($e));
+    $bd    = new Database('h', $dir);
+    $antes = array_column($bd->consultar('CHECK INDEXES FROM t'), 'indice');
+    $filas = count($bd->consultar('SELECT id FROM t WHERE r = 9100000000000000000'));
+    $tras  = $bd->consultar('CHECK INDEXES FROM t');
+    $via   = $bd->consultar('EXPLAIN SELECT id FROM t WHERE r = 9.1e18')[0]['acceso'];
+    $otra  = count($bd->consultar('SELECT id FROM t WHERE r = 9.1e18'));
+    unset($bd);
+    borrarArbol($dir);
+    return $textos === ['ix_r'] && $antes === ['ix_r'] && $filas === 50 && $tras === [] && str_starts_with($via, 'índice') && $otra === 50
+        ?: json_encode([$textos, $antes, $filas, $tras, $via, $otra], JSON_UNESCAPED_UNICODE);
+});
+
+chk('una búsqueda numérica por un índice lee los trozos de rango desconocido, y uno vacío (solo NULL) no da avisos de PHP (2.10: el rango de cada trozo se mira sin llamar a cabeEnRango())', function () use ($raiz) {
+    $dir = "$raiz/rangos";
+    borrarArbol($dir);
+    @mkdir($dir, 0775, true);
+    Database::crear('r', $dir);
+    $bd = new Database('r', $dir);
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)');
+    // La parte 2 toda NULL: su trozo no tiene claves, y su rango es []
+    $filas = [];
+    for ($i = 1; $i <= 200; $i++) {
+        $filas[] = '(' . $i . ', ' . ($i > 50 && $i <= 100 ? 'NULL' : $i) . ')';
+    }
+    $bd->consultar('INSERT INTO t VALUES ' . implode(',', $filas));
+    $bd->consultar('CREATE INDEX i_v ON t (v)');
+    unset($bd);
+    // El rango del trozo 1, desconocido (null): hay que leerlo
+    $e = json_decode((string)file_get_contents("$dir/r/t.rev.json"), true);
+    $vacio = $e['rangos']['i_v'][1] ?? null;
+    $e['rangos']['i_v'][0] = null;
+    file_put_contents("$dir/r/t.rev.json", json_encode($e));
+    $bd = new Database('r', $dir);                 // sin el índice ya en memoria
+    $avisos = [];
+    set_error_handler(static function (int $n, string $m) use (&$avisos): bool { $avisos[] = $m; return true; });
+    try {
+        $uno  = $bd->consultar('SELECT id FROM t WHERE v = 5');
+        $tres = $bd->consultar('SELECT id FROM t WHERE v IN (180, 5, 50) ORDER BY id');
+        $via  = $bd->consultar('EXPLAIN SELECT id FROM t WHERE v IN (180, 5, 50)')[0]['acceso'] ?? '';
+    } finally {
+        restore_error_handler();
+    }
+    unset($bd);
+    borrarArbol($dir);
+    return $vacio === [] && $uno === [['id' => 5]] && $tres === [['id' => 5], ['id' => 50], ['id' => 180]] && str_starts_with($via, 'índice') && $avisos === []
+        ?: json_encode([$vacio, $uno, $tres, $via, $avisos], JSON_UNESCAPED_UNICODE);
 });
 
 // Sin dejar nada en la carpeta temporal del sistema

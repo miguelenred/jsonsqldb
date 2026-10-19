@@ -38,11 +38,8 @@ final class EvaluatorCompilado extends Evaluator
                 return static fn() => $v;
 
             case 'col':
-                if (isset($n['externa']) || !isset($n['clave'])) {
-                    return null;
-                }
-                $c = $n['clave'];
-                return static fn(array $f) => $f[$c] ?? null;
+                $c = Evaluator::claveDirecta($n);
+                return $c === null ? null : static fn(array $f) => $f[$c] ?? null;
 
             case 'bin':
                 return self::compilarBinaria($n, $conjunto);
@@ -51,7 +48,7 @@ final class EvaluatorCompilado extends Evaluator
                 // IN con una lista de literales, ya preparada como conjunto en
                 // resolver(), o (2.9) con una subconsulta, con el conjunto que
                 // da $conjunto (el de Select, que guarda el de una subconsulta
-                // que no depende de la fila): lo mismo que in(), sin pasar
+                // que no depende de la fila): lo mismo que EvaluatorIn::in(), sin pasar
                 // por evaluar() en cada fila
                 $e = self::compilar($n['e'], $conjunto);
                 if ($e === null) {
@@ -60,7 +57,7 @@ final class EvaluatorCompilado extends Evaluator
                 $no = (bool)$n['not'];
                 if (isset($n['conjunto'])) {
                     $preparado = $n['conjunto'];
-                    return static fn(array $f) => self::enConjunto($e($f), $preparado, $no);
+                    return static fn(array $f) => EvaluatorConjunto::enConjunto($e($f), $preparado, $no);
                 }
                 if (($n['select'] ?? null) === null || $conjunto === null) {
                     return null;
@@ -68,9 +65,10 @@ final class EvaluatorCompilado extends Evaluator
                 $sel = $n['select'];
                 $sid = $n['sid'];
                 $col = $n['colacionIn'] ?? null;
-                return static function (array $f) use ($e, $conjunto, $sel, $sid, $col, $no) {
-                    $p = $conjunto($sel, $sid, $f, $col);
-                    return self::enConjunto(isset($p[3]) ? Functions::plegar($e($f), $p[3]) : $e($f), $p, $no);
+                $afi = $n['afinidadIn'] ?? null;
+                return static function (array $f) use ($e, $conjunto, $sel, $sid, $col, $afi, $no) {
+                    $p = $conjunto($sel, $sid, $f, $col, $afi);
+                    return EvaluatorConjunto::enConjunto(isset($p[3]) ? Functions::plegar($e($f), $p[3]) : $e($f), $p, $no);
                 };
 
             case 'un':
@@ -88,7 +86,7 @@ final class EvaluatorCompilado extends Evaluator
                 if ($n['op'] === '~') {
                     return static function (array $f) use ($e) {
                         $v = $e($f);
-                        return $v === null ? null : ~(is_int($v) ? $v : Valor::entero(Valor::aNumero($v)));
+                        return $v === null ? null : ~(\is_int($v) ? $v : Valor::entero(Valor::aNumero($v)));
                     };
                 }
                 return static function (array $f) use ($e) {
@@ -112,14 +110,28 @@ final class EvaluatorCompilado extends Evaluator
                     return null;
                 }
                 $not = $n['not'];
-                return static function (array $f) use ($e, $min, $max, $not) {
+                $tMin = !empty($n['textoMin']);           // x como texto para ese extremo (2.10, ver Evaluator::resolver())
+                $tMax = !empty($n['textoMax']);
+                return static function (array $f) use ($e, $min, $max, $not, $tMin, $tMax) {
                     $v = $e($f);
                     if ($v === null) { return null; }
-                    $a = Valor::comparar($v, $min($f));
+                    $a = Valor::comparar($tMin ? Valor::conAfinidad($v, 'T') : $v, $min($f));
                     if ($a !== null && $a < 0) { return $not ? 1 : 0; }
-                    $b = Valor::comparar($v, $max($f));
+                    $b = Valor::comparar($tMax ? Valor::conAfinidad($v, 'T') : $v, $max($f));
                     if ($b !== null && $b > 0) { return $not ? 1 : 0; }
                     return $a === null || $b === null ? null : ($not ? 0 : 1);
+                };
+
+            case 'cast':
+                // CAST(x AS TEXT), que es como pasa a texto lo que se compara con
+                // una columna de texto (2.10, ver Evaluator::afinar()); los demás, como siempre
+                $e = self::compilar($n['e'], $conjunto);
+                if ($e === null || $n['tipo'] !== 'TEXT') {
+                    return null;
+                }
+                return static function (array $f) use ($e) {
+                    $v = $e($f);
+                    return $v === null || \is_string($v) ? $v : Valor::aTexto($v);
                 };
 
             case 'like':
@@ -130,6 +142,9 @@ final class EvaluatorCompilado extends Evaluator
                     || ($n['escape'] !== null && $n['escape']['k'] !== 'lit')) {
                     return null;
                 }
+                if ($n['escape'] !== null && $n['escape']['v'] === null) {
+                    return static fn(array $f) => null;   // ESCAPE NULL: NULL, como SQLite (2.10)
+                }
                 $escape = $n['escape'] === null ? null : Valor::aTexto($n['escape']['v']);
                 $regex  = empty($n['glob']) ? EvaluatorPatrones::patronALike(Valor::aTexto($n['patron']['v']), $escape)
                     : EvaluatorPatrones::patronAGlob(Valor::aTexto($n['patron']['v']));
@@ -137,7 +152,7 @@ final class EvaluatorCompilado extends Evaluator
                 return static function (array $f) use ($e, $regex, $not) {
                     $v = $e($f);
                     if ($v === null) { return null; }
-                    $t = is_string($v) ? $v : Valor::aTexto($v);
+                    $t = \is_string($v) ? $v : Valor::aTexto($v);
                     $r = preg_match($regex, $t);
                     return (($r === false ? EvaluatorPatrones::casaSinRetroceso($regex, $t) : $r === 1) !== $not) ? 1 : 0;
                 };
@@ -225,11 +240,11 @@ final class EvaluatorCompilado extends Evaluator
                     if ($a === null || $b === null) { return null; }
                     $x = Valor::aNumero($a);
                     $y = Valor::aNumero($b);
-                    switch ($op) {
-                        case '+': return $x + $y;
-                        case '-': return $x - $y;
-                        case '*': return $x * $y;
-                        case '/': return $y == 0 ? null : $x / $y;
+                    switch ($op) {                  // NaN, NULL: ver Evaluator::binaria()
+                        case '+': return ($r = $x + $y) === $r ? $r : null;
+                        case '-': return ($r = $x - $y) === $r ? $r : null;
+                        case '*': return ($r = $x * $y) === $r ? $r : null;
+                        case '/': return $y == 0 ? null : (($r = $x / $y) === $r ? $r : null);
                     }
                     $di = Valor::entero($y);
                     return $di === 0 ? null : Valor::entero($x) % $di;
@@ -241,10 +256,10 @@ final class EvaluatorCompilado extends Evaluator
     /**
      * columna OP literal (o literal OP columna), que es casi todo WHERE: la
      * columna se lee de la fila y el literal va dentro de la función, sin una
-     * llamada para cada lado, y con dos números o con un texto que no es un
-     * número se compara directamente. Es el mismo resultado que
-     * Valor::comparar(), que es quien decide en cualquier otro caso. Null si
-     * no es esa forma.
+     * llamada para cada lado, y con dos números o dos textos se compara
+     * directamente (2.10: dos textos, siempre byte a byte). Es el mismo
+     * resultado que Valor::comparar(), que es quien decide en cualquier otro
+     * caso. Null si no es esa forma.
      */
     private static function compararConLiteral(array $n): ?\Closure
     {
@@ -257,26 +272,22 @@ final class EvaluatorCompilado extends Evaluator
         if ($col['k'] === 'lit' && $lit['k'] === 'col') {
             [$col, $lit, $op] = [$lit, $col, $invertido[$op]];
         }
-        if ($col['k'] !== 'col' || isset($col['externa']) || !isset($col['clave']) || $lit['k'] !== 'lit' || $lit['v'] === null) {
+        $c = Evaluator::claveDirecta($col);
+        if ($c === null || $lit['k'] !== 'lit' || $lit['v'] === null) {
             return null;
         }
-        $c = $col['clave'];
         $v = $lit['v'];
-        $numero = is_int($v) || is_float($v);
-        // Un texto que no es un número se compara con otro texto byte a byte.
-        // Si el de la fila lo es, va antes (2.9, ver Valor::comparar()): eso
-        // solo se nota con <, >… y un literal que empieza antes del ':', tras
-        // el que byte a byte puede ir uno que es un número; entonces decide
-        // Valor::comparar()
-        $texto  = is_string($v) && !is_numeric($v) && !is_numeric(trim($v)) && ($op === '=' || $op === '<>' || $v >= ':');
+        // Pasado 2^53, por Valor::comparar(), exacto entre un entero y un decimal (2.10)
+        $numero = (\is_int($v) || \is_float($v)) && abs($v) < 9007199254740992;
+        $texto  = \is_string($v);
         return static function (array $f) use ($c, $v, $op, $numero, $texto) {
             $x = $f[$c] ?? null;
             if ($x === null) {
                 return null;
             }
-            if ($numero && (is_int($x) || is_float($x))) {
+            if ($numero && (\is_int($x) || \is_float($x))) {
                 $r = $x <=> $v;
-            } elseif ($texto && is_string($x)) {
+            } elseif ($texto && \is_string($x)) {
                 $r = strcmp($x, $v) <=> 0;
             } else {
                 $r = Valor::comparar($x, $v);

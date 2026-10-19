@@ -161,6 +161,106 @@ chk('sin token CSRF no instala nada', function () use ($admin, $config) {
     $html = peticion('', ['conexion' => 'directa'] + $admin);
     return str_contains($html, 'Formulario caducado') && !is_file($config);
 });
+chk('varias peticiones a la vez crean un solo código de instalación (2.10)', function () use ($raizProyecto, $tmp) {
+    // Sin bloqueo, cada una veía el fichero vacío y escribía el suyo: el que
+    // leía quien administra podía no ser el que el panel comprobaba
+    $dir = "$tmp/carrera";
+    $hora = microtime(true) + 1.0;
+    $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=' . $tmp . '/no-existe.php"); define("ADMIN_DATA_PATH", ' . var_export($dir, true) . ');'
+        . 'require ' . var_export("$raizProyecto/jsonsqldbadmin/lib/arranque.php", true) . ';'
+        . 'while (microtime(true) < ' . $hora . ') { usleep(200); } echo Instalador::codigo();';
+    $procs = [];
+    for ($i = 0; $i < 8; $i++) {
+        $procs[] = [proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos), $tubos];
+    }
+    $vistos = [];
+    foreach ($procs as [$proc, $tubos]) {
+        $vistos[] = trim((string)stream_get_contents($tubos[1])) . trim((string)stream_get_contents($tubos[2]));
+        proc_close($proc);
+    }
+    $fichero = trim((string)@file_get_contents("$dir/codigo-instalacion.txt"));
+    $restos = array_diff((array)scandir($dir), ['.', '..', 'codigo-instalacion.txt', 'codigo-instalacion.txt.lock']);
+    array_map('unlink', glob("$dir/*") ?: []);
+    @rmdir($dir);
+    return array_unique($vistos) === [$fichero] && $restos === [] ?: json_encode([array_unique($vistos), $fichero, array_values($restos)]);
+});
+chk('un fichero con claves nace ya solo para su dueño, aunque el umask deje leerlo a todos, y con un temporal que no se puede adivinar (2.10: nacía con los permisos del umask y el chmod llegaba después)', function () use ($raizProyecto, $tmp) {
+    if (PHP_OS_FAMILY === 'Windows') { return null; }     // allí no hay permisos de Unix ni enlaces sin privilegios
+    $dir = "$tmp/privado";
+    @mkdir($dir);
+    // Con umask(0), lo que se crea con fopen nace con 0666; y en el nombre del
+    // temporal de antes (f.<pid>.tmp), un enlace a otro fichero
+    $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=' . $tmp . '/no-existe.php"); define("ADMIN_DATA_PATH", ' . var_export("$tmp/traza", true) . ');'
+        . 'require ' . var_export("$raizProyecto/jsonsqldbadmin/lib/arranque.php", true) . ';'
+        . 'umask(0); $d = ' . var_export($dir, true) . ';'
+        . '$t = Store::temporalPrivado("$d/f"); $nace = decoct(fileperms($t) & 0777); unlink($t);'
+        . 'file_put_contents("$d/espia", ""); symlink("$d/espia", "$d/f." . getmypid() . ".tmp");'
+        . 'try { Store::escribirAtomico("$d/f", "secreto", 0600); } catch (Throwable $e) { echo $e->getMessage(), ","; }'
+        . 'clearstatcache(); echo $nace, ",", decoct(fileperms("$d/f") & 0777), ",", is_link("$d/f") ? "enlace" : file_get_contents("$d/f"), ",", filesize("$d/espia");';
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+    $salida = trim((string)stream_get_contents($tubos[1])) . trim((string)stream_get_contents($tubos[2]));
+    proc_close($p);
+    $restos = array_diff((array)scandir($dir), ['.', '..', 'f', 'espia']);    // queda solo el enlace, sin tocar
+    array_map('unlink', array_merge(glob("$dir/*") ?: [], glob("$dir/.*.tmp") ?: [], glob("$tmp/traza/*") ?: []));
+    @rmdir($dir);
+    @rmdir("$tmp/traza");
+    return $salida === '600,600,secreto,0' && count($restos) === 1 ?: json_encode([$salida, array_values($restos)]);
+});
+chk('configurar.php escribe los ficheros con claves ya solo para su dueño y no sigue un enlace puesto en su sitio o en el de su temporal de antes (2.10: los escribía con el umask y el chmod llegaba después)', function () use ($raizProyecto, $tmp) {
+    if (PHP_OS_FAMILY === 'Windows') { return null; }     // allí no hay permisos de Unix ni enlaces sin privilegios
+    $d = "$tmp/configurar";
+    @mkdir("$d/api", 0777, true);
+    @mkdir("$d/jsonsqldbadmin/datos", 0777, true);
+    foreach (['configurar.php', 'api/jsonsqldb_api_config.dist.php', 'jsonsqldbadmin/config.dist.php'] as $f) {
+        copy("$raizProyecto/$f", "$d/$f");
+    }
+    // Enlaces sin destino donde va un fichero y donde iba el temporal del código
+    symlink("$d/espia1", "$d/api/jsonsqldb_api_config.php");
+    symlink("$d/espia2", "$d/jsonsqldbadmin/datos/codigo-instalacion.txt.tmp");
+    $codigo = 'umask(0); $argv = ["configurar.php", "--local"]; require ' . var_export("$d/configurar.php", true) . ';';
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+    stream_get_contents($tubos[1]);                       // lo que dice lleva las claves: no se enseña
+    $error = trim((string)stream_get_contents($tubos[2]));
+    proc_close($p);
+    clearstatcache();
+    $r = [];
+    foreach (['api/jsonsqldb_api_config.php', 'jsonsqldbadmin/config.php', 'jsonsqldbadmin/datos/codigo-instalacion.txt'] as $f) {
+        $r[] = is_link("$d/$f") ? "$f: enlace" : (is_file("$d/$f") ? decoct(fileperms("$d/$f") & 0777) : "$f: no está");
+    }
+    $r[] = file_exists("$d/espia1") || file_exists("$d/espia2") ? 'escribió en el destino de un enlace' : 'sin espías';
+    $restos = array_merge(glob("$d/api/jsonsqldb_api_config.php.*") ?: [], glob("$d/jsonsqldbadmin/config.php.*") ?: [],
+                          glob("$d/jsonsqldbadmin/datos/codigo-instalacion.txt.?*") ?: []);
+    $r[] = count($restos);                                // solo el enlace del temporal de antes
+    borrarArbol($d);
+    // Sin la carpeta datos/ del panel, la crea para dejar el código (2.10: no se guardaba)
+    @mkdir("$d/api", 0777, true);
+    @mkdir("$d/jsonsqldbadmin", 0777, true);
+    foreach (['configurar.php', 'api/jsonsqldb_api_config.dist.php', 'jsonsqldbadmin/config.dist.php'] as $f) {
+        copy("$raizProyecto/$f", "$d/$f");
+    }
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+    stream_get_contents($tubos[1]);
+    $error .= trim((string)stream_get_contents($tubos[2]));
+    proc_close($p);
+    clearstatcache();
+    $r[] = is_file("$d/jsonsqldbadmin/datos/codigo-instalacion.txt") ? decoct(fileperms("$d/jsonsqldbadmin/datos/codigo-instalacion.txt") & 0777) : 'sin código';
+    borrarArbol($d);
+    return $r === ['600', '600', '600', 'sin espías', 1, '600'] && $error === '' ?: json_encode([$r, $error], JSON_UNESCAPED_UNICODE);
+});
+chk('los ficheros del panel (usuarios.json con los hashes, intentos.json, copias.json) nacen solo para su dueño aunque el umask deje leerlos a todos (2.10)', function () use ($raizProyecto, $tmp) {
+    if (PHP_OS_FAMILY === 'Windows') { return null; }     // allí no hay permisos de Unix
+    $dir = "$tmp/datos-panel";
+    $codigo = 'putenv("JSONSQLDBADMIN_CONFIG=' . $tmp . '/no-existe.php"); define("ADMIN_DATA_PATH", ' . var_export($dir, true) . ');'
+        . 'require ' . var_export("$raizProyecto/jsonsqldbadmin/lib/arranque.php", true) . ';'
+        . 'umask(0); Store::guardar("usuarios.json", ["ana" => ["hash" => "x"]]); Store::actualizar("intentos.json", static fn(array $a): array => ["10.0.0.1" => 1]);'
+        . 'Store::actualizar("copias.json", static fn(array $a): array => [["base" => "b"]]);'
+        . 'clearstatcache(); foreach (["usuarios.json", "intentos.json", "copias.json"] as $f) { echo decoct(fileperms("' . $dir . '/$f") & 0777), ","; }';
+    $p = proc_open([PHP_BINARY, '-r', $codigo], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tubos);
+    $salida = trim((string)stream_get_contents($tubos[1])) . trim((string)stream_get_contents($tubos[2]));
+    proc_close($p);
+    borrarArbol($dir);
+    return $salida === '600,600,600,' ?: $salida;
+});
 /** El código de instalación que ha dejado el panel en su carpeta de datos. */
 function codigo(): string {
     global $tmp;

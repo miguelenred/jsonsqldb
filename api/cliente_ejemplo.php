@@ -13,7 +13,7 @@ declare(strict_types=1);
  * peticiones haciéndose pasar por otra clave.
  *
  *   $cli = JsonSqlDbCliente::pruebas();
- *   $filas = $cli->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Torrevieja']);
+ *   $filas = $cli->consultar('SELECT * FROM clientes WHERE ciudad = ?', ['Malaga']);
  *
  * Varias sentencias como una transacción, todas o ninguna (2.9):
  *   $cli->lote([['UPDATE cuentas SET saldo = saldo - ? WHERE id = ?', [50, 1]],

@@ -37,19 +37,11 @@ class Select
     /** Profundidad máxima de vistas anidadas (una vista que usa otra vista). */
     private const MAX_VISTAS = 8;
 
-    /**
-     * Cruce por índice (ver unirPorIndice()): hasta cuántas filas del lado
-     * izquierdo se leen para decidirlo, y cuántas filas de la tabla de la
-     * derecha vale una búsqueda por clave frente a leerla entera: una
-     * búsqueda cuesta como decodificar unas 150 filas.
-     */
-    private const CRUCE_POR_INDICE_MAX    = 1000;
-    private const CRUCE_POR_INDICE_FACTOR = 150;
 
     /**
      * La columna con la posición de cada fila en su tabla, en el origen del
      * FROM marcado con 'posicion' (UPDATE y DELETE con JOIN, ver
-     * WriterCambios::cruce()). Un nombre de columna no puede llevar un \0.
+     * WriterCambiosEspeciales::cruce()). Un nombre de columna no puede llevar un \0.
      */
     public const POSICION = "\0posicion";
 
@@ -84,8 +76,12 @@ class Select
     private array $semi = [];
     /** @var array<int, ?string> la colación de la primera columna de cada subconsulta ya ejecutada (2.9) */
     private array $colacionSub = [];
+    /** @var array<int, string> y su afinidad (2.10, ver IndexesBusqueda::conjuntoDeIn()) */
+    private array $afinidadSub = [];
     /** La colación de la primera columna de lo último que ejecutó ejecutarExterna() (2.9), para el IN de Writer */
     public ?string $colacionExterna = null;
+    /** Y su afinidad (2.10) */
+    public string $afinidadExterna = '';
 
     public function __construct(Catalog $cat, ?callable $lector = null)
     {
@@ -153,6 +149,7 @@ class Select
         $this->externo = ['mapa' => $mapa, 'fila' => $fila];
         $r = $this->correr($ast);
         $this->colacionExterna = $r['colaciones'][0] ?? null;
+        $this->afinidadExterna = $r['afinidades'][0] ?? '';
         return $r['filas'];
     }
 
@@ -160,18 +157,18 @@ class Select
     public function valoresExterna(array $ast, array $mapa, array $fila): array
     {
         $this->externo = ['mapa' => $mapa, 'fila' => $fila];
-        [$valores, $this->colacionExterna] = $this->valoresDe($ast);
+        [$valores, $this->colacionExterna, $this->afinidadExterna] = $this->valoresDe($ast);
         return $valores;
     }
 
     /**
-     * Los valores de la primera columna de una subconsulta, y su colación,
-     * tomados según salen sus filas, sin juntarlas (2.9): un IN (SELECT id
+     * Los valores de la primera columna de una subconsulta, y su colación y
+     * su afinidad (2.10), tomados según salen sus filas, sin juntarlas (2.9): un IN (SELECT id
      * FROM t) de un millón de filas las tenía todas en memoria, y no cabía en
      * 256 MB. Lo que la subconsulta no puede dar fila a fila (ORDER BY,
      * agregados) llega entero, como siempre.
      *
-     * @return array{0: list<mixed>, 1: ?string}
+     * @return array{0: list<mixed>, 1: ?string, 2: string}
      */
     protected function valoresDe(array $sel): array
     {
@@ -186,10 +183,78 @@ class Select
             foreach ($r['filas'] as $fila) {
                 $valores[] = reset($fila);
             }
-            return [$valores, $r['colaciones'][0] ?? null];
+            return [$valores, $r['colaciones'][0] ?? null, $r['afinidades'][0] ?? ''];
         } finally {
             [$this->sumidero, $this->nivelSumidero, $this->entregado] = $previo;
         }
+    }
+
+    /**
+     * Lo que tiene que haber costado una consulta, en nanosegundos, para
+     * guardar su resultado (2.9): 1 ms. Una búsqueda por clave cuesta menos
+     * que guardarla, y casi nunca se repite tal cual; guardarlas todas
+     * llenaba la caché de resultados que nadie volvía a pedir.
+     */
+    private const RESULTADO_MINIMO = 1000000;
+
+    /**
+     * Ejecuta un SELECT pasando por la caché de resultados: la clave lleva la
+     * SQL, los parámetros y la revisión de cada tabla implicada, así que un
+     * resultado guardado solo vale mientras nadie escriba en ninguna de ellas.
+     * No se guardan las consultas que no son deterministas (RANDOM(), la
+     * fecha actual) ni los resultados grandes, que no compensan. Lo llama
+     * Database::consultar(), con lo suyo: aquí desde la 2.10, que solo lo
+     * usan las consultas (en Database lo compilaba también cada escritura).
+     *
+     * @param (callable(array):void)|null $porFila ver Database::consultarPorFilas()
+     * @return list<array>
+     */
+    public static function conCache(Catalog $cat, Storage $st, ?callable $porFila, array $ast, string $sql, array $params): array
+    {
+        $tope   = Config::cacheResultados();
+        $tablas = $tope > 0 ? self::tablasDe($ast, $cat) : null;
+        // Lo que no lee ninguna tabla no se guarda (2.9): ninguna escritura lo
+        // borraría nunca, y cada consulta distinta dejaba su fichero
+        if ($tablas !== null && array_filter($tablas, static fn(string $t): bool => $t[0] !== '#') === []) {
+            $tablas = null;
+        }
+        if ($tablas === null) {
+            return $porFila === null
+                ? (new self($cat))->ejecutar($ast)
+                : (new self($cat))->ejecutarHacia($ast, $porFila) ?? [];
+        }
+        $clave = StorageLectura::claveResultado($st, $tablas, $sql, $params);
+        $filas = StorageLectura::resultadoCacheado($st, $clave, $tablas);
+        if ($filas !== null) {
+            return $filas;                           // ya está entero: se devuelve tal cual
+        }
+        $inicio = hrtime(true);
+        if ($porFila === null) {
+            $filas = (new self($cat))->ejecutar($ast);
+        } else {
+            // Las filas que salen una a una se guardan también para la caché
+            // mientras no pasen del tope; pasado, se dejan de guardar
+            $guardadas = [];
+            $filas = (new self($cat))->ejecutarHacia($ast, static function (array $fila) use ($porFila, &$guardadas, $tope): void {
+                if ($guardadas !== null) {
+                    $guardadas[] = $fila;
+                    if (\count($guardadas) > $tope) {
+                        $guardadas = null;
+                    }
+                }
+                $porFila($fila);
+            });
+            if ($filas === null) {
+                if ($guardadas !== null && hrtime(true) - $inicio >= self::RESULTADO_MINIMO) {
+                    StorageLectura::guardarResultado($st, $clave, $tablas, $guardadas);
+                }
+                return [];
+            }
+        }
+        if (\count($filas) <= $tope && hrtime(true) - $inicio >= self::RESULTADO_MINIMO) {
+            StorageLectura::guardarResultado($st, $clave, $tablas, $filas);
+        }
+        return $filas;
     }
 
     /**
@@ -223,7 +288,7 @@ class Select
      */
     private static function recorrer(array $n, Catalog $cat, int $nivel, array &$tablas, array &$cte): bool
     {
-        if (isset($n['with']) && is_array($n['with'])) {
+        if (isset($n['with']) && \is_array($n['with'])) {
             foreach (array_keys($n['with']) as $nombre) {
                 $cte[strtolower((string)$nombre)] = true;
             }
@@ -231,10 +296,10 @@ class Select
         if (($n['k'] ?? null) === 'fn' && isset($n['nombre'])) {
             $f = strtoupper((string)$n['nombre']);
             // Lo que cambia en cada llamada no se guarda en la caché de resultados
-            if (in_array($f, ['RANDOM', 'RAND', 'UUID', 'RANDOMBLOB', 'UTC_DATE', 'UTC_TIME', 'UTC_TIMESTAMP'], true)) {
+            if (\in_array($f, ['RANDOM', 'RAND', 'UUID', 'RANDOMBLOB', 'UTC_DATE', 'UTC_TIME', 'UTC_TIMESTAMP'], true)) {
                 return false;
             }
-            if (in_array($f, ['DATE', 'TIME', 'DATETIME', 'STRFTIME', 'UNIXEPOCH', 'JULIANDAY', 'UNIX_TIMESTAMP'], true)
+            if (\in_array($f, ['DATE', 'TIME', 'DATETIME', 'STRFTIME', 'UNIXEPOCH', 'JULIANDAY', 'UNIX_TIMESTAMP'], true)
                 && ($f === 'STRFTIME' ? $n['args'][1] ?? null : $n['args'][0] ?? null) === null) {
                 return false;                         // sin fecha: la de ahora
             }
@@ -243,7 +308,7 @@ class Select
         // como parámetro, que llega aquí como literal (2.9: solo se miraba en
         // DATE() y compañía, y DATE_FORMAT('now', …) salía de la caché con la
         // hora de la primera vez)
-        if (($n['k'] ?? null) === 'lit' && is_string($n['v'] ?? null) && strcasecmp(trim($n['v']), 'now') === 0) {
+        if (($n['k'] ?? null) === 'lit' && \is_string($n['v'] ?? null) && strcasecmp(trim($n['v']), 'now') === 0) {
             return false;
         }
         if (($n['tipo'] ?? null) === 'tabla' && isset($n['nombre'])) {
@@ -251,7 +316,7 @@ class Select
             if (!isset($cte[strtolower($nombre)])) {
                 if ($cat->esVista($nombre)) {
                     $sqlVista = (string)$cat->vista($nombre)['sql'];
-                    $de = self::tablasDe(Parser::analizar($sqlVista), $cat, $nivel + 1);
+                    $de = self::tablasDe(Parser::analizar($sqlVista, [], $cat->nombres()), $cat, $nivel + 1);
                     if ($de === null) {
                         return false;
                     }
@@ -270,7 +335,7 @@ class Select
             }
         }
         foreach ($n as $v) {
-            if (is_array($v) && !self::recorrer($v, $cat, $nivel, $tablas, $cte)) {
+            if (\is_array($v) && !self::recorrer($v, $cat, $nivel, $tablas, $cte)) {
                 return false;
             }
         }
@@ -330,7 +395,7 @@ class Select
         }
     }
 
-    /** @var array{def: array, desc: bool, k: int}|null ver ordenPorIndice(), para el primer origen */
+    /** @var array{def: array, desc: bool, k: int, binaria: ?bool, desde: array{0: int|float, 1: bool}|null}|null ver SelectOrden::ordenPorIndice(), para el primer origen */
     private ?array $porOrden = null;
     /** Algo no cupo en memoria por el camino rápido: por el que usa el disco (ver correr()) */
     protected bool $enDisco = false;
@@ -345,6 +410,13 @@ class Select
         if ($contado !== null) {
             return $contado;
         }
+        // De aquí en adelante se usa siempre Evaluator: se carga ya, antes de
+        // leer filas y de cargar lo que hace falta para leerlas, para que sin
+        // OPcache lo que cuesta compilarlo no se sume a lo que ocupan ellas
+        // (2.10: el pico de una consulta por clave subía 0,09 MB sobre la 2.9.0);
+        // una vez por proceso, que la llamada en cada consulta se notaba en un SELECT 1
+        static $cargado = false;
+        $cargado = $cargado || class_exists(Evaluator::class);
 
         // ¿Se puede dejar de recorrer en cuanto haya suficientes filas?
         // Solo si el resultado no depende de las filas que vendrían después:
@@ -354,36 +426,58 @@ class Select
         [$filas, $fuentes] = $this->origenes($ast, $tope);
         $mapa = $this->mapaColumnas($fuentes);
         $externa = $this->externo['fila'] ?? [];
+        // Lo de más fuera, para las subconsultas de esta (ver masFuera())
+        $lejos = $this->externo === null ? null : self::masFuera($this->externo);
         // Una subconsulta, con la fila de fuera a la vista: sus filas, o con
         // $valores solo los de su primera columna (ver valoresDe()), y si ha
         // mirado hacia fuera. El análisis estático no puede saberlo: la marca la
         // pone Evaluator::resolver() durante la llamada anidada
-        $correrSub = function (array $sel, int $sid, array $filaExterna, bool $valores) use ($mapa): array {
-            $externoPrevio = $this->externo;
-            $marcaPrevia   = Evaluator::$correlacionada;
+        $correrSub = function (array $sel, int $sid, array $filaExterna, bool $valores) use ($mapa, $lejos): array {
+            $externoPrevio   = $this->externo;
+            $marcaPrevia     = Evaluator::$correlacionada;
+            $externasPrevias = Evaluator::$externas;
             Evaluator::$correlacionada = false;
-            $this->externo = ['mapa' => $mapa, 'fila' => $filaExterna];
+            Evaluator::$externas       = [];
+            // Con las columnas de las consultas de más fuera detrás de las de
+            // esta, que las tapan (2.10: una subconsulta dentro de otra no veía
+            // las de dos niveles más afuera, «Columna desconocida»). $filaExterna
+            // ya las trae (ver $sub y $conjunto)
+            $this->externo = ['mapa' => $lejos === null ? $mapa : $mapa + $lejos['mapa'], 'fila' => $filaExterna];
             try {
                 if ($valores) {
-                    [$r, $this->colacionSub[$sid]] = $this->valoresDe($sel);
+                    [$r, $this->colacionSub[$sid], $this->afinidadSub[$sid]] = $this->valoresDe($sel);
                 } else {
                     $res = $this->correr($sel);
                     $r   = $res['filas'];
                     $this->colacionSub[$sid] = $res['colaciones'][0] ?? null;
+                    $this->afinidadSub[$sid] = $res['afinidades'][0] ?? '';
                     unset($res);                   // que no queden dos referencias a las filas
                 }
                 return [$r, Evaluator::$correlacionada];
             } finally {
+                // Lo que miró más allá de esta consulta (las claves con un "\1"
+                // delante, ver masFuera()) la hace correlacionada a ella también,
+                // con la de fuera, que lo ve un nivel más cerca
+                $ajenas = [];
+                foreach (Evaluator::$externas as $clave => $_) {
+                    if (str_starts_with((string)$clave, "\1")) {
+                        $ajenas[substr((string)$clave, 1)] = true;
+                    }
+                }
                 $this->externo             = $externoPrevio;
-                Evaluator::$correlacionada = $marcaPrevia;
+                Evaluator::$correlacionada = $marcaPrevia || $ajenas !== [];
+                Evaluator::$externas       = $externasPrevias + $ajenas;
             }
         };
         // Una subconsulta que no mira hacia fuera da siempre lo mismo: se
         // ejecuta una vez. Si está correlacionada, su resultado depende de
         // la fila de fuera, así que se guarda por fila.
-        $sub  = function (array $sel, int $sid, array $filaExterna = [], bool $existe = false) use ($correrSub, $mapa): array {
+        $sub  = function (array $sel, int $sid, array $filaExterna = [], bool $existe = false) use ($correrSub, $mapa, $lejos): array {
             if (isset($this->subs[$sid])) {
                 return $this->subs[$sid];
+            }
+            if ($lejos !== null) {
+                $filaExterna += $lejos['fila'];
             }
             // Un EXISTS que mira fuera por una igualdad: sin ejecutarlo por
             // cada fila (ver SelectJoin::semiJoin())
@@ -391,7 +485,7 @@ class Select
                 $this->semi[$sid] ??= SelectJoin::semiJoin($this, $sel, $mapa) ?? false;
                 if ($this->semi[$sid] !== false) {
                     [$conj, $fuera] = $this->semi[$sid];
-                    return Evaluator::enConjunto(Evaluator::evaluar($fuera, ['fila' => $filaExterna]), $conj, false) === 1 ? [[1]] : [];
+                    return EvaluatorConjunto::enConjunto(Evaluator::evaluar($fuera, ['fila' => $filaExterna]), $conj, false) === 1 ? [[1]] : [];
                 }
             }
             $claveFila = $filaExterna === [] ? '' : self::claveFila($filaExterna);
@@ -409,16 +503,19 @@ class Select
 
         // Los valores de un IN agrupados por clave, para no recorrer la lista en
         // cada fila; igual que las filas de $sub, una vez o por fila de fuera
-        $conjunto = function (array $sel, int $sid, array $filaExterna = [], string|bool|null $colacion = null) use ($correrSub): array {
+        $conjunto = function (array $sel, int $sid, array $filaExterna = [], string|bool|null $colacion = null, ?string $afinidad = null) use ($correrSub, $lejos): array {
             if (isset($this->conjuntos[$sid])) {
                 return $this->conjuntos[$sid];
+            }
+            if ($lejos !== null) {
+                $filaExterna += $lejos['fila'];
             }
             $claveFila = $filaExterna === [] ? '' : self::claveFila($filaExterna);
             if (isset($this->conjuntosCorr[$sid][$claveFila])) {
                 return $this->conjuntosCorr[$sid][$claveFila];
             }
             [$valores, $usoFuera] = $correrSub($sel, $sid, $filaExterna, true);
-            $c = IndexesBusqueda::conjuntoDeIn($valores, $colacion, $this->colacionSub[$sid] ?? null);
+            $c = IndexesBusqueda::conjuntoDeIn($valores, $colacion, $this->colacionSub[$sid] ?? null, $afinidad, $this->afinidadSub[$sid] ?? null);
             if ($usoFuera) {
                 $this->guardarCorr($this->conjuntosCorr, $sid, $claveFila, $c);
             } else {
@@ -440,8 +537,10 @@ class Select
         // DISTINCT las compara con ella, y la heredan si esto es una vista,
         // una subconsulta o una parte de un UNION
         $colaciones   = [];
+        $afinidades   = [];                         // y la afinidad (2.10, ver Evaluator::afinidadDe())
         $plegarSalida = [];
         foreach ($salida as $c) {
+            $afinidades[] = $c['expr']['k'] === 'col' ? $c['expr']['afinidad'] ?? '' : Evaluator::afinidadDe($c['expr']) ?? '';
             $colaciones[] = $col = Evaluator::colacionSalida($c['expr']);
             if ($col !== null && $col !== 'BINARY') {
                 $plegarSalida[$c['nombre']] = $col;
@@ -455,10 +554,10 @@ class Select
                 // GROUP BY 2: la segunda columna de la salida, como en ORDER BY
                 // y en SQLite. Un número suelto agrupaba por la constante: todas
                 // las filas en un grupo, y una sola fila de resultado sin avisar
-                if (($e['k'] ?? '') === 'lit' && is_int($e['v'])) {
+                if (($e['k'] ?? '') === 'lit' && \is_int($e['v'])) {
                     $n = $e['v'];
-                    if ($n < 1 || $n > count($salida)) {
-                        throw JsonSqlDbError::syntax("GROUP BY $n: la consulta devuelve " . count($salida) . ' columna(s)');
+                    if ($n < 1 || $n > \count($salida)) {
+                        throw JsonSqlDbError::syntax("GROUP BY $n: la consulta devuelve " . \count($salida) . ' columna(s)');
                     }
                     if (Evaluator::tieneAgregado($salida[$n - 1]['expr'])) {
                         throw JsonSqlDbError::syntax("GROUP BY $n: esa columna es una función de agregado y no se puede agrupar por ella");
@@ -481,7 +580,7 @@ class Select
         // es HAVING COUNT(*) > 3, que es lo que sabe acumular la agrupación
         $crudos = [];
         foreach ($ast['cols'] as $c) {
-            if (empty($c['star']) && ($c['alias'] ?? null) !== null && !array_key_exists(strtolower($c['alias']), $mapa)) {
+            if (empty($c['star']) && ($c['alias'] ?? null) !== null && !\array_key_exists(strtolower($c['alias']), $mapa)) {
                 $crudos[strtolower((string)$c['alias'])] = $c['expr'];
             }
         }
@@ -501,12 +600,19 @@ class Select
             // ORDER BY 2: la segunda columna de la salida. Un número suelto no
             // ordenaba nada (era una constante) y el resultado salía en el
             // orden de la tabla sin avisar
-            if (($o['expr']['k'] ?? '') === 'lit' && is_int($o['expr']['v'])) {
-                $n = $o['expr']['v'];
-                if ($n < 1 || $n > count($salida)) {
-                    throw JsonSqlDbError::syntax("ORDER BY $n: la consulta devuelve " . count($salida) . ' columna(s)');
+            // Con COLLATE detrás (2.10: ORDER BY 2 COLLATE NOCASE no ordenaba
+            // nada, era una constante), con esa colación
+            [$pos, $colacion] = SelectOrden::posicionConColacion($o['expr']);
+            if ($pos !== null) {
+                $n = $pos;
+                if ($n < 1 || $n > \count($salida)) {
+                    throw JsonSqlDbError::syntax("ORDER BY $n: la consulta devuelve " . \count($salida) . ' columna(s)');
                 }
-                $orden[] = ['expr' => Evaluator::conColacion($salida[$n - 1]['expr']), 'dir' => $o['dir']];
+                $e = $salida[$n - 1]['expr'];
+                $colacion ??= Parser::colacionEscrita($e);
+                $orden[] = ['expr' => $colacion === null || $colacion === 'BINARY' ? Evaluator::conColacion($e)
+                    : ['k' => 'fn', 'nombre' => 'PLEGAR', 'args' => [$e, ['k' => 'lit', 'v' => $colacion]], 'star' => false, 'distinct' => false],
+                    'dir' => $o['dir'], 'binaria' => $colacion === 'BINARY'];
                 continue;
             }
             $e = ($escritos === [] ? null : self::aliasEscrito($o['expr'], $escritos))
@@ -515,7 +621,8 @@ class Select
             if (($e['k'] ?? '') === 'col' && isset($e['alias'], $plegarSalida[$e['alias']])) {
                 $e = ['k' => 'fn', 'nombre' => 'PLEGAR', 'args' => [$e, ['k' => 'lit', 'v' => $plegarSalida[$e['alias']]]], 'star' => false, 'distinct' => false];
             }
-            $orden[] = ['expr' => Evaluator::conColacion($e), 'dir' => $o['dir']];
+            // Con COLLATE BINARY escrito, byte a byte, sin la colación configurada (2.10: la usaba igual)
+            $orden[] = ['expr' => Evaluator::conColacion($e), 'dir' => $o['dir'], 'binaria' => Parser::colacionEscrita($e) === 'BINARY'];
         }
 
         // Proyección + claves de ordenación
@@ -563,12 +670,19 @@ class Select
         $carpeta     = $this->enDisco && $particionar ? $this->cat->storage()->carpetaOrden() : null;
 
         if ($ventanas !== []) {
-            // Cada fila, o cada grupo con sus agregados, que pasa el HAVING
-            $contextos = (static function () use ($filas, $agrupar, $grupoExprs, $defs, $sub, $conjunto, $externa, $having, $carpeta): \Generator {
+            // Cada fila, o cada grupo con sus agregados, que pasa el HAVING,
+            // con solo las columnas que se usan después (2.10): se guardan
+            // todas hasta calcular las ventanas, y con las demás columnas
+            // ocupaban el doble o más
+            $usar = self::clavesUsadas([$salida, $orden, $ventanas]);
+            $contextos = (static function () use ($filas, $agrupar, $grupoExprs, $defs, $sub, $conjunto, $externa, $having, $carpeta, $usar): \Generator {
                 foreach ($agrupar ? SelectAgrupada::agrupar($filas, $grupoExprs, $defs, $sub, $conjunto, $externa, $carpeta) : $filas as $f) {
                     $ctx = $agrupar ? ['fila' => $f[0], 'agregados' => $f[1], 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa]
                                     : ['fila' => $f, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa];
                     if ($having === null || Valor::verdadero(Evaluator::evaluar($having, $ctx)) === true) {
+                        if ($usar !== null) {
+                            $ctx['fila'] = array_intersect_key($ctx['fila'], $usar);
+                        }
                         yield $ctx;
                     }
                 }
@@ -577,34 +691,50 @@ class Select
             if ($this->enDisco) {
                 // No cupo (2.9): las filas van a un temporal y en memoria solo
                 // quedan los valores que usan las ventanas
-                SelectOrden::ordenarEnDisco($this, SelectAvanzada::ventanasEnDisco($this, $contextos, $ventanas),
+                SelectEnDisco::ordenarEnDisco($this, SelectAvanzada::ventanasEnDisco($this, $contextos, $ventanas),
                     $ast['distinct'] ? [] : null, $orden, $proyectarCtx, $ast, $resultado, $plegarSalida);
                 $orden        = [];
                 $recortado    = true;
                 $sinRepetidas = true;
             } else {
-                // Si no caben, Memoria avisa y se repite por el disco (ver correr())
+                // Si no caben, Memoria avisa y se repite por el disco (ver correr()).
+                // Sin agrupar, solo las filas: lo demás del contexto es igual en
+                // todas, y guardado en cada una ocupaba tanto como ella (2.10)
                 $base  = [];
+                $comun = null;
                 $aviso = Memoria::avisarAlApretar(true);
                 try {
                     foreach ($contextos as $ctx) {
                         Memoria::comprobar('las funciones de ventana');
-                        $base[] = $ctx;
+                        if ($agrupar) {
+                            $base[] = $ctx;
+                        } else {
+                            $comun ??= array_diff_key($ctx, ['fila' => 0]);     // una vez: es el mismo en todas (2.10)
+                            $base[] = $ctx['fila'];
+                        }
                     }
+                    $comun ??= [];
                     unset($contextos);
                     // Salen en el orden en que las deja la primera ventana, como en SQLite.
                     // Las funciones se sueltan al volver: tenían $base, y soltarla
                     // fila a fila la copiaría
-                    [$secuencia, $valores] = SelectAvanzada::ventanas($ventanas, count($base),
-                        static function (array $e) use ($base): array {
+                    [$secuencia, $valores] = SelectAvanzada::ventanas($ventanas, \count($base),
+                        static function (array $e) use ($base, $agrupar, $comun): array {
                             $c = [];
-                            foreach ($base as $ctx) {
+                            // Una columna, leída de la fila sin pasar por Evaluator (2.10)
+                            if (!$agrupar && ($clave = Evaluator::claveDirecta($e)) !== null) {
+                                foreach ($base as $f) {
+                                    $c[] = $f[$clave] ?? null;
+                                }
+                                return $c;
+                            }
+                            foreach ($base as $x) {
                                 Memoria::comprobar('las funciones de ventana');
-                                $c[] = Evaluator::evaluar($e, $ctx);
+                                $c[] = Evaluator::evaluar($e, $agrupar ? $x : ['fila' => $x] + $comun);
                             }
                             return $c;
                         },
-                        static fn(array $e, int $k) => Evaluator::evaluar($e, $base[$k]));
+                        static fn(array $e, int $k) => Evaluator::evaluar($e, $agrupar ? $base[$k] : ['fila' => $base[$k]] + $comun));
                 } finally {
                     Memoria::dejarAviso($aviso);
                 }
@@ -613,7 +743,7 @@ class Select
                     foreach ($valores as $i => $lista) {
                         $v[$i] = $lista[$k];
                     }
-                    $ctx = $base[$k] + ['ventanas' => $v];
+                    $ctx = $agrupar ? $base[$k] + ['ventanas' => $v] : ['fila' => $base[$k], 'ventanas' => $v] + $comun;
                     unset($base[$k]);
                     $fila = $proyectarCtx([], $ctx);
                     $resultado[] = $fila;
@@ -638,7 +768,7 @@ class Select
                 }
             })();
             if ($this->enDisco) {
-                SelectOrden::ordenarEnDisco($this, $contextos, $ast['distinct'] ? [] : null, $orden, $proyectarCtx, $ast, $resultado, $plegarSalida);
+                SelectEnDisco::ordenarEnDisco($this, $contextos, $ast['distinct'] ? [] : null, $orden, $proyectarCtx, $ast, $resultado, $plegarSalida);
                 $orden        = [];
                 $recortado    = true;
                 $sinRepetidas = true;
@@ -662,8 +792,7 @@ class Select
             // pasar por el evaluador, que es lo corriente en un SELECT *
             $directas = [];
             foreach ($salida as $i => $c) {
-                $directas[$i] = $c['expr']['k'] === 'col' && isset($c['expr']['clave']) && !isset($c['expr']['externa'])
-                    ? $c['expr']['clave'] : null;
+                $directas[$i] = Evaluator::claveDirecta($c['expr']);
             }
             $proyectar = static function (array $origen, array $ctx) use ($salida, $directas): array {
                 $fila = [];
@@ -676,7 +805,13 @@ class Select
             };
             // El contexto del evaluador (2.9): solo si alguna columna lo usa o
             // hay que ordenar; construirlo era un array más por fila
-            $conCtx = in_array(null, $directas, true) || $orden !== [];
+            $todasDirectas = !\in_array(null, $directas, true);
+            $conCtx = !$todasDirectas || $orden !== [];
+            // Si todas se copian de la fila (lo corriente, un SELECT *), cada
+            // fila se arma en el bucle que la lee, sin llamar a $proyectar: la
+            // llamada costaba tanto como armarla (2.10: SELECT id FROM t, un
+            // 11 % menos). Nombre en la salida => clave en la fila
+            $copiar = $todasDirectas ? array_combine(array_column($salida, 'nombre'), $directas) : null;
 
             // Con ORDER BY sobre columnas de la tabla se ordena antes de
             // proyectar: con LIMIT solo se construyen las filas que salen, y
@@ -709,15 +844,22 @@ class Select
                         // Cada fila se proyecta según se lee, no después de ordenar:
                         // para ordenar solo viven las columnas de la salida y las
                         // claves, y la tabla no llega a estar entera en memoria
-                        // (2.9.1). Numeradas en el orden de lectura, que es el
+                        // (2.10). Numeradas en el orden de lectura, que es el
                         // desempate: un generador puede repetir claves (yield from)
                         $proyectadas = [];
-                        $clavesOrden = array_fill(0, count($clavesDirectas), []);
+                        $clavesOrden = array_fill(0, \count($clavesDirectas), []);
                         $vigilar     = Memoria::cada();
                         $n           = 0;
                         foreach ($filas as $k => $fila) {
-                            $proyectadas[$n] = $proyectar($fila, ['fila' => $fila, 'sub' => $sub,
-                                                                  'conjunto' => $conjunto, 'filaExterna' => $externa]);
+                            if ($copiar !== null) {
+                                $proyectadas[$n] = [];
+                                foreach ($copiar as $nombre => $clave) {
+                                    $proyectadas[$n][$nombre] = $fila[$clave] ?? null;
+                                }
+                            } else {
+                                $proyectadas[$n] = $proyectar($fila, ['fila' => $fila, 'sub' => $sub,
+                                                                      'conjunto' => $conjunto, 'filaExterna' => $externa]);
+                            }
                             foreach ($clavesDirectas as $i => $clave) {
                                 $clavesOrden[$i][$n] = $fila[$clave] ?? null;
                             }
@@ -726,7 +868,7 @@ class Select
                                 Memoria::revisar('la construcción del resultado');
                                 $vigilar = Memoria::cada();
                             }
-                            if (is_array($filas)) {
+                            if (\is_array($filas)) {
                                 unset($filas[$k]);                   // la tabla no convive con lo proyectado
                             }
                         }
@@ -763,8 +905,14 @@ class Select
                         Memoria::revisar('la construcción del resultado');
                         $vigilar = Memoria::cada();
                     }
-                    $fila = $proyectar($origen, $conCtx ? ['fila' => $origen, 'sub' => $sub, 'conjunto' => $conjunto,
-                                                           'filaExterna' => $externa] : []);
+                    if ($copiar !== null) {
+                        $fila = [];
+                        foreach ($copiar as $nombre => $clave) {
+                            $fila[$nombre] = $origen[$clave] ?? null;
+                        }
+                    } else {
+                        $fila = $proyectar($origen, ['fila' => $origen, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa]);
+                    }
                     // La consulta de fuera, con sumidero: la fila sale ya, sin
                     // quedarse en el resultado (las subconsultas van más abajo)
                     if ($this->sumidero !== null && $this->nivel === $this->nivelSumidero) {
@@ -793,7 +941,7 @@ class Select
                             yield ['fila' => $origen, 'sub' => $sub, 'conjunto' => $conjunto, 'filaExterna' => $externa];
                         }
                     })();
-                    SelectOrden::ordenarEnDisco($this, $contextos, $vistos, $orden, $proyectar, $ast, $resultado, $plegarSalida);
+                    SelectEnDisco::ordenarEnDisco($this, $contextos, $vistos, $orden, $proyectar, $ast, $resultado, $plegarSalida);
                     $orden = [];
                     $recortado = true;
                 } else {
@@ -802,7 +950,7 @@ class Select
                     $aviso = Memoria::avisarAlApretar(true);
                     try {
                         if ($vistos === null) {
-                            if (!is_array($filas)) {
+                            if (!\is_array($filas)) {
                                 $filas = iterator_to_array($filas, false);
                             }
                             // Se va soltando cada fila de origen según se proyecta. Si no, la
@@ -867,7 +1015,7 @@ class Select
         if ($ast['distinct'] && empty($sinRepetidas)) {
             $vistos = [];
             $r = [];
-            $k = array_fill(0, count($orden), []);
+            $k = array_fill(0, \count($orden), []);
             foreach ($resultado as $i => $fila) {
                 $clave = '';
                 if ($plegarSalida === []) {
@@ -903,14 +1051,14 @@ class Select
 
         // LIMIT / OFFSET (si no se aplicaron ya al leer)
         if (empty($recortado) && ($ast['limit'] !== null || $ast['offset'] !== null)) {
-            $resultado = array_slice($resultado, $ast['offset'] ?? 0, $ast['limit']);
+            $resultado = \array_slice($resultado, $ast['offset'] ?? 0, $ast['limit']);
         }
 
         $cols = [];
         foreach ($salida as $c) {
             $cols[] = $c['nombre'];
         }
-        return ['cols' => $cols, 'filas' => $resultado, 'colaciones' => $colaciones];
+        return ['cols' => $cols, 'filas' => $resultado, 'colaciones' => $colaciones, 'afinidades' => $afinidades];
     }
 
     /**
@@ -955,10 +1103,10 @@ class Select
             if ($e['k'] === 'col' && isset($e['alias'])) {
                 $e = $porAlias[$e['alias']] ?? $e;
             }
-            if ($e['k'] !== 'col' || !isset($e['clave']) || isset($e['externa'])) {
+            if (($clave = Evaluator::claveDirecta($e)) === null) {
                 return null;
             }
-            $claves[] = $e['clave'];
+            $claves[] = $clave;
         }
         return $claves;
     }
@@ -989,12 +1137,12 @@ class Select
      * filas que cumplen son exactamente las posiciones que el índice tiene
      * para esas claves, y contarlas no exige leer ninguna fila. Antes se
      * leían todas las que cumplían (un 10 % de la tabla, 18 ms con 20.000
-     * filas) solo para contarlas. Con textos que no son números, o con
-     * números en columnas INTEGER, DOUBLE o DECIMAL (2.9.1): en ellas solo
-     * hay números, y el mismo valor es la misma clave. En las demás el índice
-     * junta valores que el WHERE puede separar (true y '1.0' tienen la misma
-     * clave) y hay que mirar cada fila. Null si no se puede: lo cuenta el
-     * camino normal.
+     * filas) solo para contarlas. Desde la 2.10 un texto tiene su clave de
+     * texto y cada valor se busca con la afinidad de su columna, así que la
+     * misma clave es el mismo valor también con textos que son números (hasta
+     * la 2.9 '7' y '007' compartían clave, y solo se contaban así textos que no
+     * lo eran o números en columnas numéricas). Null si no se puede: lo
+     * cuenta el camino normal.
      */
     private function contarPorIndice(string $tabla, string $alias, array $where): ?int
     {
@@ -1003,26 +1151,21 @@ class Select
             return null;
         }
         $predicados = IndexesBusqueda::predicados($where, strtolower($alias))[strtolower($alias)] ?? [];
-        if ($predicados === [] || count(IndexesBusqueda::conjunciones($where)) !== count($predicados)) {
+        if ($predicados === [] || \count(IndexesBusqueda::conjunciones($where)) !== \count($predicados)) {
             return $this->contarPorComparacion($tabla, $alias, $where);
         }
-        $meta = null;
-        foreach ($predicados as $col => $valores) {
+        // Cada valor va con la afinidad de su columna (2.10, ver
+        // IndexesBusqueda::candidatos()), y su clave es la de los que son
+        // iguales: los textos, byte a byte; los números, por su valor
+        foreach ($predicados as $valores) {
             foreach ($valores as $v) {
-                if (is_string($v) && !is_numeric(trim($v))) {
-                    continue;
-                }
-                if (is_bool($v) || !(is_int($v) || is_float($v) || is_string($v))) {
-                    return null;
-                }
-                $meta ??= $this->cat->meta($tabla);
-                if (!in_array(Catalog::columna($meta, (string)$col)['type'] ?? null, [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
+                if (!(\is_int($v) || \is_float($v) || \is_string($v)) || !IndexesBusqueda::claveFiable($v)) {
                     return null;
                 }
             }
         }
         foreach (IndexesBusqueda::candidatos($this->cat->indicesDe($tabla), $predicados) as $c) {
-            if ($c['prefijo'] || count($c['def']['columns']) !== count($predicados)) {
+            if ($c['prefijo'] || \count($c['def']['columns']) !== \count($predicados)) {
                 continue;                            // tiene que cubrirlas todas y solo esas
             }
             $n = StorageLectura::contarPorIndice($st, $tabla, $c['def'], $c['claves']);
@@ -1042,7 +1185,7 @@ class Select
     {
         [$comparaciones, $cubiertas] = IndexesBusqueda::comparaciones($where, strtolower($alias));
         $cols = $comparaciones[strtolower($alias)] ?? [];
-        if (count($cols) !== 1 || $cubiertas !== count(IndexesBusqueda::conjunciones($where))) {
+        if (\count($cols) !== 1 || $cubiertas !== \count(IndexesBusqueda::conjunciones($where))) {
             return null;                             // otra columna u otra condición
         }
         // Solo igualdades: el camino de siempre las busca en el texto de los
@@ -1053,7 +1196,7 @@ class Select
         foreach ($this->cat->indicesDe($tabla) as $def) {
             if (strtolower((string)$def['columns'][0]) === key($cols) && Indexes::sirve($def, 1)) {
                 $n = StorageRangos::posicionesPorComparacion($this->cat->storage(), $tabla, $def, current($cols), true);
-                if (is_int($n)) {
+                if (\is_int($n)) {
                     return $n;
                 }
             }
@@ -1065,13 +1208,13 @@ class Select
      * La tabla de un SELECT sobre una sola tabla de verdad (ni vista, ni CTE,
      * ni subconsulta), sin GROUP BY, HAVING ni DISTINCT, que es lo que piden
      * los atajos que leen del índice o del recuento (contarRapido,
-     * extremosRapidos, ordenPorIndice); null si no. Con un lector propio (un
+     * extremosRapidos, SelectOrden::ordenPorIndice); null si no. Con un lector propio (un
      * trigger en mitad de una escritura) las filas buenas están en memoria,
      * no en disco, y tampoco.
      */
-    private function tablaDirecta(array $ast): ?array
+    protected function tablaDirecta(array $ast): ?array
     {
-        if (!$this->indexable || ($ast['k'] ?? 'select') !== 'select' || count($ast['from']) !== 1
+        if (!$this->indexable || ($ast['k'] ?? 'select') !== 'select' || \count($ast['from']) !== 1
             || $ast['group'] !== null || $ast['having'] !== null || $ast['distinct']) {
             return null;
         }
@@ -1093,12 +1236,12 @@ class Select
     private function contarRapido(array $ast): ?array
     {
         $o = $this->tablaDirecta($ast);
-        if ($o === null || $ast['order'] !== [] || $ast['limit'] !== null || $ast['offset'] !== null || count($ast['cols']) !== 1) {
+        if ($o === null || $ast['order'] !== [] || $ast['limit'] !== null || $ast['offset'] !== null || \count($ast['cols']) !== 1) {
             return null;
         }
         $c = $ast['cols'][0];
         $e = $c['expr'] ?? null;
-        if (($c['star'] ?? false) || !is_array($e) || ($e['k'] ?? '') !== 'fn'
+        if (($c['star'] ?? false) || !\is_array($e) || ($e['k'] ?? '') !== 'fn'
             || strtoupper((string)$e['nombre']) !== 'COUNT' || !($e['star'] ?? false) || isset($e['filtro'])) {
             return null;
         }
@@ -1136,18 +1279,18 @@ class Select
         $memo   = [];
         foreach ($ast['cols'] as $c) {
             $e = $c['expr'] ?? null;
-            $f = is_array($e) && ($e['k'] ?? '') === 'fn' ? strtoupper((string)$e['nombre']) : '';
+            $f = \is_array($e) && ($e['k'] ?? '') === 'fn' ? strtoupper((string)$e['nombre']) : '';
             $a = $e['args'][0] ?? null;
-            if (($c['star'] ?? false) || ($f !== 'MIN' && $f !== 'MAX') || count($e['args'] ?? []) !== 1 || isset($e['filtro'])
+            if (($c['star'] ?? false) || ($f !== 'MIN' && $f !== 'MAX') || \count($e['args'] ?? []) !== 1 || isset($e['filtro'])
                 || ($a['k'] ?? '') !== 'col' || ($a['tabla'] !== null && strtolower((string)$a['tabla']) !== $alias)) {
                 return null;
             }
             $col = Catalog::columna($meta, (string)$a['nombre']);
-            if ($col === null || !in_array($col['type'], [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
+            if ($col === null || !\in_array($col['type'], [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
                 return null;
             }
             $clave = strtolower($col['name']);
-            if (!array_key_exists($clave, $memo)) {
+            if (!\array_key_exists($clave, $memo)) {
                 $memo[$clave] = null;
                 foreach ($this->cat->indicesDe($tabla) as $def) {
                     if (strcasecmp((string)$def['columns'][0], $col['name']) === 0 && Indexes::sirve($def, 1)) {
@@ -1166,7 +1309,7 @@ class Select
             }
             $v = $memo[$clave][$f === 'MIN' ? 'min' : 'max'];
             $nombre = (string)($c['alias'] ?? self::etiqueta($e));
-            if (in_array($nombre, $cols, true)) {
+            if (\in_array($nombre, $cols, true)) {
                 return null;                           // nombres repetidos: los renombra el camino normal
             }
             $cols[] = $nombre;
@@ -1210,7 +1353,9 @@ class Select
         }
         $a = $n['min']['v'];
         $b = $n['max']['v'];
-        if (!(is_int($a) || is_float($a)) || !(is_int($b) || is_float($b))) {
+        // Pasado 2^53, >= y <= no son exactos entre un entero y un decimal: al
+        // camino general (2.10, ver Valor::numeros())
+        if (!(\is_int($a) || \is_float($a)) || !(\is_int($b) || \is_float($b)) || abs($a) >= 9007199254740992 || abs($b) >= 9007199254740992) {
             return null;
         }
         return [$n['e']['clave'], $a, $b, (bool)$n['not']];
@@ -1240,59 +1385,14 @@ class Select
             // las de la consulta: no hace falta sacar las demás posiciones (2.9: con
             // 100.000 filas de una ciudad y LIMIT 50 se leían las 100.000 y luego,
             // como eran demasiadas, se recorría la tabla)
-            $tope = $this->topeIndice !== null && count($this->topeIndice[1]) === $c['n']
-                && array_diff($this->topeIndice[1], array_map('strtolower', array_slice($c['def']['columns'], 0, $c['n']))) === []
+            // Con uno que solo sirve en parte salen también filas que no cumplen: sin tope
+            $tope = !$c['parcial'] && $this->topeIndice !== null && \count($this->topeIndice[1]) === $c['n']
+                && array_diff($this->topeIndice[1], array_map('strtolower', \array_slice($c['def']['columns'], 0, $c['n']))) === []
                 ? $this->topeIndice[0] : null;
-            $filas = StorageLectura::filasPorIndice($st, $tabla, $c['def'], $c['claves'], $c['prefijo'], $tope);
+            $filas = StorageLectura::filasPorIndice($st, $tabla, $c['def'], $c['claves'], $c['prefijo'], $tope, $c['parcial']);
             if ($filas !== null) {
-                $this->via = ['índice (' . ($c['prefijo'] ? 'parte de la clave' : (count($c['claves']) > 1 ? 'IN' : '=')) . ')', $c['def']['name']];
+                $this->via = ['índice (' . ($c['parcial'] ? 'parte de la clave, en las partes sin NULL' : ($c['prefijo'] ? 'parte de la clave' : (\count($c['claves']) > 1 ? 'IN' : '='))) . ')', $c['def']['name']];
                 return $filas;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * ¿Se pueden sacar las filas de un «ORDER BY col [DESC] LIMIT n» del índice
-     * de col, sin leer la tabla entera (ver StorageLectura::filasPorOrden())?
-     * Solo con una tabla, sin WHERE, agrupación ni DISTINCT, con una sola clave
-     * de orden que sea una columna numérica de la tabla con índice. En orden
-     * ascendente los NULL van primero y no están en el índice: hace falta que la
-     * columna no los admita. Las filas que salen se ordenan y se cortan después
-     * como siempre: solo cambia cuántas se leen.
-     *
-     * @return array{def: array, desc: bool, k: int}|null
-     */
-    private function ordenPorIndice(array $ast): ?array
-    {
-        $o = ($ast['k'] ?? '') === 'select' && empty($ast['ventanas']) ? $this->tablaDirecta($ast) : null;
-        if ($o === null || $ast['where'] !== null || $ast['limit'] === null
-            || count($ast['order']) !== 1 || ($ast['order'][0]['expr']['k'] ?? '') !== 'col') {
-            return null;
-        }
-        $e     = $ast['order'][0]['expr'];
-        $alias = strtolower((string)($o['alias'] ?? $o['nombre']));
-        if ($e['tabla'] !== null && strtolower((string)$e['tabla']) !== $alias) {
-            return null;
-        }
-        foreach ($ast['cols'] as $c) {
-            if (empty($c['star']) && (Evaluator::tieneAgregado($c['expr'])
-                // Un alias de la salida con el nombre de la columna manda en el ORDER BY
-                || (($c['alias'] ?? null) !== null && strcasecmp((string)$c['alias'], (string)$e['nombre']) === 0
-                    && !(($c['expr']['k'] ?? '') === 'col' && strcasecmp((string)$c['expr']['nombre'], (string)$e['nombre']) === 0)))) {
-                return null;
-            }
-        }
-        $col = Catalog::columna($this->cat->meta($o['nombre']), (string)$e['nombre']);
-        $desc = strtoupper((string)$ast['order'][0]['dir']) === 'DESC';
-        $k = self::cuantasHacenFalta($ast);
-        if ($col === null || !in_array($col['type'], [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)
-            || (!$desc && empty($col['notnull']) && empty($col['pk'])) || $k === null || $k < 1 || $k > 10000) {
-            return null;
-        }
-        foreach ($this->cat->indicesDe($o['nombre']) as $def) {
-            if (strcasecmp((string)$def['columns'][0], $col['name']) === 0 && Indexes::sirve($def, 1)) {
-                return ['def' => $def, 'desc' => $desc, 'k' => $k];
             }
         }
         return null;
@@ -1315,7 +1415,9 @@ class Select
         }
         $defs = array_filter($this->cat->indicesDe($tabla), static fn(array $d): bool => Indexes::sirve($d, 1));
         foreach ($defs as $def) {
-            $r = $rangos[strtolower($def['columns'][0])] ?? null;
+            // Un rango de números no sirve en una columna de texto (2.10): ahí
+            // 5 es '5', y '10' < '5' (ver la comparación de abajo)
+            $r = ($def['afin'][0] ?? null) === 'T' ? null : $rangos[strtolower($def['columns'][0])] ?? null;
             if ($r !== null && ($r[0] !== null || $r[1] !== null)) {
                 $filas = $st->filasPorRango($tabla, $def, $r[0], $r[1]);
                 if ($filas !== null) {
@@ -1340,6 +1442,33 @@ class Select
             }
         }
         return null;
+    }
+
+    /**
+     * Lo de fuera de una consulta visto desde sus subconsultas, un nivel más
+     * lejos (2.10): cada clave, con un "\1" más delante, para que no choque
+     * con las de la consulta que queda en medio (las columnas se guardan sin
+     * la tabla delante cuando hay una sola: «id» puede estar en las dos), y la
+     * colación y la afinidad de cada una ("\0c:" y "\0a:" y la clave) con ella.
+     *
+     * @param array{mapa: array, fila: array} $externo
+     * @return array{mapa: array, fila: array}
+     */
+    protected static function masFuera(array $externo): array
+    {
+        $mapa = [];
+        foreach ($externo['mapa'] as $nombre => $clave) {
+            if (str_starts_with((string)$nombre, "\0c:") || str_starts_with((string)$nombre, "\0a:")) {
+                $mapa[substr((string)$nombre, 0, 3) . "\1" . substr((string)$nombre, 3)] = $clave;
+            } else {
+                $mapa[$nombre] = \is_string($clave) ? "\1" . $clave : $clave;
+            }
+        }
+        $fila = [];
+        foreach ($externo['fila'] as $clave => $v) {
+            $fila["\1" . $clave] = $v;
+        }
+        return ['mapa' => $mapa, 'fila' => $fila];
     }
 
     /**
@@ -1389,51 +1518,6 @@ class Select
     // ==================================================================
 
     /**
-     * FROM a, b WHERE b.x = a.y (2.9): las igualdades del WHERE entre una
-     * tabla de la coma y las que van antes se ponen también en su ON, y se
-     * cruzan por hash como un JOIN … ON. Antes se cruzaba cada fila con todas
-     * y luego se filtraba: con 20.000 y 10.000 filas, 76 s frente a 40 ms. El
-     * WHERE sigue entero (volver a comprobarlas no cambia nada). Solo entre
-     * columnas con su tabla delante, y no si hay un RIGHT o un FULL JOIN, por
-     * lo mismo que en empujarWhere().
-     */
-    private static function comasAJoin(array $from, ?array $where): array
-    {
-        if ($where === null || count($from) < 2) {
-            return $from;
-        }
-        $alias = [];
-        foreach ($from as $o) {
-            if (in_array($o['join'] ?? '', ['RIGHT', 'FULL'], true)) {
-                return $from;
-            }
-            $alias[] = strtolower((string)($o['alias'] ?? $o['nombre']));
-        }
-        $iguales = array_values(array_filter(IndexesBusqueda::conjunciones($where), static fn(array $c): bool =>
-            $c['k'] === 'bin' && $c['op'] === '=' && $c['i']['k'] === 'col' && $c['d']['k'] === 'col'
-            && $c['i']['tabla'] !== null && $c['d']['tabla'] !== null));
-        for ($i = 1, $n = count($from); $i < $n; $i++) {
-            if (($from[$i]['join'] ?? null) !== 'CROSS' || $from[$i]['on'] !== null) {
-                continue;
-            }
-            $antes = array_flip(array_slice($alias, 0, $i));
-            $on    = null;
-            foreach ($iguales as $c) {
-                $ti = strtolower((string)$c['i']['tabla']);
-                $td = strtolower((string)$c['d']['tabla']);
-                if (($ti === $alias[$i] && isset($antes[$td])) || ($td === $alias[$i] && isset($antes[$ti]))) {
-                    $on = $on === null ? $c : ['k' => 'bin', 'op' => 'AND', 'i' => $on, 'd' => $c];
-                }
-            }
-            if ($on !== null) {
-                $from[$i]['join'] = 'INNER';
-                $from[$i]['on']   = $on;
-            }
-        }
-        return $from;
-    }
-
-    /**
      * Las filas del FROM y sus columnas. Cada columna es [alias, nombre,
      * clave], donde la clave es con la que está en la fila: el nombre a secas
      * si hay un solo origen, y `alias.nombre` si hay varios, para que dos
@@ -1443,7 +1527,7 @@ class Select
      */
     private function origenes(array $ast, ?int $tope = null): array
     {
-        $from  = self::comasAJoin($ast['from'], $ast['where']);
+        $from  = $ast['where'] === null || \count($ast['from']) < 2 ? $ast['from'] : SelectJoinIndice::comasAJoin($ast['from'], $ast['where']);
         $where = $ast['where'];
         if ($from === []) {
             return [[[]], []];                            // SELECT sin FROM: una fila vacía
@@ -1452,7 +1536,7 @@ class Select
         // Con un solo origen, una columna sin cualificar solo puede ser suya.
         // Con varios haría falta el mapa de columnas, y para eso ya habría que
         // haber leído las tablas, que es justo lo que se quiere evitar.
-        $unico = count($from) === 1 && $from[0]['tipo'] === 'tabla'
+        $unico = \count($from) === 1 && $from[0]['tipo'] === 'tabla'
             ? strtolower((string)($from[0]['alias'] ?? $from[0]['nombre']))
             : null;
         $predicados = $this->indexable ? IndexesBusqueda::predicados($where, $unico) : [];
@@ -1465,18 +1549,18 @@ class Select
         // El tope solo se puede aplicar al leer si no hay nada que filtrar
         // después: con WHERE o con JOIN, las filas que sobran no son las
         // últimas, y quedarse con las primeras daría un resultado distinto.
-        $topeLectura = $where === null && count($from) === 1 ? $tope : null;
+        $topeLectura = $where === null && \count($from) === 1 ? $tope : null;
         $this->saltoPedido = $topeLectura === null ? 0 : (int)($ast['offset'] ?? 0);
-        $igualdades = $tope !== null && count($from) === 1 ? IndexesBusqueda::soloIgualdades($where, $unico) : null;
+        $igualdades = $tope !== null && \count($from) === 1 ? IndexesBusqueda::soloIgualdades($where, $unico) : null;
         $this->topeIndice = $igualdades === null ? null : [$tope, $igualdades];
 
         // El primer origen se recorre sin materializarlo: con un solo origen,
         // el WHERE va descartando filas según llegan y en memoria solo quedan
         // las que pasan. Los demás son el lado interno del cruce y hacen falta
         // enteros.
-        $varios  = count($from) > 1;
+        $varios  = \count($from) > 1;
         $usadas  = $varios ? $this->columnasUsadas($ast) : null;
-        $this->porOrden = $this->ordenPorIndice($ast);
+        $this->porOrden = $ast['limit'] !== null && \count($ast['order']) === 1 ? SelectOrden::ordenPorIndice($this, $ast) : null;
         try {
             $primero = $this->cargar($from[0], $predicados, $topeLectura, $varios, $usadas, $rangos);
         } finally {
@@ -1489,9 +1573,9 @@ class Select
 
         $derechas = false;
         foreach ($from as $o) {
-            $derechas = $derechas || in_array($o['join'] ?? '', ['RIGHT', 'FULL'], true);
+            $derechas = $derechas || \in_array($o['join'] ?? '', ['RIGHT', 'FULL'], true);
         }
-        for ($i = 1, $n = count($from); $i < $n; $i++) {
+        for ($i = 1, $n = \count($from); $i < $n; $i++) {
             if (!empty($from[$i]['natural']) || isset($from[$i]['using'])) {
                 $from[$i]['on'] = SelectJoin::onDeUsing($this, $from[$i], $fuentes);
             }
@@ -1515,12 +1599,12 @@ class Select
                 && !isset($this->con[strtolower($from[0]['nombre'])])
                 && $this->cat->existe($from[0]['nombre'])
                 ? StorageLectura::filasSegunRevision($this->cat->storage(), $from[0]['nombre']) : null;
-            $cruce = $this->unirPorIndice($filas, $fuentes, $from[$i], $usadas, $izqConocida);
+            $cruce = SelectJoinIndice::unirPorIndice($this, $filas, $fuentes, $from[$i], $usadas, $izqConocida);
             if ($cruce !== null) {
                 [$filas, $fuentesDer] = $cruce;
             } else {
                 $der = $this->cargar($from[$i], $predicados, null, true, $usadas, $rangos);
-                if ($this->enDisco && in_array($from[$i]['join'] ?? '', ['INNER', 'LEFT'], true) && $from[$i]['on'] !== null) {
+                if ($this->enDisco && \in_array($from[$i]['join'] ?? '', ['INNER', 'LEFT'], true) && $from[$i]['on'] !== null) {
                     // El lado interno no cupo: por particiones en disco (2.9)
                     $filas = SelectJoin::unirEnDisco($this, $filas, $fuentes, $der, $from[$i]);
                 } else {
@@ -1586,180 +1670,23 @@ class Select
     }
 
     /**
-     * Cruce por índice: cuando el lado izquierdo tiene pocas filas —un JOIN
-     * detrás de un WHERE que deja una o unas decenas— y la tabla de la
-     * derecha tiene un índice sobre las columnas que iguala el ON, cargarla
-     * entera para casar unas pocas filas es lo más caro de la consulta. En su
-     * lugar se busca cada fila de la izquierda por su clave en el índice.
-     * Vale para INNER y LEFT. Devuelve null si no se dan las condiciones, y
-     * entonces el cruce es el de siempre; el lado izquierdo, que se ha
-     * empezado a leer para contarlo, se devuelve entero en $izq.
+     * Catalog::colaciones() y Catalog::afinidades() en una vuelta (2.10): las
+     * dos piden las fuentes de cada tabla de una consulta. Aquí, que solo lo
+     * usan las consultas: en Catalog lo compilaba también cada escritura
      *
-     * @param iterable<mixed> $izq
-     * @return array{0: \Generator, 1: list<array{0: string, 1: string, 2: string}>}|null
+     * @return array{0: array<string, string>, 1: array<string, string>}
      */
-    private function unirPorIndice(iterable &$izq, array $fuentesIzq, array $o, ?array $usadas, ?int $izqConocida = null): ?array
+    private static function colacionesYAfinidades(array $meta): array
     {
-        $tipo = $o['join'] ?? 'CROSS';
-        if (!$this->indexable || ($tipo !== 'INNER' && $tipo !== 'LEFT') || $o['on'] === null || !empty($o['posicion'])
-            || $o['tipo'] !== 'tabla' || isset($this->con[strtolower($o['nombre'])])
-            || $this->cat->esVista($o['nombre'])
-            || !$this->cat->existe($o['nombre'])) {
-            return null;
-        }
-        $st = $this->cat->storage();
-        if (!$st->indicesActivos()) {
-            return null;
-        }
-        $nombre = $o['nombre'];
-        $alias  = $o['alias'] ?? $nombre;
-        [$cols, $fuentesDer] = $this->fuentesDeTabla($nombre, $alias, $usadas);
-        $clavesDer = array_column($fuentesDer, 2);
-
-        $mapa = $this->mapaColumnas(array_merge($fuentesIzq, $fuentesDer));
-        $on   = Evaluator::resolver($o['on'], $mapa, [], $this->externo['mapa'] ?? []);
-        [$pares, $resto] = $this->igualdades($on, array_flip($clavesDer));
-        if ($pares === []) {
-            return null;
-        }
-        // columna interna => clave externa con la que se iguala, y su colación
-        $porColumna = [];
-        $colacion   = [];
-        foreach ($pares as [$claveExt, $claveInt, $c]) {
-            $col = substr($claveInt, strlen($alias) + 1);
-            if (!isset($porColumna[$col])) {
-                [$porColumna[$col], $colacion[$col]] = [$claveExt, $c];
+        $colaciones = $afinidades = [];
+        foreach ($meta['columns'] as $c) {
+            $minuscula = strtolower((string)$c['name']);
+            if (isset($c['collate'])) {
+                $colaciones[$minuscula] = $c['collate'];
             }
+            $afinidades[$minuscula] = $c['type'] === Types::TEXT ? 'T' : 'N';
         }
-        // El índice que más columnas del ON cubre, por la izquierda. Una
-        // igualdad con colación (2.9) solo la cubre un índice con la misma: en
-        // otro no estarían 'Ana' y 'ANA' bajo la misma clave. Una binaria, uno
-        // con colación también: da de más, y se comprueba fila a fila
-        $def      = null;
-        $externas = [];
-        foreach ($this->cat->indicesDe($nombre) as $d) {
-            $cubre = [];
-            foreach ($d['columns'] as $k => $c) {
-                if (!isset($porColumna[$c]) || ($colacion[$c] !== null && $colacion[$c] !== ($d['plegar'][$k] ?? null))) {
-                    break;
-                }
-                $cubre[] = $porColumna[$c];
-            }
-            if (count($cubre) > count($externas) && Indexes::sirve($d, count($cubre))) {
-                $def      = $d;
-                $externas = $cubre;
-            }
-        }
-        if ($def === null) {
-            return null;
-        }
-        // Las igualdades del ON que el índice no cubre se comprueban en cada
-        // candidata, como el resto de la condición
-        $otrasIgualdades = [];
-        $plegar = $def['plegar'] ?? [];
-        foreach ($pares as [$claveExt, $claveInt, $c]) {
-            // Con COLLATE en el índice (2.9), sus claves van plegadas: lo que
-            // da es de más, y todas las igualdades se comprueban fila a fila
-            if ($plegar !== [] || !in_array($claveExt, $externas, true) || $porColumna[substr($claveInt, strlen($alias) + 1)] !== $claveExt) {
-                $otrasIgualdades[] = [$claveExt, $claveInt, $c];
-            }
-        }
-
-        // ¿Cuántas filas hay a la izquierda? Compensa buscar mientras sean
-        // pocas para lo grande que es la tabla: se leen como mucho esas, y si
-        // hay más, se sigue por el camino de siempre sin haber guardado nada más
-        $internas = StorageLectura::filasSegunRevision($st, $nombre);
-        $tope     = $internas === null ? 0 : min(self::CRUCE_POR_INDICE_MAX, intdiv($internas, self::CRUCE_POR_INDICE_FACTOR));
-        if ($tope < 1 || ($izqConocida !== null && $izqConocida > $tope)) {
-            return null;
-        }
-        $it = $izq instanceof \Iterator ? $izq : new \ArrayIterator(is_array($izq) ? $izq : iterator_to_array($izq, false));
-        $it->rewind();
-        $filasIzq = [];
-        $agotado  = true;
-        while ($it->valid()) {
-            $filasIzq[] = $it->current();
-            $it->next();
-            if (count($filasIzq) > $tope) {
-                $agotado = false;
-                break;
-            }
-        }
-        if (!$agotado) {
-            // No compensa: el lado izquierdo sigue por el camino de siempre,
-            // con lo ya leído por delante y lo que quede detrás
-            $izq = (static function () use ($filasIzq, $it) {
-                yield from $filasIzq;
-                while ($it->valid()) {
-                    yield $it->current();
-                    $it->next();
-                }
-            })();
-            return null;
-        }
-
-        $prefijo   = count($externas) < count($def['columns']);
-        $nulos     = array_fill_keys($clavesDer, null);
-        $condicion = $resto === null ? null : (EvaluatorCompilado::compilar($resto) ?? $resto);
-        [$sub, $conjunto] = $this->subconsultasDelOn();
-        $lector = $this->lector;
-        $paso = $st->traza !== null ? SelectAvanzada::apuntar($this, $nombre, 'JOIN, buscando cada fila en el índice', $def['name'], 0) : null;
-        $gen = (function () use ($filasIzq, $externas, $otrasIgualdades, $def, $nombre, $alias, $cols, $prefijo, $tipo, $nulos, $condicion, $st, $sub, $conjunto, $lector, $paso, $plegar) {
-            foreach ($filasIzq as $ext) {
-                $valores = [];
-                foreach ($externas as $i => $claveExt) {
-                    $valores[] = isset($plegar[$i]) ? Functions::plegar($ext[$claveExt] ?? null, $plegar[$i]) : ($ext[$claveExt] ?? null);
-                }
-                $clave = Indexes::clave($valores);            // null si algún valor es NULL: no iguala nada
-                $candidatas = $clave === null ? [] : StorageLectura::filasPorIndice($st, $nombre, $def, [$clave], $prefijo);
-                $leidas     = count($candidatas ?? []);
-                if ($candidatas === null) {
-                    // El índice no sirve, o la clave está en demasiadas partes:
-                    // para esta fila se recorre la tabla
-                    $candidatas = [];
-                    foreach ($lector($nombre) as $fila) {
-                        $leidas++;
-                        $suya = Indexes::claveFila($fila, $def['columns'], $plegar);
-                        if ($suya !== null && ($prefijo ? strncmp($suya, $clave, strlen($clave)) === 0 : $suya === $clave)) {
-                            $candidatas[] = $fila;
-                        }
-                    }
-                }
-                if ($paso !== null) {
-                    $st->traza[$paso]['filas'] += $leidas;
-                }
-                $encontrada = false;
-                foreach ($candidatas as $int) {
-                    $plana = [];
-                    foreach ($cols as $c) {
-                        $plana[$alias . '.' . $c] = $int[$c] ?? null;
-                    }
-                    $fila = $ext + $plana;
-                    foreach ($otrasIgualdades as [$ke, $ki, $c]) {
-                        if ($fila[$ke] === null || $fila[$ki] === null
-                            || Valor::comparar($c === null ? $fila[$ke] : Functions::plegar($fila[$ke], $c), $c === null ? $fila[$ki] : Functions::plegar($fila[$ki], $c)) !== 0) {
-                            continue 2;
-                        }
-                    }
-                    if ($condicion !== null) {
-                        $vale = $condicion instanceof \Closure
-                            ? Valor::verdadero($condicion($fila))
-                            : Valor::verdadero(Evaluator::evaluar($condicion, ['fila' => $fila, 'sub' => $sub, 'conjunto' => $conjunto,
-                                                                                 'filaExterna' => $this->externo['fila'] ?? []]));
-                        if ($vale !== true) {
-                            continue;
-                        }
-                    }
-                    Memoria::comprobar('el JOIN');
-                    yield $fila;
-                    $encontrada = true;
-                }
-                if (!$encontrada && $tipo === 'LEFT') {
-                    yield $ext + $nulos;
-                }
-            }
-        })();
-        return [$gen, $fuentesDer];
+        return [$colaciones, $afinidades];
     }
 
     /**
@@ -1781,9 +1708,9 @@ class Select
                 static fn(string $c): bool => isset($suyas[strtolower($c)]) || isset($sueltas[strtolower($c)])));
         }
         $fuentes    = [];
-        $colaciones = Catalog::colaciones($this->cat->meta($nombre));
+        [$colaciones, $afinidades] = self::colacionesYAfinidades($this->cat->meta($nombre));
         foreach ($cols as $c) {
-            $fuentes[] = [$alias, $c, $alias . '.' . $c, null, $colaciones[strtolower($c)] ?? null];
+            $fuentes[] = [$alias, $c, $alias . '.' . $c, null, $colaciones[strtolower($c)] ?? null, $afinidades[strtolower($c)] ?? null];
         }
         return [$cols, $fuentes];
     }
@@ -1825,6 +1752,29 @@ class Select
         return [$porAlias, $sueltas, $todas];
     }
 
+    /**
+     * Las claves de la fila que leen unas expresiones ya resueltas (2.10), o
+     * null si alguna lleva una subconsulta, que puede leer cualquier columna
+     * de la fila de fuera.
+     *
+     * @return array<string, true>|null
+     */
+    private static function clavesUsadas(array $n, array $claves = []): ?array
+    {
+        if (($n['k'] ?? null) === 'sub' || ($n['k'] ?? null) === 'exists' || \is_array($n['select'] ?? null)) {
+            return null;
+        }
+        if (($n['k'] ?? null) === 'col' && isset($n['clave']) && !isset($n['externa'])) {
+            $claves[$n['clave']] = true;
+        }
+        foreach ($n as $v) {
+            if (\is_array($v) && ($claves = self::clavesUsadas($v, $claves)) === null) {
+                return null;
+            }
+        }
+        return $claves;
+    }
+
     private static function recorrerColumnas(array $n, array &$porAlias, array &$sueltas, array &$todas): bool
     {
         if (!empty($n['star'])) {
@@ -1840,7 +1790,7 @@ class Select
             }
         }
         foreach ($n as $v) {
-            if (is_array($v) && !self::recorrerColumnas($v, $porAlias, $sueltas, $todas)) {
+            if (\is_array($v) && !self::recorrerColumnas($v, $porAlias, $sueltas, $todas)) {
                 return false;
             }
         }
@@ -1858,7 +1808,7 @@ class Select
      */
     private function cargar(array $o, array $predicados, ?int $tope, bool $prefijar, ?array $usadas, array $rangos = []): array
     {
-        $heredadas = [];                   // las colaciones de una subconsulta, una vista o una CTE (2.9)
+        $heredadas = [[], []];             // las colaciones (2.9) y afinidades (2.10) de una subconsulta, una vista o una CTE
         if ($o['tipo'] === 'sub') {
             $r      = $this->correrEntera($o['select']);
             $alias  = $o['alias'];
@@ -1887,7 +1837,7 @@ class Select
 
             $this->profundidadVista++;
             try {
-                $r = $this->correrEntera(Parser::analizar((string)$vista['sql']));
+                $r = $this->correrEntera(Parser::analizar((string)$vista['sql'], [], $this->cat->nombres()));
             } finally {
                 $this->profundidadVista--;
             }
@@ -1911,15 +1861,21 @@ class Select
             // filas buscadas; si no lo hay, o no compensa, se recorre la tabla.
             $orden  = $this->porOrden;
             $st     = $this->cat->storage();
-            if (!empty($o['posicion'])) {
+            // Con el límite del ORDER BY en el WHERE (ver SelectOrden::ordenPorIndice()), el
+            // índice en orden antes que el rango: lee las n filas, no todo el rango
+            $origen = $orden !== null && $orden['desde'] !== null && empty($o['posicion'])
+                ? StorageOrden::filasPorOrden($st, $nombre, $orden['def'], $orden['desc'], $orden['k'], null, $orden['desde']) : null;
+            if ($origen !== null) {
+                $this->via = ['índice, en orden' . ($orden['desc'] ? ' descendente' : '') . ' desde el límite del WHERE', $orden['def']['name']];
+            } elseif (!empty($o['posicion'])) {
                 $cols[] = self::POSICION;
                 $origen = SelectAvanzada::conPosicion($this, $nombre, $predicados[strtolower($alias)] ?? []);
             } else {
                 $origen = $this->porIndice($nombre, $predicados[strtolower($alias)] ?? [])
                        ?? $this->porRango($nombre, $rangos[strtolower($alias)] ?? [], strtolower($alias));
             }
-            if ($origen === null && $orden !== null) {
-                $origen = StorageLectura::filasPorOrden($st, $nombre, $orden['def'], $orden['desc'], $orden['k']);
+            if ($origen === null && $orden !== null && $orden['desde'] === null) {
+                $origen = StorageOrden::filasPorOrden($st, $nombre, $orden['def'], $orden['desc'], $orden['k'], $orden['binaria']);
                 $this->via = ['índice, en orden' . ($orden['desc'] ? ' descendente' : ''), $orden['def']['name']];
             }
             if ($origen === null) {
@@ -1945,9 +1901,9 @@ class Select
                 static fn(string $c): bool => isset($suyas[strtolower($c)]) || isset($sueltas[strtolower($c)])));
         }
         $fuentes    = [];
-        $colaciones = isset($meta) ? Catalog::colaciones($meta) : $heredadas;
+        [$colaciones, $afinidades] = isset($meta) ? self::colacionesYAfinidades($meta) : $heredadas;
         foreach ($cols as $c) {
-            $fuentes[] = [$alias, $c, $prefijar ? $alias . '.' . $c : $c, null, $colaciones[strtolower($c)] ?? null];
+            $fuentes[] = [$alias, $c, $prefijar ? $alias . '.' . $c : $c, null, $colaciones[strtolower($c)] ?? null, $afinidades[strtolower($c)] ?? null];
         }
         if ($prefijar) {
             $origen = self::aplanar($origen, $cols, $alias);
@@ -2059,13 +2015,14 @@ class Select
                 $r = $this->correr($sel);
                 $this->subs[$sid]        = $r['filas'];
                 $this->colacionSub[$sid] = $r['colaciones'][0] ?? null;
+                $this->afinidadSub[$sid] = $r['afinidades'][0] ?? '';
             }
             return $this->subs[$sid];
         };
-        $conjunto = function (array $sel, int $sid, array $filaExterna = [], string|bool|null $colacion = null): array {
+        $conjunto = function (array $sel, int $sid, array $filaExterna = [], string|bool|null $colacion = null, ?string $afinidad = null): array {
             if (!isset($this->conjuntos[$sid])) {
-                [$valores, $this->colacionSub[$sid]] = $this->valoresDe($sel);
-                $this->conjuntos[$sid] = IndexesBusqueda::conjuntoDeIn($valores, $colacion, $this->colacionSub[$sid]);
+                [$valores, $this->colacionSub[$sid], $this->afinidadSub[$sid]] = $this->valoresDe($sel);
+                $this->conjuntos[$sid] = IndexesBusqueda::conjuntoDeIn($valores, $colacion, $this->colacionSub[$sid], $afinidad, $this->afinidadSub[$sid]);
             }
             return $this->conjuntos[$sid];
         };
@@ -2076,9 +2033,9 @@ class Select
      * Separa la condición ON en igualdades directas (para el hash) y el resto.
      * Cada igualdad lleva la colación con la que compara (2.9), o null: la de
      * una columna con COLLATE va como PLEGAR(col) = PLEGAR(col) (ver
-     * Evaluator::resolver()).
+     * Evaluator::resolver()); y cómo iguala (2.10, ver abajo).
      *
-     * @return array{0: array<int,array{0:string,1:string,2:?string}>, 1: ?array}
+     * @return array{0: array<int,array{0:string,1:string,2:?string,3:string}>, 1: ?array}
      */
     protected function igualdades(array $on, array $clavesDer): array
     {
@@ -2099,11 +2056,28 @@ class Select
                     && $i['args'][1]['v'] === $d['args'][1]['v']) {
                     [$i, $d, $c] = [self::sinCollate($i['args'][0]), self::sinCollate($d['args'][0]), (string)$i['args'][1]['v']];
                 }
+                // Cómo iguala (2.10, ver SelectJoin::claveHash()): 'T' como
+                // textos (una columna de texto con otra, o con una sin afinidad,
+                // que llega como CAST(… AS TEXT): ver Evaluator::afinar()); 'N'
+                // con números (alguna numérica); '' ninguna de las dos sabe, y
+                // la clave solo acota: la igualdad se vuelve a mirar
+                $modo = null;
+                if ($i['k'] === 'cast' && $i['tipo'] === 'TEXT') {
+                    [$i, $modo] = [$i['e'], 'T'];
+                } elseif ($d['k'] === 'cast' && $d['tipo'] === 'TEXT') {
+                    [$d, $modo] = [$d['e'], 'T'];
+                }
                 if ($i['k'] === 'col' && $d['k'] === 'col' && isset($i['clave'], $d['clave'])) {
                     $iEsDer = isset($clavesDer[$i['clave']]);
                     $dEsDer = isset($clavesDer[$d['clave']]);
                     if ($iEsDer !== $dEsDer) {
-                        $pares[] = $iEsDer ? [$d['clave'], $i['clave'], $c] : [$i['clave'], $d['clave'], $c];
+                        $ai     = $i['afinidad'] ?? '';
+                        $ad     = $d['afinidad'] ?? '';
+                        $modo ??= $ai === 'N' || $ad === 'N' ? 'N' : ($ai === 'T' && $ad === 'T' ? 'T' : '');
+                        $pares[] = $iEsDer ? [$d['clave'], $i['clave'], $c, $modo] : [$i['clave'], $d['clave'], $c, $modo];
+                        if ($modo === '') {
+                            $resto[] = $n;
+                        }
                         continue;
                     }
                 }
@@ -2124,10 +2098,11 @@ class Select
 
     /**
      * 'alias.col' => clave, y 'col' => clave (false si es ambigua); y "\0c:clave"
-     * => la colación de esa columna, si la tiene (2.9). Una columna repetida por
-     * USING solo va con su tabla delante.
+     * => la colación de esa columna, si la tiene (2.9), y "\0a:clave" => su
+     * afinidad, si es de una tabla (2.10). Una columna repetida por USING solo
+     * va con su tabla delante.
      *
-     * @param list<array{0: string, 1: string, 2: string, 3?: bool, 4?: string}> $fuentes
+     * @param list<array{0: string, 1: string, 2: string, 3?: bool, 4?: string, 5?: string}> $fuentes
      */
     protected function mapaColumnas(array $fuentes): array
     {
@@ -2138,11 +2113,14 @@ class Select
             if (isset($f[4])) {
                 $mapa["\0c:" . $clave] = $f[4];        // su COLLATE (ver Evaluator::resolver())
             }
+            if (isset($f[5]) && $f[5] !== '') {
+                $mapa["\0a:" . $clave] = $f[5];        // su afinidad (ver Evaluator::afinidadDe())
+            }
             if (!empty($f[3])) {
                 continue;                             // una columna de USING repetida: solo con su tabla delante
             }
             $corto = strtolower($col);
-            if (array_key_exists($corto, $mapa)) {
+            if (\array_key_exists($corto, $mapa)) {
                 if ($mapa[$corto] !== $clave) {
                     $mapa[$corto] = false;
                 }
@@ -2182,7 +2160,15 @@ class Select
                     if ($c['tabla'] !== null ? strcasecmp($alias, $c['tabla']) !== 0 : !empty($f[3])) {
                         continue;
                     }
-                    $anadir($corto, ['k' => 'col', 'tabla' => $alias, 'nombre' => $corto, 'clave' => $clave]);
+                    // Con su colación y su afinidad, que hereda quien la lea (una vista, una subconsulta)
+                    $col = ['k' => 'col', 'tabla' => $alias, 'nombre' => $corto, 'clave' => $clave];
+                    if (isset($f[4])) {
+                        $col['colacion'] = $f[4];
+                    }
+                    if (isset($f[5]) && $f[5] !== '') {
+                        $col['afinidad'] = $f[5];
+                    }
+                    $anadir($corto, $col);
                     $encontradas++;
                 }
                 if ($c['tabla'] !== null && $encontradas === 0) {
@@ -2228,14 +2214,16 @@ class Select
         $rango     = $simple === null ? self::rangoNumerico($where) : null;
         $compilado = $simple === null && $rango === null ? EvaluatorCompilado::compilar($where, $conjunto) : null;
         // Con un literal numérico, un valor numérico se compara aquí mismo:
-        // Valor::comparar() haría exactamente lo mismo (<=>) tras una llamada
-        $num = $simple !== null && (is_int($simple['valor']) || is_float($simple['valor']));
+        // Valor::comparar() haría exactamente lo mismo (<=>) tras una llamada.
+        // Pasado 2^53, por Valor::comparar(), que es exacto entre un entero y
+        // un decimal (2.10)
+        $num = $simple !== null && (\is_int($simple['valor']) || \is_float($simple['valor'])) && abs($simple['valor']) < 9007199254740992;
         $n = 0;
         $vigilar = Memoria::cada();                  // filas hasta mirar la memoria (ver Storage::filas())
         foreach ($filas as $fila) {
             if ($simple !== null) {
                 $v = $fila[$simple['clave']] ?? null;
-                if ($num && (is_int($v) || is_float($v))) {
+                if ($num && (\is_int($v) || \is_float($v))) {
                     $c = $v <=> $simple['valor'];
                     switch ($simple['op']) {
                         case '=':  $vale = $c === 0; break;
@@ -2251,7 +2239,7 @@ class Select
             } elseif ($rango !== null) {
                 // col BETWEEN a AND b, con a y b números
                 $v = $fila[$rango[0]] ?? null;
-                if (is_int($v) || is_float($v)) {
+                if (\is_int($v) || \is_float($v)) {
                     $vale = ($v >= $rango[1] && $v <= $rango[2]) !== $rango[3];
                 } else {
                     // NULL o incomparable: desconocido, que no cumple ni con NOT
@@ -2291,7 +2279,7 @@ class Select
                 return $n['nombre'];
             case 'lit':
                 if ($n['v'] === null)   { return 'NULL'; }
-                if (is_string($n['v'])) { return "'" . $n['v'] . "'"; }
+                if (\is_string($n['v'])) { return "'" . $n['v'] . "'"; }
                 return (string)$n['v'];
             case 'fn':
                 // x COLLATE NOCASE, como se escribió (2.9); PLEGAR lo pone el analizador

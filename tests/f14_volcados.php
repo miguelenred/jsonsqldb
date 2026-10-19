@@ -34,7 +34,7 @@ define('ADMIN_CONEXION', 'directa');
 require dirname(__DIR__) . '/engine/bootstrap.php';
 require dirname(__DIR__) . '/jsonsqldbadmin/config.dist.php';
 require dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php';
-foreach (['Idioma', 'Exportar', 'Api', 'Traductor', 'Importar'] as $clase) {
+foreach (['Idioma', 'Exportar', 'Api', 'Traductor', 'Importar', 'Lotes', 'JsonFlujo'] as $clase) {
     require dirname(__DIR__) . "/jsonsqldbadmin/lib/$clase.php";
 }
 Idioma::elegir('es');                    // los resúmenes que se comprueban, en español
@@ -384,6 +384,102 @@ chk('lo que se exporta para PostgreSQL y para SQL Server se vuelve a importar ig
         }
     }
     return true;
+});
+chk('el contador de AUTOINCREMENT va y vuelve en cada dialecto: tras borrar las últimas filas, la copia no repite sus id (2.10)', function () use ($m, $pg, $pgConexion) {
+    // Se volcaba solo la palabra AUTOINCREMENT, y la importación tiraba la fila
+    // de sqlite_sequence: la copia daba otra vez el 8, el 9 y el 10
+    Database::crear('aiv', JSONSQLDB_DATA_PATH);
+    $o = new Database('aiv', JSONSQLDB_DATA_PATH);
+    $o->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)');
+    $o->consultar('CREATE TABLE vacia (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)');
+    for ($i = 0; $i < 10; $i++) { $o->consultar("INSERT INTO t (n) VALUES ('x'), ('y')"); $o->consultar("INSERT INTO vacia (n) VALUES ('z')"); }
+    $o->consultar('DELETE FROM t WHERE id > 12');
+    $o->consultar('DELETE FROM vacia');
+    $tablas = Exportar::tablasDe('aiv');
+    $mal = [];
+    foreach (['sqlite', 'mysql', 'postgresql', 'sqlserver', 'json'] as $d) {
+        if ($d === 'json') {
+            // El volcado JSON del panel: la estructura es la de SQLite, sin filas
+            $texto = '';
+            $json = new ReflectionMethod('Exportar', 'volcadoJson');
+            PHP_VERSION_ID < 80100 && $json->setAccessible(true);
+            $json->invoke(null, 'aiv', $tablas, [], [], [], Exportar::cargador('aiv', $tablas), static function (string $t) use (&$texto): void { $texto .= $t; });
+        } else {
+            $texto = Exportar::volcado('aiv', $tablas, [], [], [], $d, Exportar::cargador('aiv', $tablas));
+        }
+        $f = JSONSQLDB_DATA_PATH . "/aiv.$d.sql";
+        file_put_contents($f, $texto);
+        Database::crear("aiv_$d", JSONSQLDB_DATA_PATH);
+        Importar::sql($f, "aiv_$d");
+        @unlink($f);
+        $c = new Database("aiv_$d", JSONSQLDB_DATA_PATH);
+        $c->consultar("INSERT INTO t (n) VALUES ('nueva')");
+        $c->consultar("INSERT INTO vacia (n) VALUES ('nueva')");
+        $ids = [(int)$c->consultar('SELECT MAX(id) AS m FROM t')[0]['m'], (int)$c->consultar('SELECT MAX(id) AS m FROM vacia')[0]['m']];
+        // También en SQL Server la vacía, que daba uno de más: CHECKIDENT de una tabla sin filas da el indicado
+        if ($ids !== [21, 11]) { $mal[] = "$d: " . json_encode($ids); }
+        if ($d === 'sqlite') {
+            $l = new PDO('sqlite::memory:');
+            $l->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $l->exec($texto);
+            $l->exec("INSERT INTO t (n) VALUES ('nueva'); INSERT INTO vacia (n) VALUES ('nueva')");
+            $en = [(int)$l->query('SELECT MAX(id) FROM t')->fetchColumn(), (int)$l->query('SELECT MAX(id) FROM vacia')->fetchColumn()];
+            if ($en !== [21, 11]) { $mal[] = 'en SQLite: ' . json_encode($en); }
+        }
+        if ($d === 'mysql' && $m !== null) {
+            $nb = 'jsonsqldb_f14ai_' . getmypid();
+            $m->query("CREATE DATABASE `$nb`");
+            $m->select_db($nb);
+            $ok = $m->multi_query($texto);
+            while ($ok && $m->more_results() && $m->next_result()) { if ($r = $m->store_result()) { $r->free(); } }
+            $m->query("INSERT INTO t (n) VALUES ('nueva')");
+            $m->query("INSERT INTO vacia (n) VALUES ('nueva')");
+            $en = [(int)$m->query('SELECT MAX(id) FROM t')->fetch_row()[0], (int)$m->query('SELECT MAX(id) FROM vacia')->fetch_row()[0]];
+            $m->query("DROP DATABASE `$nb`");
+            if ($en !== [21, 11]) { $mal[] = 'en MySQL: ' . json_encode($en) . ' ' . $m->error; }
+        }
+        if ($d === 'postgresql' && $pg !== null) {
+            $nb = 'jsonsqldb_f14ai_' . getmypid();
+            pg_query($pg, "CREATE DATABASE \"$nb\"");
+            [$host, $usuario, $clave] = array_pad(explode(':', $pgConexion, 3), 3, '');
+            $p = pg_connect("host=$host user=$usuario password=$clave dbname=$nb");
+            @pg_query($p, $texto);
+            @pg_query($p, "INSERT INTO t (n) VALUES ('nueva'); INSERT INTO vacia (n) VALUES ('nueva')");
+            $en = [(int)pg_fetch_row(pg_query($p, 'SELECT MAX(id) FROM t'))[0], (int)pg_fetch_row(pg_query($p, 'SELECT MAX(id) FROM vacia'))[0]];
+            pg_close($p);
+            pg_query($pg, "DROP DATABASE \"$nb\"");
+            if ($en !== [21, 11]) { $mal[] = 'en PostgreSQL: ' . json_encode($en); }
+        }
+    }
+    // Y el de los volcados de otros: el .dump de SQLite, pg_dump con IDENTITY o con serial,
+    // y un script de SQL Server escrito a mano, con N'…' y WITH NO_INFOMSGS
+    $ajenos = [
+        'sqlite' => "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT);\n"
+            . "INSERT INTO t VALUES(1,'a');\nDELETE FROM sqlite_sequence;\nINSERT INTO sqlite_sequence VALUES('t',1000);\nCOMMIT;\n",
+        'postgresql' => "-- PostgreSQL database dump\nCREATE TABLE public.t (id integer NOT NULL, n text);\n"
+            . "ALTER TABLE public.t ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (\n    SEQUENCE NAME public.t_id_seq\n    START WITH 1\n    CACHE 1\n);\n"
+            . "INSERT INTO public.t VALUES (1, 'a');\nSELECT pg_catalog.setval('public.t_id_seq', 1000, true);\n"
+            . "ALTER TABLE ONLY public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id);\n",
+        'serial' => "-- PostgreSQL database dump\nCREATE TABLE public.t (id integer NOT NULL, n text);\nCREATE SEQUENCE public.t_id_seq START WITH 1;\n"
+            . "ALTER SEQUENCE public.t_id_seq OWNED BY public.t.id;\nALTER TABLE ONLY public.t ALTER COLUMN id SET DEFAULT nextval('public.t_id_seq'::regclass);\n"
+            . "INSERT INTO public.t VALUES (1, 'a');\nSELECT pg_catalog.setval('public.t_id_seq', 1000, false);\n"
+            . "ALTER TABLE ONLY public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id);\n",
+        'sqlserver' => "CREATE TABLE [dbo].[t] ([id] int IDENTITY(1,1) NOT NULL PRIMARY KEY, [n] nvarchar(10));\nGO\n"
+            . "SET IDENTITY_INSERT [dbo].[t] ON;\nINSERT INTO [dbo].[t] ([id], [n]) VALUES (1, N'a');\nSET IDENTITY_INSERT [dbo].[t] OFF;\n"
+            . "DBCC CHECKIDENT (N'dbo.t', RESEED, 1000) WITH NO_INFOMSGS;\nGO\n",
+    ];
+    foreach ($ajenos as $d => $texto) {
+        $f = JSONSQLDB_DATA_PATH . "/ajeno.$d.sql";
+        file_put_contents($f, $texto);
+        Database::crear("aiv_a$d", JSONSQLDB_DATA_PATH);
+        Importar::sql($f, "aiv_a$d");
+        @unlink($f);
+        $c = new Database("aiv_a$d", JSONSQLDB_DATA_PATH);
+        $c->consultar("INSERT INTO t (n) VALUES ('nueva')");
+        $id = (int)$c->consultar('SELECT MAX(id) AS m FROM t')[0]['m'];
+        if ($id !== ($d === 'serial' ? 1000 : 1001)) { $mal[] = "$d ajeno: $id"; }
+    }
+    return $mal === [] ?: implode(' · ', $mal);
 });
 chk('Northwind, el script de ejemplo de Microsoft, llega entero', function () {
     // Se descarga de github.com/microsoft/sql-server-samples (licencia MIT)
@@ -1251,6 +1347,71 @@ function importarTexto(string $base, string $texto, string $dialecto = 'auto'): 
         @unlink($f);
     }
 }
+chk('el texto «sqlite_sequence» en un dato o en el nombre de otra tabla no se toma por el contador: la sentencia se importa (2.10)', function () {
+    // Se desviaba toda sentencia que lo contuviera, y se perdía entera sin aviso
+    Database::crear('seqtxt');
+    $o = new Database('seqtxt');
+    $o->consultar('CREATE TABLE notas (id INTEGER PRIMARY KEY, t TEXT)');
+    $o->consultar("INSERT INTO notas VALUES (1, 'mira sqlite_sequence'), (2, 'otra')");
+    $o->consultar('CREATE TABLE sqlite_sequence_x (a INTEGER)');
+    $o->consultar('INSERT INTO sqlite_sequence_x VALUES (7)');
+    importarTexto('seqtxt_2', Exportar::volcado('seqtxt', Exportar::tablasDe('seqtxt'), [], [], [], 'sqlite', Exportar::cargador('seqtxt', Exportar::tablasDe('seqtxt'))));
+    $c = new Database('seqtxt_2');
+    $r = [$c->consultar('SELECT id, t FROM notas ORDER BY id'), $c->consultar('SELECT a FROM sqlite_sequence_x')];
+    return $r === [[['id' => 1, 't' => 'mira sqlite_sequence'], ['id' => 2, 't' => 'otra']], [['a' => 7]]] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('MySQL: # es un comentario, con su ; y su apóstrofo; "x" es un texto salvo con ANSI_QUOTES, también con \\"; y X\'4142 o b\'01 sin cerrar es un error, no un proceso sin fin (2.10)', function () {
+    // Antes: «Carácter no válido '#'», «Columna desconocida: 'Madrid'», y el
+    // traductor volvía al principio del texto hasta agotar la memoria
+    $r = [importarTexto('almohadilla', "CREATE TABLE t (a INT, b TEXT);\nINSERT INTO t VALUES (1, 'x'); # uno; no borrar, don't\n"
+            . "# una línea entera; con 'comillas'\nINSERT INTO t VALUES (2, 'y #no es comentario');\n", 'mysql'),
+          importarTexto('dobles', "CREATE TABLE t (a INT, b TEXT);\nINSERT INTO t VALUES (1, \"Madrid\"), (2, \"dice \\\"hola\\\"; y \"\"más\"\"\");\n", 'mysql'),
+          importarTexto('ansi', "SET sql_mode = 'ANSI_QUOTES';\nCREATE TABLE \"t\" (\"a\" INT, b TEXT);\nINSERT INTO \"t\" (\"a\", b) VALUES (1, 'z');\n", 'mysql')];
+    $filas = [Api::sql('almohadilla', 'SELECT * FROM t ORDER BY a'), Api::sql('dobles', 'SELECT * FROM t ORDER BY a'), Api::sql('ansi', 'SELECT * FROM t')];
+    $esperado = [[['a' => 1, 'b' => 'x'], ['a' => 2, 'b' => 'y #no es comentario']],
+                 [['a' => 1, 'b' => 'Madrid'], ['a' => 2, 'b' => 'dice "hola"; y "más"']], [['a' => 1, 'b' => 'z']]];
+    if ($filas !== $esperado) { return json_encode([$r, $filas], JSON_UNESCAPED_UNICODE); }
+    $errores = [];
+    foreach (["INSERT INTO t VALUES (1, X'4142)", "INSERT INTO t VALUES (1, b'01)"] as $q) {
+        $t = new Traductor('mysql');
+        try { $t->traducir($q); $errores[] = "pasó: $q"; } catch (RuntimeException $e) {
+            if (!str_contains($e->getMessage(), 'cadena sin cerrar')) { $errores[] = $e->getMessage(); }
+        }
+    }
+    return $errores === [] ?: implode(' · ', $errores);
+});
+chk('exportar ordenada por la clave primaria numérica (la conexión por API) va por lotes según ella: borrar o añadir filas entre dos lotes no salta ni repite ninguna; sin ese orden, o con una clave de texto o de varias columnas, por posición (2.10)', function () {
+    // Con LIMIT … OFFSET …, borrar una fila ya enviada movía las demás y la 21 no salía
+    Database::crear('lotes');
+    $bd = new Database('lotes');
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, n TEXT)');
+    $bd->consultar('INSERT INTO t VALUES ' . implode(', ', array_map(static fn(int $i): string => "($i, 'x$i')", range(1, 100))));
+    $lotes = new ReflectionMethod('Lotes', 'siguiendoClave');
+    PHP_VERSION_ID < 80100 && $lotes->setAccessible(true);
+    $vistos = [];
+    foreach ($lotes->invoke(null, 'lotes', 't', 'id', '', [], false) as $i => $f) {
+        $vistos[] = $f['id'];
+        if ($i === 19) {                                // acabado el primer lote
+            $bd->consultar('DELETE FROM t WHERE id = 5');
+            $bd->consultar("INSERT INTO t VALUES (101, 'nueva')");
+        }
+    }
+    $desc = array_column(iterator_to_array($lotes->invoke(null, 'lotes', 't', 'id', " WHERE n LIKE 'x%' OR n LIKE 'z%'", [], true), false), 'id');
+    // En una clave de texto, el ORDER BY sigue la colación y el > compara byte
+    // a byte: se saltaban y repetían filas. Esa va por posición
+    $bd->consultar('CREATE TABLE tx (k TEXT PRIMARY KEY)');
+    $bd->consultar('CREATE TABLE d (a INTEGER, b INTEGER, PRIMARY KEY (a, b))');
+    $t = $bd->consultar('SHOW SCHEMA t');
+    $r = [$vistos === range(1, 101), $desc === array_values(array_diff(range(100, 1), [5])),
+          Lotes::porClave($t, 'id'), !Lotes::porClave($t, ''), !Lotes::porClave($t, 'n'),
+          !Lotes::porClave($bd->consultar('SHOW SCHEMA tx'), 'k'), !Lotes::porClave($bd->consultar('SHOW SCHEMA d'), 'a')];
+    return !in_array(false, $r, true) ?: json_encode([$r, count($vistos), count($desc)]);
+});
+chk('SQL Server y Access: un SELECT … INTO saltado lo dice con su nombre, no como sentencia de control (2.10)', function () {
+    $t = new Traductor('sqlserver');
+    $t->traducir('SELECT * INTO copia FROM clientes');
+    return str_contains(implode(' ', $t->avisos()), 'SELECT … INTO saltado') ?: json_encode($t->avisos(), JSON_UNESCAPED_UNICODE);
+});
 chk('un trigger con IF … END IF, también con el END y el IF en dos líneas, es una sola sentencia: el volcado SQL y el JSON del propio panel se vuelven a importar, y la consola no lo parte (2.9)', function () {
     Database::crear('endif');
     $bd = new Database('endif');
@@ -1480,6 +1641,22 @@ chk('exportar a Excel: si PHP se para a mitad (el tiempo), no quedan ni el fiche
     $quedan = array_values(array_diff((array)scandir($tmp), ['.', '..']));
     return str_contains($salida, 'Maximum execution time') && $quedan === [] ?: json_encode([substr($salida, 0, 300), $quedan]);
 });
+chk('exportar a Excel: si PHP se para justo después de cerrar una hoja, aún sin olvidarla, las hojas temporales se borran igual (2.10: fclose() daba un error y se quedaban)', function () {
+    if (!class_exists('ZipArchive')) { return null; }
+    $tmp = JSONSQLDB_DATA_PATH . '/tmp_excel2';
+    @mkdir($tmp, 0775, true);
+    $lib = dirname(__DIR__) . '/jsonsqldbadmin/';
+    // La hoja cerrada por fuera, como la deja cerrarHoja() si PHP se para entre fclose() y olvidarla
+    $codigo = 'define("ADMIN_CONEXION", "directa"); require ' . var_export($lib . 'config.dist.php', true) . ';'
+        . ' require ' . var_export($lib . 'lib/util.php', true) . ';'
+        . ' foreach (["Idioma", "Exportar", "EscritorXlsx"] as $c) { require ' . var_export($lib . 'lib/', true) . ' . "$c.php"; }'
+        . ' Idioma::elegir("es"); $x = new EscritorXlsx(["id"]); $x->fila([1]);'
+        . ' $p = new ReflectionProperty($x, "actual"); PHP_VERSION_ID < 80100 && $p->setAccessible(true); fclose($p->getValue($x));'
+        . ' $x->borrarTemporales(); echo "bien";';
+    $salida = (string)shell_exec('TMPDIR=' . escapeshellarg($tmp) . ' ' . escapeshellarg(PHP_BINARY) . ' -d display_errors=1 -r ' . escapeshellarg($codigo) . ' 2>&1');
+    $quedan = array_values(array_diff((array)scandir($tmp), ['.', '..']));
+    return $salida === 'bien' && $quedan === [] ?: json_encode([substr($salida, 0, 300), $quedan]);
+});
 chk('SQL Server: una columna rowversion (TIMESTAMP) sin valores en los INSERT, como la escriben Management Studio y sqlserver-to-jsonsqldb.ps1, y un CREATE OR ALTER TRIGGER sin BEGIN se importan (2.9)', function () {
     $r = importarTexto('rowversion', "SET ANSI_NULLS ON\nGO\nCREATE TABLE [dbo].[t](\n\t[id] [int] NOT NULL,\n\t[n] [int] NULL,\n\t[rv] [timestamp] NOT NULL,\n"
         . " CONSTRAINT [PK_t] PRIMARY KEY CLUSTERED ([id] ASC)\n) ON [PRIMARY]\nGO\nCREATE TABLE [dbo].[r](\n\t[id] [int] NULL\n) ON [PRIMARY]\nGO\n"
@@ -1488,6 +1665,31 @@ chk('SQL Server: una columna rowversion (TIMESTAMP) sin valores en los INSERT, c
     Api::sql('rowversion', 'INSERT INTO t (id, n) VALUES (2, 6)');
     return Api::sql('rowversion', 'SELECT id, rv FROM t ORDER BY id') === [['id' => 1, 'rv' => null], ['id' => 2, 'rv' => null]]
         && Api::sql('rowversion', 'SELECT id FROM r') === [['id' => 2]] && !str_contains($r, 'sin importar') ?: $r;
+});
+chk('una vista cuya tabla no está en la base (una tabla vinculada de Access) no se importa y se dice; las demás sí, también la que va antes que su tabla, en los dos dialectos (2.10: se creaba y fallaba al usarla)', function () {
+    $r = [];
+    foreach (['jsonsqldb' => "-- jsonSQLDB\n", 'sqlite' => "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n"] as $d => $cab) {
+        $r[] = importarTexto("vsin_$d", $cab . "CREATE VIEW antes AS SELECT id FROM a;\nCREATE TABLE a (id INTEGER PRIMARY KEY);\n"
+            . "INSERT INTO a VALUES (1);\nCREATE VIEW buena AS SELECT id FROM a;\nCREATE VIEW vinculada AS SELECT * FROM enlazada;\n");
+        $r[] = array_column(Api::sql("vsin_$d", 'SHOW VIEWS'), 'vista');
+    }
+    foreach ([0, 2] as $i) {
+        if (!str_contains((string)$r[$i], "Vista 'vinculada' sin importar: usa la tabla 'enlazada'") || $r[$i + 1] !== ['antes', 'buena']) {
+            return json_encode($r, JSON_UNESCAPED_UNICODE);
+        }
+    }
+    return true;
+});
+chk('el volcado de jsonSQLDB y SQLite pone cada vista detrás de las que usa, aunque su nombre vaya antes (2.10: por orden de nombre, y el motor ya no crea una vista antes que lo que usa)', function () {
+    Database::crear('vorden');
+    $o = new Database('vorden');
+    foreach (['CREATE TABLE t (id INTEGER PRIMARY KEY)', 'CREATE VIEW z AS SELECT id FROM t', 'CREATE VIEW m AS SELECT id FROM z', 'CREATE VIEW a AS SELECT id FROM m'] as $q) {
+        $o->consultar($q);
+    }
+    $t = [['tabla' => 't', 'columnas' => $o->consultar('SHOW SCHEMA t'), 'claves' => $o->consultar('SHOW KEYS FROM t'), 'filas' => []]];
+    $sql = Exportar::volcado('vorden', $t, [], $o->consultar('SHOW VIEWS'), [], 'sqlite');
+    $p = array_map(static fn(string $v) => strpos($sql, "CREATE VIEW \"$v\""), ['z', 'm', 'a']);
+    return !in_array(false, $p, true) && $p[0] < $p[1] && $p[1] < $p[2] ?: json_encode($p);
 });
 
 unset($bd);

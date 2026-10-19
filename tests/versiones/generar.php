@@ -44,6 +44,11 @@ $probar('INSERT INTO cola VALUES ' . implode(',', $v));
 $probar('DELETE FROM cola WHERE id > 1200');
 $probar("INSERT INTO cola VALUES (5000, 'y')");
 $probar('DELETE FROM cola WHERE id > 1000');
+// Textos que son números en una columna de texto con índice: hasta la 2.9,
+// '7', '007' y ' 7' iban a la misma clave (ver comprobar.php)
+$probar('CREATE TABLE codigos (id INTEGER PRIMARY KEY, c TEXT)');
+$probar("INSERT INTO codigos VALUES (1, '7'), (2, '007'), (3, ' 7'), (4, '10'), (5, '9'), (6, 'x')");
+$probar('CREATE INDEX ix_codigo ON codigos (c)');
 $consultas = [
     'SELECT COUNT(*) AS n, SUM(id) AS s FROM cola',
     'SELECT COUNT(*) AS n, SUM(id) AS s FROM clientes',

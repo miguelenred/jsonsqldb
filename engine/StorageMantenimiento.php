@@ -118,7 +118,7 @@ final class StorageMantenimiento extends Storage
             $quedan = array_diff((array)scandir($dir), ['.', '..']);
             throw JsonSqlDbError::io(
                 "La base '$base' se ha borrado solo en parte: no se pudieron eliminar "
-                . count($quedan) . ' fichero(s). Comprueba los permisos y bórrala a mano.'
+                . \count($quedan) . ' fichero(s). Comprueba los permisos y bórrala a mano.'
             );
         }
     }
@@ -129,7 +129,7 @@ final class StorageMantenimiento extends Storage
         foreach ((array)scandir($dir) as $e) {
             if ($e === '.' || $e === '..') continue;
             $ruta = "$dir/$e";
-            if (in_array($ruta, $salvo, true)) {
+            if (\in_array($ruta, $salvo, true)) {
                 continue;
             }
             is_dir($ruta) ? self::borrarRecursivo($ruta) : @unlink($ruta);
@@ -184,26 +184,39 @@ final class StorageMantenimiento extends Storage
     public static function loteGuardar(Storage $st, array $finales): void
     {
         $cambio = false;
-        foreach ($finales as $f) {
-            $nombre = basename($f);
-            if (isset($st->lote['guardados'][$nombre]) || isset($st->lote['nuevos'][$nombre])) {
-                continue;
-            }
-            clearstatcache(true, $f);
-            if (is_file($f)) {
-                $copia = $st->dirLote() . '/' . $nombre;
-                @unlink($copia);
-                if (!@link($f, $copia) && !self::copiarSeguro($st, $f, $copia)) {
-                    throw JsonSqlDbError::io('No se puede guardar el original de ' . $nombre . ' para la transacción');
+        $antes  = [$st->lote['guardados'], $st->lote['nuevos']];
+        // Lo guardado, al manifiesto también si otro fichero falla después; y
+        // si el manifiesto no se puede escribir, no cuenta como guardado y se
+        // guarda otra vez la próxima (2.10: quedaba apuntado solo en memoria,
+        // las sentencias siguientes ya no lo guardaban, y deshacer no lo devolvía)
+        try {
+            foreach ($finales as $f) {
+                $nombre = basename($f);
+                if (isset($st->lote['guardados'][$nombre]) || isset($st->lote['nuevos'][$nombre])) {
+                    continue;
                 }
-                $st->lote['guardados'][$nombre] = true;
-            } else {
-                $st->lote['nuevos'][$nombre] = true;
+                clearstatcache(true, $f);
+                if (is_file($f)) {
+                    $copia = $st->dirLote() . '/' . $nombre;
+                    @unlink($copia);
+                    if (!@link($f, $copia) && !self::copiarSeguro($st, $f, $copia)) {
+                        throw JsonSqlDbError::io('No se puede guardar el original de ' . $nombre . ' para la transacción');
+                    }
+                    $st->lote['guardados'][$nombre] = true;
+                } else {
+                    $st->lote['nuevos'][$nombre] = true;
+                }
+                $cambio = true;
             }
-            $cambio = true;
-        }
-        if ($cambio) {
-            self::loteManifiesto($st);
+        } finally {
+            if ($cambio) {
+                try {
+                    self::loteManifiesto($st);
+                } catch (\Throwable $e) {
+                    [$st->lote['guardados'], $st->lote['nuevos']] = $antes;
+                    throw $e;
+                }
+            }
         }
     }
 
@@ -226,6 +239,20 @@ final class StorageMantenimiento extends Storage
             self::loteDeshacer($st);
             throw JsonSqlDbError::io('La transacción se ha deshecho: una de sus escrituras se quedó a medias');
         }
+        // Lo escrito, a disco antes del punto de no retorno, cada fichero una
+        // vez (2.10: cada sentencia forzaba los suyos, y en una transacción de
+        // cien INSERT eran trescientos fsync; ver StorageEscritura::escribirTemporal())
+        if (function_exists('fsync')) {
+            foreach (array_keys($st->lote['sincronizar'] ?? []) as $f) {
+                $fh = is_file((string)$f) ? @fopen((string)$f, 'r+') : false;
+                if ($fh !== false) {
+                    @fsync($fh);
+                    @fclose($fh);
+                    StorageEscritura::sincronizados(1);
+                }
+            }
+        }
+        StorageEscritura::fsyncDir($st->dir);
         // Sin manifiesto, la transacción ya no se deshace: es el punto de no retorno
         @unlink(self::manifiestoLote($st));
         StorageEscritura::fsyncDir($st->dirLote());
@@ -240,15 +267,24 @@ final class StorageMantenimiento extends Storage
         }
     }
 
-    /** Deshace la transacción abierta: todo vuelve a como estaba al empezarla. */
+    /**
+     * Deshace la transacción abierta: todo vuelve a como estaba al empezarla.
+     * Si algo no se puede devolver, la transacción se suelta igual: su
+     * manifiesto sigue en `.lote/` y el siguiente bloqueo lo vuelve a
+     * intentar (ver Storage::recuperar()). 2.10: se quedaba abierta, y lo
+     * que hiciera después la conexión iba dentro de ella y se perdía.
+     */
     public static function loteDeshacer(Storage $st): void
     {
         if ($st->lote === null) {
             return;
         }
-        StorageEscritura::txAbandonar($st);
-        self::devolverLote($st, array_keys($st->lote['guardados']), array_keys($st->lote['nuevos']));
-        $st->lote = null;
+        try {
+            StorageEscritura::txAbandonar($st);
+            self::devolverLote($st, array_keys($st->lote['guardados']), array_keys($st->lote['nuevos']));
+        } finally {
+            $st->lote = null;
+        }
     }
 
     /**
@@ -274,17 +310,14 @@ final class StorageMantenimiento extends Storage
         foreach (array_keys($tablas) as $t) {
             clearstatcache(true, $st->ficheroRev($t));
             $e = json_decode((string)@file_get_contents($st->ficheroRev($t)), true);
-            $gen[$t] = is_array($e) ? (int)($e['gen'] ?? 0) : 0;
-            self::vaciarCacheDe($st, $t, is_array($e) ? $e : []);
+            $gen[$t] = \is_array($e) ? (int)($e['gen'] ?? 0) : 0;
+            self::vaciarCacheDe($st, $t, \is_array($e) ? $e : []);
         }
         foreach ($guardados as $nombre) {
             $copia = $st->dirLote() . '/' . $nombre;
             $final = $st->dir . '/' . $nombre;
-            if (is_file($copia) && !@rename($copia, $final)) {
-                @unlink($final);                          // Windows: rename falla si el destino existe
-                if (!@rename($copia, $final)) {
-                    throw JsonSqlDbError::io('No se puede devolver ' . $nombre . ' al deshacer la transacción: sigue en .lote/');
-                }
+            if (is_file($copia) && !@rename($copia, $final) && !StorageEscritura::reemplazar($copia, $final)) {
+                throw JsonSqlDbError::io('No se puede devolver ' . $nombre . ' al deshacer la transacción: sigue en .lote/');
             }
         }
         foreach ($nuevos as $nombre) {
@@ -293,7 +326,7 @@ final class StorageMantenimiento extends Storage
         foreach (array_keys($tablas) as $t) {
             clearstatcache(true, $st->ficheroRev($t));
             $e = json_decode((string)@file_get_contents($st->ficheroRev($t)), true);
-            if (is_array($e)) {
+            if (\is_array($e)) {
                 self::vaciarCacheDe($st, $t, $e);
                 $e['gen'] = max($gen[$t], (int)($e['gen'] ?? 0)) + 1;
                 foreach (['indexes', 'rangos'] as $k) {
@@ -323,7 +356,10 @@ final class StorageMantenimiento extends Storage
         }
         @unlink($st->ficheroEstado($tabla));
         if ($st->apcu && class_exists('APCUIterator')) {
-            apcu_delete(new \APCUIterator('/^' . preg_quote($st->prefijo, '/') . '/'));
+            // Solo las claves (2.10): sin APC_ITER_KEY el iterador trae también
+            // los valores, y deshacer una transacción cargaba en memoria la
+            // caché entera de la base (20 MB en APCu, 33 MB de pico)
+            apcu_delete(new \APCUIterator('/^' . preg_quote($st->prefijo, '/') . '/', APC_ITER_KEY));
         }
     }
 
@@ -343,7 +379,7 @@ final class StorageMantenimiento extends Storage
     public static function recuperarLote(Storage $st, bool $yaExclusivo): void
     {
         $m = json_decode((string)@file_get_contents(self::manifiestoLote($st)), true);
-        if (!is_array($m)) {
+        if (!\is_array($m)) {
             if (is_dir($st->dirLote())) {
                 self::borrarLote($st);                      // sin manifiesto: se confirmó, solo faltaba limpiar
             }
@@ -409,7 +445,7 @@ final class StorageMantenimiento extends Storage
     public static function recuperarTabla(Storage $st, string $ambito): void
     {
         $manifiesto = self::leerManifiesto($st, $ambito);
-        $tablas     = is_array($manifiesto) ? (array)($manifiesto['tablas'] ?? []) : [];
+        $tablas     = \is_array($manifiesto) ? (array)($manifiesto['tablas'] ?? []) : [];
         $tablas     = array_values(array_filter(
             array_map('strval', $tablas),
             static fn(string $t): bool => preg_match(self::RE_TABLA, $t) === 1
@@ -458,7 +494,7 @@ final class StorageMantenimiento extends Storage
             $fichero = self::dirJournal($st, $ambito) . '/manifiesto.json';
         }
         $m = json_decode((string)@file_get_contents($fichero), true);
-        return is_array($m) ? $m : null;
+        return \is_array($m) ? $m : null;
     }
 
     /** Aplica o deshace el journal de un ámbito, según de qué versión sea. */
@@ -491,7 +527,7 @@ final class StorageMantenimiento extends Storage
             self::deshacer($st, $ambito, $manifiesto);
         }
         foreach ((array)($manifiesto['tablas'] ?? []) as $t) {
-            if (is_string($t)) {
+            if (\is_string($t)) {
                 unset($st->estados[$t]);
             }
         }
@@ -510,7 +546,7 @@ final class StorageMantenimiento extends Storage
         }
         $dir    = self::dirJournal($st, $ambito);
         $tablas = array_values(array_filter((array)($manifiesto['tablas'] ?? []),
-            static fn($t): bool => is_string($t) && preg_match(self::RE_TABLA, $t) === 1));
+            static fn($t): bool => \is_string($t) && preg_match(self::RE_TABLA, $t) === 1));
         if ($tablas === [] && $ambito !== null) {
             $tablas = [$ambito];
         }
@@ -518,7 +554,7 @@ final class StorageMantenimiento extends Storage
         // único seguro es pararse. Los manifiestos anteriores a la 2.0 traían
         // una lista de nombres sin tamaño.
         foreach ((array)($manifiesto['ficheros'] ?? []) as $nombre => $tam) {
-            if (!is_string($nombre) || !is_int($tam)) {
+            if (!\is_string($nombre) || !\is_int($tam)) {
                 continue;
             }
             clearstatcache(true, $dir . '/' . $nombre);
@@ -538,7 +574,7 @@ final class StorageMantenimiento extends Storage
         }
         // La caché en disco puede tener entradas de la revisión deshecha
         foreach ($tablas as $t) {
-            if (is_string($t)) {
+            if (\is_string($t)) {
                 unset($st->estados[$t]);
                 foreach ((array)glob($st->dirCache . '/' . md5($st->prefijo . $st->etiqueta($t)) . '.*') as $f) {
                     @unlink((string)$f);                   // .cache, y su .php del modo OPcache
@@ -560,7 +596,7 @@ final class StorageMantenimiento extends Storage
      */
     private static function deLaBase(array $nombres): array
     {
-        return array_values(array_filter($nombres, static fn($n): bool => is_string($n) && preg_match(
+        return array_values(array_filter($nombres, static fn($n): bool => \is_string($n) && preg_match(
             '/^(?:_database|_views|_revs|[A-Za-z_][A-Za-z0-9_]{0,63}(?:\.meta|\.rev|\.idx\.[A-Za-z_][A-Za-z0-9_]{0,63})?(?:\.part\d+)?)\.json$/', $n) === 1));
     }
 
@@ -575,7 +611,7 @@ final class StorageMantenimiento extends Storage
     {
         $out = [];
         foreach ($tablas as $t) {
-            if (!is_string($t) || $t === '') {
+            if (!\is_string($t) || $t === '') {
                 continue;
             }
             foreach (['.json', '.part*.json', '.meta.json', '.rev.json', '.idx.*.json'] as $patron) {
@@ -640,7 +676,7 @@ final class StorageMantenimiento extends Storage
     /** Guarda la estructura de una tabla e invalida su caché. */
     public static function guardarMeta(Storage $st, string $tabla, array $meta, array $definiciones = []): void
     {
-        StorageEscritura::guardarTabla($st, $tabla, null, $meta, $definiciones);
+        StorageEntera::guardarTabla($st, $tabla, null, $meta, $definiciones);
     }
 
     // ------------------------------------------------------------------
@@ -703,7 +739,7 @@ final class StorageMantenimiento extends Storage
         }
 
         $f = $st->ficheroMeta($tabla);
-        if (!is_array(json_decode((string)@file_get_contents($f), true))) {
+        if (!\is_array(json_decode((string)@file_get_contents($f), true))) {
             $sola = Reparador::objeto((string)@file_get_contents($f)) !== null;
             $anotar($f, 'estructura ilegible', $sola ? 'se arregla sola' : 'a mano: la estructura no se adivina');
             if (!$sola && $reparar) {
@@ -712,7 +748,7 @@ final class StorageMantenimiento extends Storage
             $rotos[] = $f;
         }
         $f = $st->ficheroRev($tabla);
-        if (is_file($f) && !is_array(json_decode((string)file_get_contents($f), true))) {
+        if (is_file($f) && !\is_array(json_decode((string)file_get_contents($f), true))) {
             $anotar($f, 'estado ilegible', 'se rehace con los datos');
             $rotos[] = $f;
         }
@@ -724,7 +760,7 @@ final class StorageMantenimiento extends Storage
         $juntas  = $reparar;
         $cuantas = 0;
         $juntar  = static function (array $deParte) use (&$filas, &$juntas, &$cuantas): void {
-            $cuantas += count($deParte);
+            $cuantas += \count($deParte);
             if ($juntas) {
                 array_push($filas, ...$deParte);
                 if (Memoria::apretado()) {
@@ -771,7 +807,7 @@ final class StorageMantenimiento extends Storage
         foreach ($st->estado($tabla)['indexes'] as $nombre => $revs) {
             foreach (array_keys((array)$revs) as $i) {
                 $f = $st->ficheroIndice($tabla, (string)$nombre, $i + 1);
-                if (is_file($f) && !is_array(json_decode((string)file_get_contents($f), true))) {
+                if (is_file($f) && !\is_array(json_decode((string)file_get_contents($f), true))) {
                     $anotar($f, 'índice ilegible', 'se rehace con los datos');
                     $rotos[] = $f;
                 }
@@ -828,7 +864,7 @@ final class StorageMantenimiento extends Storage
     private static function filasValidas(string $texto): ?array
     {
         $json = json_decode($texto, true);
-        return is_array($json) && is_array($json['rows'] ?? null) ? array_values($json['rows']) : null;
+        return \is_array($json) && \is_array($json['rows'] ?? null) ? array_values($json['rows']) : null;
     }
 
     private static function ficheroApartadas(Storage $st): string
@@ -887,12 +923,12 @@ final class StorageMantenimiento extends Storage
     protected static function avisoDudosas(string $fichero, array $dudosas): string
     {
         $lineas = [];
-        foreach (array_slice($dudosas, 0, 5) as [$n, $texto]) {
+        foreach (\array_slice($dudosas, 0, 5) as [$n, $texto]) {
             $lineas[] = ($n > 0 ? "línea $n: " : '') . $texto;
         }
-        return "Datos ilegibles en $fichero: " . (count($dudosas) === 1 ? 'una fila no' : count($dudosas) . ' filas no')
-            . ' se puede' . (count($dudosas) === 1 ? '' : 'n') . ' arreglar sola' . (count($dudosas) === 1 ? '' : 's') . ' ('
-            . implode('; ', $lineas) . (count($dudosas) > 5 ? '; …' : '') . '). Corrígelo a mano, o con REPAIR TABLES, que la aparta y la guarda en .reparados/';
+        return "Datos ilegibles en $fichero: " . (\count($dudosas) === 1 ? 'una fila no' : \count($dudosas) . ' filas no')
+            . ' se puede' . (\count($dudosas) === 1 ? '' : 'n') . ' arreglar sola' . (\count($dudosas) === 1 ? '' : 's') . ' ('
+            . implode('; ', $lineas) . (\count($dudosas) > 5 ? '; …' : '') . '). Corrígelo a mano, o con REPAIR TABLES, que la aparta y la guarda en .reparados/';
     }
 
     /**
@@ -914,7 +950,7 @@ final class StorageMantenimiento extends Storage
         }
         Memoria::comprobarFichero($fichero);
         $idx = json_decode((string)file_get_contents($fichero), true);
-        if (!is_array($idx) || !is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev
+        if (!\is_array($idx) || !\is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev
             || isset($idx['part']) || ($idx['columns'] ?? null) !== $def['columns']) {
             return null;
         }
@@ -930,7 +966,7 @@ final class StorageMantenimiento extends Storage
         if ($st->revsLegadas === null) {
             $fichero = $st->dir . '/_revs.json';
             $json    = is_file($fichero) ? json_decode((string)@file_get_contents($fichero), true) : [];
-            $st->revsLegadas = is_array($json) ? $json : [];
+            $st->revsLegadas = \is_array($json) ? $json : [];
         }
         return (int)($st->revsLegadas[$tabla] ?? 0);
     }
@@ -987,7 +1023,7 @@ final class StorageMantenimiento extends Storage
         // juntas en memoria). Si una no tiene la forma esperada, se deja todo
         // y quien llama lo hace como siempre
         $lineas = static function (int $i) use ($st, $tabla, $porLinea, $chunk, $filasAntes): array {
-            $lineas = StorageCambios::lineasDeParte($st, $tabla, $i + 1, min($chunk, $filasAntes - $i * $chunk));
+            $lineas = StorageCompactacion::lineasDeParte($st, $tabla, $i + 1, min($chunk, $filasAntes - $i * $chunk));
             foreach ($lineas ?? throw new \UnexpectedValueException() as $k => $linea) {
                 if ($linea !== 'null') {                 // un hueco se queda como está
                     $lineas[$k] = $porLinea($linea) ?? throw new \UnexpectedValueException();
@@ -998,7 +1034,7 @@ final class StorageMantenimiento extends Storage
         };
         $partes = (static function () use ($lineas, $tabla, $partesAntes): \Generator {
             for ($i = 0; $i < $partesAntes; $i++) {
-                yield $i => StorageCambios::textoDeParte($tabla, $lineas($i));
+                yield $i => StorageCompactacion::textoDeParte($tabla, $lineas($i));
             }
         })();
         // Si un índice no vale tal cual (uno nuevo, o sobre una columna que
@@ -1033,22 +1069,26 @@ final class StorageMantenimiento extends Storage
      * VACUUM (2.9): rehace, sin tocar las partes, los índices de una tabla con
      * algún trozo sin filtro, como los escribían la 2.8 y las anteriores; con
      * él, una búsqueda por un texto no lee los trozos en que no puede estar.
-     * De cada trozo se lee solo el principio: el filtro va antes que las
-     * claves. True si los rehízo.
+     * Y (2.10) los de una tabla con algún índice sobre una columna de texto
+     * o decimal con las claves de antes (ver Storage::clavesAlDia()), que no se usan
+     * hasta rehacerlos; lo hace también la primera consulta que los
+     * encuentra, al acabar (ver DatabaseAvanzada::reparar()). De cada trozo
+     * se lee solo el principio: el filtro va antes que las claves. Con
+     * $todos (REPAIR INDEXES), sin mirar nada. True si los rehízo.
      *
      * @param list<array{name: string, columns: list<string>, auto: bool}> $definiciones
      */
-    public static function rehacerIndicesSinFiltro(Storage $st, string $tabla, array $definiciones): bool
+    public static function rehacerIndicesViejos(Storage $st, string $tabla, array $definiciones, bool $todos = false): bool
     {
         if (!$st->indices) {
             return false;                          // sin índices no hay nada que rehacer
         }
         $revs  = (array)($st->estado($tabla)['indexes'] ?? []);
-        $viejo = false;
-        foreach ($definiciones as $def) {
+        $viejo = $todos;
+        foreach ($todos ? [] : $definiciones as $def) {
             $trozos = $revs[$def['name']] ?? null;
-            $viejo  = !is_array($trozos);
-            for ($p = 1; !$viejo && $p <= count($trozos); $p++) {
+            $viejo  = !\is_array($trozos) || !$st->clavesAlDia($tabla, $def);
+            for ($p = 1; !$viejo && $p <= \count($trozos); $p++) {
                 $principio = (string)@file_get_contents($st->ficheroIndice($tabla, $def['name'], $p), false, null, 0, 4096);
                 $viejo     = strpos($principio, '"filtro":"') === false;
             }
@@ -1059,7 +1099,7 @@ final class StorageMantenimiento extends Storage
         if (!$viejo) {
             return false;
         }
-        // Con otro tamaño de parte, la tabla entera (ver StorageEscritura::guardarTabla())
+        // Con otro tamaño de parte, la tabla entera (ver StorageEntera::guardarTabla())
         if (($st->estado($tabla)['chunk'] ?? null) !== $st->filasPorParte) {
             self::compactar($st, $tabla, $definiciones);
             return true;
@@ -1069,6 +1109,94 @@ final class StorageMantenimiento extends Storage
             static fn(): \Generator => StorageEscritura::enPartes($st->filas($tabla), $st->filasPorParte),
             [], (int)($st->estado($tabla)['rows'] ?? StorageLectura::contarFilas($st, $tabla)), null, null, [], $st->partes($tabla));
         return true;
+    }
+
+    /**
+     * CHECK INDEXES (2.10): los problemas de los índices de una tabla, cada
+     * uno contra sus filas, trozo a trozo y parte a parte (solo una parte en
+     * memoria): que se puedan usar (si no, una consulta recorre la tabla); que
+     * cada trozo tenga las claves de las filas de su parte, ni una de más ni
+     * de menos, en sus posiciones; que su filtro deje ver todas sus claves de
+     * texto; y que el rango que el estado guarda de cada trozo cubra sus
+     * números. Las dos últimas harían que una búsqueda no lo abriera y se
+     * perdiera filas. Vacío si todo cuadra o si los índices están apagados.
+     *
+     * @param list<array{name: string, columns: list<string>}> $definiciones
+     * @return list<array{tabla: string, indice: string, problema: string, arreglo: string}>
+     */
+    public static function revisarIndices(Storage $st, string $tabla, array $definiciones): array
+    {
+        if (!$st->indices) {
+            return [];
+        }
+        self::validarTabla($tabla);
+        $st->bloquearLectura($tabla);
+        $out     = [];
+        // Uno que no se usa solo hace más lentas las búsquedas; uno que se usa
+        // y no cuadra puede hacer que den filas de menos
+        $anotar  = static function (array $def, string $problema, bool $seUsa = true) use (&$out, $tabla): void {
+            $out[] = ['tabla' => $tabla, 'indice' => (string)$def['name'], 'problema' => $problema,
+                      'arreglo' => $seUsa ? 'REPAIR INDEXES lo rehace; hasta entonces, buscar por él puede dar filas de menos'
+                          : 'REPAIR INDEXES lo rehace, y también la siguiente escritura de la tabla; hasta entonces, se recorre la tabla'];
+        };
+        $planes = [];
+        foreach ($definiciones as $def) {
+            if (!$st->clavesAlDia($tabla, $def)) {
+                $anotar($def, 'sus claves son de antes de la 2.10 (un texto que era un número iba a la clave de ese número, y un decimal entero de 9·10^18 a 2^63, a una de decimal): no se usa', false);
+            } elseif (($plan = $st->planIndice($tabla, $def)) === null) {
+                $anotar($def, 'le faltan trozos, o no son de la revisión de la tabla: no se usa', false);
+            } else {
+                $planes[$def['name']] = $plan;
+            }
+        }
+        $chunk = max(1, (int)($st->estado($tabla)['chunk'] ?? $st->filasPorParte));
+        $todas = $st->partes($tabla);
+        for ($p = 1; $planes !== [] && $p <= $todas; $p++) {
+            $filas = [];
+            foreach ($st->parte($tabla, $p, $st->ficheroDatos($tabla, $p)) as $i => $fila) {
+                if ($fila !== null) {
+                    $filas[($p - 1) * $chunk + $i] = $fila;
+                }
+            }
+            foreach ($definiciones as $def) {
+                $plan = $planes[$def['name']] ?? null;
+                if ($plan === null || $plan['legado'] !== null) {
+                    continue;                      // uno de antes de la 2.6, de un fichero: VACUUM lo rehace
+                }
+                $esperadas = StorageEscritura::construir($filas, $def['columns'], $def['plegar'] ?? []);
+                $keys      = $st->trozoIndice($tabla, $def, $p);
+                if ($keys === null) {
+                    $anotar($def, "el trozo $p no se puede leer, o es de otra revisión: no se usa", false);
+                    continue;
+                }
+                $deMas = $deMenos = 0;
+                foreach ($keys as $clave => $donde) {
+                    $donde = (array)$donde;
+                    $bien  = array_map('intval', (array)($esperadas[(string)$clave] ?? []));
+                    $deMas += \count(array_diff(array_map('intval', $donde), $bien));
+                }
+                foreach ($esperadas as $clave => $donde) {
+                    $deMenos += \count(array_diff(array_map('intval', (array)$donde), array_map('intval', (array)($keys[(string)$clave] ?? []))));
+                }
+                if ($deMas + $deMenos > 0) {
+                    $anotar($def, "el trozo $p tiene $deMas clave(s) que sus filas no tienen y le faltan $deMenos");
+                }
+                $filtro = Indexes::filtro($st->indicesMemo[$tabla][$def['name']]['resumen'][$p] ?? []);
+                $ocultas = 0;
+                foreach ($filtro === null ? [] : array_keys($keys) as $clave) {
+                    $ocultas += Indexes::puedeEstar($filtro, (string)$clave) ? 0 : 1;
+                }
+                if ($ocultas > 0) {
+                    $anotar($def, "el filtro del trozo $p no deja ver $ocultas de sus claves");
+                }
+                $rango = $plan['rangos'][$p - 1] ?? null;
+                $suyo  = IndexesEscritura::rango($keys);
+                if ($rango !== null && $suyo !== [] && ($rango === [] || $suyo === null || $suyo[0] < $rango[0] || $suyo[1] > $rango[1])) {
+                    $anotar($def, "el rango del trozo $p en el estado no cubre sus claves");
+                }
+            }
+        }
+        return $out;
     }
 
     /**
@@ -1083,7 +1211,31 @@ final class StorageMantenimiento extends Storage
         if ($st->existe($tabla)) {
             throw JsonSqlDbError::schema("La tabla '$tabla' ya existe");
         }
-        StorageEscritura::guardarTabla($st, $tabla, $filas, $meta, $definiciones);
+        StorageEntera::guardarTabla($st, $tabla, $filas, $meta, $definiciones);
+    }
+
+    /**
+     * Cuenta en _database.json, en «esquema», un cambio en las tablas de la
+     * base (2.10): una que se crea, se borra o cambia de nombre. Reescrito con
+     * el resto de la escritura, lo ve quien guarda la lista de tablas (ver
+     * StorageEscritura::tablasEsquema()). Una vez por escritura. Aquí desde
+     * la 2.10, que solo lo usa la estructura: en StorageEscritura lo
+     * compilaba cada escritura
+     */
+    public static function anotarEsquema(Storage $st): void
+    {
+        $f = $st->dir . '/_database.json';
+        if (\in_array($f, $st->txRenombrar, true) || !is_file($f)) {
+            return;
+        }
+        $info = json_decode((string)@file_get_contents($f), true);
+        $info = (\is_array($info) ? $info : ['database' => basename($st->dir), 'engine' => 'jsonSQLDB', 'version' => 1])
+            + ['esquema' => 0];
+        $info['esquema'] = (int)$info['esquema'] + 1;
+        StorageEscritura::escribirAtomico($st, $f, json_encode($info, self::JSON_META) . "\n");
+        // La lista de tablas guardada ya no vale: fuera, como la caché de una tabla que se borra
+        StorageEscritura::$tablasProceso = [];
+        $st->apcu ? apcu_delete($st->prefijo . '.base:t:0') : @unlink($st->ficheroCache($st->prefijo . '.base:t:0'));
     }
 
     /** Borra estructura, datos, índices y caché de una tabla. */
@@ -1096,6 +1248,7 @@ final class StorageMantenimiento extends Storage
             StorageEscritura::txIniciar($st, 'DROP TABLE', isset($st->locksTabla[$tabla]) ? $tabla : null);
         }
         $st->txTablas[$tabla] = true;
+        self::anotarEsquema($st);
 
         $indices = StorageEscritura::indicesEnDisco($st, $tabla);
         $partes  = $st->partes($tabla);
@@ -1157,10 +1310,10 @@ final class StorageMantenimiento extends Storage
         StorageEscritura::abrirEscritura($st, $tabla, 'ESCRITURA');
         $quedan = fn(): \Generator => $st->filas($tabla);
         if (StorageEscritura::exacta($st, $tabla)) {
-            StorageCambios::compactarPorBloques($st, $tabla, [], [], [], (int)$st->estado($tabla)['rows'], $st->partes($tabla), $definiciones, $quedan, $meta);
+            StorageCompactacion::compactarPorBloques($st, $tabla, [], [], [], (int)$st->estado($tabla)['rows'], $st->partes($tabla), $definiciones, $quedan, $meta);
             return;
         }
-        StorageEscritura::reescribirEntera($st, $tabla, $quedan, StorageLectura::contarFilas($st, $tabla), $st->partes($tabla), $definiciones, $meta);
+        StorageEntera::reescribirEntera($st, $tabla, $quedan, StorageLectura::contarFilas($st, $tabla), $st->partes($tabla), $definiciones, $meta);
     }
 
     /** Los huecos de filas borradas que tiene una tabla (2.9; ver modificarFilas()) */
@@ -1185,7 +1338,7 @@ final class StorageMantenimiento extends Storage
     {
         $desde ??= $tabla;
         StorageEscritura::abrirEscritura($st, $tabla, 'ESCRITURA');
-        StorageEscritura::reescribirEntera($st, $tabla, static function () use ($st, $desde, $porFila): \Generator {
+        StorageEntera::reescribirEntera($st, $tabla, static function () use ($st, $desde, $porFila): \Generator {
             foreach ($st->filas($desde) as $pos => $fila) {
                 yield $pos => $porFila($fila);
             }
@@ -1195,7 +1348,7 @@ final class StorageMantenimiento extends Storage
     /** Lo apuntado hasta ahora en la escritura abierta, para volver a ello (ver volverA()). */
     public static function marca(Storage $st): array
     {
-        return [$st->txRenombrar, $st->txRegenerables, $st->txBorrar, $st->txCache, $st->txTablas, $st->txHuellas, $st->txPartes];
+        return [$st->txRenombrar, $st->txRegenerables, $st->txBorrar, $st->txCache, $st->txTablas, $st->txHuellas, $st->txPartes, $st->txEnSitio];
     }
 
     /** Deshace lo apuntado desde marca() en una escritura que sigue abierta: borra los temporales nuevos. */
@@ -1204,7 +1357,7 @@ final class StorageMantenimiento extends Storage
         foreach (array_keys(array_diff_key($st->txRenombrar, $marca[0])) as $tmp) {
             @unlink((string)$tmp);
         }
-        [$st->txRenombrar, $st->txRegenerables, $st->txBorrar, $st->txCache, $st->txTablas, $st->txHuellas, $st->txPartes] = $marca;
+        [$st->txRenombrar, $st->txRegenerables, $st->txBorrar, $st->txCache, $st->txTablas, $st->txHuellas, $st->txPartes, $st->txEnSitio] = $marca;
     }
 
     /** Carpeta del journal de un ámbito, como lo dejaban las versiones 2.0 a 2.6. */

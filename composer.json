@@ -70,11 +70,12 @@
             "php tests/f21_compatibilidad.php",
             "php tests/f22_sqlserver.php",
             "php tests/f23_reparar.php",
-            "php tests/f24_versiones_anteriores.php"
+            "php tests/f24_versiones_anteriores.php",
+            "php tests/f25_ficheros_abiertos.php"
         ]
     },
     "scripts-descriptions": {
-        "test": "Runs the 26 test suites; the ones that need MySQL, PostgreSQL, PowerShell or the git tags skip what they cannot check. Run php configurar.php --local first."
+        "test": "Runs the 27 test suites; the ones that need MySQL, PostgreSQL, PowerShell or the git tags skip what they cannot check. Run php configurar.php --local first."
     },
     "config": {
         "sort-packages": true

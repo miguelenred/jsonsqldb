@@ -7,12 +7,15 @@ $admin = Auth::esAdmin();
 $envio     = $admin && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
 $resultado = null;
 $ficheros  = null;
+$indices   = null;
 $mensaje   = null;
 $apartadas = [];
 $error     = null;
 
-// REPAIR KEYS (claves foráneas) o, desde la 2.9, REPAIR TABLES (ficheros JSON)
-foreach (['corregir' => ['REPAIR KEYS', 'corregir_claves'], 'reparar_ficheros' => ['REPAIR TABLES', 'reparar_ficheros']] as $campo => [$sql, $auditoria]) {
+// REPAIR KEYS (claves foráneas), desde la 2.9 REPAIR TABLES (ficheros JSON)
+// y desde la 2.10 REPAIR INDEXES
+foreach (['corregir' => ['REPAIR KEYS', 'corregir_claves'], 'reparar_ficheros' => ['REPAIR TABLES', 'reparar_ficheros'],
+          'reparar_indices' => ['REPAIR INDEXES', 'reparar_indices']] as $campo => [$sql, $auditoria]) {
     if ($envio && post($campo) === '1') {
         try {
             Auth::comprobarCsrf();
@@ -28,6 +31,7 @@ foreach (['corregir' => ['REPAIR KEYS', 'corregir_claves'], 'reparar_ficheros' =
 
 try {
     $ficheros  = Api::sql($base, 'CHECK TABLES');
+    $indices   = Api::sql($base, 'CHECK INDEXES');
     $resultado = Api::sql($base, 'CHECK KEYS');
 } catch (Throwable $e) {
     $error = $e->getMessage();
@@ -91,7 +95,7 @@ foreach ($pendientes as $p) {
 <div class="page-head">
   <div>
     <h1><?= h(t('Integridad')) ?></h1>
-    <p><?= t('Ficheros JSON estropeados y claves foráneas que apuntan a filas que no existen, en {1}', [1 => h($base)]) ?></p>
+    <p><?= t('Ficheros JSON estropeados, índices que no cuadran con sus filas y claves foráneas que apuntan a filas que no existen, en {1}', [1 => h($base)]) ?></p>
   </div>
   <div class="page-actions">
     <a class="btn btn-outline-secondary" href="<?= h(url(['p' => 'integridad', 'db' => $base])) ?>"><?= icono('refresh') ?> <?= h(t('Volver a comprobar')) ?></a>
@@ -198,6 +202,45 @@ foreach ($pendientes as $p) {
   <?php endforeach; ?>
 <?php endif; ?>
 
+<h2 class="h5"><?= h(t('Índices')) ?></h2>
+<?php if ($indices === []): ?>
+  <div class="alert alert-success">
+    <?= t('{1} <strong>Todo correcto.</strong> Cada índice cuadra con las filas de su tabla.', [1 => icono('check2-circle')]) ?>
+  </div>
+<?php elseif (is_array($indices)): ?>
+  <div class="alert alert-warning">
+    <?= t('{1} <strong>{2} problema(s) en los índices.</strong> Casi siempre es un fichero de índice editado a mano, o los datos de una tabla copiados sin sus índices. Mientras no se rehaga, buscar por ese índice puede dar filas de menos.', [1 => icono('exclamation-triangle'), 2 => count($indices)]) ?>
+  </div>
+  <div class="card mb-3">
+    <div class="table-responsive">
+      <table class="table table-sm table-striped mb-0 align-middle">
+        <thead><tr><th><?= h(t('Tabla')) ?></th><th><?= h(t('Índice')) ?></th><th><?= h(t('Problema')) ?></th><th><?= h(t('Arreglo')) ?></th></tr></thead>
+        <tbody>
+        <?php foreach ($indices as $p): ?>
+          <tr><td><?= h((string)$p['tabla']) ?></td><td><code><?= h((string)$p['indice']) ?></code></td>
+              <td><?= h((string)$p['problema']) ?></td><td><?= h((string)$p['arreglo']) ?></td></tr>
+        <?php endforeach; ?>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <?php if ($admin): ?>
+    <div class="card mb-4">
+      <div class="card-body">
+        <h2 class="h6"><?= h(t('Rehacer los índices')) ?></h2>
+        <p class="small mb-2">
+          <?= t('Se rehacen desde las filas los índices de cada tabla con algún problema. Las filas no se tocan.') ?>
+        </p>
+        <form method="post" data-confirm="<?= h(t('¿Rehacer los índices con problemas?')) ?>">
+          <?= csrf() ?>
+          <input type="hidden" name="reparar_indices" value="1">
+          <button class="btn btn-warning"><?= t('{1} Rehacer los índices', [1 => icono('wrench')]) ?></button>
+        </form>
+      </div>
+    </div>
+  <?php endif; ?>
+<?php endif; ?>
+
 <h2 class="h5"><?= h(t('Claves foráneas')) ?></h2>
 <?php if ($resultado === []): ?>
   <div class="alert alert-success">
@@ -262,6 +305,6 @@ foreach ($pendientes as $p) {
 
 <div class="card mt-3">
   <div class="card-body small text-body-secondary">
-    <?= t('<strong>Qué comprueba:</strong> que cada fichero JSON de las tablas se pueda leer, y que toda fila con una clave foránea apunte a una fila que existe en su tabla destino (las filas con <code>NULL</code> en esas columnas no cuentan, igual que en la comprobación normal del motor). <strong>Lee del disco.</strong> <br> Desde SQL: <code>CHECK TABLES</code> y <code>REPAIR TABLES</code> para los ficheros, <code>CHECK KEYS</code> y <code>REPAIR KEYS</code> para las claves, con <code>FROM tabla</code> opcional para limitarlo a una tabla.') ?>
+    <?= t('<strong>Qué comprueba:</strong> que cada fichero JSON de las tablas se pueda leer, que cada índice cuadre con las filas de su tabla, y que toda fila con una clave foránea apunte a una fila que existe en su tabla destino (las filas con <code>NULL</code> en esas columnas no cuentan, igual que en la comprobación normal del motor). <strong>Lee del disco.</strong> <br> Desde SQL: <code>CHECK TABLES</code> y <code>REPAIR TABLES</code> para los ficheros, <code>CHECK INDEXES</code> y <code>REPAIR INDEXES</code> para los índices, <code>CHECK KEYS</code> y <code>REPAIR KEYS</code> para las claves, con <code>FROM tabla</code> opcional para limitarlo a una tabla.') ?>
   </div>
 </div>

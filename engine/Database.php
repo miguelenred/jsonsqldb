@@ -20,6 +20,8 @@ class Database
 {
     protected Storage $st;
     protected Catalog $cat;
+    /** Catalog::nombres(), a mano: pedirla en cada sentencia se notaba en un SELECT 1 (2.10) */
+    private \Closure $nombres;
     /** ¿Se está dentro de transaccion()? */
     protected bool $enTransaccion = false;
     private string  $base;
@@ -33,6 +35,7 @@ class Database
         $this->base = $base;
         $this->st   = new Storage($raiz ?? Config::datos(), $base);
         $this->cat  = new Catalog($this->st);
+        $this->nombres = $this->cat->nombres();
     }
 
     public function nombre(): string  { return $this->base; }
@@ -62,72 +65,6 @@ class Database
     // ------------------------------------------------------------------
 
     /**
-     * Lo que tiene que haber costado una consulta, en nanosegundos, para
-     * guardar su resultado (2.9): 1 ms. Una búsqueda por clave cuesta menos
-     * que guardarla, y casi nunca se repite tal cual; guardarlas todas
-     * llenaba la caché de resultados que nadie volvía a pedir.
-     */
-    private const RESULTADO_MINIMO = 1000000;
-
-    /**
-     * Ejecuta un SELECT pasando por la caché de resultados: la clave lleva la
-     * SQL, los parámetros y la revisión de cada tabla implicada, así que un
-     * resultado guardado solo vale mientras nadie escriba en ninguna de ellas.
-     * No se guardan las consultas que no son deterministas (RANDOM(), la
-     * fecha actual) ni los resultados grandes, que no compensan.
-     *
-     * @return list<array>
-     */
-    private function seleccionar(array $ast, string $sql, array $params): array
-    {
-        $tope   = Config::cacheResultados();
-        $tablas = $tope > 0 ? Select::tablasDe($ast, $this->cat) : null;
-        // Lo que no lee ninguna tabla no se guarda (2.9): ninguna escritura lo
-        // borraría nunca, y cada consulta distinta dejaba su fichero
-        if ($tablas !== null && array_filter($tablas, static fn(string $t): bool => $t[0] !== '#') === []) {
-            $tablas = null;
-        }
-        $porFila = $this->porFila;
-        if ($tablas === null) {
-            return $porFila === null
-                ? (new Select($this->cat))->ejecutar($ast)
-                : (new Select($this->cat))->ejecutarHacia($ast, $porFila) ?? [];
-        }
-        $clave = StorageLectura::claveResultado($this->st, $tablas, $sql, $params);
-        $filas = StorageLectura::resultadoCacheado($this->st, $clave, $tablas);
-        if ($filas !== null) {
-            return $filas;                           // ya está entero: se devuelve tal cual
-        }
-        $inicio = hrtime(true);
-        if ($porFila === null) {
-            $filas = (new Select($this->cat))->ejecutar($ast);
-        } else {
-            // Las filas que salen una a una se guardan también para la caché
-            // mientras no pasen del tope; pasado, se dejan de guardar
-            $guardadas = [];
-            $filas = (new Select($this->cat))->ejecutarHacia($ast, static function (array $fila) use ($porFila, &$guardadas, $tope): void {
-                if ($guardadas !== null) {
-                    $guardadas[] = $fila;
-                    if (count($guardadas) > $tope) {
-                        $guardadas = null;
-                    }
-                }
-                $porFila($fila);
-            });
-            if ($filas === null) {
-                if ($guardadas !== null && hrtime(true) - $inicio >= self::RESULTADO_MINIMO) {
-                    StorageLectura::guardarResultado($this->st, $clave, $tablas, $guardadas);
-                }
-                return [];
-            }
-        }
-        if (count($filas) <= $tope && hrtime(true) - $inicio >= self::RESULTADO_MINIMO) {
-            StorageLectura::guardarResultado($this->st, $clave, $tablas, $filas);
-        }
-        return $filas;
-    }
-
-    /**
      * Como consultar(), pero las filas de un SELECT que se pueda resolver
      * leyendo y proyectando (sin ORDER BY, DISTINCT ni agregados) no se
      * devuelven juntas: van a $porFila una a una según salen, y quien llama
@@ -143,9 +80,21 @@ class Database
      */
     public function consultarPorFilas(string $sql, array $params, ?callable $autorizar, callable $porFila)
     {
-        $this->porFila = function (array $fila) use ($porFila): void {
+        // $porFila es de la aplicación: con su serialize_precision, no con el
+        // -1 con el que trabaja el motor (ver Config::precisionExacta())
+        $suya = Config::precisionAjena();
+        $this->porFila = function (array $fila) use ($porFila, $suya): void {
             $this->enviadas = ($this->enviadas ?? 0) + 1;
-            $porFila($fila);
+            if ($suya === null) {
+                $porFila($fila);
+                return;
+            }
+            ini_set('serialize_precision', $suya);
+            try {
+                $porFila($fila);
+            } finally {
+                ini_set('serialize_precision', '-1');
+            }
         };
         $this->enviadas = null;
         try {
@@ -183,59 +132,22 @@ class Database
      */
     public function transaccion(callable $fn)
     {
-        self::exigirAcceso();
-        if ($this->enTransaccion) {
-            throw JsonSqlDbError::lock('Ya hay una transacción abierta en esta base');
-        }
-        $this->st->bloquear(true);
-        $this->cat->olvidar();
-        try {
-            StorageMantenimiento::loteIniciar($this->st);
-            $this->enTransaccion = true;
-            try {
-                $r = $fn($this);
-            } catch (\Throwable $e) {
-                StorageMantenimiento::loteDeshacer($this->st);
-                throw $e;
-            }
-            StorageMantenimiento::loteConfirmar($this->st);
-            return $r;
-        } finally {
-            $this->enTransaccion = false;
-            $this->st->desbloquear();
-            $this->cat->olvidar();
-            $this->repararPendientes();
-        }
+        return DatabaseAvanzada::correrTransaccion($this, $fn);
     }
 
-    /**
-     * Repara en disco los ficheros que la consulta leyó estropeados a mano y
-     * reparados en memoria (2.9, ver Storage::decodificarParte()). Al acabar,
-     * sin ningún bloqueo: reparar es escribir, con el exclusivo de la base.
-     * La consulta ya ha ido bien, así que un fallo aquí no la estropea: se
-     * apunta en el registro y la tabla sigue como estaba hasta repararla.
-     */
-    private function repararPendientes(): void
+    /** Lo que la consulta dejó por reparar o por rehacer, si dejó algo (ver DatabaseAvanzada::reparar()) */
+    protected function repararPendientes(): void
     {
-        foreach ($this->st->porReparar() as $tabla => $ficheros) {
-            $t0 = microtime(true);
-            $sql = "REPAIR TABLES FROM $tabla -- automática: " . implode(', ', array_map(
-                static fn(string $f, string $motivo): string => "$f ($motivo)", array_keys($ficheros), $ficheros));
+        if ($this->st->hayPendientes()) {
+            // También al acabar una transacción, fuera de consultar(): con
+            // serialize_precision a -1 (ver Config::precisionExacta())
+            $precision = Config::precisionExacta();
             try {
-                $this->st->bloquear(true);
-                $this->cat->olvidar();
-                $hecho = $this->cat->existe($tabla)
-                    ? StorageMantenimiento::revisarFicheros($this->st, $tabla, $this->cat->indicesDe($tabla), false, in_array('editado', $ficheros, true))
-                    : [];
-                Logger::registrar($this->base, 'REPAIR', $sql, count($hecho), (microtime(true) - $t0) * 1000);
-            } catch (\Throwable $e) {
-                Logger::registrar($this->base, 'REPAIR', $sql, null, (microtime(true) - $t0) * 1000, $e->getMessage());
+                DatabaseAvanzada::reparar($this, $this->st->porReparar());
             } finally {
-                $this->st->desbloquear();
-                $this->cat->olvidar();
+                $precision === null || ini_set('serialize_precision', $precision);
             }
         }
-        $this->st->porReparar();          // lo que la propia reparación volvió a leer roto ya está arreglado
     }
 
     /**
@@ -252,10 +164,10 @@ class Database
         return DatabaseAvanzada::correrLote($this, $sentencias, $autorizar);
     }
 
-    /** ¿Solo lee? CHECK KEYS y CHECK TABLES solo leen; REPAIR, escribe */
+    /** ¿Solo lee? CHECK KEYS, CHECK TABLES y CHECK INDEXES solo leen; REPAIR, escribe */
     protected static function soloLee(array $ast): bool
     {
-        return in_array($ast['k'], ['select', 'union', 'explain', 'check_keys', 'check_tables'], true)
+        return \in_array($ast['k'], ['select', 'union', 'explain', 'check_keys', 'check_tables', 'check_indexes'], true)
             || strncmp($ast['k'], 'show_', 5) === 0;
     }
 
@@ -280,9 +192,15 @@ class Database
         $op = 'DESCONOCIDA';
 
         Memoria::iniciar();
+        // serialize_precision a -1 mientras trabaja, y al acabar, la que había
+        // (ver Config::precisionExacta()); sin llamarla si ya es -1, lo de siempre
+        $precision = ini_get('serialize_precision') === '-1' ? null : Config::precisionExacta();
 
         try {
-            $ast = Parser::analizar($sql, $params);
+            if ($this->enTransaccion) {
+                StorageEscritura::exigirEntera($this->st);
+            }
+            $ast = Parser::analizar($sql, $params, $this->nombres);
             $op  = self::operacion($ast);
             // Lo que aquí no tiene efecto (ANALYZE, USE de esta base): ni bloquea
             if ($ast['k'] === 'nada' || $ast['k'] === 'use') {
@@ -292,7 +210,7 @@ class Database
                 }
                 return self::resultadoEscritura(['filas' => 0, 'mensaje' => $ast['mensaje'] ?? "Ya estás en '{$this->base}'"]);
             }
-            if (in_array($ast['k'], ['show_databases', 'create_database', 'drop_database'], true)) {
+            if (\in_array($ast['k'], ['show_databases', 'create_database', 'drop_database'], true)) {
                 if ($this->enTransaccion && $ast['k'] !== 'show_databases') {
                     throw JsonSqlDbError::lock('Crear o borrar una base no se puede hacer dentro de una transacción');
                 }
@@ -303,9 +221,20 @@ class Database
                 throw JsonSqlDbError::lock('REPAIR TABLES no se puede hacer dentro de una transacción');
             }
             if ($autorizar !== null) {
-                $autorizar($ast['k']);          // permite comprobar permisos antes de ejecutar
+                // Permite comprobar permisos antes de ejecutar; es de la
+                // aplicación, y va con su serialize_precision
+                $precision === null || ini_set('serialize_precision', $precision);
+                try {
+                    $autorizar($ast['k']);
+                } finally {
+                    $precision === null || ini_set('serialize_precision', '-1');
+                }
             }
             $escritura = !self::soloLee($ast);
+            $apuntada = $escritura && \in_array($ast['k'], ['insert', 'update', 'delete'], true) && \is_string($ast['tabla'] ?? null);
+            if ($apuntada) {
+                StorageEscritura::escribiendo($this->st, $ast['tabla']);
+            }
 
             // Solo se llena una de las dos, según $escritura. Se inicializan para
             // que una rama nueva mal escrita no dé un aviso de PHP y un log falso.
@@ -323,7 +252,9 @@ class Database
             // que la deja ser todo o nada
             if ($ast['k'] === 'create_table' && ($ast['def'] ?? null) === null && !isset($ast['como']) && !$this->enTransaccion) {
                 $res = $this->transaccion(fn(): array => (new Writer($this->cat))->ejecutar($ast));
-                Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                if (Config::seRegistra($op, false)) {
+                    Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                }
                 return self::resultadoEscritura($res);
             }
 
@@ -346,13 +277,17 @@ class Database
                         $this->st->desbloquear();
                         $this->cat->olvidar();
                     }
-                    Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                    if (Config::seRegistra($op, false)) {
+                        Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                    }
                     return self::resultadoEscritura($res);
                 } catch (ConflictoPartes) {
                     StorageCambios::anotarRepeticion();          // a la cola: con la tabla entera, abajo
                 } catch (SentenciaGrande) {
                     $res = DatabaseAvanzada::porTramos($this, $ast);
-                    Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                    if (Config::seRegistra($op, false)) {
+                        Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+                    }
                     return self::resultadoEscritura($res);
                 }
             }
@@ -368,13 +303,15 @@ class Database
                         $grande = true;                // aún no ha escrito nada: en una transacción, abajo
                     }
                 } elseif ($ast['k'] === 'select' || $ast['k'] === 'union') {
-                    $filas = $this->seleccionar($ast, $sql, $params);
+                    $filas = Select::conCache($this->cat, $this->st, $this->porFila, $ast, $sql, $params);
                 } elseif ($ast['k'] === 'explain') {
                     $filas = DatabaseAvanzada::explicar($this, $ast['consulta']);
                 } elseif ($ast['k'] === 'check_keys') {
                     $filas = (new Integrity($this->cat))->claves($ast['tabla'], false);
                 } elseif ($ast['k'] === 'check_tables') {
                     $filas = (new Integrity($this->cat))->ficheros($ast['tabla'], false);
+                } elseif ($ast['k'] === 'check_indexes') {
+                    $filas = (new Integrity($this->cat))->indices($ast['tabla'], false);
                 } else {
                     $filas = (new Show($this->cat))->ejecutar($ast);
                 }
@@ -392,20 +329,31 @@ class Database
             }
 
             if (!$escritura) {
-                Logger::registrar($this->base, $op, $sql, $this->enviadas ?? count($filas), (microtime(true) - $t0) * 1000, null, $params);
+                if (Config::seRegistra($op, false)) {
+                    Logger::registrar($this->base, $op, $sql, $this->enviadas ?? \count($filas), (microtime(true) - $t0) * 1000, null, $params);
+                }
                 return $filas;
             }
             if ($grande) {
                 $res = DatabaseAvanzada::porTramos($this, $ast);
             }
 
-            Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+            if (Config::seRegistra($op, false)) {
+                Logger::registrar($this->base, $op, $sql, $res['filas'], (microtime(true) - $t0) * 1000, null, $params);
+            }
             return self::resultadoEscritura($res);
 
         } catch (JsonSqlDbError $e) {
-            Logger::registrar($this->base, $op, $sql, null, (microtime(true) - $t0) * 1000,
-                $e->sqlState . ': ' . $e->getMessage(), $params);
+            if (Config::seRegistra($op, true)) {
+                Logger::registrar($this->base, $op, $sql, null, (microtime(true) - $t0) * 1000,
+                    $e->sqlState . ': ' . $e->getMessage(), $params);
+            }
             throw $e;
+        } finally {
+            if ($apuntada ?? false) {
+                StorageEscritura::escribiendo($this->st, null);
+            }
+            $precision === null || ini_set('serialize_precision', $precision);
         }
     }
 
@@ -428,7 +376,7 @@ class Database
      */
     protected static function exigirAcceso(): void
     {
-        if (defined('JSONSQLDB_VIA_API') || Config::conexionDirecta()) {
+        if (\defined('JSONSQLDB_VIA_API') || Config::conexionDirecta()) {
             return;
         }
         throw JsonSqlDbError::permission(
@@ -449,7 +397,7 @@ class Database
      */
     private function tablaPorPartes(array $ast): ?string
     {
-        if (!Config::escrituraPorPartes() || !in_array($ast['k'], ['update', 'delete'], true) || !empty($ast['truncar'])) {
+        if (!Config::escrituraPorPartes() || !\in_array($ast['k'], ['update', 'delete'], true) || !empty($ast['truncar'])) {
             return null;
         }
         $tabla = $this->tablaUnica($ast);
@@ -478,7 +426,7 @@ class Database
      * el exclusivo de unas tablas, las demás se leen sin bloqueo (ver
      * Storage::bloquearLectura()), y otro proceso podría estar escribiéndolas.
      * Hasta la 2.9 las subconsultas no contaban. También para las sentencias
-     * de los triggers (ver Catalog::tablaDeLaSentencia()).
+     * de los triggers (ver CatalogBloqueos::tablaDeLaSentencia()).
      */
     public static function leeOtras(array $ast): bool
     {
@@ -504,14 +452,14 @@ class Database
             return [$tabla];                  // no puede propagar: ella sola
         }
         // Solo el DML sencillo tiene un conjunto de tablas calculable
-        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+        if (!\in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
             return null;
         }
         $destino = $ast['tabla'] ?? null;
-        if (!is_string($destino) || $destino === '' || self::leeOtras($ast)) {
+        if (!\is_string($destino) || $destino === '' || self::leeOtras($ast)) {
             return null;
         }
-        return $this->cat->cierreDeTablas($destino);
+        return CatalogBloqueos::cierreDeTablas($this->cat, $destino);
     }
 
     /**
@@ -530,11 +478,11 @@ class Database
     {
         // Solo el DML sencillo. El DDL, las vistas, los triggers y REPAIR KEYS
         // tocan metadatos de la base o varias tablas a la vez.
-        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+        if (!\in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
             return null;
         }
         $tabla = $ast['tabla'] ?? null;
-        if (!is_string($tabla) || $tabla === '' || !$this->cat->existe($tabla)) {
+        if (!\is_string($tabla) || $tabla === '' || !$this->cat->existe($tabla)) {
             return null;
         }
         if (self::leeOtras($ast)) {
@@ -545,8 +493,15 @@ class Database
         if (($meta['foreign_keys'] ?? []) !== [] || ($meta['triggers'] ?? []) !== []) {
             return null;                      // puede propagar hacia otras
         }
+        // Un INSERT que no cambia filas que ya estén (sin OR REPLACE ni DO
+        // UPDATE) no toca a quien la referencie: una fila nueva no tiene hijas.
+        // Sin mirarlas no se lista la carpeta (2.10: en cada INSERT, y con
+        // 200.000 filas eran 800 ficheros)
+        if ($ast['k'] === 'insert' && ($ast['conflicto']['modo'] ?? 'nada') === 'nada') {
+            return $tabla;
+        }
         // ¿Alguien la referencia? Un borrado suyo podría arrastrar filas ajenas
-        foreach ($this->cat->tablas() as $otra) {
+        foreach ($this->cat->tablasEsquema() as $otra) {
             if ($otra === $tabla) {
                 continue;
             }

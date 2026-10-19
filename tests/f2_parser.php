@@ -82,6 +82,27 @@ chk('SELECT sin FROM', function () {
     return $a['from'] === [] && $a['cols'][0]['expr']['op'] === '+';
 });
 chk('punto y coma final', fn() => Parser::analizar('SELECT 1;')['k'] === 'select');
+chk('un valor suelto antes de una coma, un paréntesis, FROM, AS o el final da el mismo árbol que con un operador detrás (2.10: se lee sin bajar por todos los niveles)', function () {
+    $a = Parser::analizar('SELECT 1, \'a\', ?, x, "y" AS z, t.c FROM t WHERE w IN (2, ?, b) LIMIT 3', [5, 6]);
+    $b = Parser::analizar('SELECT 1 + 0, \'a\' + 0, ? + 0, x + 0, "y" + 0, t.c + 0, w IN (2 + 0, ? + 0, b + 0)', [5, 6]);
+    $iguales = true;
+    foreach ($a['cols'] as $i => $c) {
+        $iguales = $iguales && $c['expr'] === $b['cols'][$i]['expr']['i'];
+    }
+    foreach ($a['where']['lista'] as $i => $e) {
+        $iguales = $iguales && $e === $b['cols'][6]['expr']['lista'][$i]['i'];
+    }
+    return $iguales && $a['cols'][4]['alias'] === 'z' && $a['where']['e'] === $b['cols'][6]['expr']['e'] ?: json_encode([$a['cols'], $a['where']]);
+});
+malaSintaxis('un NOT suelto delante de una coma sigue siendo un error (2.10)', 'SELECT NOT, 1');
+chk('CASE e INTERVAL delante de una columna llamada AS o FROM no van por el atajo del valor suelto: lo de detrás de su END o de su unidad cuenta (2.10)', function () {
+    $a = Parser::analizar('SELECT CASE AS WHEN 1 THEN 2 END * 3, INTERVAL AS DAY + \'2020-01-01\' FROM t', []);
+    $b = Parser::analizar('SELECT CASE FROM WHEN 1 THEN \'a\' END || \'x\' FROM t', []);
+    return $a['cols'][0]['expr']['k'] === 'bin' && $a['cols'][0]['expr']['op'] === '*' && $a['cols'][0]['expr']['i']['k'] === 'case'
+        && $a['cols'][1]['expr']['k'] === 'fn' && $a['cols'][1]['expr']['nombre'] === 'DATE_ADD'
+        && $b['cols'][0]['expr']['k'] === 'bin' && $b['cols'][0]['expr']['op'] === '||' && $b['cols'][0]['expr']['i']['k'] === 'case'
+        ?: json_encode([$a['cols'], $b['cols']]);
+});
 malaSintaxis('dos sentencias', 'SELECT 1; SELECT 2');
 chk('UPDATE y DELETE admiten ORDER BY, LIMIT y OFFSET, con RETURNING antes o después (2.9)', function () {
     $a = Parser::analizar('UPDATE t SET a = 1 WHERE a > 0 ORDER BY a DESC, b LIMIT 1 OFFSET 2');
@@ -344,7 +365,7 @@ chk('todo junto', function () {
         FROM    usuarios u
         LEFT JOIN pedidos p ON p.usuario_id = u.id
         WHERE   u.alta BETWEEN '2026-01-01' AND '2026-12-31'
-          AND   u.ciudad IN ('Madrid', 'Valencia', 'Torrevieja')
+          AND   u.ciudad IN ('Madrid', 'Valencia', 'Sevilla')
           AND   u.email IS NOT NULL
         GROUP BY u.ciudad
         HAVING  COUNT(*) > 2

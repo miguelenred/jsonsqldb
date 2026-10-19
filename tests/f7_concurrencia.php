@@ -450,6 +450,9 @@ chk('escribir una tabla no borra el temporal de otra que se está escribiendo', 
     $propio = "$dir/b/uno.json.999998.tmp";
     file_put_contents($ajeno, 'a medias');
     file_put_contents($propio, 'a medias');
+    // Con la línea que deja en el .lock quien muere escribiendo (2.10)
+    file_put_contents("$dir/b/.dos.lock", 'escribiendo: pid 999999 desde ' . date('Y-m-d H:i:s') . "\n");
+    file_put_contents("$dir/b/.uno.lock", 'escribiendo: pid 999998 desde ' . date('Y-m-d H:i:s') . "\n");
 
     // Una escritura en 'uno': tiene el exclusivo de 'uno' y solo el compartido
     // de la base, así que no puede saber si alguien está escribiendo 'dos'
@@ -878,7 +881,7 @@ chk('dos procesos que rehacen a la vez el mismo .php de la caché no lo dejan co
     $motor = 'require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';';
     // Con pocas filas cada proceso lo rehace cientos de veces: así se cruzan seguro
     $escribir = $motor . '$v = []; for ($i = 0; $i < 300; $i++) { $v[] = ["id" => $i, "texto" => str_repeat("x", 20)]; }'
-        . '$f = Closure::bind(static fn(string $p, array $v) => JsonSQLDB\\Storage::volcarPhp($p, $v), null, JsonSQLDB\\Storage::class);'
+        . '$f = static fn(string $p, array $v) => JsonSQLDB\\StorageCompartida::volcarPhp($p, $v);'
         . '$fin = microtime(true) + 1.5; while (microtime(true) < $fin) { $f(' . $php . ', $v); }';
     $leer = '$malas = 0; $vistas = 0; $fin = microtime(true) + 1.5;'
         . 'while (microtime(true) < $fin) { clearstatcache(); if (is_file(' . $php . ')) { $vistas++;'

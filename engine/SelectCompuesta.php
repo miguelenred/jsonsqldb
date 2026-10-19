@@ -43,7 +43,8 @@ final class SelectCompuesta extends Select
             }
             $r = $sel->correrEntera($ast);           // como una subconsulta del FROM, también por el disco (2.9)
             return isset($ast['columnas'])
-                ? ['cols' => $ast['columnas'], 'filas' => self::renombrar($r, $ast['columnas'], $clave), 'colaciones' => $r['colaciones'] ?? []]
+                ? ['cols' => $ast['columnas'], 'filas' => self::renombrar($r, $ast['columnas'], $clave), 'colaciones' => $r['colaciones'] ?? [],
+                   'afinidades' => $r['afinidades'] ?? []]
                 : $r;
         } finally {
             unset($sel->enCurso[$clave]);
@@ -65,21 +66,22 @@ final class SelectCompuesta extends Select
     {
         $p        = (int)$ast['recursiva'];
         $inicial  = $p === 1 ? $ast['partes'][0]
-            : ['k' => 'union', 'partes' => array_slice($ast['partes'], 0, $p), 'ops' => array_slice($ast['ops'], 0, $p - 1),
+            : ['k' => 'union', 'partes' => \array_slice($ast['partes'], 0, $p), 'ops' => \array_slice($ast['ops'], 0, $p - 1),
                'order' => [], 'limit' => null, 'offset' => null];
         $distinto = $ast['ops'][$p - 1] === 'UNION';
         $tope     = $ast['limit'] === null ? null : $ast['limit'] + (int)$ast['offset'];
         $r        = $sel->correr($inicial);
         $cols     = $ast['columnas'] ?? $r['cols'];
-        // Las columnas tienen la colación de las de la primera tanda (2.9)
+        // Las columnas tienen la colación de las de la primera tanda (2.9), y su afinidad (2.10)
         $colaciones = $r['colaciones'] ?? [];
+        $afinidades = $r['afinidades'] ?? [];
         $plegar   = array_filter($colaciones, static fn(?string $c): bool => $c !== null && $c !== 'BINARY');
         $todas    = [];
         $vistas   = [];
         $tanda    = function (array $r) use ($cols, $clave, $distinto, $tope, $plegar, &$todas, &$vistas): array {
             $nuevas = [];
             foreach (self::renombrar($r, $cols, $clave) as $fila) {
-                if ($tope !== null && count($todas) >= $tope) {
+                if ($tope !== null && \count($todas) >= $tope) {
                     break;
                 }
                 if ($distinto) {
@@ -97,17 +99,18 @@ final class SelectCompuesta extends Select
         };
         $nuevas = $tanda($r);
         try {
-            while ($nuevas !== [] && ($tope === null || count($todas) < $tope)) {
-                $sel->con[$clave] = ['k' => 'tanda', 'cols' => $cols, 'filas' => $nuevas, 'colaciones' => $colaciones];
+            while ($nuevas !== [] && ($tope === null || \count($todas) < $tope)) {
+                $sel->con[$clave] = ['k' => 'tanda', 'cols' => $cols, 'filas' => $nuevas, 'colaciones' => $colaciones, 'afinidades' => $afinidades];
                 $nuevas = [];
-                foreach (array_slice($ast['partes'], $p) as $parte) {
+                foreach (\array_slice($ast['partes'], $p) as $parte) {
                     array_push($nuevas, ...$tanda($sel->correr($parte)));
                 }
             }
         } finally {
             $sel->con[$clave] = $ast;
         }
-        return ['cols' => $cols, 'filas' => array_slice($todas, (int)$ast['offset'], $ast['limit']), 'colaciones' => $colaciones];
+        return ['cols' => $cols, 'filas' => \array_slice($todas, (int)$ast['offset'], $ast['limit']), 'colaciones' => $colaciones,
+                'afinidades' => $afinidades];
     }
 
     /**
@@ -118,8 +121,8 @@ final class SelectCompuesta extends Select
      */
     private static function renombrar(array $r, array $cols, string $nombre): \Generator
     {
-        if (count($r['cols']) !== count($cols)) {
-            throw JsonSqlDbError::syntax("'$nombre' nombra " . count($cols) . ' columnas y su consulta da ' . count($r['cols']));
+        if (\count($r['cols']) !== \count($cols)) {
+            throw JsonSqlDbError::syntax("'$nombre' nombra " . \count($cols) . ' columnas y su consulta da ' . \count($r['cols']));
         }
         foreach ($r['filas'] as $fila) {
             yield array_combine($cols, array_values($fila));
@@ -145,6 +148,7 @@ final class SelectCompuesta extends Select
         $cols       = [];
         $partes     = [];
         $colaciones = [];
+        $afinidades = null;
         // Un UNION del FROM que se junta entero (ver Select::correrEntera()):
         // si una parte no cabe, no se repite ella por el disco, porque el UNION
         // la juntaría igual; se repite la consulta de fuera, que lo lleva a disco
@@ -161,12 +165,13 @@ final class SelectCompuesta extends Select
             if ($i === 0) {
                 $cols = $r['cols'];
             }
-            self::mismasColumnas($cols, count($r['cols']));
+            self::mismasColumnas($cols, \count($r['cols']));
             // La colación de cada columna (2.9), como en SQLite: la de la
             // primera parte, empezando por la izquierda, que tiene una
             foreach ($r['colaciones'] ?? [] as $j => $c) {
                 $colaciones[$j] ??= $c;
             }
+            $afinidades = self::afinidadesUnion($afinidades, $r);
 
             // Las columnas se toman por posición y se renombran a las de la
             // primera parte, aunque en su SELECT se llamen de otra forma
@@ -184,7 +189,7 @@ final class SelectCompuesta extends Select
 
         // Con ellas se decide qué filas son iguales
         $plegar     = self::plegarUnion($cols, $colaciones);
-        $colaciones = array_replace(array_fill(0, count($cols), null), $colaciones);
+        $colaciones = array_replace(array_fill(0, \count($cols), null), $colaciones);
         $filas      = array_shift($partes);
         for ($i = 0; $partes !== []; $i++) {
             $nuevas = array_shift($partes);      // y deja de ocupar memoria en cuanto se usa
@@ -218,10 +223,31 @@ final class SelectCompuesta extends Select
         $filas = self::ordenarUnion($sel, $filas, $cols, $ast['order'], $plegar);
 
         if ($ast['limit'] !== null || $ast['offset'] !== null) {
-            $filas = array_slice($filas, $ast['offset'] ?? 0, $ast['limit']);
+            $filas = \array_slice($filas, $ast['offset'] ?? 0, $ast['limit']);
         }
 
-        return ['cols' => $cols, 'filas' => array_values($filas), 'colaciones' => $colaciones];
+        return ['cols' => $cols, 'filas' => array_values($filas), 'colaciones' => $colaciones, 'afinidades' => $afinidades ?? []];
+    }
+
+    /**
+     * La afinidad de cada columna de un UNION (2.10), como en SQLite: la de
+     * sus partes si todas tienen la misma, y si no, ninguna ('').
+     *
+     * @param list<string>|null $hasta las de las partes anteriores (null: es la primera)
+     * @return list<string>
+     */
+    private static function afinidadesUnion(?array $hasta, array $r): array
+    {
+        $suyas = array_values($r['afinidades'] ?? []);
+        if ($hasta === null) {
+            return $suyas;
+        }
+        foreach ($hasta as $j => $a) {
+            if (($suyas[$j] ?? '') !== $a) {
+                $hasta[$j] = '';
+            }
+        }
+        return $hasta;
     }
 
     /**
@@ -247,13 +273,23 @@ final class SelectCompuesta extends Select
         }
         $cols       = null;
         $colaciones = [];
+        $afinidades = null;
         if ($ultima >= 0) {
-            foreach ($ast['partes'] as $parte) {
-                $r = $sel->correr(['limit' => 0, 'offset' => null] + $parte);
-                self::mismasColumnas($cols ??= $r['cols'], count($r['cols']));
-                foreach ($r['colaciones'] ?? [] as $j => $c) {
-                    $colaciones[$j] ??= $c;
+            // Sin apuntarlo en el EXPLAIN (2.10: salía cada tabla dos veces,
+            // la primera con 0 filas)
+            $st    = $sel->cat->storage();
+            $traza = $st->traza;
+            $st->traza = null;
+            try {
+                foreach ($ast['partes'] as $parte) {
+                    $r = $sel->correr(['limit' => 0, 'offset' => null] + $parte);
+                    self::mismasColumnas($cols ??= $r['cols'], \count($r['cols']));
+                    foreach ($r['colaciones'] ?? [] as $j => $c) {
+                        $colaciones[$j] ??= $c;
+                    }
                 }
+            } finally {
+                $st->traza = $traza;
             }
         }
         $plegar   = self::plegarUnion($cols ?? [], $colaciones);
@@ -269,7 +305,7 @@ final class SelectCompuesta extends Select
                     return;                         // ya están todas (la parte sigue, pero no sale nada más)
                 }
                 $valores = array_values($fila);
-                self::mismasColumnas($cols, count($valores));
+                self::mismasColumnas($cols, \count($valores));
                 $n = [];
                 foreach ($cols as $j => $nombre) {
                     $n[$nombre] = $valores[$j] ?? null;
@@ -300,26 +336,28 @@ final class SelectCompuesta extends Select
             } finally {
                 [$sel->sumidero, $sel->nivelSumidero, $sel->entregado] = $previo;
             }
-            self::mismasColumnas($cols ??= $r['cols'], count($r['cols']));
+            self::mismasColumnas($cols ??= $r['cols'], \count($r['cols']));
             foreach ($r['colaciones'] ?? [] as $j => $c) {
                 $colaciones[$j] ??= $c;
             }
+            $afinidades = self::afinidadesUnion($afinidades, $r);
             $plegar = self::plegarUnion($cols, $colaciones);
             foreach ($r['filas'] as $fila) {
                 $poner($fila);                      // las que no salieron fila a fila
             }
         }
         $sel->entregado = $sel->entregado || $entregado;
-        return ['cols' => $cols ?? [], 'filas' => [], 'colaciones' => array_replace(array_fill(0, count($cols ?? []), null), $colaciones)];
+        return ['cols' => $cols ?? [], 'filas' => [], 'colaciones' => array_replace(array_fill(0, \count($cols ?? []), null), $colaciones),
+                'afinidades' => $afinidades ?? []];
     }
 
     /** Todas las partes de un UNION, con tantas columnas como la primera */
     private static function mismasColumnas(array $cols, int $n): void
     {
-        if ($n !== count($cols)) {
+        if ($n !== \count($cols)) {
             throw JsonSqlDbError::syntax(
                 'Todas las partes de un UNION tienen que devolver el mismo número de '
-                . 'columnas: la primera devuelve ' . count($cols) . " y otra devuelve $n"
+                . 'columnas: la primera devuelve ' . \count($cols) . " y otra devuelve $n"
             );
         }
     }
@@ -332,7 +370,7 @@ final class SelectCompuesta extends Select
      */
     private static function plegarUnion(array $cols, array $colaciones): array
     {
-        return array_filter(array_replace(array_fill(0, count($cols), null), $colaciones),
+        return array_filter(array_replace(array_fill(0, \count($cols), null), $colaciones),
             static fn(?string $c): bool => $c !== null && $c !== 'BINARY');
     }
 
@@ -376,6 +414,7 @@ final class SelectCompuesta extends Select
 
         $claves     = [];
         $colaciones = [];
+        $binarias   = [];
         foreach ($orden as $o) {
             // Con la colación de la columna (2.9), o la escrita con COLLATE:
             // el analizador la deja como PLEGAR(COLLATE(x)), o COLLATE(x) si es BINARY
@@ -389,27 +428,28 @@ final class SelectCompuesta extends Select
             }
             // El nombre, sin distinguir mayúsculas, como en un SELECT (2.9)
             $j = $e['k'] === 'col' && $e['tabla'] === null ? array_search(strtolower($e['nombre']), array_map('strtolower', $cols), true)
-               : ($e['k'] === 'lit' && is_int($e['v']) && isset($cols[$e['v'] - 1]) ? $e['v'] - 1 : false);
+               : ($e['k'] === 'lit' && \is_int($e['v']) && isset($cols[$e['v'] - 1]) ? $e['v'] - 1 : false);
             if ($j === false) {
                 throw JsonSqlDbError::syntax(
                     'El ORDER BY de un UNION solo admite nombres de columna del resultado o su '
                     . 'posición (1, 2...)'
                 );
             }
+            $binarias[] = $c === 'BINARY';             // escrita: byte a byte, sin la colación configurada (2.10)
             $c = $c === false ? ($plegar[$j] ?? null) : $c;
             $claves[]     = $cols[$j];
             $colaciones[] = $c === 'BINARY' ? null : $c;
         }
 
         $indices = array_keys($filas);
-        usort($indices, static function (int $a, int $b) use ($filas, $claves, $orden, $colaciones): int {
+        usort($indices, static function (int $a, int $b) use ($filas, $claves, $orden, $colaciones, $binarias): int {
             foreach ($claves as $i => $col) {
                 $x = $filas[$a][$col] ?? null;
                 $y = $filas[$b][$col] ?? null;
                 if ($colaciones[$i] !== null) {
                     [$x, $y] = [Functions::plegar($x, $colaciones[$i]), Functions::plegar($y, $colaciones[$i])];
                 }
-                $c = Valor::compararOrden($x, $y);
+                $c = Valor::compararOrden($x, $y, $binarias[$i]);
                 if ($c !== 0) {
                     return $orden[$i]['dir'] === 'DESC' ? -$c : $c;
                 }
@@ -426,20 +466,27 @@ final class SelectCompuesta extends Select
 
     /**
      * Las columnas (en minúsculas) de un resultado que tienen colación (2.9),
-     * con la suya: las hereda quien lo lee como una tabla.
+     * con la suya, y las que tienen afinidad (2.10), con la suya: las hereda
+     * quien lo lee como una tabla.
      *
-     * @param array{cols: list<string>, colaciones?: list<?string>} $r
-     * @return array<string, string>
+     * @param array{cols: list<string>, colaciones?: list<?string>, afinidades?: list<string>} $r
+     * @return array{0: array<string, string>, 1: array<string, string>}
      */
     public static function heredadas(array $r): array
     {
-        $out  = [];
+        $colaciones = [];
+        $afinidades = [];
         $cols = array_values($r['cols']);
         foreach ($r['colaciones'] ?? [] as $i => $c) {
             if ($c !== null && $c !== 'BINARY' && isset($cols[$i])) {
-                $out[strtolower((string)$cols[$i])] ??= $c;
+                $colaciones[strtolower((string)$cols[$i])] ??= $c;
             }
         }
-        return $out;
+        foreach ($r['afinidades'] ?? [] as $i => $a) {
+            if ($a !== '' && isset($cols[$i])) {
+                $afinidades[strtolower((string)$cols[$i])] ??= $a;
+            }
+        }
+        return [$colaciones, $afinidades];
     }
 }

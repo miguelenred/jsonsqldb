@@ -55,6 +55,14 @@ defined('JSONSQLDB_CACHE_APCU') || define('JSONSQLDB_CACHE_APCU', true);
 // eso va activado, pero no es obligatorio: sin OPcache el motor funciona igual.
 // Nunca usa más de lo que deja libre un 25 % de su memoria. false lo desactiva.
 defined('JSONSQLDB_CACHE_OPCACHE') || define('JSONSQLDB_CACHE_OPCACHE', true);
+// El JIT de OPcache: con él, las consultas que recorren muchas filas hacen un
+// 22-45 % menos de trabajo. Se enciende en php.ini (opcache.jit=tracing y
+// opcache.jit_buffer_size=64M). Si allí tiene su memoria pero está en
+// opcache.jit="off" (con comillas) o 0, el motor lo enciende para cada
+// petición en la que se usa, también para el resto de la aplicación; con
+// "disable", con off sin comillas (php.ini lo lee como vacío, que es
+// "disable") o sin memoria, PHP no lo deja. false lo deja como esté.
+defined('JSONSQLDB_JIT') || define('JSONSQLDB_JIT', true);
 
 // Escritura por partes: un UPDATE o DELETE que solo depende de cada fila hace
 // su trabajo con la tabla compartida y solo la bloquea entera para confirmar,

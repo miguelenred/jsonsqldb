@@ -255,7 +255,7 @@ if __name__ == "__main__":
     )
 
     # IN de tamaño variable: un ? por elemento
-    ciudades = ["Torrevieja", "Alicante", "Murcia"]
+    ciudades = ["Malaga", "Alicante", "Murcia"]
     huecos = ",".join("?" for _ in ciudades)
     print(cli.consultar(f"SELECT nombre FROM clientes WHERE ciudad IN ({huecos})", ciudades))
 

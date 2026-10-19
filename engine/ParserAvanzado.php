@@ -58,8 +58,8 @@ final class ParserAvanzado extends Parser
             if ($veces > 1 || $suya === null) {
                 throw JsonSqlDbError::syntax("Cada parte recursiva de '$nombre' la nombra una sola vez, en su FROM (no en una subconsulta ni dos veces)");
             }
-            if (in_array($p['from'][$suya]['join'], ['LEFT', 'FULL'], true)
-                || array_intersect(['RIGHT', 'FULL'], array_column(array_slice($p['from'], $suya + 1), 'join')) !== []) {
+            if (\in_array($p['from'][$suya]['join'], ['LEFT', 'FULL'], true)
+                || array_intersect(['RIGHT', 'FULL'], array_column(\array_slice($p['from'], $suya + 1), 'join')) !== []) {
                 throw JsonSqlDbError::syntax("'$nombre' no puede ir en el lado de un LEFT, RIGHT o FULL JOIN que se rellena con NULL dentro de sí misma");
             }
             $agregado = $p['group'] !== null || $p['having'] !== null || $p['distinct'];
@@ -73,7 +73,7 @@ final class ParserAvanzado extends Parser
         if ($primera === 0) {
             throw JsonSqlDbError::syntax("'$nombre' se nombra a sí misma: necesita antes una parte que no lo haga, y UNION o UNION ALL entre ellas");
         }
-        if (array_diff(array_slice($sel['ops'], $primera - 1), ['UNION', 'UNION ALL']) !== []) {
+        if (array_diff(\array_slice($sel['ops'], $primera - 1), ['UNION', 'UNION ALL']) !== []) {
             throw JsonSqlDbError::syntax("En '$nombre', entre sus partes recursivas y las de antes solo vale UNION o UNION ALL");
         }
         if ($sel['order'] !== []) {
@@ -109,7 +109,7 @@ final class ParserAvanzado extends Parser
             throw JsonSqlDbError::syntax("FILTER solo vale con una función de agregado, no con $nombre()");
         }
         [$min, $max] = self::VENTANA[$nombre] ?? [0, 2];
-        if (!$agregado && ($fn['star'] || count($fn['args']) < $min || count($fn['args']) > $max)) {
+        if (!$agregado && ($fn['star'] || \count($fn['args']) < $min || \count($fn['args']) > $max)) {
             throw JsonSqlDbError::syntax("$nombre() lleva " . ($min === $max ? $min : "de $min a $max") . ' argumento(s)');
         }
         foreach (array_merge($fn['args'], $filtro === null ? [] : [$filtro]) as $a) {
@@ -132,7 +132,7 @@ final class ParserAvanzado extends Parser
         $an->exigir('punc', '(');
         $def = ['base' => null, 'particion' => [], 'orden' => [], 'marco' => null];
         $tk  = $an->actual();
-        if ($tk['t'] === 'id' && ($tk['q'] || !in_array($tk['u'], ['PARTITION', 'ORDER', 'ROWS', 'RANGE', 'GROUPS'], true))) {
+        if ($tk['t'] === 'id' && ($tk['q'] || !\in_array($tk['u'], ['PARTITION', 'ORDER', 'ROWS', 'RANGE', 'GROUPS'], true))) {
             $def['base'] = $an->avanzar()['v'];
         }
         if ($an->comer('id', 'PARTITION')) {
@@ -210,7 +210,8 @@ final class ParserAvanzado extends Parser
             $v = null;
         }
         $v = Valor::esNumerico($v) ? Valor::aNumero($v) : null;
-        if ($v === null || $v < 0 || ($tipo !== 'RANGE' && !is_int($v) && floor($v) !== $v)) {
+        // Con ROWS y GROUPS, un entero que quepa en 64 bits (2.10: 9e999 y 1e19 valían 0)
+        if ($v === null || $v < 0 || ($tipo !== 'RANGE' && !\is_int($v) && !(is_finite($v) && floor($v) === $v && $v < 9.2233720368547758E18))) {
             throw JsonSqlDbError::syntax('El ' . ($inicio ? 'inicio' : 'final') . ' del marco tiene que ser '
                 . ($tipo === 'RANGE' ? 'un número' : 'un entero') . ' no negativo y constante');
         }
@@ -268,14 +269,14 @@ final class ParserAvanzado extends Parser
             unset($def['tal']);
             $m = $def['marco'];
             if ($m !== null && $m['tipo'] === 'RANGE' && (isset($m['inicio']['n']) || isset($m['fin']['n']))
-                && count(array_filter($def['orden'], static fn(array $o): bool => empty($o['nulos']))) !== 1) {
+                && \count(array_filter($def['orden'], static fn(array $o): bool => empty($o['nulos']))) !== 1) {
                 throw JsonSqlDbError::syntax('RANGE con un desplazamiento (n PRECEDING o FOLLOWING) necesita un ORDER BY de una sola expresión');
             }
             $n['def'] = $def;
             return $n;
         }
         foreach ($n as $k => $v) {
-            if (is_array($v) && $k !== 'select') {
+            if (\is_array($v) && $k !== 'select') {
                 $n[$k] = self::resolverVentanas($v, $ventanas);
             }
         }
@@ -289,7 +290,7 @@ final class ParserAvanzado extends Parser
             return true;
         }
         foreach ($n as $k => $v) {
-            if (is_array($v) && $k !== 'select' && self::conVentana($v)) {
+            if (\is_array($v) && $k !== 'select' && self::conVentana($v)) {
                 return true;
             }
         }

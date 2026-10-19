@@ -95,6 +95,33 @@ concept helps a lot; a working exploit is not required.
   up as PHP code in `config.php`; and an IPv6 client could get around the
   request limit and the lockout by changing address (an IPv6 address now
   counts by its /64). See the CHANGELOG.
+- **2.10.0 — the panel's record of failed sign-ins had no limit.** Up to
+  2.9.0, `jsonsqldbadmin/datos/intentos.json` kept an entry per IP for up to
+  four times the lockout, and every sign-in reads it and rewrites it when it
+  counts: requests from many addresses at once made it grow without bound, and
+  each sign-in slower. It now keeps at most 1,000 IPs, the locked-out ones first
+  and then the most recent.
+- **2.10.0 — a range in an allow-list without its number of bits let every
+  address in.** Up to 2.9.0, an entry such as `10.0.0.0/` in the API's
+  `IPS_PERMITIDAS` or in the panel's allow-list (one slash too many) was taken
+  as `/0`, and `10.0.0.0/24x` as `/24`. An entry that is not valid now lets
+  nobody in, and the setup wizard and the Configuration page do not save one.
+  **If an allow-list of yours has an entry ending in `/`, it was open to every
+  address: check the API's request log.**
+- **2.10.0 — the panel's users file could be read by other users of the
+  machine.** Up to 2.9.0, `jsonsqldbadmin/datos/usuarios.json` (the bcrypt
+  hashes of the panel's passwords) and `intentos.json` (addresses and user
+  names tried) were created with the umask's permissions, readable by every
+  account of a shared server where the umask lets everyone read. They are now
+  created as `0600`, and so is `copias.json`; one written before keeps its
+  permissions until the panel writes it again. **If PHP runs as your own user
+  on a shared server, run `chmod 600 jsonsqldbadmin/datos/*.json` after
+  upgrading.**
+- **2.10.0 — the root `.htaccess` turned PHP on in `data/`.** Up to 2.9.0, a
+  block meant to keep anything in the data folder from running had
+  `php_flag engine on`. The folder refuses every request anyway, so there is
+  no known way to use it; `data/`, `logs/` and the panel's `datos/` now turn
+  PHP off where Apache runs it as a module.
 
 ## Before you deploy
 
@@ -125,6 +152,10 @@ These are the things that actually matter, in order.
    # must be 403 or 404, never 200
    ```
 
+   The panel's home page and its Configuration page show administrators the
+   same check (the home page since 2.10; see
+   [docs/05-admin.md](docs/05-admin.md), section 7).
+
 5. **Restrict the admin panel.** `ADMIN_IPS_PERMITIDAS` limits which IPs can even
    reach the login screen. If only you use it, this is the single most effective
    measure available.
@@ -143,7 +174,9 @@ These are the things that actually matter, in order.
 
 9. **Check who else on the server can read the data.** Folders are created as
    `0775` and files with PHP's default mode, so what the others can do depends
-   on the server's `umask`. On shared hosting, PHP and your FTP user often need
+   on the server's `umask`; only the configuration files, the installation
+   code and the panel's users, sign-in attempts and backup schedules are
+   created as `0600` (the last three since 2.10). On shared hosting, PHP and your FTP user often need
    to share the group, which is why the project does not force tighter modes.
    If PHP runs as its own user, `umask 0027` in its pool (or `chmod -R o-rwx` on
    `data/`, `logs/` and `jsonsqldbadmin/datos/`) keeps other accounts out; even

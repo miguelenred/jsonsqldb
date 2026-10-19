@@ -36,13 +36,13 @@ sudo cp nginx/jsonsqldb.conf /etc/nginx/snippets/jsonsqldb.conf
 ```nginx
 server {
     listen 443 ssl;
-    server_name yourserver.com;
+    server_name example.com;
 
     root /var/www/html;
     index index.php index.html;
 
-    ssl_certificate     /etc/letsencrypt/live/yourserver.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourserver.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
 
     # jsonSQLDB
     include snippets/jsonsqldb.conf;

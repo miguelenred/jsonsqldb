@@ -40,6 +40,8 @@ final class Catalog
     private array $memo = [];
     /** @var array<string, array{0: string, 1: array}> base y tabla => [huella, meta normalizada], la última del proceso (ver meta()) */
     private static array $normalizadas = [];
+    /** @var array<string, array{0: array, 1: list<array>}> carpeta y tabla => su estructura y sus índices (ver indicesDe()) */
+    private static array $indices = [];
 
     public function __construct(Storage $storage)
     {
@@ -48,14 +50,16 @@ final class Catalog
 
     public function storage(): Storage { return $this->st; }
 
-    /**
-     * Tope de tablas que se bloquean una a una. Pasado ese número, pedir tantos
-     * bloqueos cuesta más que el exclusivo de la base.
-     */
-    private const MAX_TABLAS_BLOQUEADAS = 8;
-
     /** @var list<string>|null lista de tablas de esta petición */
     private ?array $memoTablas = null;
+    /** @var list<string>|null la de tablasEsquema() */
+    private ?array $memoEsquema = null;
+    /** @var array<string, string> nombre escrito => el de la tabla (ver nombreReal()) */
+    private array $reales = [];
+    /** El que se le pasa al analizador (ver nombres()) */
+    private ?\Closure $nombres = null;
+    /** @var array<string, array>|null las vistas, leídas una vez por consulta (2.10, ver vistas()) */
+    private ?array $memoVistas = null;
 
     /**
      * Nombres de las tablas de la base.
@@ -70,155 +74,69 @@ final class Catalog
         return $this->memoTablas ??= $this->st->tablas();
     }
 
-    /**
-     * Todas las tablas que una escritura sobre $tabla puede llegar a tocar.
-     *
-     * Escribir en una tabla no se queda siempre en ella: una clave foránea con
-     * ON DELETE CASCADE arrastra filas hijas, un trigger puede escribir donde
-     * quiera, y esas tablas tienen a su vez sus propias claves y triggers. Hay
-     * que saber el conjunto ENTERO antes de bloquear nada: pedir un bloqueo a
-     * mitad de una escritura es la receta del interbloqueo.
-     *
-     * Se recorre en las dos direcciones y de forma transitiva:
-     *   - las tablas a las que $tabla apunta (padres);
-     *   - las que apuntan a $tabla (hijas, que una cascada puede tocar);
-     *   - las que escriben los triggers, leyendo su SQL.
-     *
-     * Devuelve la lista ORDENADA, que es lo que hace imposible el interbloqueo:
-     * si todos los procesos piden los bloqueos en el mismo orden, no puede haber
-     * un ciclo de esperas.
-     *
-     * Devuelve null si no se puede afirmar el conjunto —una tabla que no existe,
-     * un trigger cuya SQL no se deja analizar, demasiadas tablas— y entonces
-     * quien llama tiene que caer al bloqueo de toda la base.
-     *
-     * @return list<string>|null
-     */
-    public function cierreDeTablas(string $tabla): ?array
+    /** Las tablas, para ver quién apunta a quién al escribir: sin mirar la carpeta si no ha cambiado el esquema (ver StorageEscritura::tablasEsquema()) */
+    public function tablasEsquema(): array
     {
-        if (!$this->existe($tabla)) {
-            return null;
-        }
-        $vistas    = [];
-        $pendiente = [$tabla];
-
-        while ($pendiente !== []) {
-            $actual = array_pop($pendiente);
-            $clave  = strtolower($actual);
-            if (isset($vistas[$clave])) {
-                continue;
-            }
-            if (!$this->existe($actual)) {
-                return null;                       // referencia a algo que no está
-            }
-            $vistas[$clave] = $actual;
-
-            // Un conjunto enorme no compensa: sale más barato el exclusivo de
-            // la base que pedir cincuenta bloqueos uno a uno
-            if (count($vistas) > self::MAX_TABLAS_BLOQUEADAS) {
-                return null;
-            }
-
-            $meta = $this->meta($actual);
-
-            // Hacia arriba: las tablas a las que esta apunta
-            foreach ($meta['foreign_keys'] as $fk) {
-                $pendiente[] = (string)$fk['table'];
-            }
-            // Hacia abajo: las que apuntan a esta
-            foreach ($this->tablas() as $otra) {
-                foreach ($this->meta($otra)['foreign_keys'] as $fk) {
-                    if (strcasecmp((string)$fk['table'], $actual) === 0) {
-                        $pendiente[] = $otra;
-                    }
-                }
-            }
-            // Y donde escriban sus triggers
-            foreach ($meta['triggers'] as $trg) {
-                foreach (self::sentenciasDe((array)($trg['body'] ?? [])) as $sql) {
-                    $destino = self::tablaDeLaSentencia($sql);
-                    if ($destino === null) {
-                        return null;               // no se sabe a dónde escribe
-                    }
-                    if ($destino !== '') {
-                        $pendiente[] = $destino;
-                    }
-                }
-            }
-        }
-
-        $lista = array_values($vistas);
-        sort($lista, SORT_STRING);
-        return $lista;
-    }
-
-    /**
-     * Los textos de las sentencias de un cuerpo de trigger, entrando en los
-     * bloques IF, y sus condiciones (que pueden leer de otras tablas).
-     *
-     * @param list<string|array> $cuerpo
-     * @return list<string>
-     */
-    public static function sentenciasDe(array $cuerpo): array
-    {
-        $todas = [];
-        foreach ($cuerpo as $paso) {
-            if (!is_array($paso)) {
-                $todas[] = (string)$paso;
-                continue;
-            }
-            foreach ($paso['si'] as [$cond, $sentencias]) {
-                $todas[] = 'SELECT ' . $cond;
-                array_push($todas, ...self::sentenciasDe($sentencias));
-            }
-            array_push($todas, ...self::sentenciasDe($paso['sino'] ?? []));
-        }
-        return $todas;
-    }
-
-    /**
-     * Sobre qué tabla escribe una sentencia de trigger.
-     *
-     * Cadena vacía si no escribe en ninguna (un SELECT), y null si no se puede
-     * saber, que obliga a bloquear la base entera. Se analiza de verdad en vez
-     * de mirar el texto: una SQL con un nombre de tabla dentro de una cadena
-     * engañaría a cualquier expresión regular.
-     */
-    private static function tablaDeLaSentencia(string $sql): ?string
-    {
-        // SET NEW.col = … solo cambia la fila que se está escribiendo
-        if (preg_match('/^\s*SET\s+NEW\s*\./i', $sql)) {
-            return '';
-        }
-        try {
-            $ast = Parser::analizar($sql);
-        } catch (\Throwable) {
-            return null;
-        }
-        // Lo que lee de otras tablas también habría que bloquearlo: un SELECT
-        // con FROM o con subconsultas, un INSERT … SELECT, y desde la 2.9 las
-        // subconsultas, UPDATE … FROM y DELETE … USING (ver
-        // Database::leeOtras()), que se leían sin bloqueo
-        if (in_array($ast['k'], ['select', 'union'], true)) {
-            return $ast['k'] === 'select' && ($ast['from'] ?? []) === [] && empty($ast['subconsultas']) ? '' : null;
-        }
-        if (!in_array($ast['k'], ['insert', 'update', 'delete'], true) || Database::leeOtras($ast)) {
-            return null;                           // cualquier otra cosa, a la base
-        }
-        $tabla = $ast['tabla'] ?? null;
-        return is_string($tabla) && $tabla !== '' ? $tabla : null;
+        return $this->memoEsquema ??= StorageEscritura::tablasEsquema($this->st);
     }
 
     public function existe(string $tabla): bool { return $this->st->existe($tabla); }
+
+    /**
+     * El nombre de una tabla como está guardada, escrito sin distinguir
+     * mayúsculas, como en SQLite (2.10): el de su estructura si existe tal
+     * cual (en Windows, «FOO» abre el fichero de «Foo»), el único que coincide
+     * si no, y el escrito si no hay ninguna (una vista, un nombre nuevo). Si
+     * hay dos que solo se distinguen por las mayúsculas (de antes de la 2.10),
+     * hay que escribirlo exacto.
+     */
+    public function nombreReal(string $nombre): string
+    {
+        if (isset($this->reales[$nombre])) {
+            return $this->reales[$nombre];
+        }
+        try {
+            // Si el disco distingue mayúsculas, se llama así; si no, como diga su estructura
+            if ($this->st->existe($nombre)) {
+                return $this->reales[$nombre] = $this->st->distingueMayusculas($nombre)
+                    ? $nombre : (string)($this->meta($nombre)['table'] ?? $nombre);
+            }
+        } catch (JsonSqlDbError) {
+            return $nombre;                        // no puede ser una tabla: tal cual
+        }
+        if ($this->esVista($nombre)) {
+            return $this->reales[$nombre] = $nombre;
+        }
+        $iguales = array_values(array_filter($this->tablas(), static fn(string $t): bool => strcasecmp($t, $nombre) === 0));
+        if (\count($iguales) > 1) {
+            throw JsonSqlDbError::schema("Hay más de una tabla que se llama '$nombre' sin distinguir mayúsculas ("
+                . implode(', ', $iguales) . '): escribe su nombre exacto');
+        }
+        return isset($iguales[0]) ? $this->reales[$nombre] = $iguales[0] : $nombre;
+    }
+
+    /** nombreReal() para Parser::analizar() */
+    public function nombres(): \Closure
+    {
+        return $this->nombres ??= function (string $nombre): string {
+            return $this->nombreReal($nombre);
+        };
+    }
 
     // ------------------------------------------------------------------
     // Vistas
     // ------------------------------------------------------------------
 
-    /** @return array<string,array> nombre => ['sql' => ..., 'created_at' => ...] */
+    /**
+     * Las vistas, una vez por consulta (2.10: una búsqueda por clave miraba
+     * _views.json cuatro veces, y con vistas lo leía y decodificaba otras
+     * tantas). Se olvidan con olvidar() y al escribirlas (ver CatalogDdl).
+     *
+     * @return array<string,array> nombre => ['sql' => ..., 'created_at' => ...]
+     */
     public function vistas(): array
     {
-        return $this->st->leerVistas();
+        return $this->memoVistas ??= $this->st->leerVistas();
     }
 
     public function esVista(string $nombre): bool
@@ -283,7 +201,7 @@ final class Catalog
         }
 
         if ($huella !== null) {
-            if (count(self::$normalizadas) >= 32) {
+            if (\count(self::$normalizadas) >= 32) {
                 self::$normalizadas = [];             // las de las tablas que se están usando
             }
             self::$normalizadas[$this->st->dir() . "\0" . $tabla] = [$huella, $meta];
@@ -297,6 +215,9 @@ final class Catalog
         if ($tabla === null) {
             $this->memo       = [];
             $this->memoTablas = null;      // pudo crearse o borrarse una tabla
+            $this->memoEsquema = null;
+            $this->reales     = [];
+            $this->memoVistas = null;
         } else {
             unset($this->memo[$tabla]);    // la lista de nombres no cambia
         }
@@ -347,7 +268,7 @@ final class Catalog
         // UNSIGNED de MySQL (2.9): solo se guarda si se declara, para que las
         // estructuras de antes no cambien
         if (!empty($col['unsigned'])) {
-            if (!in_array($tipo['type'], [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
+            if (!\in_array($tipo['type'], [Types::INTEGER, Types::DOUBLE, Types::DECIMAL], true)) {
                 throw JsonSqlDbError::schema("UNSIGNED solo es válido en columnas numéricas ('$nombre')");
             }
             $out['unsigned'] = true;
@@ -359,7 +280,7 @@ final class Catalog
         // COLLATE NOCASE o RTRIM (2.9); BINARY es lo de siempre y no se guarda
         if (isset($col['collate']) && strtoupper((string)$col['collate']) !== 'BINARY') {
             $c = strtoupper((string)$col['collate']);
-            if (!in_array($c, ['NOCASE', 'RTRIM'], true)) {
+            if (!\in_array($c, ['NOCASE', 'RTRIM'], true)) {
                 throw JsonSqlDbError::schema("COLLATE $c no está soportado: NOCASE, RTRIM o BINARY ('$nombre')");
             }
             if ($out['type'] !== Types::TEXT) {
@@ -495,7 +416,43 @@ final class Catalog
         return $out;
     }
 
-    /** Nombre de columna, solo o con la tabla delante, en minúsculas => su nombre (para Evaluator::resolver()) */
+    /**
+     * La afinidad de cada columna (en minúsculas), 'N' o 'T' (2.10, ver
+     * Types::afinidad()): con ella se compara con lo que no es una columna.
+     *
+     * @return array<string, string>
+     */
+    public static function afinidades(array $meta): array
+    {
+        $out = [];
+        foreach ($meta['columns'] as $c) {
+            $out[strtolower((string)$c['name'])] = $c['type'] === Types::TEXT ? 'T' : 'N';     // Types::afinidad(), sin la llamada
+        }
+        return $out;
+    }
+
+    /**
+     * La afinidad de cada una de esas columnas, por posición (2.10): con la
+     * que se buscan sus claves (ver Indexes::claveFila()).
+     *
+     * @param list<string> $columnas
+     * @return list<string>
+     */
+    public static function afinidadesDe(array $meta, array $columnas): array
+    {
+        $por = self::afinidades($meta);
+        $out = [];
+        foreach (array_values($columnas) as $c) {
+            $out[] = $por[strtolower((string)$c)] ?? 'T';
+        }
+        return $out;
+    }
+
+    /**
+     * Nombre de columna, solo o con la tabla delante, en minúsculas => su
+     * nombre (para Evaluator::resolver()); y "\0c:" y "\0a:" con el nombre, su
+     * colación (2.9) y su afinidad (2.10)
+     */
     public static function mapaColumnas(string $tabla, array $columnas): array
     {
         $mapa = [];
@@ -505,6 +462,7 @@ final class Catalog
             if (isset($c['collate'])) {
                 $mapa["\0c:" . $c['name']] = $c['collate'];    // su colación (ver Evaluator::resolver())
             }
+            $mapa["\0a:" . $c['name']] = $c['type'] === Types::TEXT ? 'T' : 'N';      // su afinidad (2.10, ver Types::afinidad())
         }
         return $mapa;
     }
@@ -520,7 +478,18 @@ final class Catalog
      */
     public function indicesDe(string $tabla): array
     {
-        return Indexes::definiciones($this->meta($tabla));
+        // Una vez por estructura y proceso (2.10): una consulta los pide
+        // varias veces, y salen de recorrer sus columnas e índices
+        $meta  = $this->meta($tabla);
+        $clave = $this->st->dir() . "\0" . $tabla;
+        $memo  = self::$indices[$clave] ?? null;
+        if ($memo !== null && $memo[0] === $meta) {
+            return $memo[1];
+        }
+        if (\count(self::$indices) >= 32) {
+            self::$indices = [];                  // los de las tablas que se están usando
+        }
+        return (self::$indices[$clave] = [$meta, Indexes::definiciones($meta)])[1];
     }
 
     // ------------------------------------------------------------------
@@ -533,128 +502,6 @@ final class Catalog
         return $meta['autoincrement']['column'] ?? null;
     }
 
-    // ------------------------------------------------------------------
-    // Cambios de estructura: en CatalogDdl, que solo se carga para ellos
-    // ------------------------------------------------------------------
-
-    /** Ver CatalogDdl::exigirNombreLibreDeVista() */
-    public function exigirNombreLibreDeVista(string $nombre): void
-    {
-        CatalogDdl::exigirNombreLibreDeVista($this, $nombre);
-    }
-
-    /** Ver CatalogDdl::crearVista() */
-    public function crearVista(string $nombre, string $sql, bool $siNoExiste = false): bool
-    {
-        return CatalogDdl::crearVista($this, $nombre, $sql, $siNoExiste);
-    }
-
-    /** Ver CatalogDdl::borrarVista() */
-    public function borrarVista(string $nombre, bool $siExiste = false): bool
-    {
-        return CatalogDdl::borrarVista($this, $nombre, $siExiste);
-    }
-
-    /** Ver CatalogDdl::crearTabla() */
-    public function crearTabla(string $tabla, array $def): void
-    {
-        CatalogDdl::crearTabla($this, $tabla, $def);
-    }
-
-    /** Ver CatalogDdl::borrarTabla() */
-    public function borrarTabla(string $tabla): void
-    {
-        CatalogDdl::borrarTabla($this, $tabla);
-    }
-
-    /** Ver CatalogDdl::renombrarTabla() */
-    public function renombrarTabla(string $desde, string $hasta): void
-    {
-        CatalogDdl::renombrarTabla($this, $desde, $hasta);
-    }
-
-    /** Ver CatalogDdl::anadirColumna() */
-    public function anadirColumna(string $tabla, array $spec): void
-    {
-        CatalogDdl::anadirColumna($this, $tabla, $spec);
-    }
-
-    /** Ver CatalogDdl::modificarColumna() */
-    public function modificarColumna(string $tabla, array $spec, ?string $desde = null): void
-    {
-        CatalogDdl::modificarColumna($this, $tabla, $spec, $desde);
-    }
-
-    /** Ver CatalogDdl::borrarColumna() */
-    public function borrarColumna(string $tabla, string $nombre): void
-    {
-        CatalogDdl::borrarColumna($this, $tabla, $nombre);
-    }
-
-    /** Ver CatalogDdl::renombrarColumna() */
-    public function renombrarColumna(string $tabla, string $desde, string $hasta): void
-    {
-        CatalogDdl::renombrarColumna($this, $tabla, $desde, $hasta);
-    }
-
-    /** Ver CatalogDdl::anadirUnico() */
-    public function anadirUnico(string $tabla, array $uq): string
-    {
-        return CatalogDdl::anadirUnico($this, $tabla, $uq);
-    }
-
-    /** Ver CatalogDdl::anadirCheck() */
-    public function anadirCheck(string $tabla, array $ck): string
-    {
-        return CatalogDdl::anadirCheck($this, $tabla, $ck);
-    }
-
-    /** Ver CatalogDdl::anadirFk() */
-    public function anadirFk(string $tabla, array $fk): string
-    {
-        return CatalogDdl::anadirFk($this, $tabla, $fk);
-    }
-
-    /** Ver CatalogDdl::crearIndice() */
-    public function crearIndice(string $tabla, string $nombre, array $columnas, bool $siNoExiste = false): bool
-    {
-        return CatalogDdl::crearIndice($this, $tabla, $nombre, $columnas, $siNoExiste);
-    }
-
-    /** Ver CatalogDdl::borrarIndice() */
-    public function borrarIndice(?string $tabla, string $nombre, bool $siExiste = false): ?string
-    {
-        return CatalogDdl::borrarIndice($this, $tabla, $nombre, $siExiste);
-    }
-
-    /** Ver CatalogDdl::borrarRestriccion() */
-    public function borrarRestriccion(string $tabla, string $nombre): void
-    {
-        CatalogDdl::borrarRestriccion($this, $tabla, $nombre);
-    }
-
-    /** Ver CatalogDdl::anadirClavePrimaria() */
-    public function anadirClavePrimaria(string $tabla, array $columnas): void
-    {
-        CatalogDdl::anadirClavePrimaria($this, $tabla, $columnas);
-    }
-
-    /** Ver CatalogDdl::borrarClavePrimaria() */
-    public function borrarClavePrimaria(string $tabla): void
-    {
-        CatalogDdl::borrarClavePrimaria($this, $tabla);
-    }
-
-    /** Ver CatalogDdl::crearTrigger() */
-    public function crearTrigger(string $tabla, array $trg): void
-    {
-        CatalogDdl::crearTrigger($this, $tabla, $trg);
-    }
-
-    /** Ver CatalogDdl::borrarTrigger() */
-    public function borrarTrigger(string $nombre): string
-    {
-        return CatalogDdl::borrarTrigger($this, $nombre);
-    }
-
+    // Los cambios de estructura están en CatalogDdl, que solo se carga para
+    // ellos y se llama directamente: CatalogDdl::crearTabla($cat, …) (2.10)
 }

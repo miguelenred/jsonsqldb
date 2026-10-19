@@ -200,10 +200,10 @@ receives, so what is signed and what is sent must be identical byte for byte.
 and support for a certificate of your own:
 
 ```powershell
-Set-JsonSqlDbConexion -Url 'https://shirka:44311/jsonsqldb/api/jsonsqldb_api.php' `
+Set-JsonSqlDbConexion -Url 'https://myserver/jsonsqldb/api/jsonsqldb_api.php' `
                       -ApiKey '...' -HmacSecret '...' -Base 'pruebas'
 
-API-SQL-JSON "SELECT * FROM customers WHERE city = ?" @('Torrevieja')
+API-SQL-JSON "SELECT * FROM customers WHERE city = ?" @('Malaga')
 API-SQL-JSON "SHOW DATABASES" -Base ''
 
 # Several statements as one transaction (2.9): all of them, or none
@@ -249,7 +249,9 @@ Rules:
 - Allowed values: `null`, boolean (stored as 1/0), integer, decimal and text.
   No lists or objects, and no number out of range: `1e400`, which JSON decodes
   as infinity, is rejected with its own message (2.9: it ended in an internal
-  error).
+  error). The same goes for a result: a query that gives a number out of range
+  (`SELECT 1e400`, `1e300 * 1e300`) is an error that says so (2.10: an internal
+  error), and an `INSERT` or `UPDATE` that would store one names the column.
 - The `?` go where a **value** goes: `WHERE`, `VALUES`, `SET`, `HAVING`,
   function arguments, `LIMIT` and `OFFSET`. They cannot stand for table or
   column names: that is structure, not data. `LIMIT` and `OFFSET` take a number,
@@ -346,8 +348,8 @@ $API_KEYS = [
 
 | Permission | Allowed statements |
 |---|---|
-| `lectura` | `SELECT`, `SHOW`, `EXPLAIN`, `CHECK KEYS`, `CHECK TABLES` |
-| `escritura` | those plus `INSERT`, `UPDATE`, `DELETE` (also `TRUNCATE TABLE`, which is one), `REPAIR KEYS`, `REPAIR TABLES` |
+| `lectura` | `SELECT`, `SHOW`, `EXPLAIN`, `CHECK KEYS`, `CHECK TABLES`, `CHECK INDEXES` |
+| `escritura` | those plus `INSERT`, `UPDATE`, `DELETE` (also `TRUNCATE TABLE`, which is one), `REPAIR KEYS`, `REPAIR TABLES`, `REPAIR INDEXES` |
 | `admin` | everything, including `CREATE`, `ALTER`, `DROP`, triggers and `VACUUM` |
 
 The permission is checked **after parsing the SQL and before running it**, so
@@ -365,8 +367,8 @@ What each permission can do, without ambiguity:
 | `SHOW KEYS`, `SHOW TRIGGERS`, `SHOW INDEXES` | yes | yes | yes |
 | `SHOW CREATE TABLE`, `SHOW CREATE VIEW`, `EXPLAIN` (2.9) | yes | yes | yes |
 | `SHOW DATABASES` | yes | yes | yes |
-| `CHECK KEYS`, `CHECK TABLES` (2.9) | yes | yes | yes |
-| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS`, `REPAIR TABLES` (2.9) | no | yes | yes |
+| `CHECK KEYS`, `CHECK TABLES` (2.9), `CHECK INDEXES` (2.10) | yes | yes | yes |
+| `INSERT`, `UPDATE`, `DELETE`, `REPAIR KEYS`, `REPAIR TABLES` (2.9), `REPAIR INDEXES` (2.10) | no | yes | yes |
 | `TRUNCATE TABLE` (2.9) | no | yes | yes |
 | `CREATE` / `ALTER` / `DROP` of table, index, view or trigger, `VACUUM` | no | no | yes |
 | `ANALYZE`, `USE` of the request's database | yes | yes | yes |
@@ -401,7 +403,7 @@ The admin key and its `hmac_secret` must match `ADMIN_API_KEY` and
 | Bound parameters per request | `MAX_PARAMS`, `MAX_PARAMS_LENGTH` | 1,000 values, 100 KB |
 | Maximum clock skew | `RATE_TIMESTAMP_DIFF` | 300 s |
 | Anti-replay (single-use token; a repeated one does not count as an authentication failure of the IP, 2.9) | `ANTI_REPLAY_ACTIVO` | enabled |
-| Per-IP request limit (an IPv6 by its /64, 2.9) | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **enabled**, 150 / 24 h |
+| Per-IP request limit (an IPv6 by its /64, 2.9; `admin` keys are not counted, 2.10) | `RATE_LIMIT_ACTIVO`, `RATE_LIMIT_MAX`, `RATE_LIMIT_SECONDS` | **enabled**, 150 / 24 h |
 | Per-IP block after authentication failures (an IPv6 by its /64, 2.9) | `RATE_LIMIT_FALLOS_IP` | 10 in the window, only that IP |
 | Per-key request limit, from any IP | `RATE_LIMIT_POR_CLAVE` | 0 (no limit) |
 | IP allow-list (single IP or CIDR) | `IPS_PERMITIDAS` | empty (no filter) |
@@ -412,6 +414,13 @@ The admin key and its `hmac_secret` must match `ADMIN_API_KEY` and
 `RATE_LIMIT_ACTIVO = false` turns off all three limits: the per-IP request
 limit, the block after authentication failures (`RATE_LIMIT_FALLOS_IP`) and
 the per-key limit (`RATE_LIMIT_POR_CLAVE`).
+
+Requests signed with an `admin` key do not count towards the per-IP limit
+(2.10). The panel uses one, and calls the API from its own server, always the
+same IP: with 150 requests a day it ran out after a few dozen pages. An
+`admin` key can do everything anyway, so the per-IP limit protected nothing
+there; the block after authentication failures and the per-key limit still
+apply to it.
 
 All state (per-IP counters, failures and used tokens) is kept in **JSON**, in
 `logs/api/estado/`, spread over up to 256 small files per kind (`n-XX.json`
@@ -424,6 +433,15 @@ Until 2.8 it was one `logs/api/estado.json`, rewritten whole on every request;
 after updating, its tokens are still refused for the few minutes they could be
 valid, and then the file is deleted (the per-IP counters start again from
 zero). There is no external database underneath.
+
+Since 2.10 each file is rewritten over what it held, padded with spaces when
+the new content is shorter (spaces after a JSON value do not change it), and
+never emptied first: emptying a file and writing it again frees its blocks and
+asks for them anew, and on the test machine (ext4) that cost 220 µs per file
+instead of 8, twice per request. A file keeps the largest size it has had,
+which the pruning bounds. A signed `SELECT` by key through PHP's built-in
+server went from 1.80 to 1.08 ms (median of 400 requests, median of five
+rounds alternating 2.9.0 and 2.10, the same limits on both).
 
 Up to 2.7.2 there was also a **global** cut-off: 30 authentication failures
 from anyone closed the API to every client for up to a day, which made it
@@ -438,7 +456,7 @@ An IPv6 address counts by its /64 network (2.9) for the request limit and the
 block after failures: that is what a provider gives each customer, and with
 2^64 addresses to choose from, changing address on every request got around
 both. The request log and `IPS_PERMITIDAS` still use the full address; an IPv4
-address written as IPv6 (`::ffff:1.2.3.4`) counts as the IPv4 one.
+address written as IPv6 (`::ffff:192.0.2.4`) counts as the IPv4 one.
 
 What a rejected request leaves in the request log is cut down (the database
 name to 64 characters, the error to 1,000), and once a day has 20 full log files
@@ -511,7 +529,9 @@ In order of effectiveness:
 1. **`IPS_PERMITIDAS`**. If the API's consumers are servers of yours with fixed
    IPs, this is the strongest protection: whoever is not on the list gets a 403
    before the signature is even looked at. Accepts single IPs (`10.0.0.7`) and
-   CIDR ranges (`10.0.0.0/24`, `2001:db8::/32`).
+   CIDR ranges (`10.0.0.0/24`, `2001:db8::/32`). An entry that is not valid
+   (`10.0.0.0/`, `10.0.0.0/33`) lets nobody in; before 2.10 a range without
+   its number of bits let everybody in.
 2. **One `hmac_secret` per account**, as explained above.
 3. **`HSTS_ACTIVO`**, only with a certificate from a recognised CA. With a
    self-signed one you would make the domain unreachable for a year.
@@ -539,7 +559,7 @@ A request leaves up to two traces:
   not valid UTF-8 is written with `�` in their place (2.9: that request was
   left out of the log).
 - `logs/consultas-YYYY-MM-DD.json` — the statement run by the engine, with its
-  SQL cut to `JSONSQLDB_LOG_MAX_SQL` bytes (2,000 by default), between letters. Since 2.9, by default only writes and errors (`JSONSQLDB_LOG_NIVEL
+  SQL cut to `JSONSQLDB_LOG_MAX_SQL` bytes (2,000 by default), without splitting a UTF-8 character. Since 2.9, by default only writes and errors (`JSONSQLDB_LOG_NIVEL
   = 'escrituras'`); `'todo'` logs every query too.
 
 Both are one file per day, rotate by size and are purged according to
@@ -609,16 +629,16 @@ them with the constants `JSONSQLDB_CONFIG` and `JSONSQLDB_API_CONFIG`.
 | `api/cliente_ejemplo.ps1` | PowerShell client, with the same bound parameters |
 | `api/cliente_ejemplo.py` | Python client, standard library only |
 | `engine/ApiStore.php` | API state in JSON, spread over small files (2.9): rate limit, failures, nonces, history |
-| `tests/f4_api.php` | 76 checks sending real requests |
+| `tests/f4_api.php` | 84 checks sending real requests |
 
 ## 9. Tests
 
 ```
-php tests/f1_nucleo.php       → OK: 73
-php tests/f2_parser.php       → OK: 83
-php tests/f2_select.php       → OK: 164
-php tests/f3_escrituras.php   → OK: 111
-php tests/f4_api.php          → OK: 76
-php tests/f5_esquema.php      → OK: 122
-php tests/f5_admin.php        → OK: 176
+php tests/f1_nucleo.php       → OK: 76
+php tests/f2_parser.php       → OK: 86
+php tests/f2_select.php       → OK: 165
+php tests/f3_escrituras.php   → OK: 122
+php tests/f4_api.php          → OK: 84
+php tests/f5_esquema.php      → OK: 125
+php tests/f5_admin.php        → OK: 189
 ```

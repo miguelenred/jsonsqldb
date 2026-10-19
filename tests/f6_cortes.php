@@ -218,7 +218,7 @@ chk('las claves foráneas quedan íntegras', function () use ($raiz) {
 echo "\n  Resumen: $dentro de $INTENTOS muertes dentro de la ventana"
    . "  ·  $deshechas deshechas  ·  $aplicadas ya aplicadas\n";
 
-// Lo mismo dentro de una transacción, que desde la 2.9.1 no escribe el
+// Lo mismo dentro de una transacción, que desde la 2.10 no escribe el
 // diario de cada sentencia: si muere a mitad de una, al abrir la base se
 // devuelven los originales que la transacción guardó. Todo o nada: ni la
 // cascada a medias ni la cascada sin el UPDATE que va detrás
@@ -262,7 +262,7 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
     }
 }
 
-chk("$INTENTOS muertes a mitad de una transacción y ninguna base a medias (2.9.1: sin diario por sentencia)", function () use (&$corruptasTx) {
+chk("$INTENTOS muertes a mitad de una transacción y ninguna base a medias (2.10: sin diario por sentencia)", function () use (&$corruptasTx) {
     return $corruptasTx === [] ?: implode(' | ', array_slice($corruptasTx, 0, 3));
 });
 
@@ -335,6 +335,11 @@ for ($i = 1; $i <= $INTENTOS; $i++) {
     proc_close($proc);
 
     if (hayJournal($raiz . '/cortes')) { $dentroP++; }
+    // Lo que deja en el .lock de la tabla se lee (2.10): nada, o quién escribía y desde cuándo
+    $marca = (string)@file_get_contents($raiz . '/cortes/.particionada.lock');
+    if ($marca !== '' && !preg_match('/^escribiendo: pid \d+ desde \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n$/', $marca)) {
+        $problemas[] = "intento $i: el .lock tiene algo que no se lee: " . json_encode($marca);
+    }
 
     $bd2 = new Database('cortes', $raiz);
 
@@ -760,6 +765,7 @@ chk('sin manifiesto no se toca nada: los temporales sobran', function () use ($r
     // ningún manifiesto porque nunca se llegó a escribir
     @mkdir("$raiz/cortes/.tx/_base", 0775, true);
     file_put_contents("$raiz/cortes/art.json.999999.tmp", '{"table":"art","rows":[{"id":1,');
+    file_put_contents("$raiz/cortes/.art.lock", 'escribiendo: pid 999999 desde ' . date('Y-m-d H:i:s') . "\n");   // y su línea (2.10)
 
     $bd = new Database('cortes', $raiz);
     $n = (int)$bd->consultar('SELECT COUNT(*) AS n FROM art')[0]['n'];
@@ -770,6 +776,28 @@ chk('sin manifiesto no se toca nada: los temporales sobran', function () use ($r
         ?: "quedaron $n filas";
 });
 
+chk('una escritura que acaba deja el .lock de la tabla vacío; un temporal sin línea en el .lock (puesto a mano) se barre como mucho 32 escrituras después, y uno con la línea de un proceso vivo no se toca (2.10: se miraba la carpeta en cada escritura)', function () use ($raiz) {
+    baseVariada($raiz);
+    $bd = new Database('cortes', $raiz);
+    $bd->consultar("UPDATE art SET v = v WHERE id = 1");
+    $vacio = (string)file_get_contents("$raiz/cortes/.art.lock") === '';
+    file_put_contents("$raiz/cortes/art.json.999999.tmp", 'a medias');
+    $siguen = 0;
+    for ($i = 0; $i < 32 && is_file("$raiz/cortes/art.json.999999.tmp"); $i++) {
+        $bd->consultar("UPDATE art SET v = v WHERE id = 1");
+        $siguen++;
+    }
+    $barrido = !is_file("$raiz/cortes/art.json.999999.tmp");
+    // El de un proceso vivo (el 1, que siempre lo está en Linux) no se barre aunque su línea siga ahí
+    $vivo = "$raiz/cortes/art.json.1.tmp";
+    file_put_contents($vivo, 'de otro');
+    file_put_contents("$raiz/cortes/.art.lock", 'escribiendo: pid 1 desde ' . date('Y-m-d H:i:s') . "\n");
+    $bd->consultar("UPDATE art SET v = v WHERE id = 1");
+    $sigue = is_file($vivo);
+    @unlink($vivo);
+    unset($bd);
+    return $vacio && $barrido && $siguen >= 1 && $sigue ?: json_encode([$vacio, $barrido, $siguen, $sigue]);
+});
 chk('un journal se termina al abrir: temporales en su sitio y sobrantes fuera', function () use ($raiz) {
     baseConJournal($raiz, null);
     $bd = new Database('cortes', $raiz);

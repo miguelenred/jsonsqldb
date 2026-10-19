@@ -16,10 +16,11 @@ define('JSONSQLDB_LOG_PATH',  $raiz . '/logs');
 define('JSONSQLDB_LOG_PARAMS', true);      // la prueba comprueba el log
 define('JSONSQLDB_API_CONFIG', __DIR__ . '/_config_api.php');
 if (($argv[3] ?? '') === 'limites') {
+    // Con «__cupo», ese RATE_LIMIT_MAX, con su propio estado
     define('RATE_LIMIT_ACTIVO', true);
     define('ANTI_REPLAY_ACTIVO', true);
-    define('RATE_LIMIT_MAX', 1000);
-    define('API_ESTADO_PATH', $raiz . '/api-limites');
+    define('RATE_LIMIT_MAX', (int)($post['__cupo'] ?? 1000));
+    define('API_ESTADO_PATH', $raiz . (isset($post['__cupo']) ? '/api-cupo' : '/api-limites'));
 }
 defined('API_ESTADO_PATH') || define('API_ESTADO_PATH', $raiz . '/api');
 
@@ -38,10 +39,16 @@ if (isset($post['__tiempo'])) {
 if (isset($post['__apagada'])) {
     define('JSONSQLDB_API_ACTIVA', false);
 }
+// Con «__clases», al acabar, las clases que ha cargado, en clases.json de la raíz de datos
+if (isset($post['__clases'])) {
+    register_shutdown_function(static function () use ($raiz): void {
+        file_put_contents("$raiz/clases.json", json_encode(array_map(static fn(string $f): string => basename($f, '.php'), get_included_files())));
+    });
+}
 $_SERVER['REQUEST_METHOD']  = $post['__metodo'] ?? 'POST';
 $_SERVER['REMOTE_ADDR']     = '10.0.0.7';
 $_SERVER['HTTP_USER_AGENT'] = 'pruebas-jsonsqldb';
-unset($post['__metodo'], $post['__proxy'], $post['__tiempo'], $post['__apagada']);
+unset($post['__metodo'], $post['__proxy'], $post['__tiempo'], $post['__apagada'], $post['__clases']);
 
 $_POST = $post;
 $_SERVER['CONTENT_LENGTH'] = (string)strlen(http_build_query($post));

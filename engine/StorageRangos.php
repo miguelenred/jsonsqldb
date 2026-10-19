@@ -51,7 +51,7 @@ final class StorageRangos extends Storage
         }
         fclose($fh);
         $cabeza = $fin === false ? null : json_decode(substr($texto, 0, $fin) . '}', true);
-        if (!is_array($cabeza)) {
+        if (!\is_array($cabeza)) {
             // Sin cabecera legible: estropeado a mano, se rehace al acabar (2.9)
             $st->apuntarReparacion($st->ficheroIndice($tabla, $nombre, $parte));
             return null;
@@ -72,11 +72,12 @@ final class StorageRangos extends Storage
      *
      * La comparación es la del WHERE (Valor::comparar) sobre el valor de la
      * clave, que es el de la fila: una clave de texto guarda el texto tal
-     * cual y una numérica el número. Por eso con valores de texto todas las
-     * claves tienen que ser de texto, y con números todas numéricas: un
-     * texto que parece un número (' 05') se guarda en el índice como número,
-     * y compararlo como texto ya no daría lo mismo. Si aparece una, null, y
-     * se recorre la tabla. Null también con un índice desfasado o antiguo.
+     * cual y una numérica el número. Los valores van con la afinidad de la
+     * columna (2.10: 5 con una de texto es '5'), y con valores de texto todas
+     * las claves tienen que ser de texto, y con números todas numéricas: un
+     * número y un texto no se comparan igual que dos números o dos textos.
+     * Si aparece una de la otra clase, null, y se recorre la tabla. Null
+     * también con un índice desfasado o antiguo.
      *
      * @param list<array{0: string, 1: int|float|string}> $comparaciones
      * @return list<int>|int|null  posiciones en orden o, con $contar, cuántas
@@ -86,10 +87,12 @@ final class StorageRangos extends Storage
         if (!$st->indices || $comparaciones === []) {
             return null;
         }
-        // Con COLLATE (2.9) las claves van plegadas, y lo que se compara con ellas también
-        if (($c = $def['plegar'][0] ?? null) !== null) {
-            $comparaciones = array_map(static fn(array $x): array => [$x[0], Functions::plegar($x[1], $c)], $comparaciones);
-        }
+        // Con la afinidad de la columna (2.10), y con COLLATE (2.9) las claves
+        // van plegadas, y lo que se compara con ellas también
+        $a = $def['afin'][0] ?? null;
+        $c = $def['plegar'][0] ?? null;
+        $comparaciones = array_map(static fn(array $x): array
+            => [$x[0], $c === null ? Valor::conAfinidad($x[1], $a) : Functions::plegar(Valor::conAfinidad($x[1], $a), $c)], $comparaciones);
         self::validarTabla($tabla);
         $st->bloquearLectura($tabla);
         $plan = $st->planIndice($tabla, $def);
@@ -99,8 +102,8 @@ final class StorageRangos extends Storage
         $numeros = null;
         $min = $max = null;
         foreach ($comparaciones as [$op, $v]) {
-            $esNumero = is_int($v) || is_float($v);
-            if (($numeros !== null && $numeros !== $esNumero) || (!$esNumero && (!is_string($v) || is_numeric(trim($v))))) {
+            $esNumero = \is_int($v) || \is_float($v);
+            if (($numeros !== null && $numeros !== $esNumero) || (!$esNumero && !\is_string($v))) {
                 return null;
             }
             $numeros = $esNumero;
@@ -154,7 +157,7 @@ final class StorageRangos extends Storage
             $revsTrozos = (array)($st->estado($tabla)['indexes'][$nombre] ?? []);
             $claveLim   = $st->claveCache($tabla, 'l' . $nombre, 0);
             $lims       = $st->cacheLeer($claveLim);
-            $lims       = is_array($lims) ? $lims : [];
+            $lims       = \is_array($lims) ? $lims : [];
             $nuevos     = false;
             try {
             // El primero y el último, primero: si los dos caen enteros dentro
@@ -169,7 +172,7 @@ final class StorageRangos extends Storage
                 }
                 $revTrozo = (int)($revsTrozos[$p - 1] ?? -1);
                 $l = $lims[$p] ?? null;
-                if (is_array($l) && $l[0] === $revTrozo) {
+                if (\is_array($l) && $l[0] === $revTrozo) {
                     $cabeza = ['min' => $l[1], 'max' => $l[2]];
                 } else {
                     $cabeza = self::cabeceraTrozo($st, $tabla, $def, $p);
@@ -196,7 +199,7 @@ final class StorageRangos extends Storage
                 // que quedan: la decisión es la misma, y leerlas todas hacía
                 // un rango que abarca casi toda la tabla un 2 % más lento que
                 // recorrerla, como hacía la 2.8
-                if (!$contar && count($solo) * 2 > $plan['partes']) {
+                if (!$contar && \count($solo) * 2 > $plan['partes']) {
                     return null;
                 }
             }
@@ -210,8 +213,8 @@ final class StorageRangos extends Storage
         // más de media tabla, se deja (se recorrerá la tabla) sin haber leído
         // el índice entero. Contar siempre compensa.
         $orden = $plan['legado'] !== null ? [0] : range(1, $plan['partes']);
-        if (!$contar && count($orden) > 2) {
-            $orden = array_merge([1, count($orden)], range(2, count($orden) - 1));
+        if (!$contar && \count($orden) > 2) {
+            $orden = array_merge([1, \count($orden)], range(2, \count($orden) - 1));
         }
         $coste = 0.0;
         $vistos = 0;
@@ -241,7 +244,7 @@ final class StorageRangos extends Storage
                     }
                 }
                 if ($contar) {
-                    $total += is_array($donde) ? count($donde) : 1;
+                    $total += \is_array($donde) ? \count($donde) : 1;
                 } else {
                     foreach ((array)$donde as $x) {
                         $pos[] = (int)$x;
@@ -250,10 +253,10 @@ final class StorageRangos extends Storage
             }
             if (!$contar && $p > 0) {
                 // Lo que costará leer las filas de esta parte (ver StorageLectura::filasDePosiciones())
-                $aqui   = count($pos) - $total;
-                $total  = count($pos);
+                $aqui   = \count($pos) - $total;
+                $total  = \count($pos);
                 $coste += $aqui <= self::FILAS_POR_LINEA ? $aqui / self::LINEAS_COMO_PARTE : 1;
-                if (++$vistos >= 2 && $coste / $vistos * count($orden) * 2 > $plan['partes']) {
+                if (++$vistos >= 2 && $coste / $vistos * \count($orden) * 2 > $plan['partes']) {
                     return null;
                 }
             }
@@ -311,6 +314,6 @@ final class StorageRangos extends Storage
     public static function filasPorComparacion(Storage $st, string $tabla, array $def, array $comparaciones): ?array
     {
         $posiciones = self::posicionesPorComparacion($st, $tabla, $def, $comparaciones, false);
-        return is_array($posiciones) ? StorageLectura::filasDePosiciones($st, $tabla, $posiciones) : null;
+        return \is_array($posiciones) ? StorageLectura::filasDePosiciones($st, $tabla, $posiciones) : null;
     }
 }

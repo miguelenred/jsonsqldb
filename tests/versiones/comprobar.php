@@ -4,7 +4,9 @@
  * abre (copiada) la base que creó una versión anterior y comprueba que lee lo
  * mismo que leía aquella, que escribe bien, que el autoincremento sigue donde
  * iba, que restricciones y triggers funcionan, que índices, ficheros y claves
- * cuadran y que VACUUM rehace los índices con su filtro sin cambiar nada más.
+ * cuadran, que un índice de textos que son números se rehace solo con las
+ * claves de la 2.10, y que VACUUM rehace los índices con su filtro sin
+ * cambiar nada más.
  * Imprime «bien» o los fallos. Uso: php comprobar.php <motor> <datos>
  */
 [$_, $motor, $orig] = $argv;
@@ -56,6 +58,31 @@ $porClave = $bd()->consultar("SELECT nombre FROM clientes WHERE id = 11000");
 if ($porClave !== [['nombre' => 'Cliente 11000']]) { $fallos[] = 'por clave: ' . json_encode($porClave); }
 $ct = $bd()->consultar('CHECK TABLES'); if ($ct !== []) { $fallos[] = 'CHECK TABLES: ' . json_encode($ct, JSON_UNESCAPED_UNICODE); }
 $ck = $bd()->consultar('CHECK KEYS'); if ($ck !== []) { $fallos[] = 'CHECK KEYS: ' . json_encode($ck, JSON_UNESCAPED_UNICODE); }
+// 4b. Textos que son números, como textos (2.10): el índice de antes, que
+// juntaba '7' y '007' en una clave, no se usa; se rehace solo al acabar la
+// primera consulta que lo encuentra, y después sí se usa
+if (in_array("INSERT INTO codigos VALUES (1, '7'), (2, '007'), (3, ' 7'), (4, '10'), (5, '9'), (6, 'x')", $e['hechas'], true)) {
+    // CHECK INDEXES lo dice, sin rehacerlo
+    $ci = array_column($bd()->consultar('CHECK INDEXES FROM codigos'), 'problema', 'indice');
+    if (in_array('CREATE INDEX ix_codigo ON codigos (c)', $e['hechas'], true) && !str_contains($ci['ix_codigo'] ?? '', 'de antes de la 2.10')) {
+        $fallos[] = 'codigos: CHECK INDEXES no ve las claves de antes: ' . json_encode($ci, JSON_UNESCAPED_UNICODE);
+    }
+    // Primero dos escrituras, que no pueden aprovechar los trozos de antes:
+    // la primera rehace el índice entero aunque no toque su columna
+    foreach (['UPDATE codigos SET id = id + 0 WHERE id = 6', "INSERT INTO codigos VALUES (7, '8')"] as $w) {
+        try { $bd()->consultar($w); } catch (Throwable $x) { $fallos[] = "codigos: $w -> " . $x->getMessage(); }
+    }
+    $ids = fn(string $q): array => array_column($bd()->consultar($q), 'id');
+    foreach (["SELECT id FROM codigos WHERE c = '7'" => [1], "SELECT id FROM codigos WHERE c = '007'" => [2], 'SELECT id FROM codigos WHERE c = 7' => [1],
+              "SELECT id FROM codigos WHERE c IN ('9', ' 7') ORDER BY id" => [3, 5], "SELECT id FROM codigos WHERE c > '1' ORDER BY id" => [1, 4, 5, 6, 7],
+              'SELECT id FROM codigos ORDER BY c, id' => [3, 2, 4, 1, 7, 5, 6]] as $q => $esp) {
+        if (($r = $ids($q)) !== $esp) { $fallos[] = "codigos: $q -> " . json_encode($r); }
+    }
+    $via = (string)($bd()->consultar("EXPLAIN SELECT id FROM codigos WHERE c = '10'")[0]['acceso'] ?? '');
+    if (in_array('CREATE INDEX ix_codigo ON codigos (c)', $e['hechas'], true) && !str_starts_with($via, 'índice')) {
+        $fallos[] = "codigos: tras la primera consulta, su índice sigue sin usarse ($via)";
+    }
+}
 // 5. VACUUM rehace los índices con el filtro de la 2.9 y nada más cambia
 $sumas = fn() => [$bd()->consultar('SELECT COUNT(*) AS n, SUM(id) AS s FROM clientes'), $bd()->consultar('SELECT COUNT(*) AS n, SUM(id) AS s FROM cola')];
 $antes = $sumas();

@@ -88,9 +88,10 @@ how each table was read. Here the index is chosen while reading, from the data
 itself (an index whose rows are spread over most of the table is not worth
 using), so `EXPLAIN` runs the query, without the result cache and without
 keeping the rows, and reports what it did: one row per read with `paso`, `tabla`,
-`acceso` (`índice (=)`, `índice (IN)`, `índice, rango`, `índice, en orden`,
-`recuento, sin leer filas`, `recorrido`…), `indice` and `filas`, the rows that
-read gave. Only `SELECT`; a read-only key can use it.
+`acceso` (`índice (=)`, `índice (IN)`, `índice (parte de la clave)`,
+`índice (parte de la clave, en las partes sin NULL)` (2.10), `índice, rango`,
+`índice, en orden`, `recuento, sin leer filas`, `recorrido`…), `indice` and
+`filas`, the number of rows that step returned. Only `SELECT`; a read-only key can use it.
 
 
 Without an index a lookup scans the table. Three things avoid or cheapen that,
@@ -103,10 +104,12 @@ against literals in the top-level `AND` chain of the `WHERE`: `WHERE city =
 under a `NOT`, no `IS NULL`, `NOT IN` or `LIKE`. Since 2.9 also on ranges
 (`<`, `<=`, `>`, `>=`, `BETWEEN`) on the first column of an index, when the
 rows they match are in few parts, and for `ORDER BY column [DESC] LIMIT n` on
-a single table with no `WHERE`, when the column is numeric. A composite index is
+a single table with no `WHERE`, when the column is numeric (since 2.10 also a
+`TEXT` column without a `COLLATE` of its own). A composite index is
 used left to right: one on `(city, age)` serves a lookup by `city`, or by both,
-but not by `age` alone; and by `city` alone only when `age` is `NOT NULL`, since
-a row with `NULL` in any column of an index is not in it (2.9.1). Details in
+but not by `age` alone; and by `city` alone fully only when `age` is `NOT
+NULL`, since a row with `NULL` in any column of an index is not in it: otherwise
+it serves the parts where every row is in it, and reads the others (2.10). Details in
 [03-writes.md](03-writes.md).
 
 **Simple comparisons.** A `WHERE column = value` — and the same with `<>`, `<`,
@@ -164,31 +167,69 @@ These constructs exist in SQLite and **raise an error** here:
 
 | Construct | Why, and what to do |
 |---|---|
-| `INSERT OR FAIL` / `OR ROLLBACK` | Every statement here is all or nothing. Use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT` (2.8) |
+| `INSERT` / `UPDATE` `OR FAIL`, `OR ROLLBACK` | Every statement here is all or nothing. Use `OR IGNORE`, `OR REPLACE` or `ON CONFLICT` (2.8; `UPDATE OR IGNORE` and `OR REPLACE` since 2.10) |
 | `CREATE TEMP TABLE` / `TEMPORARY` | No temporary tables. Create a normal one and `DROP TABLE` it |
 | `WITHOUT ROWID` | There is no `rowid`: rows are JSON objects and the key is the one you declare |
 | `BEGIN` / `COMMIT` / `ROLLBACK` | Only at the start and the end of a batch, which is already a transaction (2.9, [Part 3](03-writes.md)); a transaction never spans requests |
 | `ALTER TABLE` on the primary key | Handled with `ADD`/`DROP PRIMARY KEY`, and `AUTOINCREMENT` only at creation |
 | `VACUUM INTO 'file'` | An error that says how to make a copy (the panel's ZIP or SQL dump). `VACUUM` alone is supported (2.9) |
-| `PRAGMA`, `sqlite_master`, `information_schema` | Not taken, on purpose: they belong to each engine's internals. Use `SHOW TABLES`, `SHOW COLUMNS`, `SHOW CREATE TABLE`… |
+| `PRAGMA`, `sqlite_master`, `information_schema` | Not taken, on purpose: they belong to each engine's internals. Use `SHOW TABLES`, `SHOW COLUMNS`, `SHOW CREATE TABLE`… (since 2.10 the error says so; a query reads only its own database, so a schema before a table name is an error too, except `main.`) |
 | `LOG(x)` with one argument | Base 10 in SQLite and natural in MySQL: an error that says to use `LN(x)` or `LOG10(x)` |
 | MySQL's compact dates (`'950501'`) | In SQLite that is a Julian day; here dates are written `YYYY-MM-DD`: storing it in a date column or `CAST` is an error, and the date functions give `NULL` |
-| A time without a date (`'12:00:00'`) | SQLite reads it as 2000-01-01 at that time; here it is not a date, and `TIME('12:00:00')`, `DATETIME('12:00')` or `STRFTIME('%H:%M', '12:34')` give `NULL` |
 
 And these behavioural differences are worth keeping in mind:
 
 - `DECIMAL` is rounded floating point, not exact decimal.
 - `ORDER BY` uses the configured collation, not binary order, unless you
   change it.
-- `LIKE` is case-insensitive but **does** distinguish accents.
-- A text that **is** a number compares as that number, wherever it comes
-  from: `'12' = 12`, `' 12 ' = 12` and `'1e3' = 1000` are true, and `'9' < '10'`.
-  A text that is not a number (`'12abc'`, `'1a'`, `'-x'`) is not converted:
-  `'12abc' = 12` is false, and it sorts after every number (see section 4).
-  Only arithmetic and `CAST` take its leading number (`'12abc' + 0` and
-  `CAST('12abc' AS INTEGER)` are 12, as in SQLite). SQLite instead applies the
-  affinity of the column's declared type, with rules of its own; here the rule
-  is one and does not depend on how the column was declared.
+- `LIKE` only ignores the case of `A` to `Z`, as in SQLite (2.10): `'É' LIKE
+  'é'` is 0. Before 2.10, with UTF-8, it was 1.
+- `UPPER` and `LOWER` change accented letters too (`UPPER('ñandú')` is
+  `'ÑANDÚ'`), as MySQL, PostgreSQL and Access do, so that a view or a query
+  brought from them gives the same here; SQLite changes only `A` to `Z`.
+- `SUM` of integers that does not fit in 64 bits is an error ("integer
+  overflow"), as in SQLite (2.10; before, an approximate decimal without
+  warning). A text that is an integer (`'12'`) counts as an integer; with any
+  other value, before or after, `SUM` adds in decimal and does not fail, as
+  SQLite 3.45 does. `TOTAL` and `AVG` always add in decimal. They add as
+  SQLite does (2.10): integers exact until the first decimal or until they no
+  longer fit, and from there everything in the order it comes, keeping the
+  error of each sum apart (the compensated sum SQLite uses since 3.43; before,
+  `TOTAL` of 1e100, 3 and -1e100 gave 0, now 3), so the figures are SQLite's,
+  bit for bit, also the `NULL` SQLite 3.45 gives when the last value makes the
+  sum overflow to infinity, and through the disk. In a window whose frame
+  does not start at `UNBOUNDED PRECEDING`, each frame is added with its own
+  values, while SQLite carries what it saw before in the partition, so there
+  the two can differ: never with a wrong number here, which SQLite can give in
+  some frames; and a frame of integers that do not fit in 64 bits is the
+  overflow error here, while SQLite gives a decimal if one was in an earlier
+  frame.
+- An integer and a decimal compare exactly, also past 2^53, as in SQLite
+  (2.10; PHP turns the integer into a decimal, and `9007199254740993 >
+  9007199254740992.0` was false): in `WHERE`, `ORDER BY`, `MIN`, `MAX`,
+  `GROUP BY`, `DISTINCT`, joins and windows. An index gives a whole decimal
+  the key of that integer in the whole range, up to 2^63 (2.10; before, past
+  9·10^18 they had two keys: an equality with such a value did not use the
+  index, and a foreign key between an `INTEGER` and a `REAL` column with such
+  values failed).
+- Texts and numbers compare as in SQLite (2.10), with the affinity of the
+  column: two texts compare as texts, byte by byte, also when they are numbers
+  (`'7' = '007'` is false and `'10' < '9'` is true); a number compared with a
+  `TEXT` column is taken as its text (`codigo = 7` finds `'7'`, not `'007'`),
+  and a text that is a number compared with a numeric column as that number
+  (`edad = '30'` finds 30). Two differences with SQLite are kept on purpose:
+  a number and a text that is a number with no column on either side
+  (literals, parameters, expressions) compare as numbers here (`'7' = 7` is
+  true; in SQLite, false), so that a parameter bound as text still finds a
+  number; and in `x IN (…)` with a list each value is compared as in its own
+  `x = value` (SQLite applies the affinity of `x` to the whole list: with a
+  text column, `7 IN (codigo, 'zz')` finds `'7'` here and nothing there). A
+  text that is not a number (`'12abc'`, `'1a'`, `'-x'`) never equals a number,
+  and sorts after every number (see section 4). Only arithmetic and `CAST` take
+  its leading number (`'12abc' + 0` and `CAST('12abc' AS INTEGER)` are 12, as
+  in SQLite). Until 2.9 a text that was a number compared as that number
+  everywhere: `'7' = '007'` was true, and a `UNIQUE` text column took them as
+  duplicates.
 - `ROUND` rounds away from zero (`ROUND(2.5)` = 3), like SQLite. But
   `ROUND(2.675, 2)` gives 2.68 here and 2.67 in SQLite: 2.675 does not exist
   exactly in floating point and each engine breaks the tie its own way. If the
@@ -207,6 +248,11 @@ And these behavioural differences are worth keeping in mind:
 - `ORDER BY 2` orders by the second column of the result, and a `HAVING` can
   use the aliases of the `SELECT` (`HAVING n > 3` with `COUNT(*) AS n`), as in
   SQLite and MySQL (2.7.1).
+- Without `ORDER BY`, the rows of a table come in its own order, the one they
+  went in (a row whose key changes keeps its place), and SQLite, reading a
+  whole table, gives them by its integer primary key. SQL leaves that order
+  open in both: write the `ORDER BY` where it matters, also in an `INSERT …
+  SELECT` that takes new ids, which are given in the order the rows come.
 
 ## 2. Supported syntax
 
@@ -214,7 +260,7 @@ And these behavioural differences are worth keeping in mind:
 |---|---|
 | `SELECT` | columns, expressions, `*`, `table.*`, `DISTINCT`, `AS` (the `AS` is optional) |
 | `FROM` | tables, aliases, subqueries (`FROM (SELECT ...) t`; the alias can be left out, as in SQLite, 2.9) |
-| `JOIN` | `INNER`, `LEFT [OUTER]`, `RIGHT [OUTER]`, `FULL [OUTER]`, `CROSS`, comma; `ON` with any condition; `USING (a, b)` and `NATURAL [INNER \| LEFT \| RIGHT] JOIN` on tables (2.9, not with `FULL` or `CROSS JOIN`, an error: the common columns appear once in `SELECT *`, and without a table in front they are not ambiguous; with a view or a subquery, write the `ON`) |
+| `JOIN` | `INNER`, `LEFT [OUTER]`, `RIGHT [OUTER]`, `FULL [OUTER]`, `CROSS`, comma (also followed by `ON` or `USING`, as in SQLite, 2.10); `ON` with any condition; `USING (a, b)` and `NATURAL [INNER \| LEFT \| RIGHT] JOIN` on tables (2.9, not with `FULL` or `CROSS JOIN`, an error: the common columns appear once in `SELECT *`, and without a table in front they are not ambiguous; with a view or a subquery, write the `ON`) |
 | `WHERE` | any expression |
 | `GROUP BY` | one or more expressions, or the number of an output column (`GROUP BY 1`, 2.9) |
 | `HAVING` | with or without `GROUP BY` |
@@ -234,13 +280,14 @@ SQLite: `*`, `?` and `[…]`, telling case apart; inside `[…]`, `^` first
 negates, a `]` right after `[` or `[^` is one of the characters, `a-z` is a
 range, and a `[` that is never closed matches nothing) and `x -> path` / `x ->> path`
 (2.9, as in SQLite and MySQL: the piece of a JSON text as JSON, or as a value;
-`col -> 'a'` and `col -> 2` stand for `$.a` and `$[2]`).
+`col -> 'a'` and `col -> 2` stand for `$.a` and `$[2]`; a negative or decimal
+number points at nothing and gives `NULL`, as in SQLite; until 2.10, an error).
 From tightest to loosest, as in SQLite: unary `- + ~`, `COLLATE`,
-`|| -> ->>`, `* / % DIV MOD`, `+ -`, `& | << >>`, the comparisons (with `IS`,
-`IN`, `LIKE`, `GLOB`, `REGEXP` and `BETWEEN`), `NOT`, `AND`, `XOR`, `OR`. The
-comparisons share one level and group from the left; SQLite puts `< <= > >=`
-one step above `= <> IS`, which only matters when they are chained without
-parentheses (`0 = 1 < 2`).
+`|| -> ->>`, `* / % DIV MOD`, `+ -`, `& | << >>`, `< <= > >=`, then `= == <>
+!= IS IN LIKE GLOB REGEXP BETWEEN`, `NOT`, `AND`, `XOR`, `OR`. Until 2.9 the
+comparisons shared one level, and `0 = 1 < 2` was 1 where SQLite gives 0
+(2.10). What follows `IS` is a whole expression: `1 IS NULL + 1` is
+`1 IS (NULL + 1)`.
 
 **`COLLATE`** (2.9, as in SQLite) goes after an expression: `x COLLATE NOCASE`
 compares and sorts ignoring the case of A–Z (only those, as SQLite: `Ñ` and `ñ`
@@ -249,12 +296,15 @@ are still different), `COLLATE RTRIM` ignores the spaces at the end, and
 `IN`, `BETWEEN`, `CASE x WHEN`, `ORDER BY`, `GROUP BY` and `DISTINCT`, and
 inside an aggregate or a window function: `COUNT(DISTINCT x COLLATE NOCASE)`,
 `MIN(x COLLATE NOCASE)`, `GROUP_CONCAT(DISTINCT x COLLATE NOCASE)`; if one
-side of a comparison has it, it applies to both. On its own
-(`SELECT x COLLATE NOCASE`) the value does not change. A column can have one
-too (2.9, below). In `ORDER BY`, the collation is applied to the values and
-then they are sorted in the configured order (`JSONSQLDB_COLACION`, section
-4): `ORDER BY x COLLATE BINARY` is therefore not byte order unless that
-setting is `'binaria'`; with the default, `'general'`, it gives `A, a, B, b`.
+side of a comparison has it, it applies to both, also in `IS` (2.10: `'a' IS
+'A' COLLATE NOCASE` was 0). On its own (`SELECT x COLLATE NOCASE`) the value
+does not change. A column can have one too (2.9, below), and keeps it through
+a view or a subquery that takes it with `SELECT *` (2.10: it was lost there).
+In `ORDER BY`, a collation is applied to the values and then they are sorted
+in the configured order (`JSONSQLDB_COLACION`, section 4), but `ORDER BY x
+COLLATE BINARY` sorts byte by byte whatever that setting (2.10: with the
+default, `'general'`, it gave `A, a, B, b`), and `ORDER BY 2 COLLATE NOCASE`
+applies it to the second column (2.10: it was left out).
 
 ### COLLATE in a column (2.9)
 
@@ -371,8 +421,25 @@ SELECT city, SUM(total), RANK() OVER w FROM orders GROUP BY city WINDOW w AS (OR
   FOLLOWING`, and `EXCLUDE NO OTHERS`, `CURRENT ROW`, `GROUP` or `TIES`.
   Without a frame, as in SQL: from the start of the partition to the last row
   equal to the current one in the `ORDER BY` (the whole partition without
-  `ORDER BY`). `RANGE` with a distance needs a single expression in the
-  `ORDER BY`; a `NULL` or a text has no distance, and its frame is its peers.
+  `ORDER BY`). With `ROWS` and `GROUPS`, `n` is an integer that fits in 64
+  bits (2.10: `9e999` was 0). `RANGE` with a distance needs a single expression in the
+  `ORDER BY`; a `NULL` or a text (also one like `'5'`, which sorts after the
+  numbers) has no distance, and its frame is its peers. The distance goes with SQLite's arithmetic, row by row (2.10): `n PRECEDING`
+  adds `n` to the value of each row and compares it with the current one, and
+  `n FOLLOWING` compares each row with the current value plus `n`; an integer
+  plus an integer is an integer, anything else a decimal, which past 2^53 is
+  rounded (`9007199254740992 + 1.0` is `9007199254740992.0`, and the row at
+  1.0 is left out, as in SQLite). The frame starts at the first row that
+  reaches its bound and ends before the first one that passes it, and peers
+  have the frame of the first of them. A `NULL` or
+  a text sorts before or after every number, and is in the frames that reach
+  it (`UNBOUNDED PRECEDING AND 1 PRECEDING` takes the `NULL`s before the
+  numbers). With an infinite distance (`9e999`) and infinite values, -INF +
+  INF is `NULL`, as in SQLite, and compares as its `NULL`s do; with both bounds
+  `PRECEDING` the frame does not go past the row's peers, as there. With
+  values past 2^53, or infinite ones, SQLite can give a row the frame of the
+  one before it, or more rows than the partition has; here each row has its
+  own.
 - Named windows: `WINDOW w AS (…)`, `OVER w`, and `OVER (w ORDER BY …)` or
   `OVER (w ROWS …)` building on one, with SQLite's rules (a window that
   builds on another cannot change its `PARTITION BY`, nor its `ORDER BY` if
@@ -389,6 +456,13 @@ SELECT city, SUM(total), RANK() OVER w FROM orders GROUP BY city WINDOW w AS (OR
   partition) are accumulated as the frame advances: a running sum, a ranking
   per partition and a moving average over 20,000 rows take about 100 ms
   each. Other frames go through their rows for each row.
+- Of each row, only the columns the query uses are kept until the windows
+  are worked out, without the rest of its context (2.10; they kept the whole
+  row, and a context of the same size beside it). On 30,000 customers of
+  seven columns, `ROW_NUMBER() OVER (PARTITION BY ciudad ORDER BY saldo)`
+  peaks at 24.1 MB instead of 40.8, `SUM(saldo) OVER (ORDER BY id)` at 16.5
+  instead of 35.2, and with rows of 500 characters that are not used, 11 MB
+  instead of 30.3 (`tests/f8_indices.php`).
 
 A statement may end in one or more `;` (2.9). Identifiers with spaces: `"my field"`, `[my field]` or `` `my field` ``. A
 column can be named that way (2.8); tables, indexes and triggers cannot. A
@@ -439,6 +513,8 @@ BOTH] [c] FROM x)`, `POSITION(a IN b)`, `SUBSTRING(x FROM i [FOR n])`,
 | `TIMESTAMPDIFF(unit, a, b)` | `b - a` in whole units towards zero; months, quarters and years count complete ones, as MySQL |
 | `STR_TO_DATE(text, format)` | Returns `YYYY-MM-DD`, `HH:MM:SS` or both, as the format has; `NULL` if the text does not fit or the date does not exist. Specifiers: `%Y %y %m %c %d %e %H %k %h %I %l %i %s %S %f %p %M %b %T %%`; `%f` reads up to six digits and keeps the millisecond, the precision the engine stores (`'10:20:30.500'`) |
 | `json_extract` | As in SQLite: paths `$`, `$.key`, `$."key with spaces"`, `$[2]`, `$[#-1]` (the last one); an object or a list comes back as JSON text, `true`/`false` as 1/0, a path that is not there as `NULL`; with several paths, a JSON list of their values. Malformed JSON or path is an error. Integers too big for PHP come back as a decimal (`1.2345678901234567e+19`), also inside the JSON text of `$` |
+| `QUOTE(decimal)` | As in SQLite, the same number again (2.10; before, 14 digits, and `QUOTE(0.30000000000000004)` was `0.3`): 15 digits when that is enough, and if not the 16 or 17 that are needed, with an exponent (`3.0000000000000004e-01`). SQLite sometimes writes a digit or two more (`3.00000000000000044e-01`), which give the same number |
+| `json_array`, `json_object` with decimals | Every digit, as stored: `json_array(0.1 + 0.2)` is `[0.30000000000000004]`; SQLite writes 15 (`[0.3]`) and its exponent with two digits (`1.0e-05`; here `1.0e-5`) |
 | `NOW()`, `RAND()`, `UNIX_TIMESTAMP()`, `UNIXEPOCH()` | Not cached: each run gives the current value |
 | `TIMEDIFF(a, b)` | MySQL's: `'01:00:00'`, with microseconds when there are any (2.9) |
 | `RANDOMBLOB`, `ZEROBLOB` | Bytes, fine inside an expression (`HEX(RANDOMBLOB(16))`) but not in a table: storing them as they are is always an error, seen in the statement (2.9) |
@@ -447,7 +523,8 @@ BOTH] [c] FROM x)`, `POSITION(a IN b)`, `SUBSTRING(x FROM i [FOR n])`,
 - Text functions work with **UTF-8 characters**, not bytes
   (`LENGTH('María')` = 5). If the host has no `mbstring`, the engine uses an
   equivalent calculation of its own, accents and `ñ` in `UPPER`/`LOWER`
-  included.
+  included (2.10: without `mbstring`, `LOWER` turned every `S` into `ß` and
+  `UPPER('straße')` gave `'STRASE'`; now `'STRASSE'`, as with it).
 - `DATE`/`TIME`/`DATETIME` with no argument, or with `'now'`, return the current
   date: `SELECT DATE('now')`.
 - **Adding and subtracting time** works as in SQLite, with *modifiers* after the
@@ -489,36 +566,44 @@ BOTH] [c] FROM x)`, `POSITION(a IN b)`, `SUBSTRING(x FROM i [FOR n])`,
 
 ## 4. Value semantics
 
-- **Comparisons and ordering** follow one total order (2.9): first the
-  numbers and the texts that are numbers (`'10'`, `' 5 '`, `'1e3'`), by their
-  value; then the texts that are not numbers, as text. `WHERE`, `ORDER BY`
-  (also with `LIMIT`, from an index or sorted on disk), `MIN`/`MAX`,
-  `GREATEST`/`LEAST`, `BETWEEN` and window `ORDER BY` all use it to place
-  numbers and texts, so they agree on that: with `'10'`, `'9'`, `'1a'`, `'2b'`
-  and `'100'`, `ORDER BY` gives `9, 10, 100, 1a, 2b`, `MIN` is `'9'`, `MAX` is
-  `'2b'` and `c < '1a'` is true for the three numbers. Between two texts that
-  are not numbers, `ORDER BY` (a window's too) then applies the configured
-  collation (`JSONSQLDB_COLACION`, below), while `WHERE`, `MIN`/`MAX`,
-  `GREATEST`/`LEAST` and `BETWEEN` compare them byte by byte: by default
-  `ORDER BY` puts `'B'` after `'a'`, but `MAX` of the two is `'a'`. With
-  `'binaria'` they agree there too. As in SQLite, numbers go before
-  texts. Before 2.9 a numeric text and a non-numeric one compared as text,
-  and the order went round in a circle (`'9' < '10' < '1a' < '9'`), so
-  `ORDER BY`, `ORDER BY … LIMIT` and `MIN`/`MAX` could disagree. `NULL` is
-  outside the order (see below). Dates are stored in the fixed format
-  `yyyy-MM-dd...`, so comparing and sorting them works without conversion.
-  The `ON` of a `JOIN` compares the same way as the `WHERE` (2.9): `1`, `1.0`
-  and `'1'` match.
+- **Comparisons and ordering** follow one total order, as in SQLite (2.10):
+  first the numbers, by their value, then the texts, also those that are
+  numbers. `WHERE`, `ORDER BY` (also with `LIMIT`, from an index or sorted on
+  disk), `MIN`/`MAX`, `GREATEST`/`LEAST`, `BETWEEN` and window `ORDER BY` all
+  use it, so they agree: with the texts `'10'`, `'9'`, `'1a'`, `'2b'` and
+  `'100'`, `ORDER BY` gives `10, 100, 1a, 2b, 9`, `MIN` is `'10'` and `MAX` is
+  `'9'`; with the numbers 10 and 9 and the text `'1a'`, `9, 10, 1a`. Between
+  two texts, `ORDER BY` (a window's too) applies the configured collation
+  (`JSONSQLDB_COLACION`, below) and `WHERE`, `MIN`/`MAX`, `GREATEST`/`LEAST`
+  and `BETWEEN` compare them byte by byte: by default `ORDER BY` puts `'B'`
+  after `'a'`, but `MAX` of the two is `'a'`. With `'binaria'` they agree
+  there too. Until 2.9 a text that was a number sorted among the numbers
+  (`9, 10, 100, 1a, 2b`), and `MIN`/`MAX` of several values compared a
+  number with a text as numbers (now by class, as in SQLite: `MAX(10, '9')`
+  is `'9'`). `NULL` is outside the order (see below). Dates are stored in the
+  fixed format `yyyy-MM-dd...`, so comparing and sorting them works without
+  conversion. The `ON` of a `JOIN` compares the same way as the `WHERE`, with
+  the affinity of each column (2.10): a `TEXT` column and an `INTEGER` one
+  match `'1'` with 1, two `TEXT` columns only the same text.
 - **`DISTINCT`, `GROUP BY`, `UNION`, `INTERSECT` and `EXCEPT`** take `1` and
-  `1.0` as the same value and `1` and `'1'` as two, as SQLite does (2.9).
+  `1.0` as the same value and `1` and `'1'` as two, as SQLite does (2.9). Of
+  two values that are the same written differently (`1` and `1.0`, or `'A'`
+  and `'a'` in a `NOCASE` column), all of them keep the first that comes;
+  SQLite keeps the last in a `UNION`: `SELECT 1 UNION SELECT 1.0` gives 1 here
+  and 1.0 there. It is kept on purpose: the API sends each row as soon as it
+  has it, and the last one is only known at the end.
 - **NULL**: any comparison with `NULL` is unknown, so `phone <> '600111222'`
   does **not** return rows with a null phone (same as SQLite and MySQL). To
   include them: `phone IS NULL OR phone <> '...'`. `x BETWEEN a AND b` is
   `x >= a AND x <= b`, so a `NULL` bound only makes it unknown when the other
   one does not decide: `15 BETWEEN NULL AND 10` is 0 and `15 NOT BETWEEN NULL
   AND 10` is 1, as in SQLite (2.9; before, both were `NULL`).
-- `LIKE` **is case-insensitive**, like SQLite, but **distinguishes accents** —
-  SQLite does the same only because it does not know them either. A pattern
+- `LIKE` **is case-insensitive** for `A` to `Z` only, like SQLite: `'Á'` and
+  `'á'` are different, and so are `'á'` and `'a'` (2.10; before, with UTF-8,
+  `'É' LIKE 'é'` was 1). `ESCAPE` takes one character, also one of several
+  bytes such as `ñ` (before 2.10 only its first byte counted), and anything
+  else is an error, as in SQLite; a pattern that ends in it matches nothing,
+  and `ESCAPE NULL` gives `NULL`. A pattern
   with many `%` over a long text (`'%a%a%a…%c'`) has the same answer as any
   other (2.9: past the backtracking limit of PHP's regular expressions it
   said "no match" without warning); if even so it cannot be decided, it is an
@@ -548,35 +633,57 @@ BOTH] [c] FROM x)`, `POSITION(a IN b)`, `SUBSTRING(x FROM i [FOR n])`,
   with `COLLATE NOCASE` does change that for `'Oscar'` and `'oscar'` (2.9,
   section 2).
 - Division by zero returns `NULL` instead of failing.
+- An operation whose result is not a number (`INF - INF`, `INF * 0`, `INF /
+  INF`, `MOD(INF, 2)`, `LOG(INF, INF)`, `SUM` of `+INF` and `-INF`) returns
+  `NULL`, as in SQLite (2.10; before, NaN, which passed any `WHERE x > 2` and
+  sorted anywhere).
+- A decimal turned into text (stored in a `TEXT` column, also one declared
+  without a type, which is `TEXT` here; `CAST(x AS TEXT)`, `||`) has 15
+  significant digits and SQLite's exponent, as there (2.10; before, PHP's 14):
+  `123456789.123456789` is `'123456789.123457'` (before `'123456789.12346'`),
+  `1e100` is `'1.0e+100'` (before `'1.0E+100'`) and `1e-5` is `'1.0e-05'`. Of
+  200,000 random decimals written with 17 digits, 278 (about 1 in 700) get
+  another last digit than in SQLite: 269 are exact ties at the 16th digit,
+  which go to the even digit here and away from zero there, and in 9 SQLite's
+  conversion misses it. It does not depend on the locale nor on `precision` in
+  `php.ini`. An infinite number is
+  `'Inf'` or `'-Inf'`, as in SQLite (before 2.10, an empty text, also stored
+  in a `TEXT` column without warning). What is already stored does not
+  change.
 - In `ORDER BY`, `NULL`s go first in ascending order and last in descending, as
   in SQLite and MySQL; `NULLS FIRST` and `NULLS LAST` (2.9) choose.
 
 ## 5. Performance
 
-Measured with `php tests/benchmark.php` and 2.9.1 (PHP 8.3, one core, 20,000
-customers and 30,000 orders, on-disk cache; each figure the mean of three
+Measured with `php tests/benchmark.php` and 2.10 (PHP 8.3, one core, 20,000
+customers and 30,000 orders, on-disk cache; each figure the median of seven
 runs, each run the mean of several repetitions, the first of the process
 included, which loads the code; two runs of the same thing differ by up to
 10–15 %). The memory is the peak of the whole process:
 
 | Query | Time · peak memory |
 |---|---|
-| Lookup by primary key | 1.2 ms · 4.7 MB (about 0.2 ms once the process has made one) |
-| Lookup by a `UNIQUE` text column | 0.46 ms · 4.5 MB |
-| `BETWEEN` on the primary key (1,000 rows) | 2.5 ms · 5.8 MB |
-| `COUNT(*)` of an equality on an indexed column (2,000 matches) | 0.35 ms · 4.7 MB |
-| Numeric range, no index | 14 ms · 5.7 MB |
-| `LIKE` by prefix | 18 ms · 5.7 MB |
-| `LIMIT 50`, no filter | 0.64 ms · 5.7 MB |
-| `COUNT(*)` of a 30,000-row table | 0.79 ms · 5.0 MB |
-| `GROUP BY` + `SUM` + `ORDER BY` | 24 ms · 5.8 MB |
-| `ORDER BY ... LIMIT 20` | 14 ms · 5.9 MB |
-| `ORDER BY`, whole table | 36 ms · 15 MB |
-| `JOIN` 30,000 × 20,000 with aggregation | 150 ms · 18 MB |
-| `IN (SELECT ...)` subquery | 68 ms · 6.5 MB |
-| `JOIN` of one order with its customer, after `WHERE o.id = ?` | 0.45 ms · 5.0 MB |
-| `LEFT JOIN` of twenty orders with their customers | 3.2 ms · 5.6 MB |
-| Any of the above repeated on unchanged data | 0.23 ms · 2.7 MB |
+| Lookup by primary key | 1.1 ms · 4.9 MB (about 0.2 ms once the process has made one) |
+| Lookup by a `UNIQUE` text column | 0.25 ms · 4.8 MB |
+| `BETWEEN` on the primary key (1,000 rows) | 2.0 ms · 6.0 MB |
+| `COUNT(*)` of an equality on an indexed column (2,000 matches) | 0.33 ms · 4.9 MB |
+| Numeric range, no index | 12 ms · 5.9 MB |
+| `LIKE` by prefix | 17 ms · 5.9 MB |
+| `LIMIT 50`, no filter | 0.64 ms · 5.9 MB |
+| `COUNT(*)` of a 30,000-row table | 0.87 ms · 5.2 MB |
+| `GROUP BY` + `SUM` + `ORDER BY` | 21 ms · 6.1 MB |
+| `ORDER BY ... LIMIT 20` | 12 ms · 6.1 MB |
+| `ORDER BY`, whole table | 24 ms · 15 MB |
+| `JOIN` 30,000 × 20,000 with aggregation | 109 ms · 18 MB |
+| `IN (SELECT ...)` subquery | 54 ms · 6.8 MB |
+| `JOIN` of one order with its customer, after `WHERE o.id = ?` | 0.44 ms · 5.3 MB |
+| `LEFT JOIN` of twenty orders with their customers | 2.6 ms · 5.9 MB |
+| Any of the above repeated on unchanged data | 0.19 ms · 2.8 MB |
+
+The process takes 0.1–0.3 MB more than with 2.9.0 in most lines, and the
+writes 0.4–0.6 MB more (the whole `ORDER BY`, 4.7 MB less): the engine has
+more code, which PHP keeps in each process's memory unless OPcache holds it
+(see the CHANGELOG, 2.10, *Checked*).
 
 Decisions that make this possible:
 
@@ -601,7 +708,7 @@ Decisions that make this possible:
    the group. Memory is proportional to the number of groups.
 6. **`ORDER BY … LIMIT n` keeps only the n rows in the lead**; a full sort uses
    `array_multisort` when every key is all numbers or all text, computing the
-   collation key once per row rather than once per comparison. Since 2.9.1 a
+   collation key once per row rather than once per comparison. Since 2.10 a
    full sort projects each row as it is read and keeps only that and its sort
    keys, not the table: `SELECT id, balance … ORDER BY balance DESC` on 30,000
    rows, 104 → 47 ms and 33.8 → 13.5 MB.
@@ -613,7 +720,7 @@ Decisions that make this possible:
    already joined are applied before the join (2.7), and when what is left
    on the left is small and the right-hand table has an index on the `ON`
    columns, each left row is looked up by key instead of hashing the table:
-   one order and its customer in 0.45 ms instead of about 20. Tables separated
+   one order and its customer in 0.44 ms instead of about 20. Tables separated
    by commas are joined the same way when the `WHERE` has equalities between
    their columns, written with the table in front (`FROM a, b WHERE b.x =
    a.y`, 2.9): 20,000 by 10,000 rows, 76 s → 40 ms.
@@ -644,14 +751,15 @@ Decisions that make this possible:
     (ten keys at the end of their pieces, 0.426 → 0.342 ms). A few rows from
     a part are read by their byte offset, one line each, without decoding
     the part (2.7), up to 30 of a part; the index is used while that costs
-    no more than reading half the table, counting 200 lines as one part (2.9.1;
+    no more than reading half the table, counting 200 lines as one part (2.10;
     until 2.9.0 it counted 30, and gave the index up with more than 15
     matching rows per part: `WHERE age = 30`, 453 of 30,000 rows, 21.9 →
-    1.8 ms). An index on several columns serves its first ones only when
-    the columns after them are `NOT NULL`: a row with `NULL` in an indexed
-    column is not in the index (2.9.1; before, a lookup by `a` through an
-    index on `(a, b)` missed the rows with `b` `NULL`: in `UPDATE` and
-    `DELETE` from 2.5.0, in `SELECT` from 2.7.4). A
+    1.8 ms). An index on several columns serves its first ones fully only
+    when the columns after them are `NOT NULL`: a row with `NULL` in an
+    indexed column is not in the index, so it serves the parts with none of
+    those rows, and the others are read whole (2.10; before, a lookup by `a`
+    through an index on `(a, b)` missed the rows with `b` `NULL`: in `UPDATE`
+    and `DELETE` from 2.5.0, in `SELECT` from 2.7.4; [01-core.md](01-core.md)). A
     `BETWEEN`, `<` or `>` on a numeric indexed column reads only the parts
     whose piece can hold a value in the range (2.7) — one or two parts for a
     range of ids on a table that grows by appending, the whole table for a
@@ -690,9 +798,11 @@ Decisions that make this possible:
     and only the pieces that can hold the range are read. A `COUNT(*)` whose
     `WHERE` is only such comparisons on one indexed column counts in the index
     without reading the table; with only equalities it does so for texts
-    that are not numbers and, since 2.9.1, for numbers on an `INTEGER`,
-    `DOUBLE` or `DECIMAL` column, where each value has a single key (`COUNT(*)
-    WHERE age = 30` on 30,000 rows, 21.3 → 0.36 ms). The comparison is
+    that are not numbers and, since 2.10, for numbers on an `INTEGER`,
+    `DOUBLE` or `DECIMAL` column and any text on a `TEXT` column, where each
+    value has a single key (`COUNT(*) WHERE age = 30` on 30,000 rows, 21.3 →
+    0.36 ms; `COUNT(*) WHERE codigo BETWEEN '01000' AND '01100'`, codes that
+    are numbers written as texts, 41.2 → 23.4 ms, which read the table). The comparison is
     the `WHERE`'s own, exact: with a text the index must hold only texts, with
     a number only numbers, or the table is read as before. On 60,000 rows,
     against 2.8.0: `SELECT *` of one day 65.6 → 2.7 ms, `COUNT(*)` of a month
@@ -705,13 +815,17 @@ Decisions that make this possible:
     stopping as soon as the next one cannot beat
     the n-th value, and only the n rows of the result are read: in a tie on
     the last value, the first ones in the table, which are the ones the usual
-    sort keeps (2.9.1; before, every row of that value was read: `ORDER BY age
+    sort keeps (2.10; before, every row of that value was read: `ORDER BY age
     DESC LIMIT 20` with 439 rows tied, 11.5 → 3.6 ms).
     In ascending order `NULL`s come first and are not in the index: the column
     must be `NOT NULL` (the primary key is). On 60,000 rows, median of five
     runs against 2.8.0: `ORDER BY id DESC LIMIT 20` 117.7 → 2.9 ms, `ORDER BY
     saldo DESC LIMIT 20` (values spread over the table) 87.5 → 17.8 ms, with
-    `LIMIT 100 OFFSET 400` 101.5 → 63.7 ms. With a `WHERE`, on a column without
+    `LIMIT 100 OFFSET 400` 101.5 → 63.7 ms. Since 2.10 also on a `TEXT`
+    column without a `COLLATE` of its own, in the configured collation or byte
+    by byte (`COLLATE BINARY`): every piece is read, keeping only what can
+    still come out (`ORDER BY ciudad DESC LIMIT 20` on 30,000 rows, 29.2 →
+    2.0 ms; see [01-core.md](01-core.md)). With a `WHERE`, on a column without
     an index or with `NULL`s in ascending order, the table is read as before.
 15. **`DISTINCT` drops repeated rows as they come** (2.9) instead of gathering
     the whole table and every projected row to remove them at the end:
@@ -784,7 +898,8 @@ silently wrong result.
 |---|---|
 | `engine/Lexer.php` | SQL → tokens (comments, strings, identifiers, numbers) |
 | `engine/Parser.php` | tokens → query tree: expressions and `FROM`; the rest of the `SELECT` is parsed by `ParserConsulta`, and the other statements by its subclasses (see [03-writes.md](03-writes.md)) |
-| `engine/ParserConsulta.php` | the grammar of `SELECT` (`WITH`, `UNION`, columns, `GROUP BY`, `ORDER BY`, `LIMIT`…) and the functions written with words, such as `TRIM(… FROM …)` (2.9) |
+| `engine/ParserConsulta.php` | the grammar of `SELECT` (`WITH`, `UNION`, columns, `GROUP BY`, `ORDER BY`, `LIMIT`…) (2.9) |
+| `engine/ParserFunciones.php` | the functions written with words, such as `TRIM(… FROM …)`, `EXTRACT(… FROM …)` or `CONVERT(… USING …)` (2.10; in `ParserConsulta` in 2.9) |
 | `engine/ParserAvanzado.php` | window functions and the check of a `WITH RECURSIVE` (2.9) |
 | `engine/Valor.php` | comparison, truth and conversion of values |
 | `engine/Collation.php` | alphabetical order of ORDER BY, configurable per language |
@@ -793,27 +908,31 @@ silently wrong result.
 | `engine/Evaluator.php` | evaluation of expressions over rows and groups |
 | `engine/EvaluatorCompilado.php` | expressions compiled into closures, for a query that evaluates them over many rows (2.9) |
 | `engine/EvaluatorPatrones.php` | the patterns of `LIKE`, `GLOB` and `REGEXP` (2.9) |
-| `engine/Select.php` | sources, `JOIN` by index, filters, ordering by index and limit |
-| `engine/SelectOrden.php` | `ORDER BY` without an index, also on disk (2.9) |
+| `engine/EvaluatorIn.php` | `IN` evaluated row by row, when it is not compiled nor resolved by an index (2.10; in `Evaluator` before) |
+| `engine/EvaluatorConjunto.php` | looking a value up in a prepared set: the `IN` row by row or compiled, and a correlated `EXISTS` (2.10; in `Evaluator` before) |
+| `engine/Select.php` | sources, filters, ordering by index and limit, and the result cache (2.10; in `Database` before) |
+| `engine/SelectJoinIndice.php` | the `JOIN` that looks each row up in an index of the other table (2.10; in `Select` before), and `FROM a, b WHERE …` as a `JOIN` |
+| `engine/SelectOrden.php` | `ORDER BY`: whether an index gives the first rows of `ORDER BY … LIMIT` (2.10), and without one, in memory (2.9) |
+| `engine/SelectEnDisco.php` | an `ORDER BY` that does not fit in memory, sorted on disk (2.10; in `SelectOrden` before) |
 | `engine/SelectAgrupada.php` | `GROUP BY`, the aggregates and `HAVING`, also on disk (2.9) |
 | `engine/SelectCompuesta.php` | `UNION`, `INTERSECT`, `EXCEPT`, `WITH` and `WITH RECURSIVE` (2.9) |
 | `engine/SelectJoin.php` | the hash `JOIN` (also on disk), `USING`, `NATURAL`, and a correlated `EXISTS` as a semi-join (2.9) |
 | `engine/SelectAvanzada.php` | window functions, `EXPLAIN` and the position column of an `UPDATE` or `DELETE` with `JOIN` (2.9) |
 | `engine/Volcado.php` | rows in temporary files, for what does not fit in memory (2.9) |
 | `engine/Database.php` | façade: parses, locks, executes and logs |
-| `engine/DatabaseAvanzada.php` | batches of statements, `SHOW DATABASES`, `CREATE` and `DROP DATABASE`, `EXPLAIN` and writes in stretches (2.9) |
-| `engine/Config.php` | reads `config.php` with defaults |
-| `engine/Logger.php` | query log |
-| `tests/f2_parser.php` | 83 checks of the parser |
-| `tests/f21_compatibilidad.php` | 96 checks of the SQLite and MySQL syntax and functions, against SQLite where it has them |
-| `tests/f2_select.php` | 164 checks of the executor, with real data |
+| `engine/DatabaseAvanzada.php` | batches of statements and transactions, `SHOW DATABASES`, `CREATE` and `DROP DATABASE`, `EXPLAIN`, writes in stretches (2.9), and the repairs left for the end of a query (2.10) |
+| `engine/Config.php` | reads `config.php` with defaults, and decides whether a statement goes to the log (2.10) |
+| `engine/Logger.php` | query log, loaded only when something is written to it; who runs the queries and from where comes from `Logger::contexto()` or, from the API and the panel, the constant `JSONSQLDB_REGISTRO` (2.10) |
+| `tests/f2_parser.php` | 86 checks of the parser |
+| `tests/f21_compatibilidad.php` | 132 checks of the SQLite and MySQL syntax and functions, against SQLite where it has them |
+| `tests/f2_select.php` | 165 checks of the executor, with real data |
 
 ## 8. Tests
 
 ```
-php tests/f1_nucleo.php     → OK: 73
-php tests/f2_parser.php     → OK: 83
-php tests/f2_select.php     → OK: 164
-php tests/f8_indices.php    → OK: 85
-php tests/f21_compatibilidad.php → OK: 96
+php tests/f1_nucleo.php     → OK: 76
+php tests/f2_parser.php     → OK: 86
+php tests/f2_select.php     → OK: 165
+php tests/f8_indices.php    → OK: 93
+php tests/f21_compatibilidad.php → OK: 132
 ```

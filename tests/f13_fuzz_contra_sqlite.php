@@ -29,12 +29,14 @@ declare(strict_types=1);
  * FUERA DEL ALCANCE, a propósito, porque son diferencias documentadas en
  * docs/02-queries.md y no fallos:
  *   - `7 / 2` da 3.5 aquí y 3 en SQLite; `%` igual.
- *   - '5' = 5 es cierto aquí.
+ *   - '5' = 5 es cierto aquí cuando ninguno de los dos es una columna.
  *   - ROUND redondea como PHP, no como SQLite, en los empates.
- *   - El orden de texto usa el cotejamiento configurado, no BINARY.
- * Por eso el fuzz no compara texto con < ni >, ni MIN/MAX sobre texto, ni usa
- * ORDER BY sobre columnas de texto. Eso se queda para f12_contra_sqlite.php,
- * que lo prueba a mano y con las diferencias ya escritas.
+ *   - El ORDER BY de texto usa el cotejamiento configurado, no BINARY.
+ * Por eso el fuzz no usa ORDER BY sobre columnas de texto, ni MIN/MAX sobre
+ * texto. Eso se queda para f12_contra_sqlite.php, que lo prueba a mano y con
+ * las diferencias ya escritas. Desde la 2.10 sí compara la columna de texto
+ * con < y >, y con textos que son números ('7', '007'), contra textos y
+ * números: dos textos se comparan como textos, como en SQLite.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -183,8 +185,10 @@ function condicion(int $prof = 0): string {
         $c = uno(['a', 'd', 'c', 'b']);
         return mt_rand(0, 1) ? "$c IS NULL" : "$c IS NOT NULL";
     }
-    if ($tipo === 9) {                                  // texto, solo igualdad
-        return uno(["b = " . quoteTxt(), "b <> " . quoteTxt(), "b IS NULL", "b IS NOT NULL"]);
+    if ($tipo === 9) {                                  // texto: igualdad, orden (2.10) y números
+        $x = mt_rand(0, 2) === 0 ? num() : quoteTxt();
+        return uno(["b = $x", "b <> $x", "b < $x", "b >= $x", "b IN ($x, " . quoteTxt() . ', ' . num() . ')',
+                    "b BETWEEN $x AND " . quoteTxt(), "b IS NULL", "b IS NOT NULL"]);
     }
     if ($tipo === 10) {                                 // LIKE, sin comodines dentro del patrón
         return 'b LIKE ' . uno(["'a%'", "'%a'", "'_n_'", "'A%'", "'%an%'", "''", "'%'"]);
@@ -193,7 +197,7 @@ function condicion(int $prof = 0): string {
 }
 
 function quoteTxt(): string {
-    return "'" . uno(['ana', 'Bea', '', 'carlos', 'ANA', 'niño', 'zzz']) . "'";
+    return "'" . uno(['ana', 'Bea', '', 'carlos', 'ANA', 'niño', 'zzz', '7', '007', '10', '9.0', ' 9']) . "'";
 }
 
 /** Una expresión aritmética escalar. */
@@ -271,14 +275,14 @@ $esquema = [
 ];
 foreach ($esquema as $q) { $j->consultar($q); enSqlite($s, $q); }
 if ($opciones['indices']) {
-    foreach (['CREATE INDEX ia ON t (a)', 'CREATE INDEX id2 ON t (d)', 'CREATE INDEX iut ON u (tid)'] as $q) {
+    foreach (['CREATE INDEX ia ON t (a)', 'CREATE INDEX id2 ON t (d)', 'CREATE INDEX iut ON u (tid)', 'CREATE INDEX ib ON t (b)'] as $q) {
         $j->consultar($q);
     }
 }
 
 // Datos deterministas: los mismos en los dos motores, con NULLs repartidos.
 mt_srand($opciones['semilla']);
-$textos = ['ana', 'Bea', '', 'carlos', 'ANA', 'niño', 'zzz', 'a$n', 'x y'];
+$textos = ['ana', 'Bea', '', 'carlos', 'ANA', 'niño', 'zzz', 'a$n', 'x y', '7', '007', '10', '9.0', ' 9', '-3'];
 $ins = [[], []];
 for ($i = 1; $i <= 40; $i++) {
     $ins[0][] = sprintf('(%d, %s, %s, %s, %s)',

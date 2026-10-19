@@ -9,3 +9,7 @@
     Deny from all
 </IfModule>
 Options -Indexes
+# Y aunque se llegara, nada de aquí se ejecuta como PHP (2.10)
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>

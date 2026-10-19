@@ -21,6 +21,41 @@ final class StorageLectura extends Storage
     }
 
     /**
+     * Las partes enteras que se pueden saltar para dejar atrás $filas filas
+     * (2.9): [primera parte que hay que leer, filas que quedan atrás]. Cada
+     * parte tiene las filas de su tamaño menos los huecos que el estado le
+     * cuenta; la última, las que falten, y nunca se salta. Sin tamaño en el
+     * estado (tablas de antes de la 2.2), no se salta nada. Aquí, con lo que
+     * carga cualquier lectura (2.10: en StorageOrden, un OFFSET compilaba
+     * entero lo de ORDER BY … LIMIT).
+     *
+     * @return array{0: int, 1: int}
+     */
+    public static function partesQueSalta(Storage $st, string $tabla, int $filas): array
+    {
+        self::validarTabla($tabla);
+        $st->bloquearLectura($tabla);
+        $estado = $st->estado($tabla);
+        $chunk  = (int)($estado['chunk'] ?? 0);
+        $total  = (int)($estado['rows'] ?? 0);
+        if ($chunk <= 0 || $total <= 0) {
+            return [1, 0];
+        }
+        $huecos   = (array)($estado['huecos'] ?? []);
+        $parte    = 1;
+        $saltadas = 0;
+        while ($parte * $chunk < $total) {              // no es la última
+            $tiene = $chunk - (int)($huecos[$parte - 1] ?? 0);
+            if ($saltadas + $tiene > $filas || !is_file($st->ficheroDatos($tabla, $parte))) {
+                break;
+            }
+            $saltadas += $tiene;
+            $parte++;
+        }
+        return [$parte, $saltadas];
+    }
+
+    /**
      * Cuenta las filas de una tabla sin construirlas en memoria: el motor
      * escribe una fila por línea, así que contar es leer líneas. A propósito no
      * mira la caché ni la revisión: cuenta lo que hay en el fichero.
@@ -39,7 +74,7 @@ final class StorageLectura extends Storage
         // hace git para no fiarse de una fecha reciente)
         $clave    = $st->prefijo . $st->etiqueta($tabla) . ':n:0';
         $guardado = $st->cacheLeer($clave);
-        $guardado = is_array($guardado) ? $guardado : [];
+        $guardado = \is_array($guardado) ? $guardado : [];
         $estado   = $st->estado($tabla);
         $ahora    = time();
         $nuevo    = [];
@@ -54,9 +89,9 @@ final class StorageLectura extends Storage
             }
             $sello = [(int)($estado['parts'][$parte - 1] ?? $estado['rev']), (int)$info['size'], (int)$info['mtime']];
             $antes = $guardado[$parte] ?? null;
-            $cuantas = is_array($antes) && array_slice($antes, 0, 3) === $sello
+            $cuantas = \is_array($antes) && \array_slice($antes, 0, 3) === $sello
                 ? (int)$antes[3]
-                : (self::contarLineasDeParte($st, $fichero) ?? count($st->decodificarParte($fichero)));
+                : (self::contarLineasDeParte($st, $fichero) ?? \count($st->decodificarParte($fichero)));
             if ($sello[2] < $ahora) {
                 $nuevo[$parte] = [$sello[0], $sello[1], $sello[2], $cuantas];
             }
@@ -92,7 +127,7 @@ final class StorageLectura extends Storage
             if (isset($m[1])) {
                 return 0;                                  // "rows":[]
             }
-            $fin = preg_match('/^[ \t]*\][ \t,]*\r?$/m', $texto, $f, PREG_OFFSET_CAPTURE, $m[0][1]) ? $f[0][1] : strlen($texto);
+            $fin = preg_match('/^[ \t]*\][ \t,]*\r?$/m', $texto, $f, PREG_OFFSET_CAPTURE, $m[0][1]) ? $f[0][1] : \strlen($texto);
             // Con las comas que sobren, como al leerla (2.9: con dos, la fila no contaba)
             return (int)preg_match_all('/^[ \t]*\{.*\}[ \t,]*\r?$/m', substr($texto, $m[0][1], $fin - $m[0][1]));
         }
@@ -165,7 +200,7 @@ final class StorageLectura extends Storage
             return $n;
         }
         $posiciones = $st->posicionesPorIndice($tabla, $def, $claves, false);
-        return $posiciones === null ? null : count($posiciones);
+        return $posiciones === null ? null : \count($posiciones);
     }
 
     /**
@@ -225,7 +260,7 @@ final class StorageLectura extends Storage
             }
             // Pocas filas de una parte: se leen sus líneas, sin decodificar las
             // mil. Muchas, o una parte que no trae desfases: se decodifica
-            if (count($desfases) <= self::FILAS_POR_LINEA) {
+            if (\count($desfases) <= self::FILAS_POR_LINEA) {
                 $sueltas = $st->filasEnParte($tabla, $parte, $fichero, $desfases);
                 if ($sueltas !== null) {
                     foreach ($sueltas as $fila) {
@@ -255,16 +290,16 @@ final class StorageLectura extends Storage
      * @param list<string> $claves
      * @return list<array>|null
      */
-    public static function filasPorIndice(Storage $st, string $tabla, array $def, array $claves, bool $prefijo, ?int $tope = null): ?array
+    public static function filasPorIndice(Storage $st, string $tabla, array $def, array $claves, bool $prefijo, ?int $tope = null, bool $parcial = false): ?array
     {
         // Con claves numéricas se sabe de antemano en qué parte cae cada una
         // (el rango de su trozo): si no va a compensar, se renuncia sin buscar
         if (!$prefijo && $tope === null && self::noCompensa($st, $tabla, $def, $claves)) {
             return null;
         }
-        $posiciones = $st->posicionesPorIndice($tabla, $def, $claves, $prefijo, $tope);
+        $posiciones = $st->posicionesPorIndice($tabla, $def, $claves, $prefijo, $tope, $parcial);
         if ($posiciones !== null && $tope !== null) {
-            $posiciones = array_slice($posiciones, 0, $tope);   // las primeras en el orden de la tabla (2.9)
+            $posiciones = \array_slice($posiciones, 0, $tope);   // las primeras en el orden de la tabla (2.9)
         }
         return $posiciones === null ? null : self::filasDePosiciones($st, $tabla, $posiciones);
     }
@@ -276,7 +311,7 @@ final class StorageLectura extends Storage
      */
     private static function noCompensa(Storage $st, string $tabla, array $def, array $claves): bool
     {
-        if (count($claves) <= self::FILAS_POR_LINEA) {
+        if (\count($claves) <= self::FILAS_POR_LINEA) {
             return false;
         }
         $plan = $st->planIndice($tabla, $def);
@@ -297,7 +332,7 @@ final class StorageLectura extends Storage
         // Primera posición con un valor mayor ($incluido: o igual) que $x
         $corte = static function (array $a, $x, bool $incluido): int {
             $lo = 0;
-            $hi = count($a);
+            $hi = \count($a);
             while ($lo < $hi) {
                 $m = ($lo + $hi) >> 1;
                 if ($incluido ? $a[$m] < $x : $a[$m] <= $x) { $lo = $m + 1; } else { $hi = $m; }
@@ -409,7 +444,7 @@ final class StorageLectura extends Storage
         // llenarlo con resultados enormes, uno por consulta distinta. En APCu
         // no hace falta: su memoria tiene un tamaño y lo viejo sale solo
         $texto = serialize($valor);
-        if (strlen($texto) > self::RESULTADO_MAXIMO_DISCO) {
+        if (\strlen($texto) > self::RESULTADO_MAXIMO_DISCO) {
             return;
         }
         foreach ($tablas as $t) {
@@ -434,124 +469,7 @@ final class StorageLectura extends Storage
         // JOIN de dos tablas hacían el acierto más lento que en 2.8.0, el doble
         // con open_basedir. Una edición a mano la ve la siguiente consulta que
         // lea ese fichero, que reescribe la tabla y con ello retira sus resultados
-        return is_array($v) && ($v['k'] ?? null) === $clave && isset($v['f']) ? $v['f'] : null;
+        return \is_array($v) && ($v['k'] ?? null) === $clave && isset($v['f']) ? $v['f'] : null;
     }
 
-    /**
-     * Las partes enteras que se pueden saltar para dejar atrás $filas filas
-     * (2.9): [primera parte que hay que leer, filas que quedan atrás]. Cada
-     * parte tiene las filas de su tamaño menos los huecos que el estado le
-     * cuenta; la última, las que falten, y nunca se salta. Sin tamaño en el
-     * estado (tablas de antes de la 2.2), no se salta nada.
-     *
-     * @return array{0: int, 1: int}
-     */
-    public static function partesQueSalta(Storage $st, string $tabla, int $filas): array
-    {
-        self::validarTabla($tabla);
-        $st->bloquearLectura($tabla);
-        $estado = $st->estado($tabla);
-        $chunk  = (int)($estado['chunk'] ?? 0);
-        $total  = (int)($estado['rows'] ?? 0);
-        if ($chunk <= 0 || $total <= 0) {
-            return [1, 0];
-        }
-        $huecos   = (array)($estado['huecos'] ?? []);
-        $parte    = 1;
-        $saltadas = 0;
-        while ($parte * $chunk < $total) {              // no es la última
-            $tiene = $chunk - (int)($huecos[$parte - 1] ?? 0);
-            if ($saltadas + $tiene > $filas || !is_file($st->ficheroDatos($tabla, $parte))) {
-                break;
-            }
-            $saltadas += $tiene;
-            $parte++;
-        }
-        return [$parte, $saltadas];
-    }
-
-    /**
-     * Las $k primeras filas de la tabla ordenada por la primera columna de un
-     * índice numérico (ORDER BY col [DESC] LIMIT k), en el orden de la tabla:
-     * en un empate, las de posición más baja, así que ordenarlas y cortar da
-     * lo mismo que ordenar la tabla entera. Los trozos se leen empezando por el de
-     * mejor extremo (su rango, que ya está en el estado) y se para en cuanto
-     * el siguiente ya no puede mejorar el k-ésimo. Null si no se puede: algún
-     * trozo sin rango numérico, menos de $k valores (los NULL no están en el
-     * índice) o más de media tabla que leer.
-     *
-     * @return list<array>|null
-     */
-    public static function filasPorOrden(Storage $st, string $tabla, array $def, bool $desc, int $k): ?array
-    {
-        if (!$st->indices || $k < 1) {
-            return null;
-        }
-        self::validarTabla($tabla);
-        $st->bloquearLectura($tabla);
-        $plan = $st->planIndice($tabla, $def);
-        if ($plan === null || $plan['legado'] !== null) {
-            return null;
-        }
-        $trozos = [];
-        foreach ($plan['rangos'] as $i => $r) {
-            if ($r === null) {
-                return null;
-            }
-            if ($r !== []) {
-                $trozos[$i + 1] = $r;
-            }
-        }
-        uasort($trozos, $desc ? static fn(array $a, array $b): int => $b[1] <=> $a[1]
-                              : static fn(array $a, array $b): int => $a[0] <=> $b[0]);
-        $nombre  = $def['name'];
-        $valores = [];                                  // [valor, posición]
-        $corte   = null;                                // el k-ésimo mejor valor visto
-        foreach ($trozos as $p => $r) {
-            if ($corte !== null && ($desc ? $r[1] < $corte : $r[0] > $corte)) {
-                break;                                  // ni este ni los siguientes lo mejoran
-            }
-            $yaEstaba = isset($st->indicesMemo[$tabla][$nombre][$p]);
-            $keys = $st->trozoIndice($tabla, $def, $p);
-            if (!$yaEstaba) {
-                unset($st->indicesMemo[$tabla][$nombre][$p]);
-            }
-            if ($keys === null) {
-                return null;
-            }
-            foreach ($keys as $clave => $donde) {
-                $v = Indexes::valorNumerico((string)$clave);
-                if ($v === null) {
-                    return null;
-                }
-                if ($corte !== null && ($desc ? $v < $corte : $v > $corte)) {
-                    continue;                           // peor que el k-ésimo ya visto (2.9.1)
-                }
-                foreach ((array)$donde as $x) {
-                    $valores[] = [$v, (int)$x];
-                }
-            }
-            if (count($valores) >= $k) {
-                $vs = array_column($valores, 0);
-                $desc ? rsort($vs) : sort($vs);
-                $corte   = $vs[$k - 1];
-                $valores = array_values(array_filter($valores,
-                    static fn(array $e): bool => $desc ? $e[0] >= $corte : $e[0] <= $corte));
-            }
-            Memoria::comprobar('la lectura del índice');
-        }
-        if (count($valores) < $k) {
-            return null;
-        }
-        // Solo las $k primeras: en un empate en el corte, las de posición más
-        // baja, que son las que el ORDER BY deja, porque ordena en el orden de
-        // la tabla (2.9.1: se leían todas las del valor del corte, y con
-        // valores muy repetidos, ORDER BY edad DESC LIMIT 20 leía cientos de
-        // filas para quedarse con 20)
-        usort($valores, $desc ? static fn(array $a, array $b): int => [$b[0], $a[1]] <=> [$a[0], $b[1]]
-                              : static fn(array $a, array $b): int => [$a[0], $a[1]] <=> [$b[0], $b[1]]);
-        $posiciones = array_column(array_slice($valores, 0, $k), 1);
-        sort($posiciones);
-        return self::filasDePosiciones($st, $tabla, $posiciones);
-    }
 }

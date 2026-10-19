@@ -25,7 +25,7 @@ try {
 $ms = (microtime(true) - $inicio) * 1000;
 
 $directa  = Api::directa();
-[$datosBien, $datosTexto] = Instalador::datosExpuestos();
+[$datosAviso, $datosEstado] = carpetaDatosHtml(true);
 $lectura  = trim((string)ADMIN_API_KEY_LECTURA) !== '';
 $ajustes  = Instalador::ajustes();
 $numero   = static function (string $campo, string $texto, string $ayuda = '') use ($ajustes): string {
@@ -49,9 +49,7 @@ $numero   = static function (string $campo, string $texto, string $ayuda = '') u
   </div>
 <?php endif; ?>
 
-<?php if ($datosBien === false): ?>
-  <div class="alert alert-danger"><?= t('<strong>La carpeta de datos se puede descargar desde fuera.</strong> {1}.', [1 => h($datosTexto)]) ?></div>
-<?php endif; ?>
+<?= $datosAviso ?>
 
 <div class="card mb-3">
   <div class="card-body d-flex flex-wrap gap-4 align-items-center">
@@ -65,7 +63,7 @@ $numero   = static function (string $campo, string $texto, string $ayuda = '') u
     </div>
     <div><span class="text-body-secondary small"><?= h(t('Versión')) ?></span><?= t('<br><strong>{1}</strong> · PHP {2}', [1 => h(version() !== '' ? version() : '—'), 2 => h(PHP_VERSION)]) ?></div>
     <div><span class="text-body-secondary small"><?= h(t('Carpeta de datos')) ?></span><br>
-      <strong class="<?= $datosBien === true ? 'text-success' : ($datosBien === false ? 'text-danger' : 'text-body-secondary') ?>"><?= h($datosTexto) ?></strong></div>
+      <?= $datosEstado ?></div>
     <div><span class="text-body-secondary small"><?= h(t('Usuarios y auditoría')) ?></span><br><code class="small"><?= h((string)ADMIN_DATA_PATH) ?></code></div>
   </div>
 </div>

@@ -35,7 +35,7 @@ function chk(string $titulo, callable $fn): void {
     try {
         $r = $fn();
         if ($r === true) { $ok++; echo "  OK   $titulo\n"; }
-        elseif ($r === null) { echo "  --   $titulo (se salta en esta versión de PHP)\n"; }
+        elseif ($r === null) { echo "  --   $titulo (se salta con este PHP: le falta lo que necesita, como un locale de coma)\n"; }
         else { $ko++; echo "  FALLO $titulo -> " . var_export($r, true) . "\n"; }
     } catch (Throwable $e) {
         $ko++;
@@ -296,6 +296,22 @@ chk('CREATE TABLE de un volcado de MySQL: UNSIGNED, COMMENT, CHARACTER SET, KEY,
     try { $bd->consultar("INSERT INTO m (email) VALUES ('a@x')"); $rep = 'pasó'; } catch (JsonSqlDbError $e) { $rep = $e->sqlState; }
     return $id === 100 && in_array('ix_ciudad', $indices, true) && in_array('activo', $indices, true) && $sinSigno['id'] === 1
         && $sinSigno['saldo'] === 1 && $sinSigno['email'] === 0 && $neg === 'TYPE' && $rep === 'CONSTRAINT' ?: json_encode([$id, $indices, $sinSigno, $neg, $rep]);
+});
+chk('ALTER TABLE … AUTO_INCREMENT = n, de MySQL: sube el contador y nunca lo baja, también tras abrir otra vez la base (2.10)', function () use ($bd, $raiz) {
+    $bd->consultar('CREATE TABLE ai (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)');
+    $bd->consultar("INSERT INTO ai (n) VALUES ('a'), ('b'), ('c')");
+    $bd->consultar('DELETE FROM ai WHERE id = 3');
+    $r = [$bd->consultar('ALTER TABLE ai AUTO_INCREMENT = 50')['mensaje'] ?? '', $bd->consultar('ALTER TABLE ai AUTO_INCREMENT=10')['mensaje'] ?? ''];
+    $bd->consultar("INSERT INTO ai (n) VALUES ('d')");
+    $otra = new Database('c', $raiz);
+    $otra->consultar("INSERT INTO ai (n) VALUES ('e')");
+    $r[] = array_column($otra->consultar('SELECT id FROM ai'), 'id');
+    $r[] = error('ALTER TABLE m2x AUTO_INCREMENT = 5', 'no existe');
+    $bd->consultar('CREATE TABLE sinai (id INTEGER PRIMARY KEY)');
+    $r[] = error('ALTER TABLE sinai AUTO_INCREMENT = 5', 'no tiene columna AUTO_INCREMENT');
+    $r[] = error('ALTER TABLE ai AUTO_INCREMENT = -1', 'número entero positivo');
+    return $r === ["El siguiente AUTO_INCREMENT de 'ai' es 50", "El siguiente AUTO_INCREMENT de 'ai' es 50", [1, 2, 50, 51], true, true, true]
+        ?: json_encode($r, JSON_UNESCAPED_UNICODE);
 });
 chk('opciones que no existen, ZEROFILL y ON UPDATE dan error en vez de ignorarse', function () {
     foreach (['CREATE TABLE z (n INT) ENGINE=InnoDB FOO=1' => 'Opción de tabla', 'CREATE TABLE z (n INT ZEROFILL)' => 'ZEROFILL',
@@ -1257,7 +1273,9 @@ foreach (["CREATE TABLE vw (id INTEGER PRIMARY KEY, g TEXT, x INTEGER, f REAL)",
 /** Las mismas filas que SQLite, en el mismo orden; los decimales, a 9 cifras */
 function filasComoSqlite(array $consultas): bool|string {
     global $bd, $sqlite;
-    $norma = static fn(array $r): string => json_encode(array_map(static fn(array $f): array => array_map(static fn($v) => is_float($v) ? round($v, 9) : $v, array_values($f)), $r));
+    // Los decimales enormes, con 14 cifras: en PHP 8.0, PDO trae los de SQLite con 15
+    $norma = static fn(array $r): string => json_encode(array_map(static fn(array $f): array => array_map(static fn($v) => is_float($v)
+        ? (abs($v) >= 1e15 ? (float)sprintf('%.13e', $v) : round($v, 9)) : $v, array_values($f)), $r));
     $mal = [];
     foreach ($consultas as $q) {
         try { $a = $norma($bd->consultar($q)); } catch (Throwable $e) { $a = 'error: ' . $e->getMessage(); }
@@ -1330,6 +1348,9 @@ chk('Funciones de ventana: lo que SQLite no admite, o no está soportado aquí, 
               "SELECT upper(g) FILTER (WHERE x > 1) FROM vw" => 'FILTER solo vale',
               "SELECT sum(x) OVER (ROWS -1 PRECEDING) FROM vw" => 'no negativo',
               "SELECT sum(x) OVER (ROWS 1.5 PRECEDING) FROM vw" => 'un entero',
+              "SELECT sum(x) OVER (ORDER BY id ROWS 9e999 PRECEDING) FROM vw" => 'un entero',
+              "SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1e19 PRECEDING AND CURRENT ROW) FROM vw" => 'un entero',
+              "SELECT sum(x) OVER (ORDER BY x GROUPS 9e999 PRECEDING) FROM vw" => 'un entero',
               "SELECT sum(x) OVER (RANGE 1 PRECEDING) FROM vw" => 'ORDER BY de una sola expresión',
               "SELECT sum(x) OVER (ORDER BY x, id RANGE 1 PRECEDING) FROM vw" => 'ORDER BY de una sola expresión',
               "SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 1 PRECEDING) FROM vw" => 'no soportado',
@@ -1843,6 +1864,959 @@ chk('LIKE con muchos % sobre un texto largo da lo mismo que SQLite, compilado, s
     }
     $g = str_repeat('*a', 30) . '*c';
     return filasComoSqlite(array_merge($c, ["SELECT s GLOB '$g' FROM au_l", "SELECT glob('$g', s) FROM au_l"]));
+});
+
+echo "\n== Arreglos de la 2.10 ==\n";
+chk('subconsultas correlacionadas a dos y tres niveles, con la del medio sin mirar fuera, con IN, con el mismo alias dentro y en UPDATE y DELETE, como SQLite (2.10: «Columna desconocida»)', function () use ($bd, $sqlite) {
+    $sql = ['CREATE TABLE cn_a (id INTEGER PRIMARY KEY, x INTEGER)', 'CREATE TABLE cn_b (id INTEGER PRIMARY KEY, a_id INTEGER)',
+            'CREATE TABLE cn_c (id INTEGER PRIMARY KEY, b_id INTEGER, x INTEGER)', 'CREATE TABLE cn_d (id INTEGER PRIMARY KEY, a INTEGER, x INTEGER)',
+            'INSERT INTO cn_a VALUES (1, 10), (2, 20), (3, 10), (4, 30), (5, NULL)',
+            'INSERT INTO cn_b VALUES (1, 1), (2, 1), (3, 2), (4, 3), (5, 3), (6, 4), (7, 9)',
+            'INSERT INTO cn_c VALUES (1, 1, 10), (2, 2, 99), (3, 3, 20), (4, 4, 10), (5, 5, 30), (6, 6, 30), (7, 7, 10), (8, 1, 20)',
+            'INSERT INTO cn_d VALUES (1, 1, 10), (2, 2, 20), (3, 3, 99), (4, 4, 30)'];
+    foreach ($sql as $q) { $bd->consultar($q); $sqlite->exec($q); }
+    $r = filasComoSqlite([
+        'SELECT cn_a.id, (SELECT COUNT(*) FROM cn_b WHERE cn_b.a_id = cn_a.id AND EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = cn_b.id AND cn_c.x = cn_a.x)) AS n FROM cn_a ORDER BY cn_a.id',
+        'SELECT cn_a.id, (SELECT COUNT(*) FROM cn_b WHERE EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = cn_b.id AND cn_c.x = cn_a.x)) AS n FROM cn_a ORDER BY cn_a.id',
+        'SELECT cn_a.id, (SELECT COUNT(*) FROM cn_b WHERE cn_b.id IN (SELECT cn_c.b_id FROM cn_c WHERE cn_c.x > cn_a.x)) AS n FROM cn_a ORDER BY cn_a.id',
+        'SELECT id FROM cn_a WHERE EXISTS (SELECT 1 FROM cn_b WHERE cn_b.a_id = cn_a.id AND EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = cn_b.id AND cn_c.x IN (SELECT cn_d.x FROM cn_d WHERE cn_d.a = cn_a.id))) ORDER BY id',
+        'SELECT id FROM cn_a WHERE NOT EXISTS (SELECT 1 FROM cn_b WHERE NOT EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = cn_b.id AND cn_c.x = cn_a.x)) ORDER BY id',
+        'SELECT t.id, (SELECT COUNT(*) FROM cn_b t WHERE EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = t.id AND cn_c.x = 10)) AS n FROM cn_a t ORDER BY t.id',
+        'SELECT cn_a.id, (SELECT MAX((SELECT COUNT(*) FROM cn_c WHERE cn_c.b_id = cn_b.id AND cn_c.x >= cn_a.x)) FROM cn_b) AS n FROM cn_a ORDER BY cn_a.id',
+    ]);
+    if ($r !== true) { return $r; }
+    foreach (['UPDATE cn_a SET x = x + (SELECT COUNT(*) FROM cn_b WHERE cn_b.a_id = cn_a.id AND EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = cn_b.id AND cn_c.x = cn_a.x))',
+              'DELETE FROM cn_b WHERE EXISTS (SELECT 1 FROM cn_c WHERE cn_c.b_id = cn_b.id AND EXISTS (SELECT 1 FROM cn_a WHERE cn_a.id = cn_b.a_id AND cn_a.x = cn_c.x - 1))'] as $q) {
+        $bd->consultar($q); $sqlite->exec($q);
+    }
+    return filasComoSqlite(['SELECT * FROM cn_a ORDER BY id', 'SELECT * FROM cn_b ORDER BY id']);
+});
+chk('TIME() de una hora sola, -> y ->> con un índice negativo, la precedencia de < > <= >= sobre = <> IS, lo que sigue a IS como una expresión entera, y COLLATE en IS, como SQLite (2.10: NULL, error, 0 = 1 < 2 daba 1, error, 0)', function () {
+    return comoSqlite(["TIME('12:00:00')", "TIME('23:59:59.5')", "'[1,2,3]' -> -1", "'[1,2,3]' ->> -1", "'{\"a\":[1,2]}' -> '$.a' ->> -2",
+                       '0 = 1 < 2', '1 = 2 > 1', '0 <> 1 >= 1', '1 = 1 > 0 = 1', '3 > 2 > 1', 'NULL IS 1 < 2', '0 IS 1 > 2', '1 IS NULL + 1', '2 IS 1 + 1', 'NULL IS NOT NULL = 0',
+                       "'a' IS 'A' COLLATE NOCASE", "'a' IS NOT 'A' COLLATE NOCASE", "'a' COLLATE NOCASE IS 'A'", "'x' LIKE 'X' = 1", '5 & 3 = 1', '1 | 2 < 3', '1 << 2 < 5']);
+});
+chk('los nombres de tabla no distinguen mayúsculas, como SQLite: leer, escribir, CREATE IF NOT EXISTS, índices, claves foráneas, JOIN y DROP; dos tablas de antes que solo se distinguen por ellas piden el nombre exacto (2.10: «La tabla no existe»)', function () use ($raiz) {
+    $dir = "$raiz/may";
+    @mkdir($dir, 0775, true);
+    Database::crear('m', $dir);
+    $m = new Database('m', $dir);
+    $l = sqliteParaComparar();
+    $l->exec('PRAGMA foreign_keys = ON');
+    $mal = [];
+    foreach (['CREATE TABLE Foo (id INTEGER PRIMARY KEY, x TEXT)', "INSERT INTO FOO VALUES (1, 'a')", "INSERT INTO foo (id, x) VALUES (2, 'b')", 'CREATE TABLE foo (id INTEGER)',
+              'CREATE TABLE IF NOT EXISTS FOO (id INTEGER)', 'CREATE INDEX ix_f ON FOO (x)', "UPDATE fOO SET x = 'z' WHERE id = 2", 'CREATE TABLE h (id INTEGER PRIMARY KEY, f INTEGER REFERENCES FOO (id))',
+              'INSERT INTO h VALUES (1, 1)', 'INSERT INTO h VALUES (2, 9)', 'SELECT foo.x, FOO.id FROM Foo ORDER BY 2', 'SELECT f.x FROM foo f JOIN H ON H.f = f.id',
+              'ALTER TABLE FOO ADD COLUMN y INTEGER', 'DELETE FROM FoO WHERE id = 2', 'SELECT * FROM foo', 'DROP TABLE H', 'DROP TABLE FOO', 'CREATE TABLE fOo (k INTEGER)'] as $q) {
+        try { $r = $m->consultar($q); $a = isset($r[0]) || $r === [] ? json_encode($r) : 'ok'; } catch (JsonSqlDbError) { $a = 'error'; }
+        try { $st = $l->query($q); $b = $st->columnCount() > 0 ? json_encode($st->fetchAll(PDO::FETCH_ASSOC)) : 'ok'; } catch (PDOException) { $b = 'error'; }
+        if ($a !== $b) { $mal[] = "$q: $a / $b"; }
+    }
+    // Dos de antes de la 2.10, «Uno» y «UNO» (en un disco que distingue
+    // mayúsculas): escritas tal cual, cada una la suya; si no, error
+    $m->consultar('CREATE TABLE Uno (id INTEGER PRIMARY KEY)');
+    $m->consultar('CREATE TABLE Dos (id INTEGER PRIMARY KEY)');
+    $m->consultar('INSERT INTO Dos VALUES (2)');
+    unset($m);
+    foreach ((array)glob("$dir/m/Dos.*") as $f) { rename($f, "$dir/m/UNO" . substr(basename($f), 3)); }
+    file_put_contents("$dir/m/UNO.meta.json", str_replace('"Dos"', '"UNO"', (string)file_get_contents("$dir/m/UNO.meta.json")));
+    $m = new Database('m', $dir);
+    if (is_file("$dir/m/uno.meta.json")) { return null; }                   // un disco que no las distingue
+    $dos = static function (string $q) use ($m) { try { return $m->consultar($q); } catch (JsonSqlDbError $e) { return $e->getMessage(); } };
+    if ($dos('SELECT * FROM Uno') !== [] || $dos('SELECT * FROM UNO') !== [['id' => 2]]
+        || !str_starts_with((string)$dos('SELECT * FROM uno'), "Hay más de una tabla que se llama 'uno'")) { $mal[] = 'las dos de antes'; }
+    unset($m);
+    borrarArbol($dir);
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk('mensajes que dicen qué falla: lo que sobra al final, information_schema y otro esquema delante de una tabla; main. vale, como en SQLite (2.10: «Solo se admite una sentencia por consulta»)', function () use ($bd) {
+    $r = [error('SELECT 1 2', "Sobra lo que va desde '2'"), error('SELECT 1 FROM cn_a b c', "Sobra lo que va desde 'c'"),
+          error('SELECT * FROM information_schema.tables', "No hay 'information_schema' en jsonSQLDB"), error('SELECT * FROM otra.cn_a', "'otra.' delante de una tabla"),
+          $bd->consultar('SELECT COUNT(*) AS n FROM main.cn_a')[0]['n'] === 5 ?: 'main.'];
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('una coma con ON o USING junta como un JOIN, como SQLite; ORDER BY n COLLATE con n fuera de la consulta da error, como SQLite; y EXPLAIN de un UNION da un paso por SELECT (2.10: error, se aceptaba, y cada paso dos veces)', function () use ($bd) {
+    $r = filasComoSqlite(['SELECT cn_a.id, cn_b.id AS b FROM cn_a, cn_b ON cn_b.a_id = cn_a.id ORDER BY 1, 2', 'SELECT x.id, y.id AS b FROM cn_a x, cn_b y ON y.a_id = x.id WHERE y.id > 2 ORDER BY 1, 2',
+                          'SELECT id, x, b_id FROM cn_d, cn_c USING (id, x) ORDER BY id', 'SELECT cn_a.id FROM cn_a, cn_d USING (id) ORDER BY 1']);
+    if ($r !== true) { return $r; }
+    $e = error('SELECT id FROM cn_a ORDER BY 2 COLLATE NOCASE', 'ORDER BY 2');
+    $pasos = array_column($bd->consultar('EXPLAIN SELECT id FROM cn_a UNION SELECT id FROM cn_b'), 'tabla');
+    return $e === true && $pasos === ['cn_a', 'cn_b'] ?: json_encode([$e, $pasos], JSON_UNESCAPED_UNICODE);
+});
+chk('INSERT OR IGNORE salta las filas que no cumplen un NOT NULL o un CHECK y guarda las demás, también desde un SELECT; con ON CONFLICT DO NOTHING y OR REPLACE siguen siendo un error; como SQLite (2.10: error y ninguna fila)', function () use ($raiz) {
+    return escriturasComoSqlite("$raiz/ig", ['CREATE TABLE ck (id INTEGER PRIMARY KEY, v INTEGER NOT NULL CHECK (v > 0), u TEXT UNIQUE)', "INSERT INTO ck VALUES (1, 5, 'a')",
+                                              'CREATE TABLE src (id INTEGER PRIMARY KEY, v INTEGER, u TEXT)', "INSERT INTO src VALUES (2, -1, 'b'), (3, NULL, 'c'), (4, 9, 'a'), (5, 7, 'e')"], [
+        ["INSERT OR IGNORE INTO ck VALUES (2, -1, 'b'), (3, NULL, 'c'), (4, 9, 'd'), (1, 3, 'x'), (5, 4, 'a')", null],
+        ['INSERT OR IGNORE INTO ck SELECT * FROM src', null],
+        ["INSERT OR IGNORE INTO ck (id, u) VALUES (6, 'f')", null],
+        ["INSERT INTO ck VALUES (2, -1, 'b') ON CONFLICT DO NOTHING", null],
+        ["INSERT OR REPLACE INTO ck VALUES (1, -1, 'z')", null],
+    ]);
+});
+chk('UPDATE OR IGNORE deja como estaba la fila que no cumpliría un NOT NULL, un CHECK o una clave única; UPDATE OR REPLACE e INSERT OR REPLACE borran las filas con que chocan y ponen el valor por defecto de una columna NOT NULL; una fila que no entra no gasta su id sin AUTOINCREMENT; como SQLite (2.10: UPDATE OR era un error de sintaxis, el NULL un error y el id se gastaba)', function () use ($raiz) {
+    $r = [escriturasComoSqlite("$raiz/uo", ["CREATE TABLE r (id INTEGER PRIMARY KEY, a TEXT NOT NULL DEFAULT 'd', u INTEGER UNIQUE, c INTEGER CHECK (c < 10))",
+                                             "INSERT INTO r VALUES (1, 'x', 1, 1), (2, 'y', 2, 2), (3, 'z', 3, 3)",
+                                             'CREATE TABLE hr (id INTEGER PRIMARY KEY, rid INTEGER REFERENCES r(id) ON DELETE CASCADE)',
+                                             'INSERT INTO hr VALUES (1, 1), (2, 2), (3, 3)'], [
+        ['INSERT OR REPLACE INTO r VALUES (4, NULL, 4, 4)', null],
+        ['REPLACE INTO r (id, a, u) VALUES (2, NULL, 9)', null],
+        ['UPDATE OR IGNORE r SET u = 3 WHERE id = 1', null],
+        ['UPDATE OR IGNORE r SET c = c * 4', null],
+        ['UPDATE OR IGNORE r SET a = NULL WHERE id = 2', null],
+        ['UPDATE OR REPLACE r SET u = 3 WHERE id = 1', null],
+        ['UPDATE OR REPLACE r SET a = NULL', null],
+        ['UPDATE OR REPLACE r SET id = 3 WHERE id = 1', null],
+        ['UPDATE OR REPLACE r SET c = 20 WHERE id = 1', null],
+        ['UPDATE OR ABORT r SET c = 0 WHERE id = 2', null],
+        ["INSERT OR IGNORE INTO r (a, u) VALUES ('p', 1), ('q', 5), ('s', 2), ('t', 6)", null],
+        ["INSERT INTO r (a, u) VALUES ('p', 1), ('q', 5) ON CONFLICT (u) DO UPDATE SET a = excluded.a", null],
+    ]), escriturasComoSqlite("$raiz/uo2", ["CREATE TABLE n (id INTEGER PRIMARY KEY, u TEXT UNIQUE, par TEXT REFERENCES n(u) ON DELETE CASCADE)",
+                                             "INSERT INTO n VALUES (1, 'a', NULL), (2, 'b', 'a'), (3, 'c', 'b'), (4, 'd', 'c')"], [
+        // La fila que cambia se va con la cascada de la que choca: no vuelve
+        ["UPDATE OR REPLACE n SET u = 'b', par = NULL WHERE id = 3", null],
+        ["UPDATE OR REPLACE n SET u = 'c' WHERE id = 1", null],
+    ]), error('UPDATE OR FAIL r SET c = 0', 'UPDATE OR FAIL no está soportado: usa OR IGNORE u OR REPLACE')];
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('el siguiente id de una clave primaria entera sin AUTOINCREMENT es el mayor de los que quedan + 1, también cuando la misma sentencia borra con OR REPLACE la fila del mayor, con la tabla cargada y sin cargar: 100 sentencias al azar sobre 2.500 filas, como SQLite (2.10: salía de la fila ya borrada)', function () use ($raiz) {
+    $mal = [];
+    foreach ([false, true] as $cargada) {
+        $dir = "$raiz/rowid" . (int)$cargada;
+        @mkdir($dir, 0775, true);
+        Database::crear('x', $dir);
+        $b = new Database('x', $dir);
+        $l = sqliteParaComparar();
+        $inicio = ['CREATE TABLE t (id INTEGER PRIMARY KEY, u INTEGER UNIQUE, x TEXT)', 'CREATE TABLE lg (id INTEGER PRIMARY KEY, tid INTEGER)'];
+        if ($cargada) {
+            // Con un trigger, la tabla se carga entera; sin él, se escribe sin cargarla
+            $inicio[] = 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO lg (tid) VALUES (NEW.id); END';
+        }
+        $inicio[] = 'INSERT INTO t VALUES ' . implode(', ', array_map(static fn(int $i): string => "($i, $i, 'a')", range(1, 2500)));
+        foreach ($inicio as $q) { $b->consultar($q); $l->exec($q); }
+        $foto = static fn(array $filas): string => implode(' ', array_map(static fn(array $f): string => implode(':', array_values($f)), $filas));
+        mt_srand(2100 + (int)$cargada);
+        for ($n = 0; $n < 100 && count($mal) < 3; $n++) {
+            $max  = (int)$l->query('SELECT MAX(id) FROM t')->fetchColumn();
+            $uMax = (int)$l->query("SELECT u FROM t WHERE id = $max")->fetchColumn();
+            $nu   = mt_rand(1, 3000);
+            $otro = mt_rand(1, $max);
+            $q = match (mt_rand(0, 5)) {
+                0 => "INSERT OR REPLACE INTO t VALUES (NULL, $nu, 'n'), ($otro, $nu, 'r'), (NULL, " . ($nu + 1) . ", 'n')",
+                1 => "INSERT OR REPLACE INTO t VALUES ($otro, $uMax, 'r'), (NULL, $nu, 'n')",
+                2 => "UPDATE OR REPLACE t SET u = $uMax WHERE id = $otro",
+                3 => "DELETE FROM t WHERE id = $max",
+                4 => "INSERT INTO t VALUES ($otro, " . (5000 + $n) . ", 'd'), (NULL, " . (6000 + $n) . ", 'n') ON CONFLICT (id) DO UPDATE SET id = " . ($max + 7),
+                default => 'INSERT INTO t (u, x) VALUES (' . (3000 + $n) . ", 'n')",
+            };
+            $b->consultar($q);
+            $l->exec($q);
+            $resumen = 'SELECT MAX(id) AS m, COUNT(*) AS c, SUM(id * 7 + u) AS s FROM t';
+            $x = $foto($b->consultar($resumen));
+            $y = $foto(array_map(static fn(array $f): array => array_map('intval', $f), $l->query($resumen)->fetchAll(PDO::FETCH_ASSOC)));
+            if ($x !== $y) { $mal[] = [(int)$cargada, $q, $x, $y]; }
+        }
+        foreach (['t', 'lg'] as $t) {
+            $x = $foto($b->consultar("SELECT * FROM $t ORDER BY id"));
+            $y = $foto(array_map(static fn(array $f): array => array_map(static fn($v) => is_numeric($v) ? (int)$v : $v, $f),
+                $l->query("SELECT * FROM $t ORDER BY id")->fetchAll(PDO::FETCH_ASSOC)));
+            if ($x !== $y) { $mal[] = [(int)$cargada, $t, strlen($x), strlen($y)]; }
+        }
+        unset($b);
+        Database::borrar('x', $dir);
+    }
+    return $mal === [] ?: json_encode($mal);
+});
+chk('las claves foráneas NO ACTION y las de una fila hija se miran al acabar la sentencia, como SQLite: INSERT OR REPLACE de un padre con hijas, borrar una tabla que se apunta a sí misma, una hija antes que su padre, un trigger que borra las hijas, una hija que se va y otra que llega, dos claves foráneas con el mismo nombre, el padre nuevo de una cascada que un trigger borra, lo que las cascadas de un OR REPLACE hacen apuntar a la fila que quita; RESTRICT, al momento; lo que sigue sin padre al acabar, error (2.10: error al momento); y las hijas que trae una cascada o un UPDATE sin cargar la tabla (2.10: no las veía, desde antes de la 2.9)', function () use ($raiz) {
+    $ph = ['CREATE TABLE p (id INTEGER PRIMARY KEY, u TEXT UNIQUE)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id))',
+           "INSERT INTO p VALUES (1, 'a'), (2, 'b')", 'INSERT INTO h VALUES (1, 1), (2, 2)'];
+    $arbol = ['CREATE TABLE t (id INTEGER PRIMARY KEY, padre INTEGER REFERENCES t(id))', 'INSERT INTO t VALUES (1, NULL), (2, 1), (3, 2)'];
+    $casos = [
+        [$ph, "INSERT OR REPLACE INTO p VALUES (1, 'z')"],
+        [array_merge($ph, ['CREATE INDEX ih ON h (p)']), "INSERT OR REPLACE INTO p VALUES (2, 'z'), (1, 'y')"],
+        [$ph, "INSERT OR REPLACE INTO p VALUES (5, 'a')"],                                           // la hija se queda sin padre: error
+        [$ph, 'UPDATE OR REPLACE p SET id = 2 WHERE id = 1'],                                         // la hija de 1, sin padre: error
+        [array_merge($ph, ['DELETE FROM h WHERE id = 1']), 'UPDATE OR REPLACE p SET id = 2 WHERE id = 1'],
+        [$ph, 'DELETE FROM p WHERE id = 1'],
+        [array_merge($ph, ['CREATE TRIGGER tr AFTER DELETE ON p BEGIN DELETE FROM h WHERE p = OLD.id; END']), 'DELETE FROM p WHERE id = 1'],
+        // El padre 1 sale dos veces y un trigger borra sus hijas entre medias
+        [array_merge($ph, ['CREATE TRIGGER tr AFTER INSERT ON p BEGIN DELETE FROM h WHERE p = 1 AND NEW.id = 7; END']),
+         "INSERT OR REPLACE INTO p VALUES (1, 'z'), (7, 'z')"],
+        [str_replace('REFERENCES p(id)', 'REFERENCES p(id) ON DELETE RESTRICT', $ph), "INSERT OR REPLACE INTO p VALUES (1, 'z')"],
+        [$arbol, 'DELETE FROM t'],
+        [$arbol, 'DELETE FROM t WHERE id >= 2'],
+        [$arbol, 'DELETE FROM t WHERE id <= 2'],
+        [$arbol, 'UPDATE t SET id = id + 10, padre = padre + 10'],
+        [$arbol, 'UPDATE t SET id = id + 10'],
+        [['CREATE TABLE t (id INTEGER PRIMARY KEY, padre INTEGER REFERENCES t(id))'], 'INSERT INTO t VALUES (2, 3), (3, NULL)'],
+        [['CREATE TABLE t (id INTEGER PRIMARY KEY, padre INTEGER REFERENCES t(id))'], 'INSERT INTO t VALUES (2, 3), (4, NULL)'],
+        [$ph, 'INSERT OR REPLACE INTO h VALUES (5, 99), (5, 1)'],                                    // la hija sin padre sale con la siguiente
+        [$ph, 'INSERT OR REPLACE INTO h VALUES (5, 1), (5, 99)'],
+        [str_replace('REFERENCES p(id)', 'REFERENCES p(id) ON DELETE CASCADE', $ph) + [4 => 'CREATE TABLE g (id INTEGER PRIMARY KEY, h INTEGER REFERENCES h(id))',
+                           5 => 'INSERT INTO g VALUES (1, 1)'], 'DELETE FROM p WHERE id = 1'],                  // la cascada deja a g sin padre: error
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER DEFAULT 9 REFERENCES p(id) ON DELETE SET DEFAULT)',
+          'INSERT INTO p VALUES (1)', 'INSERT INTO h VALUES (1, 1)'], 'DELETE FROM p WHERE id = 1'],
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER DEFAULT 9 REFERENCES p(id) ON DELETE SET DEFAULT)',
+          'INSERT INTO p VALUES (1), (9)', 'INSERT INTO h VALUES (1, 1)'], 'DELETE FROM p WHERE id = 1'],
+        // La hija cambia en otra columna y luego se borra: no queda ninguna
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id), x TEXT)',
+          'INSERT INTO p VALUES (1)', "INSERT INTO h VALUES (1, 1, 'a')",
+          "CREATE TRIGGER tr AFTER DELETE ON p BEGIN UPDATE h SET x = 'b' WHERE p = OLD.id; DELETE FROM h WHERE p = OLD.id; END"], 'DELETE FROM p WHERE id = 1'],
+        // Salen más hijas de las que se apuntaron, y luego llega una huérfana: error
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id))', 'CREATE TABLE cmd (id INTEGER PRIMARY KEY)',
+          'INSERT INTO p VALUES (1)', 'INSERT INTO h VALUES (1, 1)',
+          'CREATE TRIGGER tr AFTER INSERT ON cmd BEGIN DELETE FROM p WHERE id = 1; INSERT INTO p VALUES (1); INSERT INTO h VALUES (2, 1); DELETE FROM h; DELETE FROM p WHERE id = 1; INSERT INTO h VALUES (3, 1); END'],
+         'INSERT INTO cmd VALUES (1)'],
+        [['CREATE TABLE t (id INTEGER PRIMARY KEY, padre INTEGER REFERENCES t(id), u TEXT UNIQUE)', "INSERT INTO t VALUES (1, NULL, 'a'), (2, 1, 'b')"],
+         "INSERT OR REPLACE INTO t VALUES (1, NULL, 'a'), (3, 1, 'c'), (2, NULL, 'b'), (3, NULL, 'c'), (4, NULL, 'a'), (5, 1, 'e')"],
+        // Dos claves foráneas de la misma columna, con el mismo nombre: cada una con su padre
+        [['CREATE TABLE p1 (id INTEGER PRIMARY KEY)', 'CREATE TABLE p2 (id INTEGER PRIMARY KEY)',
+          'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER, FOREIGN KEY (p) REFERENCES p1(id), FOREIGN KEY (p) REFERENCES p2(id))',
+          'INSERT INTO p1 VALUES (1), (2)', 'INSERT INTO p2 VALUES (1), (3)',
+          'CREATE TRIGGER tr AFTER INSERT ON h WHEN NEW.id = 5 BEGIN INSERT INTO p2 VALUES (2); END'], 'INSERT INTO h VALUES (6, 2), (5, 3)'],
+        // Una cascada ON UPDATE trae una hija al padre 3 sin cargar la tabla hija, y OR REPLACE lo borra: error (desde antes de la 2.9)
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY, u TEXT UNIQUE)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON UPDATE CASCADE)',
+          "INSERT INTO p VALUES (1, 'a'), (2, 'b')", 'INSERT INTO h VALUES (1, 1)'],
+         "UPDATE OR REPLACE p SET id = CASE id WHEN 1 THEN 3 ELSE id END, u = CASE id WHEN 2 THEN 'a' ELSE u END"],
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY, u TEXT UNIQUE)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON UPDATE CASCADE)',
+          "INSERT INTO p VALUES (1, 'a'), (2, 'b')", 'INSERT INTO h VALUES (1, 1)', 'CREATE INDEX ih ON h (p)'],
+         "UPDATE OR REPLACE p SET id = CASE id WHEN 1 THEN 3 ELSE id END, u = CASE id WHEN 2 THEN 'a' ELSE u END"],
+        // Cascadas encadenadas por triggers: la hija que trae una la mueve la siguiente
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON UPDATE CASCADE)', 'CREATE INDEX ih ON h (p)',
+          'INSERT INTO p VALUES (1), (2), (3), (7)', 'INSERT INTO h VALUES (10, 1), (20, 2), (30, 3)',
+          'CREATE TRIGGER t1 AFTER UPDATE ON p WHEN OLD.id = 1 BEGIN UPDATE p SET id = 8 WHERE id = 2; END',
+          'CREATE TRIGGER t2 AFTER UPDATE ON p WHEN OLD.id = 2 BEGIN UPDATE p SET id = 9 WHERE id = 8; UPDATE h SET p = 7 WHERE id = 30; UPDATE p SET id = 6 WHERE id = 7; END'],
+         'UPDATE p SET id = 4 WHERE id = 1'],
+        // El UPDATE de h, sin cargarla, le da un padre que una cascada de vuelta cambia después
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON UPDATE CASCADE)', 'CREATE INDEX ih ON h (p)',
+          'CREATE TABLE g (id INTEGER PRIMARY KEY, h INTEGER REFERENCES h(id) ON UPDATE CASCADE, x INTEGER)',
+          'INSERT INTO p VALUES (5), (6)', 'INSERT INTO h VALUES (0, NULL), (1, NULL), (2, NULL), (3, NULL)', 'INSERT INTO g VALUES (1, 1, 5), (3, 3, 6)',
+          'CREATE TRIGGER tg AFTER UPDATE ON g BEGIN UPDATE p SET id = NEW.x * 10 WHERE id = NEW.x; END'],
+         'UPDATE h SET id = CASE id WHEN 0 THEN 10 WHEN 1 THEN 11 WHEN 3 THEN 13 ELSE id END, p = CASE id WHEN 2 THEN 6 ELSE p END'],
+        // ON UPDATE CASCADE: el trigger de la primera hija borra el padre nuevo; la segunda lo toma: error (desde antes de la 2.9)
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)',
+          'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON UPDATE CASCADE ON DELETE CASCADE, x INTEGER)',
+          'CREATE TRIGGER t AFTER UPDATE ON h WHEN NEW.x = 1 BEGIN DELETE FROM p WHERE id = NEW.p; END',
+          'INSERT INTO p VALUES (1)', 'INSERT INTO h VALUES (1, 1, 1), (2, 1, 0)'], 'UPDATE p SET id = 2 WHERE id = 1'],
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY)',
+          'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON UPDATE CASCADE ON DELETE CASCADE, x INTEGER)', 'CREATE INDEX ih ON h (p)',
+          'CREATE TRIGGER t AFTER UPDATE ON h WHEN NEW.x = 1 BEGIN DELETE FROM p WHERE id = NEW.p; END',
+          'INSERT INTO p VALUES (1)', 'INSERT INTO h VALUES (1, 1, 1), (2, 1, 0)'], 'UPDATE p SET id = 2 WHERE id = 1'],
+        // OR REPLACE quita la fila con la que choca después de sus cascadas: lo que estas hacen apuntar a ella, error (desde antes de la 2.9)
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY, u INTEGER UNIQUE)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER DEFAULT 1 REFERENCES p(id) ON DELETE SET DEFAULT)',
+          'INSERT INTO p VALUES (1, 10)', 'INSERT INTO h VALUES (1, 1)'], 'INSERT OR REPLACE INTO p VALUES (2, 10)'],
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY, u INTEGER UNIQUE)', 'CREATE TABLE a (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id))',
+          'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON DELETE CASCADE)',
+          'CREATE TRIGGER t AFTER DELETE ON h BEGIN INSERT INTO a VALUES (OLD.id, OLD.p); END',
+          'INSERT INTO p VALUES (1, 10), (3, 30)', 'INSERT INTO h VALUES (1, 1)'], 'INSERT OR REPLACE INTO p VALUES (2, 10)'],
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY, u INTEGER UNIQUE)', 'CREATE TABLE a (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id))',
+          'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON DELETE CASCADE)',
+          'CREATE TRIGGER t AFTER DELETE ON h BEGIN INSERT INTO a VALUES (OLD.id, OLD.p); END',
+          'INSERT INTO p VALUES (1, 10), (3, 30)', 'INSERT INTO h VALUES (1, 1)'], 'UPDATE OR REPLACE p SET u = 10 WHERE id = 3'],
+        [['CREATE TABLE p (id INTEGER PRIMARY KEY, u INTEGER UNIQUE)', 'CREATE TABLE h (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON DELETE SET NULL)',
+          'INSERT INTO p VALUES (1, 10)', 'INSERT INTO h VALUES (1, 1)'], 'INSERT OR REPLACE INTO p VALUES (1, 20)'],
+    ];
+    $mal = [];
+    foreach ($casos as $i => [$inicio, $q]) {
+        $dir = "$raiz/fkfin$i";
+        @mkdir($dir, 0775, true);
+        Database::crear('x', $dir);
+        $b = new Database('x', $dir);
+        $l = sqliteParaComparar();
+        $l->exec('PRAGMA foreign_keys = ON');
+        foreach ($inicio as $x) { $b->consultar($x); $l->exec($x); }
+        try { $b->consultar($q); $r = ['ok']; } catch (JsonSqlDbError) { $r = ['error']; }
+        try { $l->exec($q); $s = ['ok']; } catch (PDOException) { $s = ['error']; }
+        foreach (array_unique(array_filter(array_map(static fn($x) => preg_match('/^CREATE TABLE (\w+)/', $x, $m) ? $m[1] : null, $inicio))) as $t) {
+            $r[] = json_encode($b->consultar("SELECT * FROM $t ORDER BY id"));
+            $s[] = json_encode($l->query("SELECT * FROM $t ORDER BY id")->fetchAll(PDO::FETCH_ASSOC));
+        }
+        if ($r !== $s) { $mal[] = [$q, $r, $s]; }
+        unset($b);
+        Database::borrar('x', $dir);
+    }
+    return $mal === [] ?: json_encode($mal, JSON_UNESCAPED_UNICODE);
+});
+chk('TRUNCATE TABLE en un trigger cuenta para las claves foráneas que se miran al acabar la sentencia, como un DELETE (2.10: un error falso)', function () use ($bd) {
+    foreach (['CREATE TABLE trp (id INTEGER PRIMARY KEY)', 'CREATE TABLE trh (id INTEGER PRIMARY KEY, p INTEGER REFERENCES trp(id))',
+              'INSERT INTO trp VALUES (1), (2)', 'INSERT INTO trh VALUES (1, 1), (2, 1)',
+              'CREATE TRIGGER trv AFTER DELETE ON trp BEGIN TRUNCATE TABLE trh; END'] as $q) {
+        $bd->consultar($q);
+    }
+    $bd->consultar('DELETE FROM trp WHERE id = 1');
+    $r = [$bd->consultar('SELECT id FROM trp'), $bd->consultar('SELECT COUNT(*) AS n FROM trh')];
+    return $r === [[['id' => 2]], [['n' => 0]]] ?: json_encode($r);
+});
+chk('cada sentencia de un trigger calcula sus subconsultas otra vez, también en cada fila que lo dispara, y la de fuera sigue con las suyas; como SQLite (2.10: valía la de la primera vez para toda la sentencia de fuera)', function () use ($raiz) {
+    return escriturasComoSqlite("$raiz/subtrg", ['CREATE TABLE a (id INTEGER PRIMARY KEY)', 'CREATE TABLE c (id INTEGER PRIMARY KEY, n INTEGER, m INTEGER)',
+        'INSERT INTO c VALUES (1, 0, 0)', 'INSERT INTO a VALUES (1), (2), (3)',
+        'CREATE TRIGGER ta AFTER INSERT ON a BEGIN UPDATE c SET n = (SELECT count(*) FROM a) WHERE id = 1; UPDATE c SET m = m + 1 WHERE id IN (SELECT 1 FROM a WHERE id = 2); END',
+        'CREATE TRIGGER td AFTER DELETE ON a BEGIN UPDATE c SET n = (SELECT count(*) FROM a) WHERE id = 1; END',
+        'CREATE TABLE u (id INTEGER PRIMARY KEY, x INTEGER)', 'CREATE TABLE u2 (id INTEGER PRIMARY KEY)', 'INSERT INTO u VALUES (1, 0), (2, 0), (3, 0)',
+        'CREATE TRIGGER tu AFTER UPDATE ON u BEGIN INSERT INTO u2 VALUES (NEW.id); UPDATE c SET m = (SELECT count(*) FROM u2) WHERE id = 1; END'], [
+        ['INSERT INTO a VALUES (4), (5), (6)', null],
+        // La sentencia de fuera usa la misma subconsulta antes de que el trigger salte
+        ['DELETE FROM a WHERE id = 1 AND (SELECT count(*) FROM a) > 0', null],
+        // La de fuera la calcula una vez, como SQLite, aunque la del trigger cambie
+        ['UPDATE u SET x = (SELECT count(*) FROM u2)', null],
+    ]);
+});
+chk('un trigger no puede usar RETURNING, como SQLite; el de un trigger de antes no devuelve nada en la sentencia de fuera (2.10: sus filas se mezclaban con las de ella)', function () use ($bd, $raiz) {
+    $bd->consultar('CREATE TABLE rtt (id INTEGER PRIMARY KEY, v INTEGER)');
+    $bd->consultar('CREATE TABLE rtl (id INTEGER PRIMARY KEY, v INTEGER)');
+    $r = [error('CREATE TRIGGER rtr AFTER INSERT ON rtt BEGIN INSERT INTO rtl VALUES (NEW.id * 10, NEW.v) RETURNING *; END', 'no puede usar RETURNING')];
+    // Uno así de una versión anterior: se le pone el RETURNING a mano en su estructura
+    $bd->consultar('CREATE TRIGGER rtr AFTER INSERT ON rtt BEGIN INSERT INTO rtl VALUES (NEW.id * 10, NEW.v); END');
+    $f = "$raiz/c/rtt.meta.json";
+    file_put_contents($f, str_replace('NEW.v)', 'NEW.v) RETURNING *', (string)file_get_contents($f)));
+    $bd2 = new Database('c', $raiz);
+    $r[] = $bd2->consultar('INSERT INTO rtt VALUES (2, 7) RETURNING *') === [['id' => 2, 'v' => 7]] ?: 'filas de más';
+    $r[] = $bd2->consultar('SELECT * FROM rtl') === [['id' => 20, 'v' => 7]] ?: 'el trigger no se ejecutó';
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('RETURNING se calcula antes de escribir: si da error, la sentencia no deja nada, también sin filas; una subconsulta ve las tablas como las deja la sentencia; como SQLite (2.10: la fila quedaba escrita, y una subconsulta daba un error de PHP)', function () use ($raiz) {
+    return escriturasComoSqlite("$raiz/ret", ['CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)', 'INSERT INTO t VALUES (1, 1), (2, 2)'], [
+        ['INSERT INTO t VALUES (3, 3) RETURNING nocol', null],
+        ['UPDATE t SET v = 5 WHERE id = 9 RETURNING nocol', null],
+        ["INSERT INTO t VALUES (3, 3) RETURNING json_extract('x', '$')", null],
+        ['UPDATE t SET v = 9 WHERE id = 1 RETURNING id, (SELECT SUM(v) FROM t) AS s', null],
+        ['UPDATE t SET v = v + 10 WHERE v < (SELECT max(v) FROM t) RETURNING id, (SELECT max(v) FROM t) AS m', null],
+        ['DELETE FROM t WHERE id = 1 RETURNING id, (SELECT COUNT(*) FROM t) AS n, id IN (SELECT id FROM t) AS sigue', null],
+    ]);
+});
+chk('una cascada sobre la misma tabla (una clave foránea hacia sí misma) cuenta para las claves únicas del UPDATE que la lanza: ni repite un UNIQUE ni ve ocupada una clave que ha liberado; como SQLite (2.10: el UNIQUE quedaba repetido, desde antes de la 2.9)', function () use ($raiz) {
+    $r = [escriturasComoSqlite("$raiz/cm1", ["CREATE TABLE m (id INTEGER PRIMARY KEY, u TEXT UNIQUE, par TEXT UNIQUE REFERENCES m(u) ON UPDATE CASCADE)",
+                                             "INSERT INTO m VALUES (1, 'a', NULL), (2, 'b', 'a'), (3, 'c', NULL)"], [
+        ["UPDATE m SET u = CASE id WHEN 1 THEN 'z' ELSE u END, par = CASE id WHEN 3 THEN 'z' ELSE par END WHERE id IN (1, 3)", null],
+        ["UPDATE m SET u = CASE id WHEN 1 THEN 'z' ELSE u END, par = CASE id WHEN 3 THEN 'y' ELSE par END WHERE id IN (1, 3)", null],
+    ]), escriturasComoSqlite("$raiz/cm2", ["CREATE TABLE m (id INTEGER PRIMARY KEY, u TEXT UNIQUE, par TEXT REFERENCES m(u) ON DELETE CASCADE)",
+                                            "INSERT INTO m VALUES (1, 'a', NULL), (2, 'b', 'a'), (3, 'c', 'b'), (4, 'x', NULL)"], [
+        ["UPDATE OR REPLACE m SET u = CASE id WHEN 1 THEN 'b' ELSE 'c' END WHERE id IN (1, 4)", null],
+    ])];
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('un número fuera de rango (1e400, 1e300 * 1e300) no se guarda: INSERT y UPDATE dan un error que lo dice y la tabla queda como estaba (2.10: «No se puede codificar una fila»)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE inf (id INTEGER PRIMARY KEY, x REAL)');
+    $bd->consultar('INSERT INTO inf VALUES (1, 1.5)');
+    $r = [error('INSERT INTO inf VALUES (2, 1e400)', "La columna 'x' de 'inf' recibe un número fuera de rango"),
+          error('UPDATE inf SET x = 1e300 * 1e300', 'fuera de rango (infinito o NaN)'), error('INSERT INTO inf VALUES (3, -1e400)', 'fuera de rango'),
+          $bd->consultar('SELECT * FROM inf') === [['id' => 1, 'x' => 1.5]] ?: 'la tabla cambió'];
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('CREATE VIEW da error si usa una tabla o una vista que no existe, también en una subconsulta o la suya propia; con WITH, vistas de vistas y subconsultas en FROM, no; como MySQL y PostgreSQL (2.10: se creaba y fallaba al usarla)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE vx (id INTEGER PRIMARY KEY)');
+    $r = [error('CREATE VIEW vno AS SELECT id FROM noexiste', "La vista 'vno' usa 'noexiste'"),
+          error('CREATE VIEW vno AS SELECT id FROM vx WHERE id IN (SELECT id FROM tampoco)', "usa 'tampoco'"),
+          error('CREATE VIEW vno AS SELECT id FROM vno', "usa 'vno'")];
+    foreach (['CREATE VIEW v1x AS SELECT id FROM VX', 'CREATE VIEW v2x AS SELECT id FROM v1x',
+              'CREATE VIEW v3x AS WITH c AS (SELECT id FROM vx) SELECT id FROM c', 'CREATE VIEW v4x AS SELECT id FROM (SELECT id FROM main.vx) s',
+              'CREATE VIEW v5x AS WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT i FROM n',
+              'CREATE VIEW IF NOT EXISTS v1x AS SELECT id FROM vx'] as $q) {
+        $bd->consultar($q);
+    }
+    $v = array_values(preg_grep('/^v\\dx$/', array_column($bd->consultar('SHOW VIEWS'), 'vista')));
+    $r[] = $v === ['v1x', 'v2x', 'v3x', 'v4x', 'v5x'] && $bd->consultar('SELECT COUNT(*) AS n FROM v5x') === [['n' => 3]] ?: json_encode($v);
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('LIKE solo iguala mayúsculas y minúsculas de la A a la Z, como SQLite, también sin mbstring (2.10: con UTF-8, É LIKE é)', fn() =>
+    comoSqlite(["'É' LIKE 'é'", "'á' LIKE 'Á%'", "'ñ' LIKE 'N'", "'Z' LIKE 'z'", "'zÉta' LIKE 'ZÉTA'", "'[' LIKE '{'", "'ß' LIKE 'SS'",
+                "like('Á%', 'á')", "like('A%', 'a')"]));
+chk('ESCAPE como SQLite: un solo carácter, aunque sea de varios bytes; patrón que acaba en él, no casa; ESCAPE NULL, NULL (2.10)', function () {
+    // Con ESCAPE 'ñ' se tomaba su primer byte, que también empieza á o é
+    $r = [comoSqlite(["'x%' LIKE 'xñ%' ESCAPE 'ñ'", "'xá' LIKE 'xñ%' ESCAPE 'ñ'", "'xñ' LIKE 'xññ' ESCAPE 'ñ'", "'a_b' LIKE 'a!_b' ESCAPE '!'",
+                      "'axb' LIKE 'a!_b' ESCAPE '!'", "'ab\\' LIKE 'ab\\' ESCAPE '\\'", "'x' LIKE 'X' ESCAPE 'X'", "'A' LIKE '!a' ESCAPE '!'", "'ab' LIKE 'ab!' ESCAPE '!'", "'xáb' LIKE 'xá%' ESCAPE 'ñ'",
+                      "'a' LIKE 'a' ESCAPE NULL", "like('a', 'a', NULL)"]),
+          filasComoSqlite(["SELECT id, n LIKE 'an%' ESCAPE NULL AS a, n LIKE 'AN!%' ESCAPE '!' AS b, n LIKE 'án%' AS c FROM cn ORDER BY id",
+                           "SELECT id FROM cn WHERE b LIKE 'an%' ESCAPE NULL IS NULL ORDER BY id", "SELECT id FROM cn WHERE b NOT LIKE 'a%' ESCAPE 'a' ORDER BY id"]),
+          error("SELECT 'a' LIKE 'a' ESCAPE 'xy'", 'ESCAPE tiene que ser un solo carácter'),
+          error("SELECT 'a' LIKE 'a' ESCAPE ''", 'ESCAPE tiene que ser un solo carácter')];
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('SUM de enteros que no cabe en 64 bits es un error, como en SQLite, por las tres vías y por el disco; TOTAL y AVG suman en decimal (2.10: un decimal aproximado sin avisar)', function () use ($bd, $sqlite, $raiz) {
+    $bd->consultar('CREATE TABLE so (g INTEGER, x INTEGER)');
+    $bd->consultar('INSERT INTO so VALUES (1, 9223372036854775807), (1, 1), (1, -2), (2, 5), (2, 7)');
+    $sqlite->exec('CREATE TABLE so (g INTEGER, x INTEGER); INSERT INTO so VALUES (1, 9223372036854775807), (1, 1), (1, -2), (2, 5), (2, 7)');
+    $r = [];
+    // Al final, a mitad (vuelve a caber, y aun así), con GROUP BY, con DISTINCT y en una ventana
+    // (en una ventana, SQLite corta el resultado en la fila que desborda, y
+    // PDO no lo trata como error: se mira solo la primera)
+    foreach (['SELECT SUM(x) FROM so', 'SELECT g, SUM(x) FROM so GROUP BY g', 'SELECT SUM(DISTINCT x) FROM so',
+              'SELECT SUM(x) OVER () FROM so', 'SELECT SUM(x) OVER (ORDER BY g, x) FROM so', 'SELECT SUM(x) OVER (ORDER BY g, x ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM so'] as $i => $q) {
+        $r[] = error($q, 'integer overflow');
+        try { $sqlite->query($q)->fetchAll(); $r[] = $i < 4 ? "SQLite no dio error: $q" : true; } catch (PDOException) { }
+    }
+    // Con un NULL, o una fila que FILTER deja fuera, antes del que desborda:
+    // no cuentan entre los sumados (2.10: cada grupo cuenta los que deja fuera)
+    $son = 'INSERT INTO son VALUES (1, NULL), (1, 9223372036854775807), (1, 1), (2, 5), (2, 9223372036854775807), (2, 1)';
+    $bd->consultar('CREATE TABLE son (g INTEGER, x INTEGER)');
+    $bd->consultar($son);
+    $sqlite->exec("CREATE TABLE son (g INTEGER, x INTEGER); $son");
+    foreach (['SELECT SUM(x) FROM son WHERE g = 1', 'SELECT g, SUM(x) FROM son WHERE g = 1 GROUP BY g', 'SELECT SUM(x) FILTER (WHERE x <> 5) FROM son WHERE g = 2'] as $q) {
+        $r[] = error($q, 'integer overflow');
+        try { $sqlite->query($q)->fetchAll(); $r[] = "SQLite no dio error: $q"; } catch (PDOException) { }
+    }
+    // Con un valor que no es entero, antes o después de pasarse, en decimal y
+    // sin error, como SQLite 3.45 (un texto que no es un número cuenta como
+    // decimal); un texto que es un entero desborda como un entero
+    $sd = '(SELECT 1.5 AS x UNION ALL SELECT 9223372036854775807 UNION ALL SELECT 1)';
+    $se = '(SELECT 9223372036854775807 AS x UNION ALL SELECT 1 UNION ALL SELECT 1.5)';
+    $sa = "(SELECT 9223372036854775807 AS x UNION ALL SELECT 1 UNION ALL SELECT 'abc')";
+    $bd->consultar('CREATE TABLE st (s TEXT)');
+    $bd->consultar("INSERT INTO st VALUES ('9223372036854775807'), (' 1 ')");
+    $sqlite->exec("CREATE TABLE st (s TEXT); INSERT INTO st VALUES ('9223372036854775807'), (' 1 ')");
+    foreach (['SELECT SUM(s) FROM st', 'SELECT SUM(DISTINCT s) FROM st', 'SELECT SUM(s) OVER () FROM st'] as $i => $q) {
+        $r[] = error($q, 'integer overflow');
+        try { $sqlite->query($q)->fetchAll(); $r[] = $i < 2 ? "SQLite no dio error: $q" : true; } catch (PDOException) { }
+    }
+    $r[] = filasComoSqlite(['SELECT g, TOTAL(x), AVG(x), SUM(x + 0.0) FROM so GROUP BY g', 'SELECT g, SUM(x) FROM so WHERE g = 2 GROUP BY g',
+                            'SELECT SUM(x) FROM so WHERE x < 9', 'SELECT AVG(DISTINCT x), TOTAL(DISTINCT x) FROM so', "SELECT SUM(x) FROM $sd",
+                            "SELECT SUM(x) OVER () FROM $sd", "SELECT SUM(x) FROM $se", "SELECT SUM(x) OVER () FROM $se", "SELECT SUM(x) FROM $sa",
+                            "SELECT SUM(DISTINCT x) FROM $se"]);
+    // SUM(DISTINCT) por el disco, por particiones (cuando sus valores no caben):
+    // con un decimal en una partición y enteros que no caben en otra, en
+    // decimal y sin error, como en memoria y en SQLite; todos enteros, el error
+    $v = ["('0.5')", "('9223372036854775807')"];
+    for ($i = 3; $i <= 300; $i++) { $v[] = "('$i')"; }
+    $bd->consultar('CREATE TABLE sp (x TEXT)');
+    $bd->consultar('INSERT INTO sp VALUES ' . implode(',', $v));
+    $disco = new JsonSQLDB\Select(new JsonSQLDB\Catalog(new JsonSQLDB\Storage($raiz, 'c')));
+    $p = new ReflectionProperty(JsonSQLDB\Select::class, 'enDisco');
+    PHP_VERSION_ID < 80100 && $p->setAccessible(true);         // desde 8.5 avisa de obsoleta
+    $p->setValue($disco, true);
+    foreach (['SELECT SUM(DISTINCT x) AS s FROM sp' => 'decimal', "SELECT SUM(DISTINCT x) AS s FROM sp WHERE x <> '0.5'" => 'error'] as $q => $esperado) {
+        try {
+            $s = $disco->ejecutar(JsonSQLDB\Parser::analizar($q))[0]['s'];
+            $obtenido = is_float($s) && $s > 9.2e18 ? 'decimal' : json_encode($s);
+        } catch (JsonSqlDbError $e) {
+            $obtenido = str_contains($e->getMessage(), 'integer overflow') ? 'error' : $e->getMessage();
+        }
+        $r[] = $obtenido === $esperado ?: "$q por el disco: $obtenido";
+    }
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('enteros pasado 2^53 con decimales: ORDER BY, WHERE, BETWEEN, IN, MIN y MAX, GROUP BY, DISTINCT, UNION, JOIN y ventanas, exactos como en SQLite (2.10: PHP pasaba el entero a decimal y 9007199254740993 salía igual que 9007199254740992.0)', function () use ($bd, $sqlite) {
+    $b = 9007199254740992;                               // 2^53
+    $filas = [];
+    foreach ([$b - 1, $b, $b + 1, $b + 2, $b + 3, -$b - 1, -$b, -$b - 3, 1, 0, PHP_INT_MAX, PHP_INT_MIN, PHP_INT_MAX - 1] as $i => $n) {
+        $filas[] = '(' . ($i + 1) . ", $n, NULL)";
+    }
+    foreach (['9007199254740992.0', '9007199254740994.0', '-9007199254740992.0', '9.2233720368547758e18', '-9.2233720368547758e18', '1.5', '9007199254740996.0'] as $i => $m) {
+        $filas[] = '(' . ($i + 20) . ", NULL, $m)";
+    }
+    foreach (['CREATE TABLE gr (id INTEGER PRIMARY KEY, n INTEGER, m REAL)', 'CREATE INDEX gr_n ON gr (n)', 'CREATE TABLE gh (n INTEGER)',
+              'INSERT INTO gr VALUES ' . implode(', ', $filas), 'INSERT INTO gh VALUES (9007199254740993), (9007199254740992), (9007199254740994)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    // Enteros y decimales en una misma columna
+    $x = '(SELECT id, n AS x FROM gr WHERE n IS NOT NULL UNION ALL SELECT id, m FROM gr WHERE m IS NOT NULL) AS u';
+    return filasComoSqlite([
+        'SELECT n FROM gr WHERE n IS NOT NULL ORDER BY n', 'SELECT n FROM gr WHERE n IS NOT NULL ORDER BY n DESC LIMIT 4', 'SELECT n FROM gh ORDER BY n',
+        "SELECT x FROM $x ORDER BY x, id", "SELECT x FROM $x ORDER BY x DESC LIMIT 5", "SELECT x, RANK() OVER (ORDER BY x) FROM $x ORDER BY id, x",
+        'SELECT n FROM gr WHERE n > 9007199254740992.0 ORDER BY n', 'SELECT n FROM gr WHERE 9007199254740992.0 < n ORDER BY n LIMIT 2',
+        'SELECT n FROM gr WHERE n = 9007199254740992.0', 'SELECT n FROM gr WHERE n <> 9007199254740992.0 ORDER BY n',
+        'SELECT n FROM gr WHERE n >= 9007199254740994.0 ORDER BY n', 'SELECT n FROM gr WHERE n + 0 > 9007199254740992.0 ORDER BY n',
+        'SELECT n FROM gr WHERE n BETWEEN 9007199254740992.0 AND 9007199254740994.0 ORDER BY n', 'SELECT n FROM gr WHERE n IN (9007199254740992.0, 9007199254740994.0) ORDER BY n',
+        "SELECT x FROM $x WHERE x = 9007199254740993 ORDER BY x", "SELECT x FROM $x WHERE x > 9007199254740993 ORDER BY x",
+        "SELECT MIN(x), MAX(x) FROM $x WHERE x > 9e15", "SELECT COUNT(DISTINCT x) FROM $x", "SELECT x, COUNT(*) FROM $x GROUP BY x ORDER BY x",
+        "SELECT x FROM $x UNION SELECT n FROM gh ORDER BY 1", 'SELECT gh.n, gr.m FROM gh JOIN gr ON gr.m = gh.n ORDER BY gh.n',
+        'SELECT CASE WHEN n > 9007199254740992.0 THEN 1 ELSE 0 END FROM gr ORDER BY id',
+        // Pasado 9·10^18, un decimal entero y su entero van por su índice con
+        // la misma clave, también en UPDATE y DELETE (ver la prueba de 2^63)
+        ...(static function () use ($bd, $sqlite): array {
+            foreach (['CREATE TABLE gi (id INTEGER PRIMARY KEY, r REAL, i INTEGER)', 'CREATE INDEX gi_r ON gi (r)', 'CREATE INDEX gi_i ON gi (i)',
+                      'INSERT INTO gi VALUES (1, 9.2e18, 9100000000000000000), (2, -9.2233720368547758e18, 5), (3, 1.0, 9223372036854775807)',
+                      'UPDATE gi SET i = i - 1 WHERE r = 9200000000000000000', 'DELETE FROM gi WHERE i = 9.2233720368547758e18'] as $q) {
+                $bd->consultar($q);
+                $sqlite->exec($q);
+            }
+            return ['SELECT id, i FROM gi WHERE r = 9200000000000000000', 'SELECT id FROM gi WHERE r = -9223372036854775808',
+                    'SELECT id FROM gi WHERE i = 9.1e18 - 1', 'SELECT id FROM gi WHERE r IN (9200000000000000000, 1) ORDER BY id', 'SELECT COUNT(*) FROM gi'];
+        })()]);
+});
+chk('pasado 2^53, también exactos los atajos: ORDER BY … LIMIT desde el límite del WHERE, BETWEEN y AND con un literal, el ORDER BY … LIMIT en memoria y el ORDER BY por el disco, como en SQLite (2.10: perdían o colaban filas)', function () use ($bd, $sqlite, $raiz) {
+    $v = [];
+    for ($i = 1; $i <= 2998; $i++) {
+        $v[] = "($i, $i)";
+    }
+    foreach ([9007199254740991, 9007199254740992, 9007199254740993, 9007199254740995] as $j => $n) {
+        $v[] = '(' . (3000 + $j) . ", $n)";
+    }
+    foreach (['CREATE TABLE bg (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)', 'CREATE INDEX bg_n ON bg (n)', 'INSERT INTO bg VALUES ' . implode(',', $v),
+              'CREATE TABLE bgn (n INTEGER)', 'INSERT INTO bgn SELECT n FROM bg WHERE n > 2990'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    $r = filasComoSqlite(['SELECT n FROM bg WHERE n <= 9007199254740992.0 ORDER BY n DESC LIMIT 2', 'SELECT n FROM bg WHERE n >= 9007199254740992.0 ORDER BY n LIMIT 2',
+        'SELECT n FROM bg WHERE n < 9007199254740994.0 ORDER BY n DESC LIMIT 1', 'SELECT COUNT(*) FROM bg WHERE n BETWEEN 0 AND 9007199254740992.0',
+        'SELECT id FROM bg WHERE n > 9007199254740992.0 AND id > 0 ORDER BY id', 'SELECT COUNT(*) FROM bgn WHERE n BETWEEN 0 AND 9007199254740992.0',
+        'SELECT COUNT(*) FROM bgn WHERE n NOT BETWEEN 9007199254740994.0 AND 9007199254740996.0']);
+    if ($r !== true) {
+        return $r;
+    }
+    // Enteros y decimales en la misma columna: en memoria con LIMIT, y por el disco
+    $u = '(SELECT n AS x FROM bg WHERE n > 9007199254740992 UNION ALL SELECT 9007199254740992.0 UNION ALL SELECT 9007199254740994.0) AS u';
+    $disco = new JsonSQLDB\Select(new JsonSQLDB\Catalog(new JsonSQLDB\Storage($raiz, 'c')));
+    $p = new ReflectionProperty(JsonSQLDB\Select::class, 'enDisco');
+    PHP_VERSION_ID < 80100 && $p->setAccessible(true);         // desde 8.5 avisa de obsoleta
+    $p->setValue($disco, true);
+    // y con el listón de un LIMIT: 9007199254740993 llega cuando el tercero es 9007199254740992.0
+    $l = '(SELECT 9007199254740992.0 AS x UNION ALL SELECT 9007199254740994.0 UNION ALL SELECT 9007199254740995 UNION ALL SELECT n FROM bg WHERE n < 9e15 UNION ALL SELECT 9007199254740993) AS l';
+    $vistos = [array_column($bd->consultar("SELECT x FROM $u ORDER BY x LIMIT 3"), 'x'), array_column($bd->consultar("SELECT x FROM $l ORDER BY x DESC LIMIT 3"), 'x'),
+               array_column($disco->ejecutar(JsonSQLDB\Parser::analizar("SELECT x FROM $u ORDER BY x")), 'x')];
+    return $vistos === [[9007199254740992.0, 9007199254740993, 9007199254740994.0], [9007199254740995, 9007199254740994.0, 9007199254740993],
+                        [9007199254740992.0, 9007199254740993, 9007199254740994.0, 9007199254740995]]
+        ?: json_encode($vistos, JSON_PRESERVE_ZERO_FRACTION);
+});
+chk('Los marcos RANGE con distancia, con la aritmética de SQLite fila a fila: PRECEDING suma la distancia a cada fila, un entero más un decimal se redondea pasado 2^53, un NULL o un texto entra en el marco que llega hasta él, y un texto que parece un número no tiene distancia (2.10: restaba la distancia, se saltaba el NULL y \'5\' contaba como 5)', function () use ($bd, $sqlite) {
+    foreach (['CREATE TABLE rg (id INTEGER PRIMARY KEY, i INTEGER, r REAL, s TEXT)',
+              "INSERT INTO rg VALUES (1, -4, NULL, NULL), (2, NULL, -3.6, NULL), (3, 9007199254740989, NULL, NULL), (4, NULL, NULL, NULL), (5, NULL, NULL, 'c'),
+                                     (6, 9007199254740993, NULL, NULL), (7, 9007199254740990, NULL, NULL), (8, NULL, 1.9, NULL)",
+              'CREATE TABLE rd (id INTEGER PRIMARY KEY, x REAL)', 'INSERT INTO rd VALUES (1, 0.3), (2, 0.4), (3, -0.3), (4, -0.4), (5, NULL), (6, 1.0)',
+              'CREATE TABLE rb (id INTEGER PRIMARY KEY, n INTEGER)', 'INSERT INTO rb VALUES (1, 9007199254740991), (2, 9007199254740992), (3, 9007199254740993), (4, 9007199254740995)',
+              'CREATE TABLE rgh (id INTEGER PRIMARY KEY, i INTEGER, r REAL)', 'INSERT INTO rgh VALUES (1, 0, NULL), (2, 1, NULL), (3, NULL, 9007199254740992.0)',
+              'CREATE TABLE rgt (id INTEGER PRIMARY KEY, i INTEGER, r REAL, s TEXT)', "INSERT INTO rgt VALUES (1, 1, NULL, NULL), (2, NULL, 2.5, NULL), (3, NULL, NULL, '5'), (4, NULL, NULL, 'a')",
+              'CREATE TABLE rgv (id INTEGER PRIMARY KEY, x REAL)',
+              'CREATE TABLE rgp (id INTEGER PRIMARY KEY, i INTEGER, r REAL)', 'INSERT INTO rgp VALUES (1, 9007199254740992, NULL), (2, NULL, 9007199254740992.0), (3, NULL, 9007199254740994.0), (4, 9007199254740993, NULL)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    $x = 'COALESCE(i, r, s)';
+    $q = [];
+    // -3.6 + 9007199254740993 se redondea a ...988 y no llega, pero -4 sí: el
+    // marco empieza en la primera que llega; 0.5 FOLLOWING del ...993 lo deja
+    // en ...992.0; el NULL y el texto, al principio y al final del orden
+    foreach (["ORDER BY $x RANGE BETWEEN 9007199254740993 PRECEDING AND CURRENT ROW", "ORDER BY $x DESC RANGE BETWEEN 0.5 FOLLOWING AND UNBOUNDED FOLLOWING",
+              "ORDER BY $x RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING", "ORDER BY $x DESC RANGE BETWEEN 1.5 FOLLOWING AND UNBOUNDED FOLLOWING",
+              "ORDER BY $x RANGE BETWEEN 2 FOLLOWING AND 3 FOLLOWING", "ORDER BY $x NULLS LAST RANGE BETWEEN 1 PRECEDING AND 1.0 FOLLOWING"] as $w) {
+        $q[] = "SELECT id, COUNT(*) OVER ($w) AS c, FIRST_VALUE(id) OVER ($w) AS f, LAST_VALUE(id) OVER ($w) AS l, GROUP_CONCAT(id) OVER ($w) AS g FROM rg ORDER BY id";
+    }
+    // 0.3 + 0.1 llega a 0.4, y -0.4 + 0.1 no llega a -0.3; el NULL va delante
+    foreach (['ORDER BY x RANGE BETWEEN 0.1 PRECEDING AND CURRENT ROW', 'ORDER BY x DESC RANGE BETWEEN 0.1 PRECEDING AND CURRENT ROW',
+              'ORDER BY x RANGE BETWEEN CURRENT ROW AND 0.1 FOLLOWING', 'ORDER BY x DESC RANGE BETWEEN 0.1 FOLLOWING AND 0.7 FOLLOWING',
+              'ORDER BY x RANGE BETWEEN UNBOUNDED PRECEDING AND 0.1 PRECEDING', 'ORDER BY x DESC RANGE BETWEEN 0.1 FOLLOWING AND UNBOUNDED FOLLOWING'] as $w) {
+        $q[] = "SELECT id, COUNT(*) OVER ($w) AS c, GROUP_CONCAT(id) OVER ($w) AS g FROM rd ORDER BY id";
+    }
+    // 9007199254740992 + 1.0 da 9007199254740992.0 y deja fuera el ...993
+    foreach (['ORDER BY n RANGE BETWEEN CURRENT ROW AND 1.0 FOLLOWING', 'ORDER BY n RANGE BETWEEN 1.0 PRECEDING AND CURRENT ROW',
+              'ORDER BY n DESC RANGE BETWEEN CURRENT ROW AND 1.0 FOLLOWING', 'ORDER BY n RANGE BETWEEN 1 FOLLOWING AND 2.0 FOLLOWING'] as $w) {
+        $q[] = "SELECT id, COUNT(*) OVER ($w) AS c FROM rb ORDER BY id";
+    }
+    // Pasado 2^52 el < de PHP ya no basta: 1 + 9007199254740992 es entero y
+    // pasa de 9007199254740992.0; el texto '5' va detrás de los números
+    $q[] = 'SELECT id, COUNT(*) OVER (ORDER BY COALESCE(i, r) RANGE BETWEEN UNBOUNDED PRECEDING AND 9007199254740992 PRECEDING) AS c FROM rgh ORDER BY id';
+    $q[] = 'SELECT id, COUNT(*) OVER (ORDER BY COALESCE(i, r, s) RANGE BETWEEN 10 PRECEDING AND 10 FOLLOWING) AS c FROM rgt ORDER BY id';
+    // Los pares tienen el marco del primero: 9007199254740992 + 1 es ...993,
+    // y 9007199254740992.0 + 1 se queda en ...992.0
+    foreach (['1 FOLLOWING AND UNBOUNDED FOLLOWING', 'CURRENT ROW AND 1 FOLLOWING'] as $m) {
+        $q[] = "SELECT id, COUNT(*) OVER (ORDER BY COALESCE(i, r) RANGE BETWEEN $m) AS c FROM rgp ORDER BY id";
+    }
+    // Sin filas, y sin avisos de PHP (2.10, antes de publicarla: uno)
+    $avisos = [];
+    set_error_handler(static function (int $n, string $m) use (&$avisos): bool { $avisos[] = $m; return true; });
+    try {
+        $vacia = $bd->consultar('SELECT COUNT(*) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND 1.5 FOLLOWING) AS c FROM rgv');
+    } finally {
+        restore_error_handler();
+    }
+    if ($vacia !== [] || $avisos !== []) {
+        return 'sin filas: ' . json_encode([$vacia, $avisos]);
+    }
+    $r = filasComoSqlite($q);
+    if ($r !== true) {
+        return $r;
+    }
+    // Un marco que encoge: -2 + 9007199254740993 es ...991 y empieza en el
+    // ...994, pero -1.7 + 9007199254740993 se redondea a ...990.0 y empieza
+    // antes. COUNT, que acumula según avanza el marco, cuenta lo mismo que
+    // GROUP_CONCAT. SQLite da a -1.7 el marco de -2: avanza sin volver atrás
+    $bd->consultar('CREATE TABLE ra (id INTEGER PRIMARY KEY, i INTEGER, r REAL)');
+    $bd->consultar('INSERT INTO ra VALUES (1, 18014398509481992, NULL), (2, 9007199254740998, NULL), (3, -4, NULL), (4, 9007199254740994, NULL), (5, -2, NULL),
+                    (6, 9007199254740988, NULL), (7, 9007199254740990, NULL), (8, NULL, -1.7), (9, 9007199254740990, NULL)');
+    $w = 'OVER (ORDER BY COALESCE(i, r) RANGE BETWEEN 9007199254740993 FOLLOWING AND UNBOUNDED FOLLOWING)';
+    $f = array_map(static fn(array $f): string => $f['c'] . ':' . $f['g'], $bd->consultar("SELECT c, g FROM (SELECT id, COUNT(*) $w AS c, GROUP_CONCAT(id) $w AS g FROM ra) AS v WHERE id IN (3, 5, 8) ORDER BY id"));
+    return $f === ['5:7,9,4,2,1', '3:4,2,1', '5:7,9,4,2,1'] ?: 'el marco que encoge: ' . json_encode($f);
+});
+chk('Los marcos RANGE con una distancia infinita (9e999) y valores infinitos, como SQLite: -INF + INF es NULL y compara como sus NULL, y con los dos bordes PRECEDING el marco no pasa de los pares de la fila (2.10: comparaba un NaN)', function () use ($bd, $sqlite) {
+    foreach (['CREATE TABLE rgi (id INTEGER PRIMARY KEY, k INTEGER, r REAL, s TEXT)', "INSERT INTO rgi VALUES (1, 1, NULL, NULL), (2, 2, NULL, NULL), (3, 0, NULL, NULL),
+              (4, 0, 2.5, NULL), (5, 0, -1.0, NULL), (6, 0, NULL, NULL), (7, 2, NULL, NULL), (8, 0, NULL, 'b'), (9, 0, NULL, 'a'), (10, 0, NULL, 'c')"] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    $x = 'CASE k WHEN 1 THEN 9e999 WHEN 2 THEN -9e999 ELSE COALESCE(r, s) END';      // una columna no guarda un infinito
+    $q = [];
+    foreach (['9e999 PRECEDING AND CURRENT ROW', 'CURRENT ROW AND 9e999 FOLLOWING', '9e999 FOLLOWING AND 9e999 FOLLOWING', '0 PRECEDING AND 9e999 PRECEDING',
+              '9e999 PRECEDING AND 9e999 FOLLOWING', '1 FOLLOWING AND 9e999 FOLLOWING', '9e999 PRECEDING AND 1 PRECEDING', 'UNBOUNDED PRECEDING AND 9e999 FOLLOWING',
+              '9e999 PRECEDING AND UNBOUNDED FOLLOWING'] as $m) {
+        foreach (['ASC', 'DESC', 'ASC NULLS LAST', 'DESC NULLS FIRST'] as $dir) {
+            // SQLite no vuelve atrás: en DESC el +INF va primero, su marco
+            // llega al final con FOLLOWING, y las filas que siguen se quedan
+            // con ese final; aquí cada fila tiene el suyo
+            if (str_ends_with($m, 'FOLLOWING') && ($dir === 'DESC' || ($dir === 'DESC NULLS FIRST' && str_starts_with($m, '9e999 FOLLOWING')))) {
+                continue;
+            }
+            $w   = "OVER (ORDER BY $x $dir RANGE BETWEEN $m)";
+            $q[] = "SELECT id, COUNT(*) $w AS c, FIRST_VALUE(id) $w AS f, LAST_VALUE(id) $w AS l FROM rgi ORDER BY id";
+        }
+    }
+    // Los textos con COLLATE BINARY, comparados como se ordenan
+    $bd->consultar('CREATE TABLE rgc (id INTEGER PRIMARY KEY, s TEXT)');
+    $bd->consultar("INSERT INTO rgc VALUES (1, 'b'), (2, 'C'), (3, 'a')");
+    $sqlite->exec("CREATE TABLE rgc (id INTEGER PRIMARY KEY, s TEXT); INSERT INTO rgc VALUES (1, 'b'), (2, 'C'), (3, 'a')");
+    foreach (['9e999 PRECEDING AND CURRENT ROW', 'CURRENT ROW AND 9e999 FOLLOWING'] as $m) {
+        $q[] = "SELECT id, COUNT(*) OVER (ORDER BY s COLLATE BINARY RANGE BETWEEN $m) AS c FROM rgc ORDER BY id";
+    }
+    return \count($q) === 31 ? filasComoSqlite($q) : \count($q) . ' consultas';
+});
+chk('TOTAL, AVG y SUM con decimales suman compensando el error, como SQLite 3.45: 1e100, 3 y -1e100 dan 3, también por grupos, con DISTINCT y en una ventana (2.10: 0)', function () use ($bd, $sqlite) {
+    foreach (['CREATE TABLE kb (id INTEGER PRIMARY KEY, g INTEGER, r REAL, i INTEGER)',
+              'INSERT INTO kb VALUES (1, 1, 1e100, 5), (2, 1, 3.0, 9223372036854775807), (3, 1, -1e100, 1), (4, 2, 0.1, 2), (5, 2, 0.2, 3), (6, 2, 0.3, 4), (7, 1, 0.5, -9223372036854775807)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    $r = [filasComoSqlite(['SELECT TOTAL(r), AVG(r), SUM(r) FROM kb', 'SELECT g, TOTAL(r), AVG(r), SUM(r) FROM kb GROUP BY g ORDER BY g',
+                           'SELECT SUM(DISTINCT r), TOTAL(r + i) FROM kb', 'SELECT id, SUM(r) OVER (ORDER BY id), AVG(r) OVER (PARTITION BY g ORDER BY id) FROM kb ORDER BY id'])];
+    // Con un marco que no empieza en la partición, cada uno se suma con sus
+    // valores; SQLite resta lo que sale, y ahí puede no dar lo mismo
+    $bd->consultar('CREATE TABLE kv (id INTEGER PRIMARY KEY, x REAL)');
+    $bd->consultar('INSERT INTO kv VALUES (1, 1e100), (2, -1e100), (3, 1.0), (4, 2.0), (5, 3.0)');
+    $v = array_column($bd->consultar('SELECT SUM(x) OVER (ORDER BY id ROWS 1 PRECEDING) AS s FROM kv ORDER BY id'), 's');
+    $r[] = $v === [1e100, 0.0, -1e100, 3.0, 5.0] ?: json_encode($v);
+    // Bit a bit, lo que da SQLite 3.45 (PDO en PHP 8.0 trae los decimales con
+    // 15 cifras: van escritos): los enteros, exactos hasta el primer decimal o
+    // hasta que no caben, y desde ahí al par en orden de llegada; AVG pasa la
+    // suma a decimal antes de dividir; y por el disco, una suma para todas las
+    // particiones
+    foreach (['CREATE TABLE ko (id INTEGER PRIMARY KEY, i INTEGER, r REAL)',
+              'INSERT INTO ko VALUES (1, -68, NULL), (2, NULL, 1e-16), (3, NULL, 3.0), (4, 380, NULL), (5, NULL, 3.0), (6, NULL, -1e16), (7, 941, NULL), (8, -882, NULL)',
+              'CREATE TABLE kx (id INTEGER PRIMARY KEY, i INTEGER)', 'INSERT INTO kx VALUES (1, 9223372036854775807), (2, 1), (3, -9223372036854775807)',
+              'CREATE TABLE ka (i INTEGER)', 'INSERT INTO ka VALUES (9007199254740993), (9007199254740993), (9007199254740993)',
+              'CREATE TABLE kd (r REAL)', 'INSERT INTO kd VALUES (1e100), (21.0), (-1e100), (0.1), (0.2), (0.3)'] as $q) {
+        $bd->consultar($q);
+    }
+    $disco = new JsonSQLDB\Select(new JsonSQLDB\Catalog(new JsonSQLDB\Storage($GLOBALS['raiz'], 'c')));
+    $p = new ReflectionProperty(JsonSQLDB\Select::class, 'enDisco');
+    PHP_VERSION_ID < 80100 && $p->setAccessible(true);         // desde 8.5 avisa de obsoleta
+    $p->setValue($disco, true);
+    foreach (['SELECT SUM(COALESCE(i, r)) FROM ko' => [-9999999999999622.0], 'SELECT TOTAL(i), AVG(i) FROM kx' => [1.0, 0.3333333333333333],
+              "SELECT SUM(x) FROM (SELECT i AS x FROM kx UNION ALL SELECT 0.5)" => [1.5], 'SELECT AVG(i) FROM ka' => [9007199254740994.0],
+              'SELECT TOTAL(i) OVER (ORDER BY id) FROM kx ORDER BY id' => [9.2233720368547758e18, 9.2233720368547758e18, 1.0]] as $q => $esperado) {
+        $v = array_merge(...array_map('array_values', $bd->consultar($q)));
+        $r[] = $v === $esperado ?: "$q: " . json_encode($v, JSON_PRESERVE_ZERO_FRACTION);
+    }
+    foreach (['SELECT SUM(DISTINCT r), TOTAL(DISTINCT r), AVG(DISTINCT r) FROM kd', 'SELECT TOTAL(DISTINCT i), AVG(DISTINCT i) FROM kx'] as $q) {
+        $v = array_values($disco->ejecutar(JsonSQLDB\Parser::analizar($q))[0]);
+        $m = array_values($bd->consultar($q)[0]);
+        $r[] = $v === $m && in_array($m, [[21.6, 21.6, 3.6], [1.0, 0.3333333333333333]], true) ?: "$q: por el disco " . json_encode($v) . ', en memoria ' . json_encode($m);
+    }
+    return array_filter($r, static fn($x) => $x !== true) === [] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('SUM, TOTAL, AVG, SUM(DISTINCT) y TOTAL en una ventana dan bit a bit lo que SQLite 3.45 en 200 conjuntos al azar: enteros cerca de 2^63 que desbordan, cerca de 2^52, decimales de 1e-20 a 1e100 y medios', function () use ($bd) {
+    if (PHP_VERSION_ID < 80100) {
+        return null;                    // PDO de PHP 8.0 trae los decimales de SQLite con 15 cifras
+    }
+    mt_srand(11);
+    $uno = static function (): string {
+        switch (mt_rand(0, 9)) {
+            case 0: return (string)(mt_rand(0, 1) ? PHP_INT_MAX - mt_rand(0, 1000) : PHP_INT_MIN + mt_rand(0, 1000));
+            case 1: return (string)mt_rand(-1000, 1000);
+            case 2: return sprintf('%.17e', (mt_rand(0, 1) ? 1 : -1) * 10 ** mt_rand(-20, 100));
+            case 3: return mt_rand(-1000, 1000) . '.5';
+            case 4: return (string)((mt_rand(0, 1) ? 1 : -1) * 4503599627370496 + mt_rand(-5, 5));
+            case 5: return '1e16';
+            case 6: return '-1e16';
+            case 7: return (string)mt_rand(-9000000000000000000, 9000000000000000000);
+            case 8: return '0.1';
+            default: return (string)mt_rand(-5, 5);
+        }
+    };
+    $mal = [];
+    for ($c = 0; $c < 200; $c++) {
+        $filas = [];
+        for ($i = 1, $n = mt_rand(1, 8); $i <= $n; $i++) {
+            $x = $uno();
+            $filas[] = "($i, " . (preg_match('/[.e]/', $x) ? "NULL, $x)" : "$x, NULL)");
+        }
+        $l = sqliteParaComparar();
+        foreach (['DROP TABLE IF EXISTS bab', 'CREATE TABLE bab (id INTEGER PRIMARY KEY, i INTEGER, r REAL)', 'INSERT INTO bab VALUES ' . implode(',', $filas)] as $q) {
+            $bd->consultar($q);
+            $l->exec($q);
+        }
+        foreach (['SELECT SUM(COALESCE(i, r)), TOTAL(COALESCE(i, r)), AVG(COALESCE(i, r)) FROM bab', 'SELECT SUM(DISTINCT COALESCE(i, r)) FROM bab',
+                  'SELECT TOTAL(COALESCE(i, r)) OVER (ORDER BY id) FROM bab ORDER BY id'] as $q) {
+            try { $a = json_encode(array_map('array_values', $bd->consultar($q)), JSON_PRESERVE_ZERO_FRACTION); } catch (JsonSqlDbError $e) { $a = 'error'; }
+            try { $b = json_encode($l->query($q)->fetchAll(PDO::FETCH_NUM), JSON_PRESERVE_ZERO_FRACTION); } catch (PDOException $e) { $b = 'error'; }
+            if ($a !== $b) {
+                $mal[] = "$q con " . implode(',', $filas) . ": $a / $b";
+            }
+        }
+    }
+    $bd->consultar('DROP TABLE bab');
+    return $mal === [] ?: count($mal) . ' distintas; ' . substr(implode(' | ', $mal), 0, 900);
+});
+chk('SUM, TOTAL y AVG(DISTINCT) por el disco suman en el orden en que aparecen los valores: el mismo redondeo y el mismo error de desbordamiento que en memoria y en SQLite (2.10, antes de publicarla: en el de las particiones)', function () use ($bd, $sqlite, $raiz) {
+    mt_srand(7);
+    $v = [];
+    for ($i = 1; $i <= 300; $i++) {
+        $v[] = "($i, " . sprintf('%.17g', (mt_rand() / mt_getrandmax() - 0.5) * 10 ** mt_rand(-5, 17)) . ')';
+    }
+    foreach (['CREATE TABLE kdo (id INTEGER PRIMARY KEY, r REAL)', 'INSERT INTO kdo VALUES ' . implode(',', $v),
+              'CREATE TABLE kdi (id INTEGER PRIMARY KEY, i INTEGER)',
+              'INSERT INTO kdi VALUES (1, 9223372036854775807), (2, 2), (3, -2), (4, -9223372036854775808), (5, 1), (6, -1)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    $disco = new JsonSQLDB\Select(new JsonSQLDB\Catalog(new JsonSQLDB\Storage($raiz, 'c')));
+    $p = new ReflectionProperty(JsonSQLDB\Select::class, 'enDisco');
+    PHP_VERSION_ID < 80100 && $p->setAccessible(true);         // desde 8.5 avisa de obsoleta
+    $p->setValue($disco, true);
+    $dar = static function (callable $f): string {
+        try {
+            return json_encode(array_values($f()[0]), JSON_PRESERVE_ZERO_FRACTION);
+        } catch (Throwable $e) {
+            return str_contains($e->getMessage(), 'overflow') ? 'integer overflow' : $e->getMessage();
+        }
+    };
+    $mal = [];
+    foreach (['SELECT SUM(DISTINCT r), TOTAL(DISTINCT r), AVG(DISTINCT r) FROM kdo', 'SELECT SUM(DISTINCT i) FROM kdi', 'SELECT TOTAL(DISTINCT i), AVG(DISTINCT i) FROM kdi'] as $q) {
+        $en = [$dar(static fn() => $disco->ejecutar(JsonSQLDB\Parser::analizar($q))), $dar(static fn() => $bd->consultar($q)),
+               // PDO de PHP 8.0 trae los decimales con 15 cifras: allí, solo memoria y disco
+               PHP_VERSION_ID < 80100 ? null : $dar(static fn() => $sqlite->query($q)->fetchAll(PDO::FETCH_ASSOC))];
+        if ($en[0] !== $en[1] || ($en[2] !== null && $en[1] !== $en[2])) {
+            $mal[] = "$q: disco $en[0], memoria $en[1], SQLite $en[2]";
+        }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+chk('un booleano de un JSON editado a mano es 1 o 0 también al agrupar, en DISTINCT, en SUM y en las cuentas, y una lista no se junta con el 1 (2.10: true iba con el texto \'1\', sumaba 0 y true + 1 daba 1)', function () use ($bd, $raiz) {
+    $bd->consultar('CREATE TABLE jbo (id INTEGER PRIMARY KEY, x INTEGER, t TEXT)');
+    $bd->consultar("INSERT INTO jbo VALUES (1, 1, '1'), (2, 1, ''), (3, 1, 'a'), (4, 0, 'b'), (5, 0, 'c')");
+    // Como lo dejaría quien edita el fichero: true y false en lugar de 1 y 0
+    $f = "$raiz/c/jbo.json";
+    file_put_contents($f, str_replace(['{"id":1,"x":1', '{"id":2,"x":1', '{"id":4,"x":0'], ['{"id":1,"x":true', '{"id":2,"x":true', '{"id":4,"x":false'], (string)file_get_contents($f)));
+    $r = [$bd->consultar('SELECT SUM(x) AS s, TOTAL(x) AS t, AVG(x) AS a, COUNT(DISTINCT x) AS d FROM jbo')[0],
+          array_column($bd->consultar('SELECT x, COUNT(*) AS n FROM jbo GROUP BY x ORDER BY x'), 'n'),
+          count($bd->consultar('SELECT DISTINCT x FROM jbo')), count($bd->consultar('SELECT x FROM jbo UNION SELECT t FROM jbo WHERE id <= 2')),
+          // y en las cuentas (2.10: true + 1 daba 1)
+          array_column($bd->consultar('SELECT x + 1 AS y FROM jbo WHERE id IN (1, 4) ORDER BY id'), 'y')];
+    // Y una lista donde iba un 1 no se junta con él
+    $bd->consultar('CREATE TABLE jba (id INTEGER PRIMARY KEY, x INTEGER)');
+    $bd->consultar('INSERT INTO jba VALUES (1, 1), (2, 1), (3, 1)');
+    file_put_contents("$raiz/c/jba.json", str_replace('{"id":3,"x":1', '{"id":3,"x":[1,2]', (string)file_get_contents("$raiz/c/jba.json")));
+    $r[] = $bd->consultar('SELECT COUNT(DISTINCT x) AS d FROM jba')[0]['d'];
+    return $r === [['s' => 3, 't' => 3.0, 'a' => 0.6, 'd' => 2], [2, 3], 2, 4, [2, 1], 2] ?: json_encode($r);
+});
+chk('SUM, TOTAL y AVG que se desbordan a infinito en el último valor dan NULL, como SQLite 3.45 (su error queda en -INF y la suma más él es NaN); con más valores detrás, infinito, como allí (2.10, antes de publicarla: siempre infinito)', function () use ($bd, $sqlite) {
+    foreach (['CREATE TABLE sov (id INTEGER PRIMARY KEY, g INTEGER, x REAL)',
+              'INSERT INTO sov VALUES (1, 1, 1e308), (2, 1, 1e308), (3, 2, 1e308), (4, 2, 1e308), (5, 2, 1), (6, 3, -1e308), (7, 3, -1e308),
+               (8, 4, 1e308), (9, 4, 1e308), (10, 4, -1e308), (11, 5, 1e308), (12, 5, 0.1), (13, 6, 1e308), (14, 6, -1e308), (15, 7, 1e308), (16, 7, 9e307)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    $f = static fn(string $e): string => "$e IS NULL, $e > 1e308, $e < -1e308";
+    return filasComoSqlite(['SELECT g, ' . $f('SUM(x)') . ', ' . $f('TOTAL(x)') . ', ' . $f('AVG(x)') . ' FROM sov GROUP BY g ORDER BY g',
+        'SELECT g, ' . $f('SUM(x * 10)') . ', ' . $f('TOTAL(x * 10)') . ' FROM sov WHERE g >= 5 GROUP BY g ORDER BY g',
+        'SELECT ' . $f('SUM(x)') . ' FROM sov WHERE g = 1', 'SELECT ' . $f('SUM(DISTINCT x)') . ', ' . $f('AVG(DISTINCT x)') . ' FROM sov WHERE g IN (2, 7)',
+        'SELECT id, ' . $f('SUM(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)') . ' FROM sov WHERE g = 7 ORDER BY id',
+        'SELECT id, ' . $f('SUM(x) OVER (ORDER BY id)') . ' FROM sov WHERE g <= 2 ORDER BY id']);
+});
+chk('NaN (INF - INF, INF * 0, INF / INF, MOD(INF, 2), LOG(INF, INF), SUM de +INF y -INF) es NULL, como en SQLite (2.10: pasaba un WHERE x > 2 y se ordenaba en cualquier sitio)', function () use ($bd, $sqlite) {
+    foreach (['CREATE TABLE nanx (id INTEGER PRIMARY KEY, x REAL)', 'INSERT INTO nanx VALUES (1, 1e308), (2, -1e308), (3, 2.0), (4, 3.0)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    return filasComoSqlite(['SELECT (x * 10) - (x * 10) IS NULL FROM nanx ORDER BY id', 'SELECT (x * 10) * 0 IS NULL FROM nanx ORDER BY id',
+        'SELECT (x * 10) / (x * 10) IS NULL FROM nanx ORDER BY id', 'SELECT id FROM nanx WHERE (x * 10) - (x * 10) > 2 ORDER BY id',
+        'SELECT id FROM nanx ORDER BY (x * 10) - (x * 10), id', 'SELECT SUM(x * 10) IS NULL, TOTAL(x * 10) IS NULL, AVG(x * 10) IS NULL FROM nanx',
+        'SELECT SUM(x * 10) OVER (ORDER BY id) IS NULL FROM nanx ORDER BY id', 'SELECT MOD(x * 10, 2) IS NULL FROM nanx ORDER BY id',
+        'SELECT LOG(x * 10, x * 10) IS NULL FROM nanx WHERE id = 1', 'SELECT id FROM nanx WHERE (x * 10) * 0 IS NULL ORDER BY id',
+        'SELECT id FROM nanx WHERE (x * 10) / (x * 10) IS NULL ORDER BY id', 'SELECT id FROM nanx WHERE (x * 10) + (x * -10) IS NULL ORDER BY id',
+        'SELECT (x * 10) + (x * -10) IS NULL FROM nanx ORDER BY id']);
+});
+chk('Un decimal pasado a texto (columna TEXT, CAST, ||) lleva 15 cifras y el exponente como SQLite, y un infinito es Inf (2.10: 14 cifras, 123456789.12346, 1.0E+25, y el infinito, un texto vacío)', function () use ($bd, $sqlite) {
+    foreach (['CREATE TABLE dtx (id INTEGER PRIMARY KEY, t TEXT, u)',
+              'INSERT INTO dtx VALUES (1, 123456789.123456789, 123456789.123456789), (2, 1e100, 1e-5), (3, 1e15, 1e14), (4, -2.5e-7, 0.1 + 0.2), (5, 9e999, -9e999)'] as $q) {
+        $bd->consultar($q);
+        $sqlite->exec($q);
+    }
+    return filasComoSqlite(['SELECT t, typeof(t) FROM dtx ORDER BY id', 'SELECT CAST(u AS TEXT) AS a, u || \'\' AS b FROM dtx ORDER BY id',
+        "SELECT id FROM dtx WHERE t = '123456789.123457'", "SELECT 1e25 || '' AS a, CAST(1.0 / 3 AS TEXT) AS b, CAST(-0.0 AS TEXT) AS c, 100.0 || 'x' AS d",
+        "SELECT CAST(9e999 AS TEXT) AS a, CAST(-9e999 AS TEXT) AS b, 9e999 || '' AS c", "SELECT id FROM dtx WHERE t = 'Inf'"]);
+});
+chk('Un decimal entero de 9·10^18 a 2^63 y el mismo entero son el mismo valor también en un índice: clave foránea de INTEGER a REAL y al revés, UNIQUE, =, IN, COUNT y JOIN, como SQLite (2.10: la clave foránea no lo encontraba)', function () use ($raiz) {
+    @mkdir("$raiz/fg", 0775, true);
+    $r = escriturasComoSqlite("$raiz/fg", ['CREATE TABLE fp (id INTEGER PRIMARY KEY, r REAL UNIQUE, k INTEGER UNIQUE)',
+        'CREATE TABLE fh (id INTEGER PRIMARY KEY, p INTEGER REFERENCES fp (r), q REAL REFERENCES fp (k))',
+        // -9.2e18, que PDO de PHP 8.0 trae bien con sus 15 cifras; -2^63, abajo
+        'INSERT INTO fp VALUES (1, 9.1e18, 9100000000000000000), (2, -9.2e18, -9223372036854775807), (3, 2.5, 3)',
+        'INSERT INTO fh VALUES (1, 9100000000000000000, 9.1e18), (2, -9200000000000000000, NULL)'], [
+        ['INSERT INTO fh VALUES (3, NULL, -9223372036854775808.0)', null],
+        ['INSERT INTO fp VALUES (4, 9100000000000000000, 4)', null],
+        ['INSERT INTO fp VALUES (4, 4.5, 9.1e18)', null],
+        ['DELETE FROM fp WHERE id = 1', null],
+        ['UPDATE fp SET r = 1.5 WHERE id = 2', null],
+        ['UPDATE fh SET p = 9.1e18 WHERE id = 2', null],
+        ['SELECT id FROM fp WHERE r = 9100000000000000000', null],
+        ['SELECT id FROM fp WHERE r IN (9100000000000000000, -9200000000000000000)', null],
+        ['SELECT id FROM fp WHERE k = 9.1e18', null],
+        ['SELECT COUNT(*) AS id FROM fp WHERE r = 9100000000000000000', null],
+        ['SELECT fh.id AS id, fp.id AS pid FROM fh JOIN fp ON fp.r = fh.p', null],
+    ]);
+    if ($r !== true) {
+        return $r;
+    }
+    // Y la igualdad va por el índice (2.10: pasado 9·10^18, leyendo la tabla)
+    Database::crear('x', "$raiz/fg");
+    $b = new Database('x', "$raiz/fg");
+    $b->consultar('CREATE TABLE fp (id INTEGER PRIMARY KEY, r REAL UNIQUE)');
+    $b->consultar('INSERT INTO fp VALUES (1, 9.1e18), (2, 3.5), (3, -9223372036854775808.0)');
+    $via = [$b->consultar('EXPLAIN SELECT id FROM fp WHERE r = 9100000000000000000')[0]['acceso'],
+            $b->consultar('EXPLAIN SELECT id FROM fp WHERE r IN (9.1e18, -9223372036854775808)')[0]['acceso'],
+            array_column($b->consultar('SELECT id FROM fp WHERE r IN (9.1e18, -9223372036854775808) ORDER BY id'), 'id')];
+    unset($b);
+    Database::borrar('x', "$raiz/fg");
+    return str_starts_with($via[0], 'índice') && str_starts_with($via[1], 'índice') && $via[2] === [1, 3] ?: json_encode($via, JSON_UNESCAPED_UNICODE);
+});
+chk('un decimal pasado a texto lleva 15 cifras también con otro «precision» en php.ini (17, -1 o 5), y aunque cambie a mitad del proceso', function () {
+    $antes = ini_get('precision');
+    $mal   = [];
+    foreach (['17', '-1', '5', $antes] as $p) {
+        ini_set('precision', $p);
+        $r = array_map([JsonSQLDB\Valor::class, 'aTexto'], [0.1 + 0.2, 1 / 3, 2.5, 1e14, 123456789.123456789, 1234567890123456.0, 0.1]);
+        if ($r !== ['0.3', '0.333333333333333', '2.5', '100000000000000.0', '123456789.123457', '1.23456789012346e+15', '0.1']) { $mal[] = "$p: " . implode(' ', $r); }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
+chk('con otro serialize_precision (10 o 17, puesto por la aplicación como podría estarlo en php.ini), los decimales se guardan con las cifras justas en los datos, en los índices, en SHOW CREATE TABLE, al deshacer una transacción o un lote y al reparar un fichero cuando acaban, y la aplicación sigue con el suyo, también en lo suyo que llama el motor (2.10: con 10, 0.30000000000000004 se guardaba 0.3; con 17, 0.1 era 0.10000000000000001 y el índice no lo encontraba)', function () use ($bd, $raiz) {
+    $antes = ini_get('serialize_precision');
+    $mal = [];
+    try {
+        foreach (['10', '17'] as $sp) {
+            ini_set('serialize_precision', $sp);
+            $t = "sp$sp";
+            $bd->consultar("CREATE TABLE $t (id INTEGER PRIMARY KEY, x REAL, y REAL DEFAULT 0.30000000000000004)");
+            $bd->consultar("CREATE INDEX {$t}_x ON $t (x)");
+            $bd->transaccion(static function (JsonSQLDB\Database $db) use ($t, $sp, &$mal): void {
+                $db->consultar("INSERT INTO $t (id, x) VALUES (1, 0.1 + 0.2), (2, 1.0 / 3), (3, 0.1)");
+                if (ini_get('serialize_precision') !== $sp) {
+                    $mal[] = "$sp: dentro de la transacción, " . ini_get('serialize_precision');
+                }
+            });
+            // En el fichero de la tabla y en el del índice, y lo que se lee
+            $f = file_get_contents("$raiz/c/$t.json") . file_get_contents("$raiz/c/$t.idx.{$t}_x.json");
+            foreach (['"x":0.30000000000000004,', '"x":0.3333333333333333,', '"x":0.1,', ':0.30000000000000004"', ':0.1"'] as $s) {
+                if (!str_contains($f, $s)) {
+                    $mal[] = "$sp: en el disco no está $s";
+                }
+            }
+            $r = [$bd->consultar("SELECT id FROM $t WHERE x = 0.1"), $bd->consultar("SELECT id, x, y FROM $t WHERE x = 0.1 + 0.2"), $bd->consultar("SHOW CREATE TABLE $t")[0]['sql']];
+            if ($r[0] !== [['id' => 3]] || $r[1] !== [['id' => 1, 'x' => 0.1 + 0.2, 'y' => 0.1 + 0.2]] || !str_contains($r[2], 'DEFAULT 0.30000000000000004')) {
+                $mal[] = "$sp: " . json_encode($r);
+            }
+            if (ini_get('serialize_precision') !== $sp) {
+                $mal[] = "$sp: después, " . ini_get('serialize_precision');
+            }
+        }
+        // Un fichero editado a mano que se lee en una transacción se repara
+        // al acabarla, fuera de cada sentencia
+        // Deshacer una transacción y un lote reescribe rev.json, con el rango
+        // del índice: al leerlo, MIN y un < por el índice
+        $bd->consultar('CREATE TABLE spd (id INTEGER PRIMARY KEY, x REAL)');
+        $bd->consultar('CREATE INDEX spd_x ON spd (x)');
+        $bd->consultar('INSERT INTO spd VALUES (1, 1.0 / 7), (2, 0.5)');
+        ini_set('serialize_precision', '10');
+        try {
+            $bd->transaccion(static function (JsonSQLDB\Database $db): void {
+                $db->consultar('INSERT INTO spd VALUES (3, 0.25)');
+                ini_set('serialize_precision', '12');          // la aplicación lo cambia: después sigue así
+                throw new RuntimeException('deshacer');
+            });
+        } catch (RuntimeException) {
+        }
+        if (ini_get('serialize_precision') !== '12') {
+            $mal[] = 'el que dejó la aplicación en la transacción: ' . ini_get('serialize_precision');
+        }
+        ini_set('serialize_precision', '10');
+        $bd->lote(['INSERT INTO spd VALUES (4, 0.75)', 'ROLLBACK']);
+        $r = [$bd->consultar('SELECT MIN(x) AS m FROM spd'), $bd->consultar('SELECT id FROM spd WHERE x < 0.14285714286'), ini_get('serialize_precision')];
+        if ($r !== [[['m' => 1.0 / 7]], [['id' => 1]], '10'] || !str_contains((string)file_get_contents("$raiz/c/spd.rev.json"), '0.14285714285714285')) {
+            $mal[] = 'al deshacer: ' . json_encode($r);
+        }
+        // Un proceso que muere a mitad de una transacción: la siguiente la
+        // deshace al bloquear, antes de lo suyo, y reescribe rev.json
+        $codigo = 'define("JSONSQLDB_CONEXION_DIRECTA", true); define("JSONSQLDB_CACHE_RESULTADOS", 0);'
+            . ' require ' . var_export(dirname(__DIR__) . '/engine/bootstrap.php', true) . ';'
+            . ' (new JsonSQLDB\Database("c", ' . var_export($raiz, true) . '))->transaccion(static function ($db): void {'
+            . ' $db->consultar("INSERT INTO spd VALUES (5, 0.125)"); exit(0); });';
+        shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($codigo) . ' 2>&1');
+        $bd->transaccion(static fn(JsonSQLDB\Database $db) => $db->consultar('SELECT 1'));
+        $r = [$bd->consultar('SELECT MIN(x) AS m, COUNT(*) AS n FROM spd'), ini_get('serialize_precision')];
+        if ($r !== [[['m' => 1.0 / 7, 'n' => 2]], '10'] || !str_contains((string)file_get_contents("$raiz/c/spd.rev.json"), '0.14285714285714285')) {
+            $mal[] = 'al deshacer la de un proceso que murió: ' . json_encode($r);
+        }
+        // Lo de la aplicación que llama el motor, con lo suyo: quien autoriza
+        // la sentencia y quien recibe las filas de consultarPorFilas()
+        $vistos = [];
+        $bd->consultarPorFilas('SELECT id FROM spd', [], static function () use (&$vistos): void { $vistos[] = ini_get('serialize_precision'); },
+            static function () use (&$vistos): void { $vistos[] = ini_get('serialize_precision'); });
+        if ($vistos !== ['10', '10', '10'] || ini_get('serialize_precision') !== '10') {
+            $mal[] = 'lo de la aplicación: ' . json_encode($vistos);
+        }
+        $bd->consultar('CREATE TABLE spr (id INTEGER PRIMARY KEY, x REAL)');
+        $bd->consultar('INSERT INTO spr VALUES (1, 0.1 + 0.2), (2, 0.5)');
+        file_put_contents("$raiz/c/spr.json", str_replace('{"id":2,', '{"id": 2,', (string)file_get_contents("$raiz/c/spr.json")));
+        ini_set('serialize_precision', '10');
+        $bd->transaccion(static fn(JsonSQLDB\Database $db) => $db->consultar('SELECT * FROM spr'));
+        $f = (string)file_get_contents("$raiz/c/spr.json");
+        if (!str_contains($f, '{"id":2,"x":0.5}') || !str_contains($f, '"x":0.30000000000000004}') || ini_get('serialize_precision') !== '10') {
+            $mal[] = 'la reparación al acabar la transacción: ' . ini_get('serialize_precision') . " $f";
+        }
+    } finally {
+        ini_set('serialize_precision', (string)$antes);
+    }
+    return $mal === [] ?: implode('; ', $mal);
+});
+chk('un decimal pasado a texto no depende del locale: con uno de coma decimal (setlocale de la aplicación) sigue siendo 0.3 y no 0,3 (2.10, antes de publicarla)', function () use ($bd) {
+    $antes = setlocale(LC_ALL, '0');
+    if (setlocale(LC_ALL, 'es_ES.UTF-8', 'de_DE.UTF-8', 'fr_FR.UTF-8', 'es_ES', 'de_DE', 'Spanish_Spain', 'German_Germany') === false || localeconv()['decimal_point'] !== ',') {
+        setlocale(LC_ALL, (string)$antes);
+        return null;                    // sin un locale de coma instalado, no hay nada que ver
+    }
+    try {
+        $bd->consultar('CREATE TABLE loc (id INTEGER PRIMARY KEY, t TEXT)');
+        $bd->consultar('INSERT INTO loc VALUES (1, 0.1 + 0.2), (2, 123456789.123456789), (3, 1e20), (4, 2.5e-7)');
+        $r = [array_column($bd->consultar('SELECT t FROM loc ORDER BY id'), 't'),
+              $bd->consultar("SELECT CAST(1.5 AS TEXT) AS a, 0.25 || '' AS b, QUOTE(0.1 + 0.2) AS c")[0]];
+    } finally {
+        setlocale(LC_ALL, (string)$antes);
+    }
+    return $r === [['0.3', '123456789.123457', '1.0e+20', '2.5e-07'], ['a' => '1.5', 'b' => '0.25', 'c' => '3.0000000000000004e-01']] ?: json_encode($r);
+});
+
+chk('QUOTE de un decimal vuelve a dar el mismo número, como en SQLite: 15 cifras si bastan y si no, las que hacen falta, con exponente (2.10: 14 cifras, y 0.30000000000000004 quedaba 0.3)', function () use ($bd, $sqlite) {
+    $mal = [];
+    foreach (['0.30000000000000004', '1.0 / 3', '-2.0 / 3', '123456789.123456789', '9007199254740993.0', '123456789012345678.0', '1.7976931348623157e308', '5e-324',
+              '1e100', '0.1', '1.0', '-0.0', '1e-5', '100.5', '9e999', '-9e999'] as $x) {
+        $a = $bd->consultar("SELECT QUOTE($x) AS q")[0]['q'];
+        $b = $sqlite->query("SELECT QUOTE($x)")->fetchColumn();
+        $v = $bd->consultar("SELECT $x AS v")[0]['v'];     // de aquí: PDO de PHP 8.0 lo trae con 15 cifras
+        // El mismo texto; o, si SQLite escribe alguna cifra más, el mismo número y la misma forma
+        if ($a !== $b && !((float)$a === (float)$b && (float)$a === $v && preg_match('/^-?\d\.\d+e[+-]\d{2,3}$/', $a))) {
+            $mal[] = "$x: $a / $b";
+        }
+    }
+    return $mal === [] ?: implode(' | ', $mal);
+});
+
+chk('SHOW CREATE TABLE escribe el DEFAULT de un decimal con todas sus cifras, y la tabla hecha con ese texto tiene el mismo valor por defecto (2.10: 0.30000000000000004 salía 0.3)', function () use ($bd) {
+    $bd->consultar('CREATE TABLE sdf (id INTEGER PRIMARY KEY, r REAL DEFAULT 0.30000000000000004, s REAL DEFAULT 1.5, t REAL DEFAULT 1e100, u REAL DEFAULT -9e999)');
+    $sql = $bd->consultar('SHOW CREATE TABLE sdf')[0]['sql'];
+    $bd->consultar(str_replace('CREATE TABLE sdf', 'CREATE TABLE sdf2', $sql));
+    $bd->consultar('ALTER TABLE sdf2 DROP COLUMN u');           // un INSERT con ese DEFAULT no se puede guardar
+    $bd->consultar('INSERT INTO sdf2 (id) VALUES (1)');
+    $f = $bd->consultar('SELECT r, s, t FROM sdf2')[0];
+    return str_contains($sql, 'DEFAULT 0.30000000000000004') && str_contains($sql, 'DEFAULT 1.5') && $f === ['r' => 0.30000000000000004, 's' => 1.5, 't' => 1e100]
+        ?: $sql . ' / ' . json_encode($f);
 });
 
 borrarArbol($raiz);

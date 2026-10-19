@@ -58,14 +58,12 @@ final class ApiStore
      */
     private function transaccion(string $fichero, callable $fn, bool $soloLectura = false)
     {
-        if (!$this->preparar()) {
-            return null;
-        }
         // 'c+' en los dos casos: 'c' abre solo para escribir y stream_get_contents
         // no leería nada. Lo que distingue a la lectura es el bloqueo compartido
         // y no volver a escribir el fichero, no el modo de apertura.
-        $fh = @fopen($fichero, 'c+');
+        $fh = $this->preparar() ? @fopen($fichero, 'c+') : false;
         if ($fh === false) {
+            Logger::noSeEscribe($fichero);             // se cierra el paso, y se dice por qué (2.10)
             return null;
         }
         try {
@@ -82,10 +80,14 @@ final class ApiStore
             }
             // Sin JSON_PRETTY_PRINT: esto no lo lee nadie a mano y se reescribe
             // en cada petición, así que la sangría es peso puro
-            $json = json_encode(array_filter(self::purgar($estado)), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            ftruncate($fh, 0);
+            $json = json_encode(array_filter(self::purgar($estado)), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+            // Encima de lo que había y, si es más corto, con espacios hasta su
+            // largo, que en JSON no cuentan (2.10): vaciar el fichero para
+            // volver a escribirlo libera sus bloques y los vuelve a pedir, y
+            // en la máquina de pruebas (ext4) costaba 220 µs por fichero, en vez
+            // de 8, en cada petición. El fichero no pasa del mayor tamaño que ha tenido
             rewind($fh);
-            fwrite($fh, $json . "\n");
+            fwrite($fh, \strlen($json) < \strlen((string)$texto) ? str_pad($json, \strlen((string)$texto)) : $json);
             fflush($fh);
             return $resultado;
         } finally {
@@ -136,7 +138,7 @@ final class ApiStore
         $ip = self::red($ip);
         return (bool)$this->transaccion($this->fichero('i', $ip), static function (array $e) use ($ip): array {
             $limite = time() - RATE_LIMIT_SECONDS;
-            $n = count(array_filter($e['fallosIp'][$ip] ?? [], static fn(int $t): bool => $t >= $limite));
+            $n = \count(array_filter($e['fallosIp'][$ip] ?? [], static fn(int $t): bool => $t >= $limite));
             return [$e, $n >= self::fallosPorIp()];
         }, true);                              // solo mira: no reescribe nada
     }
@@ -146,12 +148,12 @@ final class ApiStore
      * por su red /64, que es lo que un proveedor da a cada cliente; quien tiene
      * una tiene 2^64 direcciones, y cambiando de una a otra se saltaba el
      * límite por IP y el bloqueo por intentos fallidos. Una IPv4, también la
-     * escrita como IPv6 (::ffff:1.2.3.4), tal cual.
+     * escrita como IPv6 (::ffff:192.0.2.4), tal cual.
      */
     private static function red(string $ip): string
     {
         $bin = @inet_pton($ip);
-        if ($bin === false || strlen($bin) !== 16) {
+        if ($bin === false || \strlen($bin) !== 16) {
             return $ip;
         }
         if (strncmp($bin, str_repeat("\0", 10) . "\xff\xff", 12) === 0) {
@@ -163,7 +165,7 @@ final class ApiStore
     /** Fallos de una IP antes de bloquearla; 10 si la configuración es de antes de 2.7.3. */
     private static function fallosPorIp(): int
     {
-        return max(1, defined('RATE_LIMIT_FALLOS_IP') ? (int)RATE_LIMIT_FALLOS_IP : 10);
+        return max(1, \defined('RATE_LIMIT_FALLOS_IP') ? (int)RATE_LIMIT_FALLOS_IP : 10);
     }
 
     /**
@@ -180,10 +182,10 @@ final class ApiStore
         }
         $ip = self::red($ip);
         $this->transaccion($this->fichero('i', $ip), static function (array $e) use ($ip): array {
-            if (count($e['fallosIp'][$ip] ?? []) < self::fallosPorIp()) {
+            if (\count($e['fallosIp'][$ip] ?? []) < self::fallosPorIp()) {
                 $e['fallosIp'][$ip][] = time();
             }
-            if (count($e['ips'][$ip] ?? []) < RATE_LIMIT_MAX) {
+            if (\count($e['ips'][$ip] ?? []) < RATE_LIMIT_MAX) {
                 $e['ips'][$ip][] = time();
             }
             return [$e, null];
@@ -194,7 +196,10 @@ final class ApiStore
      * Registra el nonce y cuenta la petición: el nonce en su fichero, la IP en
      * el suyo y la clave en el suyo, cada uno en su transacción y en ese orden.
      * Un nonce repetido se rechaza antes de contar nada; uno nuevo queda
-     * anotado aunque la petición se pase del cupo, como antes.
+     * anotado aunque la petición se pase del cupo, como antes. Con $cupoIp
+     * false (las claves admin, 2.10) la IP no cuenta: el panel llama a la API
+     * desde su servidor, siempre la misma IP, y con el cupo de 150 al día se
+     * quedaba sin servicio; el cupo de la clave, si lo hay, sí cuenta.
      *
      * Devuelve true si todo va bien, 'nonce' si el token ya se usó, 'limite' si
      * se pasó del cupo, y false si un fichero no se pudo tocar. Como antes, un
@@ -208,7 +213,7 @@ final class ApiStore
      *
      * @return true|string|false
      */
-    public function nonceYContar(string $nonce, string $ip, string $clave = '', int $hora = 0)
+    public function nonceYContar(string $nonce, string $ip, string $clave = '', int $hora = 0, bool $cupoIp = true)
     {
         $antiReplay = ANTI_REPLAY_ACTIVO;
         $rate       = RATE_LIMIT_ACTIVO;
@@ -230,9 +235,9 @@ final class ApiStore
         }
         $limite = time() - RATE_LIMIT_SECONDS;
         $ip     = self::red($ip);
-        $r = $this->transaccion($this->fichero('i', $ip), static function (array $e) use ($ip, $limite): array {
+        $r = !$cupoIp ? true : $this->transaccion($this->fichero('i', $ip), static function (array $e) use ($ip, $limite): array {
             $marcas = array_values(array_filter($e['ips'][$ip] ?? [], static fn(int $t): bool => $t >= $limite));
-            $dentro = count($marcas) < RATE_LIMIT_MAX;
+            $dentro = \count($marcas) < RATE_LIMIT_MAX;
             // Pasado el límite ya no se anota nada más: el rechazo no depende de
             // cuántas marcas haya por encima, y un ataque de miles de peticiones
             // haría crecer el fichero, que cada petición de esa IP lee y reescribe
@@ -248,13 +253,13 @@ final class ApiStore
         // Cupo de cada API key, sea cual sea la IP (0 = sin cupo): para que una
         // clave filtrada, o una aplicación desbocada, no lo agote todo. Una
         // configuración de antes de 2.7.3 no tiene esta constante: sin cupo
-        $porClave = defined('RATE_LIMIT_POR_CLAVE') ? (int)RATE_LIMIT_POR_CLAVE : 0;
+        $porClave = \defined('RATE_LIMIT_POR_CLAVE') ? (int)RATE_LIMIT_POR_CLAVE : 0;
         if ($porClave <= 0 || $clave === '') {
             return true;
         }
         $r = $this->transaccion($this->fichero('c', $clave), static function (array $e) use ($clave, $limite, $porClave): array {
             $deClave = array_values(array_filter($e['claves'][$clave] ?? [], static fn(int $t): bool => $t >= $limite));
-            if (count($deClave) >= $porClave) {
+            if (\count($deClave) >= $porClave) {
                 $e['claves'][$clave] = $deClave;
                 return [$e, 'limite'];
             }
@@ -307,7 +312,9 @@ final class ApiStore
         if ($vuelta >= self::MAX_FICHEROS_DIA && ($entrada['origen'] ?? '') === '') {
             return;
         }
-        @file_put_contents($fichero, $linea . "\n", FILE_APPEND | LOCK_EX);
+        if (@file_put_contents($fichero, $linea . "\n", FILE_APPEND | LOCK_EX) === false) {
+            Logger::noSeEscribe($fichero);
+        }
 
         if (mt_rand(1, 200) === 1) {
             $this->purgarHistorico();

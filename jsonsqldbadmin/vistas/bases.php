@@ -4,14 +4,20 @@ sort($bases);
 
 // La copia en ZIP lee el disco: solo tiene sentido si el motor está aquí
 $zipDisponible = mismoHostQueLaApi() !== false;
+
+// Si se pueden descargar los ficheros de datos (2.10), solo para quien puede
+// arreglarlo: los administradores
+[$datosAviso, $datosEstado] = Auth::esAdmin() ? carpetaDatosHtml() : ['', ''];
 ?>
 <div class="page-head">
   <div>
     <h1><?= h(t('Bases de datos')) ?></h1>
     <p><?= count($bases) ?> <?= h(count($bases) === 1 ? t('base') : t('bases')) ?> ·
-       <?= Api::directa() ? t('conexión directa al motor') : t('conexión por la API') ?></p>
+       <?= Api::directa() ? t('conexión directa al motor') : t('conexión por la API') ?>
+       <?php if ($datosEstado !== ''): ?> · <?= h(t('Carpeta de datos')) ?>: <?= $datosEstado ?><?php endif; ?></p>
   </div>
 </div>
+<?= $datosAviso ?>
 
 <div class="row g-3">
   <div class="col-lg-7">

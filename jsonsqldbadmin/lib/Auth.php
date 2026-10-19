@@ -14,6 +14,8 @@ final class Auth
 {
     private const USUARIOS = 'usuarios.json';
     private const INTENTOS = 'intentos.json';
+    /** IPs que guarda intentos.json como mucho (ver sumarFallo()) */
+    private const INTENTOS_MAX_IPS = 1000;
 
     // ------------------------------------------------------------------
     // Sesión
@@ -388,6 +390,15 @@ final class Auth
         $corte = time() - ADMIN_LOGIN_BLOQUEO_MIN * 60 * 4;
         foreach ($intentos as $k => $v) {
             if ((int)($v['ultimo'] ?? 0) < $corte) { unset($intentos[$k]); }
+        }
+        // Y como mucho INTENTOS_MAX_IPS (2.10): con muchas IPs distintas a la
+        // vez crecía sin tope, y cada intento lo leía y reescribía entero. Se
+        // quedan las bloqueadas y, de las demás, las del último fallo más reciente
+        if (count($intentos) > self::INTENTOS_MAX_IPS) {
+            uasort($intentos, static fn(array $a, array $b): int
+                => [(int)($b['fallos'] ?? 0) >= ADMIN_LOGIN_MAX_FALLOS, (int)($b['ultimo'] ?? 0)]
+                <=> [(int)($a['fallos'] ?? 0) >= ADMIN_LOGIN_MAX_FALLOS, (int)($a['ultimo'] ?? 0)]);
+            $intentos = array_slice($intentos, 0, self::INTENTOS_MAX_IPS, true);
         }
         return $intentos;
     }

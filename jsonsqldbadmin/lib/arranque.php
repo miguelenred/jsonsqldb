@@ -12,6 +12,12 @@ declare(strict_types=1);
  *
  * https://miguelenred.es/jsonsqldb
  */
+// Los decimales, en JSON y en lo que se exporta, con las cifras justas para
+// volver a ser el mismo número, sea cual sea serialize_precision en php.ini
+// (2.10: con 10, 0.30000000000000004 salía 0.3)
+if (function_exists('ini_set')) {
+    ini_set('serialize_precision', '-1');
+}
 $rutaConfig = (string)(getenv('JSONSQLDBADMIN_CONFIG') ?: dirname(__DIR__) . '/config.php');
 if (is_file($rutaConfig)) {
     require_once $rutaConfig;

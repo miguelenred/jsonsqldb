@@ -48,7 +48,7 @@ final class FunctionsAmpliadas extends Functions
                 // Como en SQLite: un entero sigue entero; un decimal, decimal
                 self::exige($nombre, $args, 1);
                 $n = self::numero($args[0]);
-                if ($n === null || is_int($n)) {
+                if ($n === null || \is_int($n)) {
                     return $n;
                 }
                 return $nombre === 'FLOOR' ? floor($n) : ($nombre === 'TRUNC' ? (float)($n < 0 ? ceil($n) : floor($n)) : ceil($n));
@@ -59,14 +59,14 @@ final class FunctionsAmpliadas extends Functions
                 $d = self::numero($args[1]);
                 if ($n === null || $d === null) { return null; }
                 $d = Valor::entero($d);
-                if (is_int($n) && $d >= 0) { return $n; }
+                if (\is_int($n) && $d >= 0) { return $n; }
                 $f = 10 ** $d;
                 $x = $n * $f;
                 // Con muchos decimales no hay nada que cortar; con muchas cifras
                 // de menos, 10 ** d es 0 y no queda nada: cero (2.9: dividía por
                 // cero, o daba NAN)
                 $r = !is_finite($x) ? $n : ($f == 0 ? 0 : ($x < 0 ? ceil($x) : floor($x)) / $f);
-                return is_int($n) ? Valor::entero($r) : (float)$r;
+                return \is_int($n) ? Valor::entero($r) : (float)$r;
             case 'SIGN':
                 self::exige($nombre, $args, 1);
                 $n = self::numero($args[0]);
@@ -77,7 +77,8 @@ final class FunctionsAmpliadas extends Functions
                 $a = self::numero($args[0]);
                 $b = self::numero($args[1]);
                 if ($a === null || $b === null || $b == 0) { return null; }
-                return is_int($a) && is_int($b) ? $a % $b : fmod((float)$a, (float)$b);
+                // fmod(INF, 2) es NaN: NULL, como en SQLite (2.10)
+                return \is_int($a) && \is_int($b) ? $a % $b : (($r = fmod((float)$a, (float)$b)) === $r ? $r : null);
             case 'POW':
             case 'POWER':
                 self::exige($nombre, $args, 2);
@@ -100,21 +101,21 @@ final class FunctionsAmpliadas extends Functions
                 if ($n === null || $n <= 0) { return null; }
                 return $nombre === 'LN' ? log((float)$n) : ($nombre === 'LOG10' ? log10((float)$n) : log((float)$n, 2));
             case 'LOG':
-                if (count($args) === 1) {
+                if (\count($args) === 1) {
                     throw JsonSqlDbError::syntax('LOG(x) con un solo argumento es en base 10 en SQLite y el logaritmo natural en MySQL: usa LOG10(x) o LN(x), o LOG(base, x)');
                 }
                 self::exige($nombre, $args, 2);
                 $b = self::numero($args[0]);
                 $n = self::numero($args[1]);
                 if ($b === null || $n === null || $b <= 0 || $b == 1 || $n <= 0) { return null; }
-                return log((float)$n) / log((float)$b);
+                return ($r = log((float)$n) / log((float)$b)) === $r ? $r : null;      // LOG(INF, INF) es NaN: NULL (2.10)
             case 'PI':
                 self::exige($nombre, $args, 0);
                 return M_PI;
             case 'GREATEST':
             case 'LEAST':
                 // Como MIN/MAX con varios argumentos: NULL si alguno es NULL
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     throw JsonSqlDbError::syntax("$nombre() necesita al menos 2 argumentos");
                 }
                 return self::escalar($nombre === 'GREATEST' ? 'MAX' : 'MIN', $args);
@@ -175,16 +176,16 @@ final class FunctionsAmpliadas extends Functions
                 $v = $args[$nombre === 'SPACE' ? 0 : 1];
                 if ($s === null || $v === null) { return null; }
                 $n = max(0, Valor::entero(Valor::aNumero($v)));
-                self::exigirTope($nombre, strlen($s) * $n);   // puede pasar de 64 bits: un decimal (2.9: TypeError)
+                self::exigirTope($nombre, \strlen($s) * $n);   // puede pasar de 64 bits: un decimal (2.9: TypeError)
                 return str_repeat($s, $n);
             case 'CONCAT_WS':
                 // Separador y después los valores, saltándose los NULL (los dos igual)
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     throw JsonSqlDbError::syntax('CONCAT_WS() necesita el separador y al menos un valor');
                 }
                 if ($args[0] === null) { return null; }
                 $partes = [];
-                foreach (array_slice($args, 1) as $a) {
+                foreach (\array_slice($args, 1) as $a) {
                     if ($a !== null) { $partes[] = Valor::aTexto($a); }
                 }
                 return implode(Valor::aTexto($args[0]), $partes);
@@ -206,7 +207,7 @@ final class FunctionsAmpliadas extends Functions
                 $n = Valor::entero(Valor::aNumero($args[2]));
                 if ($sep === '' || $n === 0) { return ''; }
                 $trozos = explode($sep, $s);
-                return implode($sep, $n > 0 ? array_slice($trozos, 0, $n) : array_slice($trozos, max(0, count($trozos) + $n)));
+                return implode($sep, $n > 0 ? \array_slice($trozos, 0, $n) : \array_slice($trozos, max(0, \count($trozos) + $n)));
             case 'CHAR':
                 // Como SQLite: los caracteres de esos códigos Unicode
                 $s = '';
@@ -226,30 +227,30 @@ final class FunctionsAmpliadas extends Functions
                 self::exige($nombre, $args, 1);
                 if ($args[0] === null) { return null; }
                 $s = Valor::aTexto($args[0]);
-                return $s === '' ? 0 : ord($s[0]);
+                return $s === '' ? 0 : \ord($s[0]);
             case 'HEX':
                 self::exige($nombre, $args, 1);
                 if ($args[0] === null) { return null; }
-                if (is_int($args[0]) || is_float($args[0])) {
+                if (\is_int($args[0]) || \is_float($args[0])) {
                     throw JsonSqlDbError::syntax('HEX() de un número da cosas distintas en SQLite (los bytes del texto) y en MySQL (el número en hexadecimal): usa PRINTF(\'%X\', n) o HEX(CAST(n AS TEXT))');
                 }
                 return strtoupper(bin2hex(Valor::aTexto($args[0])));
             case 'FIELD':
                 // FIELD(x, a, b, …) de MySQL: la posición de x en la lista, o 0
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     throw JsonSqlDbError::syntax('FIELD() necesita el valor y al menos uno con el que compararlo');
                 }
                 if ($args[0] === null) { return 0; }
-                foreach (array_slice($args, 1) as $i => $a) {
+                foreach (\array_slice($args, 1) as $i => $a) {
                     if ($a !== null && Valor::comparar($args[0], $a) === 0) { return $i + 1; }
                 }
                 return 0;
             case 'ELT':
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     throw JsonSqlDbError::syntax('ELT() necesita el número y al menos un valor');
                 }
                 $n = $args[0] === null ? 0 : Valor::entero(Valor::aNumero($args[0]));
-                return $n >= 1 && $n < count($args) ? $args[$n] : null;
+                return $n >= 1 && $n < \count($args) ? $args[$n] : null;
 
             // ---------- Condiciones ----------
             case 'IF':
@@ -262,7 +263,7 @@ final class FunctionsAmpliadas extends Functions
             case 'TYPEOF':
                 self::exige($nombre, $args, 1);
                 $v = $args[0];
-                return $v === null ? 'null' : (is_int($v) || is_bool($v) ? 'integer' : (is_float($v) ? 'real' : 'text'));
+                return $v === null ? 'null' : (\is_int($v) || \is_bool($v) ? 'integer' : (\is_float($v) ? 'real' : 'text'));
 
             // ---------- Fechas ----------
             case 'YEAR':
@@ -327,9 +328,9 @@ final class FunctionsAmpliadas extends Functions
                 // Como SQLite: la fecha se toma como UTC, y admite modificadores
                 $v = $args === [] ? 'now' : $args[0];
                 // 'now' es el momento de ahora en UTC; una fecha escrita, sus cifras en UTC
-                $d = is_string($v) && strcasecmp(trim($v), 'now') === 0
-                    ? self::modificar(new \DateTimeImmutable('now', new \DateTimeZone('UTC')), array_slice($args, 1))
-                    : self::conModificadores($v, array_slice($args, 1));
+                $d = \is_string($v) && strcasecmp(trim($v), 'now') === 0
+                    ? self::modificar(new \DateTimeImmutable('now', new \DateTimeZone('UTC')), \array_slice($args, 1))
+                    : self::conModificadores($v, \array_slice($args, 1));
                 // Pasada del año 9999, NULL, como SQLite (2.9: se volvía a leer el
                 // texto de la fecha, y uno de cinco cifras era una excepción de PHP)
                 if ($d === null || (int)$d->format('Y') > 9999) { return null; }
@@ -340,7 +341,7 @@ final class FunctionsAmpliadas extends Functions
                 // json_extract(json, ruta, …) de SQLite: con una ruta, el valor
                 // (un objeto o una lista, como texto JSON; true y false, 1 y 0);
                 // con varias, una lista JSON con cada uno
-                if (count($args) < 2) {
+                if (\count($args) < 2) {
                     self::exige($nombre, $args, 2);
                 }
                 if ($args[0] === null) { return null; }
@@ -349,14 +350,14 @@ final class FunctionsAmpliadas extends Functions
                     throw JsonSqlDbError::type('json_extract: JSON mal formado');
                 }
                 $valores = [];
-                foreach (array_slice($args, 1) as $ruta) {
+                foreach (\array_slice($args, 1) as $ruta) {
                     $valores[] = $ruta === null ? null : self::rutaJson($doc, Valor::aTexto($ruta));
                 }
-                if (count($valores) > 1) {
+                if (\count($valores) > 1) {
                     return json_encode($valores, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
                 }
                 $v = $valores[0];
-                return is_bool($v) ? (int)$v : (is_array($v) || is_object($v)
+                return \is_bool($v) ? (int)$v : (\is_array($v) || \is_object($v)
                     ? json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION) : $v);
             case 'COLLATE':
                 // x COLLATE … : el valor es el mismo (ver Parser::plegar())
@@ -377,7 +378,7 @@ final class FunctionsAmpliadas extends Functions
                 $n = Valor::aNumero($args[1]);
                 $n = $nombre === 'DATE_SUB' ? -$n : $n;
                 $soloFecha = !preg_match('/\d:\d/', Valor::aTexto($args[0]))
-                    && in_array($unidad, ['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'], true);
+                    && \in_array($unidad, ['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'], true);
                 if (isset(self::MESES[$unidad])) {
                     $meses = Valor::entero($n) * self::MESES[$unidad];
                     $total = (int)$d->format('Y') * 12 + (int)$d->format('n') - 1 + $meses;
@@ -393,10 +394,10 @@ final class FunctionsAmpliadas extends Functions
                     if (!isset(self::MICROSEGUNDOS[$unidad])) { return null; }
                     // En días y semanas, por el calendario: un día de cambio de hora tiene 23 o 25 horas
                     if ($unidad === 'DAY' || $unidad === 'WEEK') {
-                        $d = $d->modify(sprintf('%+d days', Valor::entero($n) * ($unidad === 'WEEK' ? 7 : 1)));
+                        $d = $d->modify(\sprintf('%+d days', Valor::entero($n) * ($unidad === 'WEEK' ? 7 : 1)));
                     } else {
                         $micro = Valor::entero(round($n * self::MICROSEGUNDOS[$unidad]));
-                        $d = $d->modify(sprintf('%+d seconds', intdiv($micro, 1000000)))->modify(sprintf('%+d microseconds', $micro % 1000000));
+                        $d = $d->modify(\sprintf('%+d seconds', intdiv($micro, 1000000)))->modify(\sprintf('%+d microseconds', $micro % 1000000));
                     }
                 }
                 // Con milisegundos si los hay, como guarda las fechas el motor
@@ -466,9 +467,9 @@ final class FunctionsAmpliadas extends Functions
                 // ATAN(x), y ATAN(y, x) de MySQL, que es ATAN2(y, x)
                 self::exige($nombre, $args, $nombre === 'ATAN2' ? 2 : 1, 2);
                 $y = self::numero($args[0]);
-                $x = isset($args[1]) || count($args) === 2 ? self::numero($args[1] ?? null) : null;
-                if ($y === null || (count($args) === 2 && $x === null)) { return null; }
-                return self::real(count($args) === 2 ? atan2((float)$y, (float)$x) : atan((float)$y));
+                $x = isset($args[1]) || \count($args) === 2 ? self::numero($args[1] ?? null) : null;
+                if ($y === null || (\count($args) === 2 && $x === null)) { return null; }
+                return self::real(\count($args) === 2 ? atan2((float)$y, (float)$x) : atan((float)$y));
             case 'BIT_COUNT':
                 self::exige($nombre, $args, 1);
                 $n = self::numero($args[0]);
@@ -482,7 +483,7 @@ final class FunctionsAmpliadas extends Functions
             case 'CONV':
                 // CONV(n, de, a) de MySQL: entre bases de 2 a 36
                 self::exige($nombre, $args, 3);
-                if (in_array(null, $args, true)) { return null; }
+                if (\in_array(null, $args, true)) { return null; }
                 $de = abs(Valor::entero(Valor::aNumero($args[1])));
                 $a  = abs(Valor::entero(Valor::aNumero($args[2])));
                 if ($de < 2 || $de > 36 || $a < 2 || $a > 36) { return null; }
@@ -492,13 +493,14 @@ final class FunctionsAmpliadas extends Functions
             case 'OCTET_LENGTH':
             case 'BIT_LENGTH':
                 self::exige($nombre, $args, 1);
-                return $args[0] === null ? null : strlen(Valor::aTexto($args[0])) * ($nombre === 'BIT_LENGTH' ? 8 : 1);
+                return $args[0] === null ? null : \strlen(Valor::aTexto($args[0])) * ($nombre === 'BIT_LENGTH' ? 8 : 1);
             case 'QUOTE':
                 // Como SQLite: un texto entre comillas simples, un número tal cual, NULL como texto
                 self::exige($nombre, $args, 1);
                 $v = $args[0];
                 if ($v === null) { return 'NULL'; }
-                return is_int($v) || is_float($v) ? Valor::aTexto($v) : "'" . str_replace("'", "''", Valor::aTexto($v)) . "'";
+                if (\is_float($v)) { return self::decimalExacto($v); }      // sin perder cifras, como SQLite (2.10)
+                return \is_int($v) ? (string)$v : "'" . str_replace("'", "''", Valor::aTexto($v)) . "'";
             case 'SOUNDEX':
                 self::exige($nombre, $args, 1);
                 if ($args[0] === null) { return null; }
@@ -511,7 +513,7 @@ final class FunctionsAmpliadas extends Functions
                 if (isset($args[1]) && $args[1] !== null) {
                     $h = str_replace(str_split(Valor::aTexto($args[1])), '', $h);    // los caracteres que se ignoran
                 }
-                return strlen($h) % 2 === 0 && ctype_xdigit($h) || $h === '' ? (string)hex2bin($h) : null;
+                return \strlen($h) % 2 === 0 && ctype_xdigit($h) || $h === '' ? (string)hex2bin($h) : null;
             case 'RANDOMBLOB':
             case 'ZEROBLOB':
                 self::exige($nombre, $args, 1);
@@ -522,7 +524,7 @@ final class FunctionsAmpliadas extends Functions
             case 'GLOB':
                 // like(patrón, texto[, escape]) y glob(patrón, texto): como los operadores
                 self::exige($nombre, $args, 2, $nombre === 'LIKE' ? 3 : 2);
-                if ($args[0] === null || $args[1] === null) { return null; }
+                if ($args[0] === null || $args[1] === null || \array_key_exists(2, $args) && $args[2] === null) { return null; }
                 $regex = $nombre === 'LIKE'
                     ? EvaluatorPatrones::patronALike(Valor::aTexto($args[0]), isset($args[2]) ? Valor::aTexto($args[2]) : null)
                     : EvaluatorPatrones::patronAGlob(Valor::aTexto($args[0]));
@@ -542,12 +544,12 @@ final class FunctionsAmpliadas extends Functions
             case 'INSERT':
                 // INSERT(texto, pos, largo, nuevo) de MySQL
                 self::exige($nombre, $args, 4);
-                if (in_array(null, $args, true)) { return null; }
+                if (\in_array(null, $args, true)) { return null; }
                 $t   = (array)preg_split('//u', Valor::aTexto($args[0]), -1, PREG_SPLIT_NO_EMPTY);
                 $pos = Valor::entero(Valor::aNumero($args[1]));
                 $len = Valor::entero(Valor::aNumero($args[2]));
-                if ($pos < 1 || $pos > count($t)) { return Valor::aTexto($args[0]); }
-                array_splice($t, $pos - 1, $len < 0 ? count($t) : $len, [Valor::aTexto($args[3])]);
+                if ($pos < 1 || $pos > \count($t)) { return Valor::aTexto($args[0]); }
+                array_splice($t, $pos - 1, $len < 0 ? \count($t) : $len, [Valor::aTexto($args[3])]);
                 return implode('', $t);
             case 'STRCMP':
                 self::exige($nombre, $args, 2);
@@ -572,13 +574,13 @@ final class FunctionsAmpliadas extends Functions
                 if ($args[0] === null || $args[1] === null) { return null; }
                 $bits = Valor::entero(Valor::aNumero($args[1]));
                 $bits = $bits === 0 ? 256 : $bits;
-                return in_array($bits, [224, 256, 384, 512], true) ? hash('sha' . $bits, Valor::aTexto($args[0])) : null;
+                return \in_array($bits, [224, 256, 384, 512], true) ? hash('sha' . $bits, Valor::aTexto($args[0])) : null;
             case 'UUID':
                 // Al azar (versión 4): el de MySQL es de la versión 1, con la hora y el equipo
                 self::exige($nombre, $args, 0, 0);
                 $b = random_bytes(16);
-                $b[6] = chr(ord($b[6]) & 0x0f | 0x40);
-                $b[8] = chr(ord($b[8]) & 0x3f | 0x80);
+                $b[6] = \chr(\ord($b[6]) & 0x0f | 0x40);
+                $b[8] = \chr(\ord($b[8]) & 0x3f | 0x80);
                 return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($b), 4));
 
             // ---------- Fechas y horas ----------
@@ -637,7 +639,7 @@ final class FunctionsAmpliadas extends Functions
                 $us = (int)round(($a - $b) * 1e6);            // en microsegundos: sin errores de coma flotante
                 $h  = self::hora(intdiv($us, 1000000));
                 if ($us < 0 && $h[0] !== '-') { $h = '-' . $h; }
-                return $us % 1000000 === 0 ? $h : $h . sprintf('.%06d', abs($us % 1000000));
+                return $us % 1000000 === 0 ? $h : $h . \sprintf('.%06d', abs($us % 1000000));
             case 'TIME_FORMAT':
                 self::exige($nombre, $args, 2);
                 if ($args[0] === null || $args[1] === null) { return null; }
@@ -663,12 +665,14 @@ final class FunctionsAmpliadas extends Functions
             case '->>':
                 // x -> ruta: el trozo como JSON; x ->> ruta: como valor SQL. La ruta
                 // puede ir abreviada, como en SQLite: 'a' es '$.a' y 2 es '$[2]'
-                if ($args[0] === null || $args[1] === null) { return null; }
-                $ruta = is_int($args[1]) ? '$[' . $args[1] . ']' : Valor::aTexto($args[1]);
+                // Un número negativo o con decimales no señala nada: NULL, como
+                // en SQLite (2.10: un error de ruta no válida)
+                if ($args[0] === null || $args[1] === null || \is_float($args[1]) || \is_int($args[1]) && $args[1] < 0) { return null; }
+                $ruta = \is_int($args[1]) ? '$[' . $args[1] . ']' : Valor::aTexto($args[1]);
                 $v = self::rutaJson(self::docJson($args[0], 'json'), $ruta[0] === '$' ? $ruta : '$.' . $ruta, $existe);
                 if (!$existe) { return null; }
                 if ($nombre === '->') { return self::aJson($v); }
-                return is_bool($v) ? (int)$v : (is_array($v) || $v instanceof \stdClass ? self::aJson($v) : $v);
+                return \is_bool($v) ? (int)$v : (\is_array($v) || $v instanceof \stdClass ? self::aJson($v) : $v);
             case 'JSON':
             case 'JSON_VALID':
                 self::exige($nombre, $args, 1);
@@ -681,11 +685,11 @@ final class FunctionsAmpliadas extends Functions
             case 'JSON_ARRAY':
                 return self::aJson(array_map(static fn($v) => $v, $args));
             case 'JSON_OBJECT':
-                if (count($args) % 2 !== 0) {
+                if (\count($args) % 2 !== 0) {
                     throw JsonSqlDbError::syntax('json_object() necesita parejas de clave y valor');
                 }
                 $o = new \stdClass();
-                for ($i = 0; $i < count($args); $i += 2) {
+                for ($i = 0; $i < \count($args); $i += 2) {
                     if ($args[$i] === null) { throw JsonSqlDbError::type('json_object(): una clave no puede ser NULL'); }
                     $o->{Valor::aTexto($args[$i])} = $args[$i + 1];
                 }
@@ -703,18 +707,18 @@ final class FunctionsAmpliadas extends Functions
                 }
                 return match ($nombre) {
                     'JSON_TYPE'         => match (true) {
-                        $doc === null => 'null', $doc === true => 'true', $doc === false => 'false', is_int($doc) => 'integer',
-                        is_float($doc) => 'real', is_string($doc) => 'text', is_array($doc) => 'array', default => 'object' },
-                    'JSON_ARRAY_LENGTH' => is_array($doc) ? count($doc) : 0,
-                    'JSON_LENGTH'       => is_array($doc) ? count($doc) : ($doc instanceof \stdClass ? count(get_object_vars($doc)) : 1),
+                        $doc === null => 'null', $doc === true => 'true', $doc === false => 'false', \is_int($doc) => 'integer',
+                        \is_float($doc) => 'real', \is_string($doc) => 'text', \is_array($doc) => 'array', default => 'object' },
+                    'JSON_ARRAY_LENGTH' => \is_array($doc) ? \count($doc) : 0,
+                    'JSON_LENGTH'       => \is_array($doc) ? \count($doc) : ($doc instanceof \stdClass ? \count(get_object_vars($doc)) : 1),
                     default             => $doc instanceof \stdClass ? self::aJson(array_map('strval', array_keys(get_object_vars($doc)))) : null,
                 };
             case 'JSON_UNQUOTE':
                 self::exige($nombre, $args, 1);
                 if ($args[0] === null) { return null; }
                 $t = Valor::aTexto($args[0]);
-                $d = strlen($t) >= 2 && $t[0] === '"' ? json_decode($t) : null;
-                return is_string($d) ? $d : $t;
+                $d = \strlen($t) >= 2 && $t[0] === '"' ? json_decode($t) : null;
+                return \is_string($d) ? $d : $t;
             case 'JSON_CONTAINS':
                 self::exige($nombre, $args, 2, 3);
                 if ($args[0] === null || $args[1] === null) { return null; }
@@ -728,12 +732,12 @@ final class FunctionsAmpliadas extends Functions
             case 'JSON_INSERT':
             case 'JSON_REPLACE':
             case 'JSON_REMOVE':
-                if (count($args) < 2 || ($nombre !== 'JSON_REMOVE' && count($args) % 2 === 0)) {
+                if (\count($args) < 2 || ($nombre !== 'JSON_REMOVE' && \count($args) % 2 === 0)) {
                     throw JsonSqlDbError::syntax(strtolower($nombre) . '() necesita el JSON y ' . ($nombre === 'JSON_REMOVE' ? 'una o más rutas' : 'parejas de ruta y valor'));
                 }
                 if ($args[0] === null) { return null; }
                 $doc = self::docJson($args[0], $nombre);
-                for ($i = 1; $i < count($args); $i += $nombre === 'JSON_REMOVE' ? 1 : 2) {
+                for ($i = 1; $i < \count($args); $i += $nombre === 'JSON_REMOVE' ? 1 : 2) {
                     $doc = self::ponerJson($doc, self::pasosJson(Valor::aTexto($args[$i])), $args[$i + 1] ?? null, $nombre);
                 }
                 return self::aJson($doc);
@@ -775,9 +779,9 @@ final class FunctionsAmpliadas extends Functions
         $existe = false;
         foreach (self::pasosJson($ruta) as $p) {
             if ($p[0] === 'i') {
-                if (!is_array($doc)) { return null; }
-                $i = $p[1] + ($p[2] ? count($doc) : 0);
-                if ($i < 0 || !array_key_exists($i, $doc)) { return null; }
+                if (!\is_array($doc)) { return null; }
+                $i = $p[1] + ($p[2] ? \count($doc) : 0);
+                if ($i < 0 || !\array_key_exists($i, $doc)) { return null; }
                 $doc = $doc[$i];
                 continue;
             }
@@ -801,7 +805,7 @@ final class FunctionsAmpliadas extends Functions
     private static function ponerJson($doc, array $pasos, $valor, string $modo)
     {
         if ($pasos === []) {
-            return in_array($modo, ['JSON_SET', 'JSON_REPLACE'], true) ? $valor : $doc;
+            return \in_array($modo, ['JSON_SET', 'JSON_REPLACE'], true) ? $valor : $doc;
         }
         $p = array_shift($pasos);
         if ($p[0] === 'k') {
@@ -817,16 +821,16 @@ final class FunctionsAmpliadas extends Functions
             }
             return $doc;
         }
-        if (!is_array($doc)) { return $doc; }
-        $i   = $p[1] + ($p[2] ? count($doc) : 0);
-        $hay = $i >= 0 && $i < count($doc);
+        if (!\is_array($doc)) { return $doc; }
+        $i   = $p[1] + ($p[2] ? \count($doc) : 0);
+        $hay = $i >= 0 && $i < \count($doc);
         if ($pasos !== []) {
             if ($hay) { $doc[$i] = self::ponerJson($doc[$i], $pasos, $valor, $modo); }
         } elseif ($modo === 'JSON_REMOVE') {
             if ($hay) { array_splice($doc, $i, 1); }
         } elseif ($hay) {
             if ($modo !== 'JSON_INSERT') { $doc[$i] = $valor; }
-        } elseif ($modo !== 'JSON_REPLACE' && $i >= count($doc)) {
+        } elseif ($modo !== 'JSON_REPLACE' && $i >= \count($doc)) {
             $doc[] = $valor;
         }
         return $doc;
@@ -835,8 +839,8 @@ final class FunctionsAmpliadas extends Functions
     /** ¿Contiene $a a $b? Como JSON_CONTAINS de MySQL */
     private static function contieneJson($a, $b): bool
     {
-        if (is_array($a)) {
-            if (is_array($b)) {
+        if (\is_array($a)) {
+            if (\is_array($b)) {
                 foreach ($b as $x) {
                     if (!self::contieneJson($a, $x)) { return false; }
                 }
@@ -854,8 +858,8 @@ final class FunctionsAmpliadas extends Functions
             }
             return true;
         }
-        if (is_array($b) || $b instanceof \stdClass) { return false; }
-        return (is_int($a) || is_float($a)) && (is_int($b) || is_float($b)) ? $a == $b : $a === $b;
+        if (\is_array($b) || $b instanceof \stdClass) { return false; }
+        return (\is_int($a) || \is_float($a)) && (\is_int($b) || \is_float($b)) ? $a == $b : $a === $b;
     }
 
     /** Un texto JSON decodificado (objetos como stdClass), o el error de $funcion */
@@ -903,7 +907,7 @@ final class FunctionsAmpliadas extends Functions
     private static function hora(int $s): string
     {
         $a = abs($s);
-        return ($s < 0 ? '-' : '') . sprintf('%02d:%02d:%02d', intdiv($a, 3600), intdiv($a % 3600, 60), $a % 60);
+        return ($s < 0 ? '-' : '') . \sprintf('%02d:%02d:%02d', intdiv($a, 3600), intdiv($a % 3600, 60), $a % 60);
     }
 
     /** Días desde el año 0, como TO_DAYS de MySQL (su calc_daynr) */
@@ -972,7 +976,7 @@ final class FunctionsAmpliadas extends Functions
     /** Un argumento como número, o null; un texto que no es número, null (como SQLite) */
     private static function numero($v)
     {
-        if ($v === null || (is_string($v) && !is_numeric(trim($v)))) {
+        if ($v === null || (\is_string($v) && !is_numeric(trim($v)))) {
             return null;
         }
         return Valor::aNumero($v);
@@ -988,17 +992,17 @@ final class FunctionsAmpliadas extends Functions
     private static function caracter(int $c): string
     {
         if ($c < 0 || $c > 0x10FFFF) { return ''; }
-        if ($c < 0x80) { return chr($c); }
-        if ($c < 0x800) { return chr(0xC0 | ($c >> 6)) . chr(0x80 | ($c & 0x3F)); }
-        if ($c < 0x10000) { return chr(0xE0 | ($c >> 12)) . chr(0x80 | (($c >> 6) & 0x3F)) . chr(0x80 | ($c & 0x3F)); }
-        return chr(0xF0 | ($c >> 18)) . chr(0x80 | (($c >> 12) & 0x3F)) . chr(0x80 | (($c >> 6) & 0x3F)) . chr(0x80 | ($c & 0x3F));
+        if ($c < 0x80) { return \chr($c); }
+        if ($c < 0x800) { return \chr(0xC0 | ($c >> 6)) . \chr(0x80 | ($c & 0x3F)); }
+        if ($c < 0x10000) { return \chr(0xE0 | ($c >> 12)) . \chr(0x80 | (($c >> 6) & 0x3F)) . \chr(0x80 | ($c & 0x3F)); }
+        return \chr(0xF0 | ($c >> 18)) . \chr(0x80 | (($c >> 12) & 0x3F)) . \chr(0x80 | (($c >> 6) & 0x3F)) . \chr(0x80 | ($c & 0x3F));
     }
 
     /** El código Unicode de un carácter UTF-8 */
     private static function codigo(string $c): int
     {
         $b = array_values((array)unpack('C*', $c));
-        $n = count($b);
+        $n = \count($b);
         if ($n === 1) { return $b[0]; }
         if ($n === 2) { return (($b[0] & 0x1F) << 6) | ($b[1] & 0x3F); }
         if ($n === 3) { return (($b[0] & 0x0F) << 12) | (($b[1] & 0x3F) << 6) | ($b[2] & 0x3F); }
@@ -1015,11 +1019,11 @@ final class FunctionsAmpliadas extends Functions
         if ($args === []) {
             throw JsonSqlDbError::syntax("$nombre() necesita argumentos");
         }
-        if ($nombre === 'PRINTF' || (is_string($args[0]) && strpos($args[0], '%') !== false)) {
-            return self::printf(Valor::aTexto($args[0]), array_slice($args, 1));
+        if ($nombre === 'PRINTF' || (\is_string($args[0]) && strpos($args[0], '%') !== false)) {
+            return self::printf(Valor::aTexto($args[0]), \array_slice($args, 1));
         }
         self::exige('FORMAT', $args, 2, 3);
-        if (isset($args[2]) && !in_array(strtolower((string)$args[2]), ['en_us', 'en-us'], true)) {
+        if (isset($args[2]) && !\in_array(strtolower((string)$args[2]), ['en_us', 'en-us'], true)) {
             throw JsonSqlDbError::syntax("FORMAT(número, decimales, '{$args[2]}'): solo se admite el formato en_US (1,234.50)");
         }
         $n = self::numero($args[0]);
@@ -1059,10 +1063,10 @@ final class FunctionsAmpliadas extends Functions
             $especif = '%' . $banderas . $ancho . ($prec !== '' ? '.' . $prec : '');
             switch ($tipo) {
                 case 'd': case 'i': case 'u':
-                    return sprintf($especif . 'd', $v === null ? 0 : Valor::entero(Valor::aNumero($v)));
+                    return \sprintf($especif . 'd', $v === null ? 0 : Valor::entero(Valor::aNumero($v)));
                 case 'f': case 'F':
                     // F y no f: la f de PHP usa la coma decimal del idioma del servidor
-                    return sprintf($especif . 'F', $v === null ? 0.0 : (float)Valor::aNumero($v));
+                    return \sprintf($especif . 'F', $v === null ? 0.0 : (float)Valor::aNumero($v));
                 case 'e': case 'E': case 'g': case 'G':
                     // Como el printf de C y de SQLite (el de PHP escribe e+3 y no
                     // e+03, y redondea los empates de otra forma)
@@ -1072,19 +1076,19 @@ final class FunctionsAmpliadas extends Functions
                     $t = ctype_upper($tipo) ? strtoupper($t) : $t;
                     $t = ($n >= 0 && strpos($banderas, '+') !== false ? '+' : ($n >= 0 && strpos($banderas, ' ') !== false ? ' ' : '')) . $t;
                     $ancho = (int)$ancho;
-                    if (strlen($t) >= $ancho) { return $t; }
+                    if (\strlen($t) >= $ancho) { return $t; }
                     if (strpos($banderas, '-') !== false) { return str_pad($t, $ancho); }
                     if (strpos($banderas, '0') !== false) {
                         $signo = strspn($t, '+- ');
-                        return substr($t, 0, $signo) . str_repeat('0', $ancho - strlen($t)) . substr($t, $signo);
+                        return substr($t, 0, $signo) . str_repeat('0', $ancho - \strlen($t)) . substr($t, $signo);
                     }
                     return str_pad($t, $ancho, ' ', STR_PAD_LEFT);
                 case 'x': case 'X': case 'o':
-                    return sprintf($especif . $tipo, $v === null ? 0 : Valor::entero(Valor::aNumero($v)));
+                    return \sprintf($especif . $tipo, $v === null ? 0 : Valor::entero(Valor::aNumero($v)));
                 case 'c':
                     return $v === null ? '' : self::corte(Valor::aTexto($v), 0, 1);
                 case 's':
-                    return sprintf($especif . 's', $v === null ? '' : Valor::aTexto($v));
+                    return \sprintf($especif . 's', $v === null ? '' : Valor::aTexto($v));
                 case 'q':
                     return $v === null ? '(NULL)' : str_replace("'", "''", Valor::aTexto($v));
                 case 'Q':
@@ -1111,14 +1115,14 @@ final class FunctionsAmpliadas extends Functions
         $ceros = !$izquierda && strpos($banderas, '0') !== false;
         $dec = null;
         if ($decimal) {
-            [$ent, $dec] = explode('.', sprintf('%.' . ($prec === '' ? 6 : (int)$prec) . 'F', abs($n))) + [1 => null];
+            [$ent, $dec] = explode('.', \sprintf('%.' . ($prec === '' ? 6 : (int)$prec) . 'F', abs($n))) + [1 => null];
         } else {
             // El texto, sin el signo: el valor absoluto del menor entero no cabe en uno
-            $ent = str_pad(ltrim((string)$n, '-'), max((int)$prec, $ceros ? $ancho - strlen($signo) : 0), '0', STR_PAD_LEFT);
+            $ent = str_pad(ltrim((string)$n, '-'), max((int)$prec, $ceros ? $ancho - \strlen($signo) : 0), '0', STR_PAD_LEFT);
         }
         $t = $signo . strrev(implode(',', str_split(strrev($ent), 3))) . ($dec === null ? '' : '.' . $dec);
-        if ($decimal && $ceros && strlen($t) < $ancho) {
-            $t = $signo . str_repeat('0', $ancho - strlen($t)) . substr($t, strlen($signo));
+        if ($decimal && $ceros && \strlen($t) < $ancho) {
+            $t = $signo . str_repeat('0', $ancho - \strlen($t)) . substr($t, \strlen($signo));
         }
         return str_pad($t, $ancho, ' ', $izquierda ? STR_PAD_RIGHT : STR_PAD_LEFT);
     }
@@ -1127,7 +1131,7 @@ final class FunctionsAmpliadas extends Functions
     private static function cientifico(float $n, int $p): string
     {
         [$m, $x] = self::mantisa($n, $p);
-        return sprintf('%.' . $p . 'F', $m) . 'e' . ($x < 0 ? '-' : '+') . str_pad((string)abs($x), 2, '0', STR_PAD_LEFT);
+        return \sprintf('%.' . $p . 'F', $m) . 'e' . ($x < 0 ? '-' : '+') . str_pad((string)abs($x), 2, '0', STR_PAD_LEFT);
     }
 
     /** %g de C: %e o %f según el exponente, sin los ceros del final */
@@ -1135,7 +1139,7 @@ final class FunctionsAmpliadas extends Functions
     {
         $p = max(1, $p);
         [, $x] = self::mantisa($n, $p - 1);
-        $t = $x < -4 || $x >= $p ? self::cientifico($n, $p - 1) : sprintf('%.' . max(0, $p - 1 - $x) . 'F', round($n, $p - 1 - $x));
+        $t = $x < -4 || $x >= $p ? self::cientifico($n, $p - 1) : \sprintf('%.' . max(0, $p - 1 - $x) . 'F', round($n, $p - 1 - $x));
         if (strpos($t, '.') === false) {
             return $t;
         }
@@ -1169,7 +1173,7 @@ final class FunctionsAmpliadas extends Functions
         $meses = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
         $partes = [];
         $patron = '';
-        $largo = strlen($formato);
+        $largo = \strlen($formato);
         for ($i = 0; $i < $largo; $i++) {
             if ($formato[$i] !== '%' || $i + 1 >= $largo) {
                 $patron .= preg_quote($formato[$i], '/');
@@ -1226,11 +1230,30 @@ final class FunctionsAmpliadas extends Functions
         if ($hayHora && ($v['H'] > 23 || $v['i'] > 59 || $v['s'] > 59)) {
             return null;
         }
-        $hora = sprintf('%02d:%02d:%02d', (int)$v['H'], $v['i'], $v['s']) . ($v['f'] ? sprintf('.%03d', $v['f']) : '');
+        $hora = \sprintf('%02d:%02d:%02d', (int)$v['H'], $v['i'], $v['s']) . ($v['f'] ? \sprintf('.%03d', $v['f']) : '');
         if (!$hayFecha) {
             return $hayHora ? $hora : null;
         }
-        $fecha = sprintf('%04d-%02d-%02d', $v['Y'], $v['m'], $v['d']);
+        $fecha = \sprintf('%04d-%02d-%02d', $v['Y'], $v['m'], $v['d']);
         return $hayHora ? "$fecha $hora" : $fecha;
+    }
+
+    /**
+     * Un decimal como lo escribe QUOTE de SQLite (2.10): como Valor::aTexto()
+     * si así vuelve a ser el mismo número; si no, con las cifras que hacen
+     * falta (16 o 17) y exponente: 0.30000000000000004 ->
+     * '3.0000000000000004e-01'. SQLite pone a veces alguna cifra más
+     * ('3.00000000000000044e-01'), que da el mismo número. Antes de la 2.10,
+     * 14 cifras: no volvía a ser el mismo. Aquí desde la 2.10, que solo lo
+     * usa QUOTE: en Valor lo compilaba cada petición
+     */
+    private static function decimalExacto(float $v): string
+    {
+        $t = Valor::aTexto($v);
+        if (!is_finite($v) || (float)$t === $v) {
+            return $t;
+        }
+        $s = \sprintf('%.15e', $v);
+        return Valor::exponente((float)$s === $v ? $s : \sprintf('%.16e', $v));
     }
 }

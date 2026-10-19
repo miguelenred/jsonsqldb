@@ -53,7 +53,7 @@ class Storage
     protected const FILAS_POR_LINEA = 30;
     /**
      * Cuántas líneas leídas sueltas cuestan como recorrer una parte para decidir
-     * entre el índice y el recorrido (2.9.1, medido con y sin OPcache y APCu:
+     * entre el índice y el recorrido (2.10, medido con y sin OPcache y APCu:
      * 190 a 280). Antes contaba 30: con más de 15 filas por parte se dejaba el
      * índice y se recorría la tabla, de 9 a 13 veces más lento y con más memoria
      */
@@ -92,6 +92,8 @@ class Storage
     protected array  $indicesMemo = [];
     /** Los trozos de índice que se lean no van a la caché (2.9): una escritura los lee para reescribirlos, y guardarlos era una décima parte de un DELETE de muchas filas */
     protected bool   $trozosSinCache = false;
+    /** La tabla que escribe la sentencia en curso, en minúsculas (ver escribiendo()) */
+    protected ?string $aEscribir = null;
     /** @var array<string,array<string,array<int,int>>> trozos de índice ya vistos sanos, con su revisión (trozoSano()) */
     protected array  $trozosSanos = [];
     /** Tamaño en bytes de cada trozo visto sano o escrito, por etiqueta, índice y trozo (2.9; ver StorageEscritura::veredicto()) */
@@ -124,12 +126,20 @@ class Storage
     /**
      * Ficheros estropeados o editados a mano que se han leído (reparados en
      * memoria si hacía falta) y que hay que arreglar en disco al acabar (2.9,
-     * ver Reparador y Database::repararPendientes()): tabla => [fichero =>
+     * ver Reparador y DatabaseAvanzada::reparar()): tabla => [fichero =>
      * 'roto' | 'editado'].
      *
      * @var array<string, array<string, string>>
      */
     protected array $porReparar = [];
+    /**
+     * Las tablas con algún índice sobre una columna de texto o decimal cuyas
+     * claves son de antes de la 2.10 (ver clavesAlDia()): no se usa, y se rehace al
+     * acabar (ver DatabaseAvanzada::reparar()).
+     *
+     * @var array<string, true>
+     */
+    protected array $porRehacer = [];
     /** @var array<string,array<string,true>> las claves de $memoProceso por grupo, en orden de llegada */
     private static array $memoGrupos = ['x' => [], 'o' => [], 'm' => []];
     /** @var array<string,int>|null _revs.json de versiones anteriores a la 2.0 */
@@ -139,9 +149,6 @@ class Storage
     protected bool   $apcu;
     /** ¿Se cargan las partes con OPcache? (ver cacheLeer()) */
     protected bool   $opcache;
-    /** Partes pasadas a .php en esta petición: pocas, para que ninguna sea mucho más lenta */
-    private static int $phpGenerados = 0;
-    private const PHP_POR_PETICION = 4;
     /** Lo más que ocupa un resultado guardado en disco (ver guardarResultado()) */
     protected const RESULTADO_MAXIMO_DISCO = 1048576;
     protected string $prefijo;
@@ -155,6 +162,9 @@ class Storage
      *   txAmbito    tabla cuyo exclusivo se tiene, '_base' con el de la base,
      *               o null si no hay ninguna abierta
      *   txRenombrar temporal => fichero definitivo
+     *   txEnSitio   fichero definitivo => contenido, que en una transacción se
+     *               escribe en su sitio al confirmar (2.10, ver
+     *               StorageEscritura::escribirAtomico())
      *   txBorrar    ficheros definitivos que desaparecen
      *   txTablas    tablas tocadas
      *   txCache     entradas de caché que se guardan al confirmar
@@ -172,13 +182,16 @@ class Storage
     protected ?string $modoPartes  = null;
     /** @var array<string,array> lo que la escritura por partes tiene que confirmar, por tabla */
     protected array   $pendientePartes = [];
-    protected bool    $txPropia    = false;   // la abrió StorageEscritura::guardarTabla() y la confirma ella
+    protected bool    $txPropia    = false;   // la abrió StorageEscritura::abrirEscritura() y la confirma escribirTabla()
     protected string  $txOperacion = '';
     protected array   $txRenombrar = [];
+    protected array   $txEnSitio   = [];
     /** @var array<string,true> temporales que no se fuerzan a disco porque su contenido se puede rehacer */
     protected array   $txRegenerables = [];
     protected array   $txBorrar    = [];
     protected array   $txTablas    = [];
+    /** @var array<string,string> tabla => la línea que esta escritura dejó en su .lock (ver StorageEscritura::marcar()) */
+    protected array   $txMarcas    = [];
     protected array   $txCache     = [];
     protected array   $txHuellas   = [];
     protected array   $txPartes    = [];
@@ -203,6 +216,7 @@ class Storage
         // parte al sacarla (21 ms la tabla entera, frente a 0,12 ms). No con
         // 'apcu', que quiere decir no escribir caché en disco
         $this->opcache    = $this->cacheDisco && Config::cacheOpcache() && self::opcacheConSitio(false);
+        self::encenderJit();
         // 'jsq2' (2.9): las entradas de las partes, la estructura y los índices
         // llevan el sello de su fichero (ver parte()). Con otro prefijo, cada
         // versión ve solo las suyas: volver a una anterior no lee entradas que
@@ -283,7 +297,7 @@ class Storage
      */
     public function bloquear(bool $exclusivo, $tabla = null): void
     {
-        $tablas = $tabla === null ? [] : (is_array($tabla) ? array_values($tabla) : [$tabla]);
+        $tablas = $tabla === null ? [] : (\is_array($tabla) ? array_values($tabla) : [$tabla]);
         if ($this->lockNivel > 0) {
             if ($exclusivo && !$this->lockExclusivo) {
                 if ($this->modoPartes !== null) {
@@ -316,7 +330,7 @@ class Storage
             if ($exclusivoBase) {
                 // Con el exclusivo de la base no hay ninguna escritura viva en
                 // ninguna tabla: todo temporal que quede es de un proceso muerto
-                $this->barrerTemporales();
+                StorageBarrido::base($this);
             } elseif ($exclusivo) {
                 foreach ($tablas as $t) {
                     self::validarTabla($t);
@@ -329,17 +343,6 @@ class Storage
             // el DDL, creían tener un exclusivo que no tenían
             $this->desbloquear();
             throw $e;
-        }
-    }
-
-    /** Los temporales de la base y de su journal: con su exclusivo, todos son de procesos muertos (ver bloquear()) */
-    private function barrerTemporales(): void
-    {
-        foreach ((array)glob($this->dir . '/*.tmp') as $f) {
-            @unlink((string)$f);
-        }
-        foreach ((array)glob($this->dirTx . '/*.tmp') as $f) {
-            @unlink((string)$f);                      // un manifiesto que no llegó a escribirse
         }
     }
 
@@ -384,7 +387,7 @@ class Storage
             fclose($torno);
             $torno = false;
         }
-        $fh = @fopen($fichero, 'c');
+        $fh = @fopen($fichero, 'c+');                // también se lee: ver StorageEscritura::marcar()
         if ($fh === false) {
             if ($torno !== false) {
                 flock($torno, LOCK_UN);
@@ -417,7 +420,7 @@ class Storage
             flock($fh, LOCK_UN);
             fclose($fh);
         }
-        if (is_resource($this->lock)) {
+        if (\is_resource($this->lock)) {
             flock($this->lock, LOCK_UN);
             fclose($this->lock);
         }
@@ -492,16 +495,19 @@ class Storage
             }
             return;
         }
+        $rutas = (array)glob($this->dirTx . '/*');
         // Un journal de antes de la 2.0, con su estado; el de una tabla que se
         // llame «manifiesto» tiene el mismo nombre, y es de los de ahora (2.9:
-        // se tomaba por uno viejo y se llevaba los de las demás tablas)
-        if (is_file($this->dirTx . '/manifiesto.json')
+        // se tomaba por uno viejo y se llevaba los de las demás tablas). Se
+        // mira en lo listado (2.10: antes, una consulta más al disco en cada bloqueo)
+        if (\in_array($this->dirTx . '/manifiesto.json', $rutas, true)
             && (json_decode((string)@file_get_contents($this->dirTx . '/manifiesto.json'), true)['tipo'] ?? null) !== 'redo') {
             StorageMantenimiento::migrarJournalPlano($this);
+            $rutas = (array)glob($this->dirTx . '/*');
         }
 
         $ambitos = [];
-        foreach ((array)glob($this->dirTx . '/*') as $ruta) {
+        foreach ($rutas as $ruta) {
             $nombre = basename((string)$ruta);
             if (substr($nombre, -5) === '.json') {
                 $nombre = substr($nombre, 0, -5);
@@ -571,15 +577,43 @@ class Storage
         return is_file($this->ficheroMeta($tabla));
     }
 
+    /** @var array<string, bool> carpeta de datos => si su disco distingue mayúsculas (ver distingueMayusculas()) */
+    private static array $distingue = [];
+
+    /**
+     * ¿Distingue mayúsculas el disco de los datos? Se mira una vez por
+     * carpeta y proceso, con la estructura de una tabla que existe escrita
+     * con otras mayúsculas (.META.JSON, que el motor nunca escribe): si se
+     * encuentra, no las distingue (Windows, macOS). Lo usa
+     * Catalog::nombreReal() (2.10): si las distingue, una tabla que existe se
+     * llama justo como se ha escrito, sin leer su estructura.
+     */
+    public function distingueMayusculas(string $tabla): bool
+    {
+        return self::$distingue[$this->dir] ??= !is_file($this->dir . '/' . $tabla . '.META.JSON');
+    }
+
     public static function validarTabla(string $tabla): void
     {
+        // Los ya vistos, sin la expresión regular (2.10): una búsqueda por
+        // clave valida el nombre de su tabla una docena de veces
+        if (isset(self::$validas[$tabla])) {
+            return;
+        }
         if (!preg_match(self::RE_TABLA, $tabla)) {
             throw JsonSqlDbError::schema("Nombre de tabla no válido: '$tabla'");
         }
         if (isset(self::RESERVADOS[strtolower($tabla)])) {
             throw JsonSqlDbError::schema("'$tabla' es un nombre reservado: sus ficheros serían los de la base");
         }
+        if (\count(self::$validas) >= 256) {
+            self::$validas = [];
+        }
+        self::$validas[$tabla] = true;
     }
+
+    /** @var array<string, true> los nombres de tabla ya validados en este proceso (ver validarTabla()) */
+    private static array $validas = [];
 
     /**
      * Estructura de una tabla. En $huella, lo que la identifica —su clave de
@@ -599,7 +633,7 @@ class Storage
         $previa  = null;
         $huella  = null;
         $reparada = false;
-        if (is_array($v) && isset($v['s'], $v['m'])) {
+        if (\is_array($v) && isset($v['s'], $v['m'])) {
             if ($v['s'] === $sello) {
                 $meta = $v['m'];
             } else {
@@ -612,10 +646,10 @@ class Storage
             }
             $texto = (string)file_get_contents($fichero);
             $meta  = json_decode($texto, true);
-            if (!is_array($meta)) {
+            if (!\is_array($meta)) {
                 // Estropeada a mano (2.9): solo comas sobrantes o la llave final
                 $meta = Reparador::objeto($texto);
-                if ($meta === null || !is_array($meta['columns'] ?? null)) {
+                if ($meta === null || !\is_array($meta['columns'] ?? null)) {
                     throw JsonSqlDbError::io("Estructura ilegible en '$tabla.meta.json': no se puede arreglar sola, "
                         . 'corrígela a mano (la estructura de una tabla no se puede adivinar)');
                 }
@@ -624,7 +658,14 @@ class Storage
             } elseif ($previa !== null && $previa !== $meta) {
                 $this->apuntarReparacion($fichero, true);         // otra estructura: editada a mano
             }
-            $this->cacheGuardar($clave, ['s' => $sello, 'm' => $meta]);
+            // La de la tabla que la sentencia va a escribir, solo en el proceso
+            // (2.10): su clave lleva la revisión, que la escritura cambia, y lo
+            // guardado para los demás se borraba al acabar sin servir a nadie
+            if ($this->aEscribir === strtolower($tabla)) {
+                $this->recordar($clave, ['s' => $sello, 'm' => $meta]);
+            } else {
+                $this->cacheGuardar($clave, ['s' => $sello, 'm' => $meta]);
+            }
         }
         // El contador de autoincremento vive en rev.json desde la 2.7 (ver
         // StorageEscritura::ponerAutoincremento()); el de meta.json es el de la creación o el
@@ -658,7 +699,7 @@ class Storage
         }
         $texto = (string)@file_get_contents($f);
         $v = json_decode($texto, true);
-        if (is_array($v)) {
+        if (\is_array($v)) {
             return $v;
         }
         // Estropeado a mano (2.9): lo seguro se arregla al leer, como la
@@ -751,7 +792,7 @@ class Storage
     protected function partesSegunEstado(string $tabla): int
     {
         $estado = $this->estado($tabla);
-        $n      = count((array)($estado['parts'] ?? []));
+        $n      = \count((array)($estado['parts'] ?? []));
         $chunk  = (int)($estado['chunk'] ?? 0);
         return isset($estado['rows']) && $chunk > 0 ? min($n, max(1, (int)ceil((int)$estado['rows'] / $chunk))) : $n;
     }
@@ -767,13 +808,13 @@ class Storage
         Memoria::comprobarFichero($fichero);
         $texto ??= (string)file_get_contents($fichero);
         $json = json_decode($texto, true);
-        if (is_array($json) && is_array($json['rows'] ?? null)) {
+        if (\is_array($json) && \is_array($json['rows'] ?? null)) {
             // Válida, pero si sus desfases no cuadran con el texto la ha
             // editado alguien: los índices y los desfases ya no valen y la
             // tabla se reescribe al acabar (2.9). Cuesta casi nada al lado
             // del json_decode de arriba
-            if (isset($json['offsets_at']) && (!is_array($json['offsets'] ?? null)
-                || count($json['offsets']) !== count($json['rows'])
+            if (isset($json['offsets_at']) && (!\is_array($json['offsets'] ?? null)
+                || \count($json['offsets']) !== \count($json['rows'])
                 || strpos($texto, '"offsets": [', (int)$json['offsets_at']) !== (int)$json['offsets_at'] + 2)) {
                 $this->apuntarReparacion($fichero, true);
             }
@@ -791,6 +832,17 @@ class Storage
     }
 
     /**
+     * ¿Queda algo por reparar o por rehacer (ver porReparar() y porRehacer())?
+     * Una sola llamada al acabar cada sentencia, que casi nunca deja nada
+     * (2.10, antes de publicarla: eran las dos, y un SELECT 1 hacía un 0,4 %
+     * más que en la 2.9).
+     */
+    public function hayPendientes(): bool
+    {
+        return $this->lockNivel === 0 && ($this->porReparar !== [] || $this->porRehacer !== []);
+    }
+
+    /**
      * Las tablas con ficheros que reparar en disco, y se olvidan. Solo cuando
      * no queda ningún bloqueo: reparar es escribir, con su propio exclusivo.
      *
@@ -804,6 +856,52 @@ class Storage
         $r = $this->porReparar;
         $this->porReparar = [];
         return $r;
+    }
+
+    /**
+     * Las tablas cuyos índices hay que rehacer con las claves de la 2.10 (ver
+     * clavesAlDia()), y se olvidan; solo cuando ya no queda ningún bloqueo,
+     * como porReparar().
+     *
+     * @return list<string>
+     */
+    public function porRehacer(): array
+    {
+        if ($this->lockNivel > 0 || $this->porRehacer === []) {
+            return [];
+        }
+        $r = array_keys($this->porRehacer);
+        $this->porRehacer = [];
+        return $r;
+    }
+
+    /**
+     * ¿Están las claves del índice como las escribe la 2.10? Hasta la 2.9 un
+     * texto que era un número ('007') iba a la clave de ese número, la misma
+     * que '7' o 7, y un decimal entero de 9·10^18 a 2^63, a una de decimal;
+     * desde la 2.10 cada texto va como texto, y ese decimal, como el entero
+     * (ver Indexes::trozo()). En un índice sin columnas de texto ni decimales
+     * las claves son las mismas, y valen. Con alguna, solo si
+     * el estado dice en «textos» hasta qué revisión las ha escrito la 2.10 y
+     * ningún trozo es de después: una versión anterior que reescriba alguno le
+     * pone su revisión sin tocar «textos», y deja de valer.
+     */
+    protected function clavesAlDia(string $tabla, array $def): bool
+    {
+        if (($def['texto'] ?? true) === false) {
+            return true;
+        }
+        // Lo visto se recuerda mientras dure el bloqueo, como el plan
+        return $this->indicesMemo[$tabla][$def['name']]['alDia'] ??= $this->huellaAlDia($tabla, $def);
+    }
+
+    /** Ver clavesAlDia() */
+    private function huellaAlDia(string $tabla, array $def): bool
+    {
+        $estado = $this->estado($tabla);
+        $revs   = $estado['indexes'][$def['name']] ?? null;
+        $hasta  = $estado['textos'][$def['name']] ?? null;
+        return \is_int($hasta) && \is_array($revs) && $hasta <= (int)$estado['rev'] && ($revs === [] || $hasta >= max($revs));
     }
 
     /** Roto, o editado a mano y válido (entonces solo hay que reescribir la tabla) */
@@ -829,10 +927,10 @@ class Storage
         // si ya no es el mismo, alguien lo ha editado a mano y vale el disco
         $clave  = $this->claveParte($tabla, $parte);
         $sello  = self::sello($fichero);
-        $v      = $this->cacheLeer($clave);
+        $v      = $this->cacheLeer($clave, null, true);
         $previa = null;                     // lo que tenía la caché, si el fichero ya no es el mismo
         $huella = null;                     // o la huella de lo que escribió el motor, si no tenía las filas
-        if (is_array($v) && isset($v['s'], $v['f'])) {
+        if (\is_array($v) && isset($v['s'], $v['f'])) {
             if ($v['s'] === $sello) {
                 return $v['f'];
             }
@@ -943,7 +1041,7 @@ class Storage
                 $partes[] = $i + 1;
             }
         }
-        if (count($partes) * 2 > $plan['partes']) {
+        if (\count($partes) * 2 > $plan['partes']) {
             return null;
         }
         return (function () use ($tabla, $partes) {
@@ -985,7 +1083,7 @@ class Storage
         // basta comprobar que está la última y no la siguiente, dos llamadas al
         // disco en vez de una por parte (2.9). Si no cuadra —una tabla de antes
         // de la 2.5, o ficheros tocados a mano—, se cuentan como siempre
-        $n = count((array)($this->estado($tabla)['parts'] ?? []));
+        $n = \count((array)($this->estado($tabla)['parts'] ?? []));
         if ($n > 0 && is_file($this->ficheroDatos($tabla, $n)) && !is_file($this->ficheroDatos($tabla, $n + 1))) {
             return $this->partesMemo[$tabla] = $n;
         }
@@ -1031,7 +1129,7 @@ class Storage
                 return null;
             }
             $lista = $ini + 1 === $fin ? [] : json_decode(substr($linea, $ini, $fin - $ini + 1), true);
-            if (!is_array($lista)) {
+            if (!\is_array($lista)) {
                 return null;
             }
         } finally {
@@ -1069,14 +1167,14 @@ class Storage
         }
         $out = [];
         foreach ($desfases as $desfase) {
-            if ($desfase < 0 || strlen($saltos) < 4 * ($desfase + 1)) {
+            if ($desfase < 0 || \strlen($saltos) < 4 * ($desfase + 1)) {
                 fclose($fh);
                 return null;
             }
             fseek($fh, (int)unpack('N', $saltos, 4 * $desfase)[1]);
             $linea = rtrim((string)fgets($fh), ",\r\n");
             $fila = $linea !== '' && $linea[0] === '{' ? json_decode($linea, true) : null;
-            if (!is_array($fila)) {
+            if (!\is_array($fila)) {
                 fclose($fh);
                 return null;
             }
@@ -1119,7 +1217,7 @@ class Storage
             return $this->indicesMemo[$tabla][$nombre][$parte];
         }
         $revs = $this->estado($tabla)['indexes'][$nombre] ?? null;
-        if (!is_array($revs) || !isset($revs[$parte - 1])) {
+        if (!\is_array($revs) || !isset($revs[$parte - 1]) || !$this->clavesAlDia($tabla, $def)) {
             return null;
         }
         $rev   = (int)$revs[$parte - 1];
@@ -1129,18 +1227,18 @@ class Storage
         // mano se vuelve a leer, y si está roto se rehace
         $sello   = self::sello($fichero);
         $v       = $this->cacheLeer($clave);
-        $idx     = is_array($v) && isset($v['s'], $v['i']) && $v['s'] === $sello ? $v['i'] : null;
+        $idx     = \is_array($v) && isset($v['s'], $v['i']) && $v['s'] === $sello ? $v['i'] : null;
         if ($idx === null) {
             if (!is_file($fichero)) {
                 return null;
             }
             Memoria::comprobarFichero($fichero);
             $idx = json_decode((string)file_get_contents($fichero), true);
-            if (!is_array($idx)) {
+            if (!\is_array($idx)) {
                 $this->apuntarReparacion($fichero);       // estropeado a mano: se rehace al acabar (2.9)
                 return null;
             }
-            if (!is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev
+            if (!\is_array($idx['keys'] ?? null) || (int)($idx['rev'] ?? -1) !== $rev
                 || (int)($idx['part'] ?? 0) !== $parte) {
                 return null;
             }
@@ -1154,15 +1252,15 @@ class Storage
         // Hasta TROZOS_EN_MEMORIA por índice: una escritura que repasaba los
         // trozos de una tabla de un millón de filas los guardaba todos, 4,8 MB
         // por índice (2.9). Sale el más antiguo
-        if (count($this->indicesMemo[$tabla][$nombre] ?? []) >= self::TROZOS_EN_MEMORIA) {
+        if (\count($this->indicesMemo[$tabla][$nombre] ?? []) >= self::TROZOS_EN_MEMORIA) {
             foreach (array_keys($this->indicesMemo[$tabla][$nombre]) as $k) {
-                if (is_int($k)) {
+                if (\is_int($k)) {
                     unset($this->indicesMemo[$tabla][$nombre][$k]);
                     break;
                 }
             }
         }
-        // Su cabecera (filtro, cubre, min y max; ver Indexes::resumenDeTexto()),
+        // Su cabecera (filtro, cubre, min y max; ver IndexesEscritura::resumenDeTexto()),
         // para volverla a escribir tal cual si el trozo solo pierde claves (2.9)
         if (isset($idx['filtro'])) {
             $this->indicesMemo[$tabla][$nombre]['resumen'][$parte] = array_intersect_key($idx, ['filtro' => 1, 'cubre' => 1, 'min' => 1, 'max' => 1]);
@@ -1173,7 +1271,7 @@ class Storage
     /**
      * Lo que hace falta saber de un índice para buscar en él sin abrir
      * trozos de más: cuántos trozos tiene, el rango numérico de cada uno (ver
-     * Indexes::rango()) y el mínimo y máximo de todos, para descartar de un
+     * IndexesEscritura::rango()) y el mínimo y máximo de todos, para descartar de un
      * golpe una clave fuera de ellos. Si los trozos con valores van en orden
      * y sin solaparse (una clave autoincremental), `orden` los lista como
      * [mínimo, máximo, trozo], para dar con el de una clave por bisección (2.9).
@@ -1192,7 +1290,13 @@ class Storage
         }
         $estado = $this->estado($tabla);
         $revs   = $estado['indexes'][$nombre] ?? $estado['rev'];
-        if (!is_array($revs)) {
+        // Con claves de antes de la 2.10 en una columna de texto o decimal no sirve: se
+        // recorre la tabla, y al acabar se rehace (ver clavesAlDia())
+        if (!$this->clavesAlDia($tabla, $def)) {
+            $this->porRehacer[$tabla] = true;
+            return null;
+        }
+        if (!\is_array($revs)) {
             $legado = StorageMantenimiento::indiceLegado($this, $tabla, $def, (int)$revs);
             if ($legado === null) {
                 return null;
@@ -1200,10 +1304,10 @@ class Storage
             $plan = ['partes' => 0, 'rangos' => [], 'min' => null, 'max' => null, 'orden' => null, 'legado' => $legado];
         } else {
             $partes = max(1, $this->partes($tabla));
-            if (count($revs) < $partes) {
+            if (\count($revs) < $partes) {
                 return null;
             }
-            $rangos = array_slice(array_pad((array)($estado['rangos'][$nombre] ?? []), $partes, null), 0, $partes);
+            $rangos = \array_slice(array_pad((array)($estado['rangos'][$nombre] ?? []), $partes, null), 0, $partes);
             $min = $max = null;
             $orden = [];
             foreach ($rangos as $i => $r) {
@@ -1228,39 +1332,6 @@ class Storage
     }
 
     /**
-     * Los trozos de un índice en los que pueden estar unas claves, o null si
-     * el índice no sirve. Con el rango numérico de cada trozo se saltan los
-     * que no pueden contener ninguna: en una clave primaria autoincremental
-     * es abrir un trozo en vez de todos.
-     *
-     * @param list<string> $claves  claves buscadas (o sus prefijos)
-     * @return list<array<string, int|list<int>>>|null
-     */
-    private function trozosParaClaves(string $tabla, array $def, array $claves): ?array
-    {
-        $plan = $this->planIndice($tabla, $def);
-        if ($plan === null) {
-            return null;
-        }
-        if ($plan['legado'] !== null) {
-            return [$plan['legado']];
-        }
-        $valores = array_map([Indexes::class, 'valorNumerico'], $claves);
-        $trozos  = [];
-        for ($p = 1; $p <= $plan['partes']; $p++) {
-            if (!IndexesBusqueda::cabeEnRango($valores, $plan['rangos'][$p - 1])) {
-                continue;
-            }
-            $keys = $this->trozoIndice($tabla, $def, $p);
-            if ($keys === null) {
-                return null;
-            }
-            $trozos[] = $keys;
-        }
-        return $trozos;
-    }
-
-    /**
      * Posiciones de las filas cuya clave de índice es una de las dadas (o
      * empieza por una, con $prefijo: un índice sobre (a, b) usado para
      * buscar solo por a; las claves llevan la longitud por delante, así que
@@ -1270,16 +1341,25 @@ class Storage
      * orden de la tabla, así que las que da son las primeras, y puede dar
      * alguna más del último trozo mirado (2.9).
      *
+     * Con $parcial, el índice no sirve para esas columnas en toda la tabla:
+     * las de detrás admiten NULL, y las filas con NULL no están en él (ver
+     * Indexes::sirve()). Sirve en las partes donde no falta ninguna (2.10); de
+     * las demás salen todas sus posiciones, y quien llama mira el WHERE en
+     * sus filas como siempre. Null si son más de la mitad.
+     *
      * @param list<string> $claves
      * @return list<int>|null ordenadas
      */
-    public function posicionesPorIndice(string $tabla, array $def, array $claves, bool $prefijo, ?int $tope = null): ?array
+    public function posicionesPorIndice(string $tabla, array $def, array $claves, bool $prefijo, ?int $tope = null, bool $parcial = false): ?array
     {
         self::validarTabla($tabla);
         if (!$this->indices) {
             return null;
         }
         $this->bloquearLectura($tabla);
+        if ($parcial) {
+            return StorageBusquedas::posicionesEnPartesCompletas($this, $tabla, $def, $claves);
+        }
         // Con el índice entero ya en memoria (ver StorageEscritura::posicionesDeClave()),
         // de ahí (2.9): si no, cada búsqueda volvía a decodificar todos sus
         // trozos, porque solo se guardan 64 (ver trozoIndice())
@@ -1305,19 +1385,19 @@ class Storage
                 return $posiciones;
             }
         }
-        $trozos = $this->trozosParaClaves($tabla, $def, $claves);
+        $trozos = StorageBusquedas::trozosParaClaves($this, $tabla, $def, $claves);
         if ($trozos === null) {
             return null;
         }
         $posiciones = [];
         foreach ($trozos as $keys) {
-            if ($tope !== null && count($posiciones) >= $tope) {
+            if ($tope !== null && \count($posiciones) >= $tope) {
                 break;
             }
             if ($prefijo) {
                 foreach ($keys as $k => $lista) {
                     foreach ($claves as $c) {
-                        if (strncmp((string)$k, $c, strlen($c)) === 0) {
+                        if (strncmp((string)$k, $c, \strlen($c)) === 0) {
                             foreach (Indexes::posiciones($lista) as $p) { $posiciones[$p] = true; }
                             break;
                         }
@@ -1358,15 +1438,18 @@ class Storage
         }
         // Las numéricas, en cada trozo solo las que caben en su rango
         $valores = array_map([Indexes::class, 'valorNumerico'], $claves);
-        $numericas = !in_array(null, $valores, true);
+        $numericas = !\in_array(null, $valores, true);
         $trozos = [];
         for ($p = 1; $p <= $plan['partes']; $p++) {
             if (!$numericas) {
                 $trozos[$p] = $claves;
                 continue;
             }
+            // Lo de StorageBusquedas::cabeEnRango(), sin una llamada por trozo
+            // y clave (2.10): aquí ninguna es NULL
+            $r = $plan['rangos'][$p - 1];
             foreach ($claves as $i => $c) {
-                if (IndexesBusqueda::cabeEnRango([$valores[$i]], $plan['rangos'][$p - 1])) {
+                if ($r === null || ($r !== [] && $valores[$i] >= $r[0] && $valores[$i] <= $r[1])) {
                     $trozos[$p][] = $c;
                 }
             }
@@ -1395,7 +1478,7 @@ class Storage
     protected function clavesEnTexto(string $tabla, array $def, $partes, array $claves, bool $parar, ?int &$cuenta = null, ?int $tope = null): ?array
     {
         $revs    = $this->estado($tabla)['indexes'][$def['name']] ?? null;
-        if (!is_array($revs)) {
+        if (!\is_array($revs)) {
             return null;
         }
         $comoAguja = static fn($c) => json_encode($c, self::JSON_FILA) . ':';
@@ -1421,9 +1504,9 @@ class Storage
         $chunk       = (int)($estado['chunk'] ?? $this->filasPorParte);
         $sinDescarte = 0;                             // trozos seguidos en que el filtro no descartó nada
         // range(1, 0) da [1, 0], no una lista vacía: sin trozos no se busca en ninguno
-        $lista = is_array($partes) ? $partes : ($partes > 0 ? array_fill_keys(range(1, $partes), null) : []);
+        $lista = \is_array($partes) ? $partes : ($partes > 0 ? array_fill_keys(range(1, $partes), null) : []);
         foreach ($lista as $p => $deEste) {
-            if ($tope !== null && count($hallado) >= $tope) {
+            if ($tope !== null && \count($hallado) >= $tope) {
                 break;                                // ya hay las que se pedían (ver posicionesPorIndice())
             }
             $buscadas = $deEste ?? $claves;
@@ -1456,7 +1539,7 @@ class Storage
                 'index' => $nombre, 'table' => $tabla, 'columns' => $def['columns'],
                 'part' => $p, 'rev' => (int)($revs[$p - 1] ?? -1),
             ], self::JSON_FILA), 1, -1) . ',';
-            if (strncmp($texto, $cabecera, strlen($cabecera)) !== 0) {
+            if (strncmp($texto, $cabecera, \strlen($cabecera)) !== 0) {
                 if ($fh !== null) {
                     fclose($fh);
                 }
@@ -1469,13 +1552,13 @@ class Storage
             // trozo sin filtro recorría las miles de comas de sus claves
             $f = false;
             if ($filtro === null && $util && $fh !== null) {
-                $coma = strpos($texto, ',', strlen($cabecera));
+                $coma = strpos($texto, ',', \strlen($cabecera));
                 $f = $coma !== false && substr_compare($texto, '"filtro":"', $coma + 1, 10) === 0 ? $coma : false;
             }
             $deUnaVez = $deUnaVez || ($util && $filtro === null && $f === false);
             if ($f !== false) {
                 // Hasta la comilla que lo cierra y, detrás, lo que quepa de `,"cubre":"todo"`
-                while ((($fin = strpos($texto, '"', $f + 11)) === false || strlen($texto) < $fin + 16) && $fh !== null && !feof($fh)) {
+                while ((($fin = strpos($texto, '"', $f + 11)) === false || \strlen($texto) < $fin + 16) && $fh !== null && !feof($fh)) {
                     $texto .= (string)fread($fh, 8192);
                 }
                 $filtro = $fin === false ? null : Indexes::filtro([
@@ -1485,7 +1568,7 @@ class Storage
                 if ($filtro !== null) {
                     $this->indicesMemo[$tabla][$nombre]['filtros'][$p] = $filtro;
                     $aprendidos++;
-                    $antes    = count($buscadas);
+                    $antes    = \count($buscadas);
                     $buscadas = array_values(array_filter($buscadas, static fn($c) => Indexes::puedeEstar($filtro, $c)));
                     if ($buscadas === []) {
                         $sinDescarte = 0;
@@ -1497,7 +1580,7 @@ class Storage
                     // Un valor que está en casi todos los trozos (una ciudad): el
                     // filtro no ahorra nada y leer en dos veces cuesta más. Tras
                     // dos trozos así, los siguientes se leen enteros, como antes
-                    $sinDescarte = count($buscadas) === $antes ? $sinDescarte + 1 : 0;
+                    $sinDescarte = \count($buscadas) === $antes ? $sinDescarte + 1 : 0;
                     $deUnaVez    = $deUnaVez || $sinDescarte >= 2;
                 }
             }
@@ -1509,21 +1592,21 @@ class Storage
                 return null;
             }
             $agujas = array_map($comoAguja, $buscadas);
-            $desde = strpos($texto, '"keys":{', strlen($cabecera));
+            $desde = strpos($texto, '"keys":{', \strlen($cabecera));
             if ($desde === false) {
                 return null;
             }
             // Con el rango del trozo (si todas sus claves son números), dónde
             // caería cada una si van en orden (ver buscarClave())
             $rango = $this->estado($tabla)['rangos'][$nombre][$p - 1] ?? null;
-            $ancho = is_array($rango) && count($rango) === 2 && $rango[1] > $rango[0] ? $rango[1] - $rango[0] : 0;
+            $ancho = \is_array($rango) && \count($rango) === 2 && $rango[1] > $rango[0] ? $rango[1] - $rango[0] : 0;
             foreach ($agujas as $j => $aguja) {
                 $num = $ancho > 0 ? Indexes::valorNumerico($buscadas[$j]) : null;
                 $i   = self::buscarClave($texto, $aguja, $desde, $num === null ? null : ($num - $rango[0]) / $ancho);
                 if ($i === null) {
                     continue;
                 }
-                $v = $i + strlen($aguja);
+                $v = $i + \strlen($aguja);
                 if ($texto[$v] === '[') {
                     $fin = (int)strpos($texto, ']', $v);
                     if ($cuenta !== null) {
@@ -1550,7 +1633,7 @@ class Storage
     }
 
     /**
-     * Los filtros de los trozos de un índice (ver Indexes::resumenDeTexto()),
+     * Los filtros de los trozos de un índice (ver IndexesEscritura::resumenDeTexto()),
      * guardados en la caché por una lectura o una escritura anterior (2.9):
      * trozo => filtro, con la revisión de cada uno. Buscar un email en una
      * tabla de un millón de filas abría la cabecera de sus mil trozos (30 ms);
@@ -1566,11 +1649,11 @@ class Storage
         }
         $this->indicesMemo[$tabla][$nombre]['filtrosCargados'] = true;
         $v = $this->cacheLeer($this->claveCache($tabla, 'f' . $nombre, 0));
-        if (!is_array($v) || !is_array($v['r'] ?? null) || !is_array($v['f'] ?? null)) {
+        if (!\is_array($v) || !\is_array($v['r'] ?? null) || !\is_array($v['f'] ?? null)) {
             return;
         }
         foreach ($v['f'] as $i => $filtro) {
-            if (is_string($filtro) && ($v['r'][$i] ?? null) === (int)($revs[$i] ?? -1)) {
+            if (\is_string($filtro) && ($v['r'][$i] ?? null) === (int)($revs[$i] ?? -1)) {
                 $this->indicesMemo[$tabla][$nombre]['filtros'][$i + 1] ??= $filtro;
             }
         }
@@ -1586,7 +1669,7 @@ class Storage
     {
         $filtros = $this->indicesMemo[$tabla][$nombre]['filtros'] ?? [];
         $partes ??= max(1, $this->partes($tabla));
-        if (count($filtros) < $partes || count($revs) < $partes) {
+        if (\count($filtros) < $partes || \count($revs) < $partes) {
             return;
         }
         $f     = [];
@@ -1601,7 +1684,7 @@ class Storage
         if (!$algun) {
             return;                                   // un índice de números acotados no tiene filtros: nada que guardar
         }
-        $entrada = [$this->claveCache($tabla, 'f' . $nombre, 0), ['r' => array_map('intval', array_slice($revs, 0, $partes)), 'f' => $f]];
+        $entrada = [$this->claveCache($tabla, 'f' . $nombre, 0), ['r' => array_map('intval', \array_slice($revs, 0, $partes)), 'f' => $f]];
         // Con una escritura abierta, al confirmarla (2.9): los de los trozos que
         // escribe llevan una revisión que aún no está en el disco
         if ($this->txAmbito !== null) {
@@ -1626,7 +1709,7 @@ class Storage
      */
     private static function buscarClave(string $texto, string $aguja, int $desde, ?float $donde): ?int
     {
-        $largo = strlen($texto);
+        $largo = \strlen($texto);
         $corte = $desde - 1;                          // desde dónde falta mirar hacia delante
         if ($donde !== null) {
             $tramo = $largo - $desde;
@@ -1707,14 +1790,14 @@ class Storage
             if ($compartida) {
                 $php = $this->ficheroEstado($tabla);
                 $v   = $this->opcache ? (is_file($php) ? include $php : null) : apcu_fetch($this->prefijo . 'e:' . $tabla);
-                if (is_array($v) && ($v['s'] ?? null) === $sello) {
+                if (\is_array($v) && ($v['s'] ?? null) === $sello) {
                     return $this->estados[$tabla] = $v['e'];
                 }
             }
         }
         $texto   = is_file($fichero) ? (string)@file_get_contents($fichero) : null;
         $json    = $texto === null ? null : json_decode($texto, true);
-        if ($texto !== null && !is_array($json)) {
+        if ($texto !== null && !\is_array($json)) {
             $sello = null;                          // lo arreglado no se guarda en la caché
             // Estropeado a mano (2.9). Antes se tomaba por inexistente, y las
             // revisiones volvían a empezar: la caché podía servir datos viejos.
@@ -1724,17 +1807,17 @@ class Storage
             $json = Reparador::objeto($texto) ?? ['gen' => random_int(1 << 30, PHP_INT_MAX)];
             $this->apuntarReparacion($fichero);
         }
-        $estado  = is_array($json) ? ['rev' => (int)($json['rev'] ?? 0)] + $json : ['rev' => StorageMantenimiento::revLegada($this, $tabla)];
+        $estado  = \is_array($json) ? ['rev' => (int)($json['rev'] ?? 0)] + $json : ['rev' => StorageMantenimiento::revLegada($this, $tabla)];
         $estado['indexes'] = (array)($estado['indexes'] ?? []);
         $estado['rangos']  = (array)($estado['rangos'] ?? []);
         if ($sello !== null) {
             // Unas pocas: las de las tablas que se están usando
-            if (count(self::$estadosProceso) >= 32 || Memoria::apretado()) {
+            if (\count(self::$estadosProceso) >= 32 || Memoria::apretado()) {
                 self::$estadosProceso = [];
             }
             self::$estadosProceso[$fichero] = [$sello, $estado];
             if ($compartida) {
-                $this->guardarEstado($tabla, $sello, $estado);
+                StorageCompartida::guardarEstado($this, $tabla, $sello, $estado);
             }
         }
         return $this->estados[$tabla] = $estado;
@@ -1744,23 +1827,6 @@ class Storage
     protected function ficheroEstado(string $tabla): string
     {
         return $this->dirCache . '/e.' . md5($this->prefijo . $tabla) . '.php';
-    }
-
-    private function guardarEstado(string $tabla, string $sello, array $estado): void
-    {
-        if (!$this->opcache) {
-            if (self::apcuConSitio()) {
-                apcu_store($this->prefijo . 'e:' . $tabla, ['s' => $sello, 'e' => $estado]);
-            }
-            return;
-        }
-        // Recién reescrito, OPcache puede servir aún el anterior un par de
-        // segundos: entonces no se vuelve a escribir, se lee el fichero
-        $php = $this->ficheroEstado($tabla);
-        if ((!is_file($php) || (int)@filectime($php) < time() - 3) && self::opcacheConSitio(true)
-            && (is_dir($this->dirCache) || @mkdir($this->dirCache, 0775, true) || is_dir($this->dirCache))) {
-            self::volcarPhp($php, ['s' => $sello, 'e' => $estado]);
-        }
     }
 
     protected function rev(string $tabla): int
@@ -1824,8 +1890,11 @@ class Storage
         return (int)($estado['parts'][$parte - 1] ?? $estado['rev']);
     }
 
-    /** @param string|null $fichero el de la caché en disco, si quien llama ya lo sabe */
-    protected function cacheLeer(string $clave, ?string $fichero = null)
+    /**
+     * @param string|null $fichero el de la caché en disco, si quien llama ya lo sabe
+     * @param bool        $parte   la de una parte (ver claveParte()), que puede venir de OPcache
+     */
+    protected function cacheLeer(string $clave, ?string $fichero = null, bool $parte = false)
     {
         if (!$this->cache) {
             return null;
@@ -1835,11 +1904,13 @@ class Storage
         }
         // Modo OPcache (2.9): una parte con su .php se carga de la memoria
         // compartida de OPcache, que dura entre peticiones, sin leer ni
-        // reconstruir nada (la tabla entera, de unos 22 ms a 0,15 ms por visita)
-        $php = $this->opcache && explode(':', $clave)[3][0] === 'p' ? substr($this->ficheroCache($clave), 0, -6) . '.php' : null;
+        // reconstruir nada (la tabla entera, de unos 22 ms a 0,15 ms por visita).
+        // Lo dice quien llama (2.10): se miraba en el texto de la clave, y un
+        // cambio en su forma lo habría apagado sin que nadie lo notara
+        $php = $this->opcache && $parte ? substr($this->ficheroCache($clave), 0, -6) . '.php' : null;
         if ($php !== null && is_file($php)) {
             $val = include $php;
-            if (is_array($val)) {
+            if (\is_array($val)) {
                 return $val;
             }
         }
@@ -1855,56 +1926,17 @@ class Storage
                 return null;
             }
             Memoria::comprobarFichero($fichero);
-            $val = @unserialize((string)file_get_contents($fichero), ['allowed_classes' => false]);
+            $texto = (string)@file_get_contents($fichero);
+            $val   = @unserialize(str_ends_with($clave, ':0') ? (string)self::leerFija($texto) : $texto, ['allowed_classes' => false]);
             if ($val === false) {
                 return null;
             }
         }
         if ($php !== null && isset($val['f'])) {          // con sus filas: la huella sola que deja una escritura, no (2.9)
-            $this->aPhp($clave, $php, $val);
+            StorageCompartida::aPhp($this, $clave, $php, $val);
         }
         $this->recordar($clave, $val);
         return $val;
-    }
-
-    /**
-     * Pasa a .php la caché de una parte (modo OPcache, 2.9), al leerla: nunca
-     * al escribir, que quedan como siempre. Solo si lleva más de 2 segundos
-     * sin cambiar (antes OPcache no la guardaría y cada lectura la compilaría),
-     * si a OPcache le queda sitio, y unas pocas por petición. El fichero solo
-     * lleva datos (var_export) y su nombre sale de la clave interna; se
-     * escribe aparte y se renombra de una vez, con la fecha en el pasado para
-     * que OPcache lo guarde ya.
-     */
-    private function aPhp(string $clave, string $php, array $filas): void
-    {
-        // La edad, la del fichero de datos de esa parte: lo que de verdad cambia
-        [, , $etiqueta, $tipo] = explode(':', $clave);
-        $datos = $this->ficheroDatos(substr($etiqueta, 0, (int)strrpos($etiqueta, '@')), (int)substr($tipo, 1));
-        if (self::$phpGenerados >= self::PHP_POR_PETICION || (int)@filemtime($datos) >= time() - 2 || !self::opcacheConSitio(true)
-            || (!is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache))) {
-            return;
-        }
-        self::$phpGenerados++;
-        self::volcarPhp($php, $filas);      // un .tmp que quedara lo borra el barrido de StorageEscritura::limpiarCache()
-    }
-
-    /**
-     * Escribe un .php de la caché que solo lleva datos (var_export): aparte y
-     * renombrado de una vez, con la fecha en el pasado para que OPcache lo
-     * guarde ya. El temporal es de este proceso y de esta vez (2.9): con un
-     * nombre fijo, dos procesos que rehacían el mismo .php se pisaban, uno
-     * renombraba el temporal mientras el otro lo estaba escribiendo, y el .php
-     * quedaba cortado (un ParseError al cargarlo) o vacío. Solo se pone en su
-     * sitio entero, y si algo falla no se queda.
-     */
-    private static function volcarPhp(string $php, array $valor): void
-    {
-        $tmp   = $php . '.' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.tmp';
-        $texto = '<?php return ' . var_export($valor, true) . ';';
-        if (@file_put_contents($tmp, $texto) !== strlen($texto) || !@touch($tmp, time() - 10) || !@rename($tmp, $php)) {
-            @unlink($tmp);
-        }
     }
 
     /**
@@ -1920,7 +1952,30 @@ class Storage
     protected static function apcuConSitio(float $libre = 0.25): bool
     {
         $m = @apcu_sma_info(true);
-        return is_array($m) && $m['avail_mem'] >= $libre * $m['num_seg'] * $m['seg_size'];
+        return \is_array($m) && $m['avail_mem'] >= $libre * $m['num_seg'] * $m['seg_size'];
+    }
+
+    /**
+     * Enciende el JIT de OPcache si PHP lo deja (2.10): con su memoria
+     * reservada en php.ini (opcache.jit_buffer_size) y opcache.jit="off" o 0,
+     * que quieren decir apagado pero encendible. Con "disable", con off sin
+     * comillas (php.ini lo lee como un texto vacío, que PHP toma por
+     * "disable") o sin memoria, PHP no deja, y con él ya encendido no hay
+     * nada que hacer. Una vez por proceso, y vale para toda la petición.
+     * JSONSQLDB_JIT = false lo deja como esté.
+     */
+    private static function encenderJit(): void
+    {
+        static $hecho = false;
+        if ($hecho) {
+            return;
+        }
+        $hecho = true;
+        // Sin ini_set() (hay alojamientos que la desactivan), nada (2.10, antes de publicarla: un error)
+        if (Config::jit() && \function_exists('ini_set') && self::opcacheConSitio(false)
+            && \in_array(strtolower((string)ini_get('opcache.jit')), ['off', '0'], true) && (int)ini_get('opcache.jit_buffer_size') > 0) {
+            @ini_set('opcache.jit', 'tracing');
+        }
     }
 
     /**
@@ -1928,14 +1983,14 @@ class Storage
      * menos un 25 % de memoria y de claves libres? Si no, no se le da nada más:
      * así nunca se llena ni se reinicia por culpa de la base.
      */
-    private static function opcacheConSitio(bool $sitio): bool
+    protected static function opcacheConSitio(bool $sitio): bool
     {
         static $activo = null;
         if (!$sitio && $activo !== null) {
             return $activo;                            // una vez por proceso
         }
         $s = function_exists('opcache_get_status') ? @opcache_get_status(false) : false;
-        $activo = is_array($s) && !empty($s['opcache_enabled']);
+        $activo = \is_array($s) && !empty($s['opcache_enabled']);
         if (!$activo || !$sitio) {
             return $activo;
         }
@@ -1974,7 +2029,7 @@ class Storage
         $tope  = ['x' => 4, 'o' => 64, 'm' => 16][$grupo];
         self::$memoProceso[$clave] = $valor;
         self::$memoGrupos[$grupo][$clave] = true;
-        while (count(self::$memoGrupos[$grupo]) > $tope) {
+        while (\count(self::$memoGrupos[$grupo]) > $tope) {
             $vieja = array_key_first(self::$memoGrupos[$grupo]);
             unset(self::$memoGrupos[$grupo][$vieja], self::$memoProceso[$vieja]);
         }
@@ -1988,6 +2043,11 @@ class Storage
             return;
         }
         $this->recordar($clave, $valor);
+        // Dentro de una transacción, solo en este proceso (2.10): cada sentencia
+        // deja otra revisión, y lo guardado para los demás no le servía a nadie
+        if ($this->lote !== null) {
+            return;
+        }
         if ($this->apcu) {
             if (self::apcuConSitio(explode(':', $clave)[3][0] === 'p' ? 0.5 : 0.25)) {
                 apcu_store($clave, $valor);
@@ -2000,10 +2060,39 @@ class Storage
         if (!is_dir($this->dirCache) && !@mkdir($this->dirCache, 0775, true) && !is_dir($this->dirCache)) {
             return;   // sin caché en disco: el motor sigue funcionando
         }
-        // Sin escritura atómica ni fsync: la caché es regenerable y su clave
-        // lleva la revisión, así que un fichero a medias solo produce un
-        // unserialize() fallido, que cacheLeer() trata como «no hay caché»
-        @file_put_contents($this->ficheroCache($clave), serialize($valor));
+        $fichero = $this->ficheroCache($clave);
+        $datos   = serialize($valor);
+        if (!str_ends_with($clave, ':0')) {
+            // Las que llevan la revisión van a un fichero nuevo cada vez: vaciado
+            // por un corte o a medias, solo dan un unserialize() fallido, que
+            // cacheLeer() trata como «no hay caché»
+            @file_put_contents($fichero, $datos);
+            return;
+        }
+        // Las de clave fija (revisión 0: filtros, veredictos, límites,
+        // recuentos) se reescriben en cada escritura de la tabla. Encima de lo
+        // que haya, sin vaciar el fichero antes (2.10): en ext4 y XFS, vaciar un
+        // fichero y volver a escribirlo obliga a mandarlo al disco, y eran
+        // 170–270 µs por fichero, cuatro en cada INSERT. Quien lee mientras
+        // tanto puede ver lo nuevo y lo viejo mezclados: lo descarta la línea
+        // de delante, con su longitud y dos sumas de comprobación (ver leerFija())
+        $texto = \sprintf(self::CABECERA_FIJA, \strlen($datos), crc32($datos), hash('crc32c', $datos)) . $datos;
+        $fh    = @fopen($fichero, 'c');
+        if ($fh !== false) {
+            @ftruncate($fh, @fwrite($fh, $texto) === \strlen($texto) ? \strlen($texto) : 0);
+            fclose($fh);
+        }
+    }
+
+    /** La primera línea de una entrada de clave fija en disco: longitud, crc32 y crc32c de lo que sigue (ver cacheGuardar()) */
+    private const CABECERA_FIJA = "jsonsqldb-cache %d %d %s\n";
+
+    /** Lo guardado en una entrada de clave fija, o null si no está entera: de antes de la 2.10, o a medias (ver cacheGuardar()) */
+    private static function leerFija(string $texto): ?string
+    {
+        [$largo, $crc, $crcc] = (array)sscanf($texto, self::CABECERA_FIJA) + [null, null, null];
+        $datos = (string)substr($texto, (int)strpos($texto, "\n") + 1);
+        return $crcc !== null && \strlen($datos) === $largo && crc32($datos) === $crc && hash('crc32c', $datos) === $crcc ? $datos : null;
     }
 
     /** Fichero de una entrada de caché; null si es un resultado que no está. */

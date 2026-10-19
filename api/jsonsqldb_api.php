@@ -32,6 +32,10 @@ declare(strict_types=1);
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
 ini_set('display_errors', '0');
+// Los decimales de la respuesta, con las cifras justas para volver a ser el
+// mismo número, sea cual sea serialize_precision en php.ini (2.10: con 10,
+// 0.30000000000000004 salía 0.3)
+ini_set('serialize_precision', '-1');
 
 // Ambas rutas pueden fijarse antes (por ejemplo para mover la configuración
 // fuera del webroot) definiendo JSONSQLDB_API_CONFIG y JSONSQLDB_CONFIG.
@@ -55,7 +59,6 @@ if (!JsonSQLDB\Config::apiActiva()) {
 use JsonSQLDB\ApiStore;
 use JsonSQLDB\Database;
 use JsonSQLDB\JsonSqlDbError;
-use JsonSQLDB\Logger;
 
 ini_set('memory_limit', MEMORY_LIMIT);
 set_time_limit(TIME_LIMIT);
@@ -176,12 +179,16 @@ function ipPermitida(string $ip, array $lista): bool
             }
             continue;
         }
+        // Un rango mal escrito no deja pasar a nadie (2.10: «10.0.0.0/» o
+        // «10.0.0.0/foo» daban 0 bits, que es «todas las IP»)
         [$red, $bits] = explode('/', $entrada, 2);
         $redBin = @inet_pton(trim($red));
-        $bits   = (int)$bits;
-        if ($redBin === false || strlen($redBin) !== strlen($bin) || $bits < 0) {
+        $bits   = trim($bits);
+        if ($redBin === false || strlen($redBin) !== strlen($bin) || !ctype_digit($bits)
+            || (int)$bits > 8 * strlen($bin)) {
             continue;
         }
+        $bits = (int)$bits;
         $bytes = intdiv($bits, 8);
         $resto = $bits % 8;
         if ($bytes > 0 && strncmp($bin, $redBin, $bytes) !== 0) {
@@ -439,7 +446,11 @@ $autenticado = $origen;
 // dos tokens distintos coincidieran en 64 bits dentro de la misma ventana de
 // minutos y se rechazara uno legítimo, que es despreciable. A cambio, el
 // fichero de estado se queda en una cuarta parte por esta vía.
-$acceso = $store->nonceYContar(substr(hash('sha256', $token), 0, 16), $ip, $origen, (int)$timestamp);
+// Una clave admin no gasta el cupo de su IP (2.10): es la del panel, que llama
+// siempre desde la IP de su servidor y agotaba las 150 peticiones del día en
+// unas decenas de páginas. Ya puede hacerlo todo, así que el cupo por IP no la
+// frena en nada; el bloqueo por fallos de firma y el cupo por clave siguen
+$acceso = $store->nonceYContar(substr(hash('sha256', $token), 0, 16), $ip, $origen, (int)$timestamp, $permiso !== 'admin');
 if ($acceso !== true) {
     // Ni un token repetido ni pasarse del límite cuentan como intento fallido
     // de esa IP (2.9): la firma era buena, así que no es nadie probando
@@ -467,7 +478,9 @@ if (!in_array('*', $permitidas, true)) {
 }
 
 // --- Ejecución ---
-Logger::contexto($origen, $ip);
+// Quién y desde dónde, para el registro del motor: con una constante, Logger
+// solo se carga si se escribe una línea (2.10: se cargaba en cada petición)
+define('JSONSQLDB_REGISTRO', [$origen, $ip]);
 
 try {
     $limitada = !in_array('*', $permitidas, true);
@@ -488,14 +501,18 @@ try {
 
         $lectura   = ['select', 'union', 'show_databases', 'show_tables', 'show_views',
                       'show_schema', 'show_keys', 'show_triggers', 'show_indexes', 'show_create',
-                      'check_keys', 'check_tables', 'explain'];
-        $escritura = array_merge($lectura, ['insert', 'update', 'delete', 'repair_keys', 'repair_tables']);
+                      'check_keys', 'check_tables', 'check_indexes', 'explain'];
+        $escritura = array_merge($lectura, ['insert', 'update', 'delete', 'repair_keys', 'repair_tables', 'repair_indexes']);
 
         if ($permiso === 'lectura' && !in_array($tipo, $lectura, true)) {
             throw JsonSqlDbError::permission('La API key solo tiene permiso de lectura');
         }
         if ($permiso === 'escritura' && !in_array($tipo, $escritura, true)) {
-            throw JsonSqlDbError::permission('La API key no tiene permiso para modificar la estructura');
+            // VACUUM no cambia la estructura, pero reescribe todas las tablas:
+            // es de administración, y el mensaje lo dice (2.10)
+            throw JsonSqlDbError::permission($tipo === 'vacuum'
+                ? 'VACUUM necesita una API key de administración'
+                : 'La API key no tiene permiso para modificar la estructura');
         }
     };
 
@@ -534,6 +551,12 @@ try {
 
 } catch (JsonSqlDbError $e) {
     salirConError('Error en la consulta', $e->sqlState . ': ' . $e->getMessage());
+} catch (JsonException $e) {
+    // Un número del resultado que JSON no puede escribir (2.10: SELECT 1e400,
+    // infinito, acababa en «Error interno»)
+    salirConError('Error en la consulta', $e->getCode() === JSON_ERROR_INF_OR_NAN
+        ? 'TYPE: El resultado tiene un número fuera de rango (infinito o NaN), que JSON no puede representar'
+        : 'TYPE: El resultado no se puede escribir en JSON: ' . $e->getMessage());
 } catch (Throwable $e) {
     salirConError('Error interno', $e->getMessage());
 }

@@ -7,8 +7,9 @@ namespace JsonSQLDB;
  * Los cambios de estructura del catálogo (CREATE, ALTER, DROP, vistas,
  * triggers, autoincremento), con lo público de Catalog, que se recibe en
  * $cat. Van aparte para que una consulta no tenga que compilarlos (2.9):
- * sin OPcache, PHP compila en cada petición lo que carga. Catalog los sigue
- * ofreciendo con el mismo nombre. No se instancia.
+ * sin OPcache, PHP compila en cada petición lo que carga. Se llaman
+ * directamente, CatalogDdl::crearTabla($cat, …) (2.10: Catalog tenía uno con
+ * el mismo nombre para cada uno, y lo compilaba cada petición). No se instancia.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -54,9 +55,18 @@ final class CatalogDdl
             throw JsonSqlDbError::schema("La vista '$nombre' ya existe");
         }
 
+        // Lo que usa tiene que existir (2.10), como en MySQL y PostgreSQL: se
+        // aceptaba, como en SQLite, y fallaba al usarla. Las tablas y vistas,
+        // no las columnas: con las tablas, el resto se ve al usarla
+        foreach (array_unique(self::tablasNombradas(Parser::analizar($sql, [], $cat->nombres()))) as $t) {
+            if (!$cat->esVista($t) && !$cat->existe($cat->nombreReal($t))) {
+                throw JsonSqlDbError::schema("La vista '$nombre' usa '$t', que no es una tabla ni una vista de la base: créala antes");
+            }
+        }
         $vistas = $cat->vistas();
         $vistas[$nombre] = ['sql' => $sql, 'created_at' => date('Y-m-d H:i:s')];
         StorageMantenimiento::guardarVistas($cat->storage(), $vistas);
+        $cat->olvidar();                           // las vistas que recordaba ya no son esas
         return true;
     }
 
@@ -67,6 +77,7 @@ final class CatalogDdl
             if (strcasecmp((string)$n, $nombre) === 0) {
                 unset($vistas[$n]);
                 StorageMantenimiento::guardarVistas($cat->storage(), $vistas);
+                $cat->olvidar();
                 return true;
             }
         }
@@ -89,6 +100,24 @@ final class CatalogDdl
     {
         StorageMantenimiento::reescribir($cat->storage(), $tabla, $porFila, self::compactar($meta), Indexes::definiciones($meta));
         $cat->olvidar($tabla);
+    }
+
+    /**
+     * ALTER TABLE t AUTO_INCREMENT = n (2.10): el siguiente valor del contador
+     * pasa a ser n si es mayor que el que tiene; nunca baja, para no volver a
+     * dar un id. Devuelve el siguiente que queda.
+     */
+    public static function subirAutoincremento(Catalog $cat, string $tabla, int $valor): int
+    {
+        $meta = $cat->meta($tabla);
+        if ($meta['autoincrement'] === null) {
+            throw JsonSqlDbError::schema("AUTO_INCREMENT = $valor: la tabla '$tabla' no tiene columna AUTO_INCREMENT");
+        }
+        if ($valor > (int)$meta['autoincrement']['next']) {
+            $meta['autoincrement']['next'] = $valor;
+            self::guardar($cat, $tabla, $meta);
+        }
+        return max($valor, (int)$meta['autoincrement']['next']);
     }
 
     /**
@@ -217,7 +246,7 @@ final class CatalogDdl
         }
         // Índices declarados con la tabla (KEY / INDEX de MySQL, 2.9)
         foreach ($def['indexes'] ?? [] as $ix) {
-            Indexes::validarNombre((string)$ix['name']);
+            self::validarNombre((string)$ix['name']);
             $cols = [];
             foreach ($ix['columns'] as $c) {
                 $col = Catalog::columna($meta, (string)$c);
@@ -238,7 +267,7 @@ final class CatalogDdl
         // dos dejaba de comprobarse (2.9). Con las mismas, sobra pero no
         // estorba, y se admite como siempre; y si además tendrían el mismo
         // índice, ya lo dice compactar()
-        if (Indexes::autoRepetido($meta) === null) {
+        if (self::autoRepetido($meta) === null) {
             $vistos = [];
             foreach (Catalog::conjuntosUnicos($meta) as $uq) {
                 $n = strtolower($uq['name']);
@@ -288,7 +317,7 @@ final class CatalogDdl
         }
         foreach ($cat->tablas() as $t) {
             foreach ($cat->meta($t)['triggers'] as $trg) {
-                $sentencias = Catalog::sentenciasDe((array)($trg['body'] ?? []));
+                $sentencias = CatalogBloqueos::sentenciasDe((array)($trg['body'] ?? []));
                 if (($trg['when'] ?? null) !== null) {
                     $sentencias[] = 'SELECT ' . $trg['when'];
                 }
@@ -322,7 +351,7 @@ final class CatalogDdl
     private static function usaTabla(string $sql, string $tabla): bool
     {
         try {
-            $ast = strncasecmp(ltrim($sql), 'SET', 3) === 0 ? ParserEscritura::analizarSetNew($sql) : Parser::analizar($sql);
+            $ast = strncasecmp(ltrim($sql), 'SET', 3) === 0 ? ParserEscrituraAvanzada::analizarSetNew($sql) : Parser::analizar($sql);
         } catch (JsonSqlDbError) {
             return false;
         }
@@ -332,16 +361,35 @@ final class CatalogDdl
     /** ¿Sale $tabla en el árbol: en un FROM, un JOIN o una subconsulta, o como la tabla que se escribe? */
     private static function nombraTabla(array $n, string $tabla): bool
     {
-        if ((($n['tipo'] ?? null) === 'tabla' && is_string($n['nombre'] ?? null) && strcasecmp($n['nombre'], $tabla) === 0)
-            || (in_array($n['k'] ?? null, ['insert', 'update', 'delete'], true) && strcasecmp((string)$n['tabla'], $tabla) === 0)) {
-            return true;
+        return \in_array(strtolower($tabla), array_map('strtolower', self::tablasNombradas($n)), true);
+    }
+
+    /**
+     * Las tablas y vistas que nombra un árbol: en un FROM, un JOIN o una
+     * subconsulta, y la que escribe un INSERT, UPDATE o DELETE. Sin los nombres
+     * de un WITH, que son de la consulta y valen en ella y en lo que lleva dentro.
+     *
+     * @param array<string, true> $cte
+     * @return list<string>
+     */
+    private static function tablasNombradas(array $n, array $cte = []): array
+    {
+        foreach (array_keys(\is_array($n['with'] ?? null) ? $n['with'] : []) as $nombre) {
+            $cte[strtolower((string)$nombre)] = true;
+        }
+        $out = [];
+        if (($n['tipo'] ?? null) === 'tabla' && \is_string($n['nombre'] ?? null) && !isset($cte[strtolower($n['nombre'])])) {
+            $out[] = $n['nombre'];
+        }
+        if (\in_array($n['k'] ?? null, ['insert', 'update', 'delete'], true) && \is_string($n['tabla'] ?? null)) {
+            $out[] = $n['tabla'];
         }
         foreach ($n as $hijo) {
-            if (is_array($hijo) && self::nombraTabla($hijo, $tabla)) {
-                return true;
+            if (\is_array($hijo)) {
+                array_push($out, ...self::tablasNombradas($hijo, $cte));
             }
         }
-        return false;
+        return $out;
     }
 
     // ------------------------------------------------------------------
@@ -535,7 +583,7 @@ final class CatalogDdl
                                              bool $otraColacion): void
     {
         foreach (Catalog::conjuntosUnicos($meta) as $u) {
-            if (!in_array(strtolower($columna), array_map('strtolower', $u['columns']), true)) {
+            if (!\in_array(strtolower($columna), array_map('strtolower', $u['columns']), true)) {
                 continue;
             }
             $vistos = [];
@@ -545,7 +593,7 @@ final class CatalogDdl
                     continue;
                 }
                 if (isset($vistos[$clave])) {
-                    throw count($u['columns']) === 1
+                    throw \count($u['columns']) === 1
                         ? JsonSqlDbError::constraint("'$tabla.$columna' tiene valores repetidos: no puede ser UNIQUE")
                         : self::repetida($tabla, $fila, $u['columns']);
                 }
@@ -559,17 +607,18 @@ final class CatalogDdl
             $misma = strcasecmp($otra, $tabla) === 0;
             foreach (($misma ? $meta : $cat->meta($otra))['foreign_keys'] as $fk) {
                 if (strcasecmp($fk['table'], $tabla) !== 0
-                    || !in_array(strtolower($columna), array_map('strtolower', $fk['references']), true)) {
+                    || !\in_array(strtolower($columna), array_map('strtolower', $fk['references']), true)) {
                     continue;
                 }
                 $plegar = Catalog::plegarDe($meta, $fk['references']);
+                $afin   = Catalog::afinidadesDe($meta, $fk['references']);      // la hija, con la del padre (2.10)
                 $padres = [];
                 foreach ($filas as $fila) {
                     $clave = Indexes::claveFila($fila, $fk['references'], $plegar);
                     if ($clave !== null) { $padres[$clave] = true; }
                 }
                 foreach ($misma ? $filas : $cat->storage()->filas($otra) as $hija) {
-                    $clave = Indexes::claveFila($hija, $fk['columns'], $plegar);
+                    $clave = Indexes::claveFila($hija, $fk['columns'], $plegar, $afin);
                     if ($clave !== null && !isset($padres[$clave])) {
                         throw JsonSqlDbError::constraint("Los datos de '$otra' apuntan a " . self::valoresDe($hija, $fk['columns']) . " y no existe en '$tabla'");
                     }
@@ -585,7 +634,7 @@ final class CatalogDdl
         if ($col === null) {
             throw JsonSqlDbError::schema("La columna '$nombre' no existe en '$tabla'");
         }
-        if (count($meta['columns']) === 1) {
+        if (\count($meta['columns']) === 1) {
             throw JsonSqlDbError::schema("No se puede borrar la única columna de '$tabla'");
         }
         self::exigirColumnaLibre($cat, $tabla, $meta, $col['name']);
@@ -704,7 +753,7 @@ final class CatalogDdl
         }
 
         self::reescribirFilas($cat, $tabla, static function (array $fila) use ($col, $hasta): array {
-            if (array_key_exists($col['name'], $fila)) {
+            if (\array_key_exists($col['name'], $fila)) {
                 $fila[$hasta] = $fila[$col['name']];
                 unset($fila[$col['name']]);
             }
@@ -725,16 +774,16 @@ final class CatalogDdl
     {
         $aguja = StorageMantenimiento::claveJson($columna);
         $donde = strpos($linea, $aguja);
-        if ($donde === false || $donde === 0 || !in_array($linea[$donde - 1], ['{', ','], true)
+        if ($donde === false || $donde === 0 || !\in_array($linea[$donde - 1], ['{', ','], true)
             || strpos($linea, $aguja, $donde + 1) !== false) {
             return null;
         }
-        $desde = $donde + strlen($aguja);
+        $desde = $donde + \strlen($aguja);
         if (!preg_match('/\G(?:"(?:[^"\\\\]++|\\\\.)*+"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/', $linea, $m, 0, $desde)) {
             return null;
         }
         $valor = $m[0];
-        $tras  = $desde + strlen($valor);
+        $tras  = $desde + \strlen($valor);
         $sigue = $linea[$tras] ?? '';
         if ($sigue !== ',' && $sigue !== '}') {
             return null;
@@ -865,15 +914,16 @@ final class CatalogDdl
     /** Error si alguna de $filas apunta a una fila que no existe en el padre de $fk */
     private static function exigirPadres(Catalog $cat, string $tabla, array $fk, iterable $filas): void
     {
-        // Con la colación de las columnas del padre, como al escribir (2.9)
+        // Con la colación de las columnas del padre, como al escribir (2.9), y su afinidad (2.10)
         $padres = [];
         $plegar = Catalog::plegarDe($cat->meta($fk['table']), $fk['references']);
+        $afin   = Catalog::afinidadesDe($cat->meta($fk['table']), $fk['references']);
         foreach ($cat->storage()->filas($fk['table']) as $fila) {
             $clave = Indexes::claveFila($fila, $fk['references'], $plegar);
             if ($clave !== null) { $padres[$clave] = true; }
         }
         foreach ($filas as $fila) {
-            $clave = Indexes::claveFila($fila, $fk['columns'], $plegar);
+            $clave = Indexes::claveFila($fila, $fk['columns'], $plegar, $afin);
             if ($clave !== null && !isset($padres[$clave])) {
                 throw JsonSqlDbError::constraint("Los datos de '$tabla' apuntan a " . self::valoresDe($fila, $fk['columns']) . " y no existe en '{$fk['table']}'");
             }
@@ -892,7 +942,7 @@ final class CatalogDdl
      */
     public static function crearIndice(Catalog $cat, string $tabla, string $nombre, array $columnas, bool $siNoExiste = false): bool
     {
-        Indexes::validarNombre($nombre);
+        self::validarNombre($nombre);
         $meta = self::metaExistente($cat, $tabla);
 
         $cols  = [];
@@ -1051,7 +1101,7 @@ final class CatalogDdl
         }
 
         foreach ($meta['columns'] as $i => $c) {
-            if (in_array($c['name'], $nombres, true)) {
+            if (\in_array($c['name'], $nombres, true)) {
                 $meta['columns'][$i]['pk']      = true;
                 $meta['columns'][$i]['notnull'] = true;
             }
@@ -1160,14 +1210,14 @@ final class CatalogDdl
             }
             $refs[] = $col['name'];
         }
-        if ($refs === [] || count($refs) !== count($cols)) {
+        if ($refs === [] || \count($refs) !== \count($cols)) {
             throw JsonSqlDbError::schema("FOREIGN KEY con número de columnas distinto en '$tabla'");
         }
 
         $onDelete = strtoupper(trim((string)($fk['on_delete'] ?? 'NO ACTION')));
         $onUpdate = strtoupper(trim((string)($fk['on_update'] ?? 'NO ACTION')));
         foreach ([$onDelete, $onUpdate] as $accion) {
-            if (!in_array($accion, self::ACCIONES_FK, true)) {
+            if (!\in_array($accion, self::ACCIONES_FK, true)) {
                 throw JsonSqlDbError::schema("Acción de clave foránea no soportada: '$accion'");
             }
         }
@@ -1200,16 +1250,16 @@ final class CatalogDdl
         }
         $timing = strtoupper(trim((string)($trg['timing'] ?? 'AFTER')));
         $evento = strtoupper(trim((string)($trg['event'] ?? '')));
-        if (!in_array($timing, self::TIMINGS, true)) {
+        if (!\in_array($timing, self::TIMINGS, true)) {
             throw JsonSqlDbError::schema("Momento de trigger no soportado: '$timing'");
         }
-        if (!in_array($evento, self::EVENTOS, true)) {
+        if (!\in_array($evento, self::EVENTOS, true)) {
             throw JsonSqlDbError::schema("Evento de trigger no soportado: '$evento'");
         }
         // Cada paso es el texto de una sentencia o un bloque IF (un array, ver
         // ParserSentencias::cuerpoTrigger()); los textos vacíos sobran
         $cuerpo = array_values(array_filter(
-            array_map(static fn($p) => is_string($p) ? trim($p) : $p, (array)($trg['body'] ?? [])),
+            array_map(static fn($p) => \is_string($p) ? trim($p) : $p, (array)($trg['body'] ?? [])),
             static fn($p): bool => $p !== ''
         ));
         if ($cuerpo === []) {
@@ -1251,8 +1301,8 @@ final class CatalogDdl
     public static function compactar(array $meta): array
     {
         // Lo que se guarda tiene que poder indexarse: dos claves únicas con el
-        // mismo índice automático no (2.9, ver Indexes::autoRepetido())
-        $repetido = Indexes::autoRepetido($meta);
+        // mismo índice automático no (2.9, ver autoRepetido())
+        $repetido = self::autoRepetido($meta);
         if ($repetido !== null) {
             throw JsonSqlDbError::schema("Las claves únicas (" . implode(', ', $repetido[1]) . ") y (" . implode(', ', $repetido[2])
                 . ") de '" . ($meta['table'] ?? '') . "' tendrían el mismo índice, '{$repetido[0]}': cambia el nombre de una columna");
@@ -1286,5 +1336,39 @@ final class CatalogDdl
             $out['created_at'] = $meta['created_at'];
         }
         return $out;
+    }
+
+    /**
+     * Dos conjuntos únicos de una tabla cuyo índice automático se llamaría
+     * igual, o null (2.9): (a, b) y (a_b) dan los dos auto_a_b, el mismo
+     * fichero, y antes ninguno de los dos funcionaba bien.
+     *
+     * @return array{0: string, 1: list<string>, 2: list<string>}|null nombre y las dos listas de columnas
+     */
+    public static function autoRepetido(array $meta): ?array
+    {
+        $vistos = [];
+        foreach (Catalog::conjuntosUnicos($meta) as $uq) {
+            $cols   = array_values(array_map('strval', $uq['columns']));
+            $nombre = strtolower(Indexes::nombreAuto($cols));
+            if (isset($vistos[$nombre]) && strcasecmp(implode("\0", $vistos[$nombre]), implode("\0", $cols)) !== 0) {
+                return [Indexes::nombreAuto($cols), $vistos[$nombre], $cols];
+            }
+            $vistos[$nombre] = $cols;
+        }
+        return null;
+    }
+
+    public static function validarNombre(string $nombre): void
+    {
+        if (!preg_match(Indexes::RE_NOMBRE, $nombre)) {
+            throw JsonSqlDbError::schema("Nombre de índice no válido: '$nombre'");
+        }
+        if (stripos($nombre, Indexes::PREFIJO_AUTO) === 0) {
+            throw JsonSqlDbError::schema(
+                "'$nombre': el prefijo '" . Indexes::PREFIJO_AUTO . "' está reservado para los "
+                . 'índices automáticos de PRIMARY KEY y UNIQUE'
+            );
+        }
     }
 }

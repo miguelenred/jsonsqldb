@@ -12,8 +12,12 @@ if ($sql !== '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $lista = Importar::partir($sql);
         $sentencias = max(1, count($lista));
         foreach ($sentencias > 1 ? $lista : [$sql] as $una) {
-            if (!Auth::esAdmin() && !preg_match('/^\s*(SELECT|SHOW)\b/i', $una)) {
-                throw new RuntimeException(t('Con permiso de lectura solo se pueden lanzar SELECT y SHOW.'));
+            // Las que el motor deja a un usuario de lectura (2.10: WITH, EXPLAIN,
+            // CHECK y DESCRIBE se rechazaban). Sin clave de lectura, el panel
+            // firma con la de administración y esta es la única barrera: por
+            // eso se mira aquí también, y no solo en el motor
+            if (!Auth::esAdmin() && !preg_match('/^\s*(SELECT|WITH|SHOW|EXPLAIN|CHECK|DESCRIBE|DESC)\b/i', $una)) {
+                throw new RuntimeException(t('Con permiso de lectura solo se pueden lanzar consultas: SELECT, WITH, SHOW, EXPLAIN, CHECK y DESCRIBE.'));
             }
         }
         $t0        = microtime(true);

@@ -82,13 +82,13 @@ function secretoDe(string $clave): string
 }
 
 /** Petición firmada correctamente. */
-function firmada(string $sql, string $clave, ?string $bd = null, ?string $ts = null, array $params = []): array
+function firmada(string $sql, string $clave, ?string $bd = null, ?string $ts = null, array $params = [], array $extra = []): array
 {
     global $base;
     $bd ??= $base;
     $ts ??= (string)time();
     $pr = $params === [] ? '' : (string)json_encode($params, JSON_UNESCAPED_UNICODE);
-    return peticion([
+    return peticion($extra + [
         'api_key'   => $clave,
         'db'        => $bd,
         'sql'       => $sql,
@@ -236,6 +236,10 @@ chk('escritura NO puede crear tablas', function () {
     $r = firmada('CREATE TABLE prohibida (id INTEGER)', $GLOBALS['CLAVE_APP']);
     return str_contains($r['error'] ?? '', 'no tiene permiso para modificar la estructura');
 });
+chk('escritura NO puede lanzar VACUUM, y el mensaje dice por qué (2.10)', function () {
+    $r = firmada('VACUUM', $GLOBALS['CLAVE_APP']);
+    return str_contains($r['error'] ?? '', 'VACUUM necesita una API key de administración') ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
 chk('escritura NO puede borrar tablas', function () {
     $r = firmada('DROP TABLE clientes', $GLOBALS['CLAVE_APP']);
     return str_contains($r['error'] ?? '', 'PERMISSION');
@@ -340,6 +344,30 @@ chk('el log del motor guarda la etiqueta de la API key', function () use ($raizD
     return 'no se encontró la entrada esperada';
 });
 
+chk('una lectura por la API no carga Logger, que no va a escribir nada; una escritura sí, y queda con la etiqueta de su API key y su IP (2.10: la API lo cargaba en cada petición para decirle quién era)', function () use ($raizDatos) {
+    global $CLAVE_APP;
+    $cargadas = static function (callable $hacer) use ($raizDatos): array {
+        @unlink("$raizDatos/clases.json");
+        $r = $hacer();
+        return [$r, (array)json_decode((string)@file_get_contents("$raizDatos/clases.json"), true)];
+    };
+    [$lee, $clasesLee] = $cargadas(static fn() => firmada('SELECT COUNT(*) AS n FROM clientes', $CLAVE_APP, null, null, [], ['__clases' => 1]));
+    [$esc, $clasesEsc] = $cargadas(static fn() => firmada("INSERT INTO clientes (nombre, ciudad) VALUES ('Registro', 'Elche')", $CLAVE_APP, null, null, [], ['__clases' => 1]));
+    $linea = null;
+    foreach ((array)glob($raizDatos . '/logs/consultas-*.json') as $f) {
+        foreach (array_filter(explode("\n", (string)file_get_contents((string)$f))) as $l) {
+            $e = json_decode($l, true);
+            if (($e['op'] ?? '') === 'INSERT' && str_contains((string)($e['sql'] ?? ''), "'Registro'")) {
+                $linea = $e;
+            }
+        }
+    }
+    $nombre = cuentaDe($CLAVE_APP)['nombre'] ?? '?';
+    return isset($lee[0]['n']) && ($esc['success'] ?? false) === true && $clasesLee !== [] && !in_array('Logger', $clasesLee, true)
+        && in_array('Logger', $clasesEsc, true) && ($linea['origen'] ?? null) === $nombre && ($linea['ip'] ?? null) === '10.0.0.7'
+        ?: json_encode([$lee, $esc, in_array('Logger', $clasesLee, true), in_array('Logger', $clasesEsc, true), $linea, $nombre]);
+});
+
 echo "\n== Parámetros ligados ==\n";
 chk('preparar tabla de parámetros', function () {
     global $CLAVE_ADMIN;
@@ -421,6 +449,18 @@ chk('un parámetro fuera de rango (1e400, que llega como infinito) se rechaza co
     // Un decimal grande pero finito sigue valiendo
     $bien = $firmar(['sql' => 'SELECT ? AS v', 'params' => '[1e300]'], 'SELECT ? AS v[1e300]');
     return ($bien[0]['v'] ?? null) === 1.0E+300 ?: json_encode($bien);
+});
+chk('un resultado infinito (SELECT 1e400, 1e300 * 1e300) da un error que lo dice, suelto y en un lote (2.10: «Error interno»)', function () {
+    global $CLAVE_ADMIN, $base;
+    $r = [firmada('SELECT 1e400 AS v', $CLAVE_ADMIN), firmada('SELECT 1e300 * 1e300 AS v', $CLAVE_ADMIN)];
+    $ts = (string)time();
+    $lote = '["SELECT -1e400 AS v"]';
+    $r[] = peticion(['api_key' => $CLAVE_ADMIN, 'db' => $base, 'timestamp' => $ts, 'lote' => $lote,
+        'token' => hash_hmac('sha256', '+' . $CLAVE_ADMIN . '|' . $base . '|' . $ts . '|' . $lote . '¿', secretoDe($CLAVE_ADMIN))]);
+    foreach ($r as $x) {
+        if (!str_contains($x['error'] ?? '', 'fuera de rango')) { return json_encode($r, JSON_UNESCAPED_UNICODE); }
+    }
+    return true;
 });
 chk('sin parámetros la firma de siempre sigue valiendo', function () {
     global $CLAVE_ADMIN;
@@ -583,6 +623,25 @@ chk('IP suelta, rango CIDR, IPv6 y lista vacía', function () {
     @unlink($tmp);
     return $salida === '1,0,1,0,1,1,0,1,0' ?: $salida;
 });
+chk('un rango mal escrito no deja pasar a nadie, igual en la API que en el panel (2.10)', function () {
+    // «10.0.0.0/» y «10.0.0.0/foo» daban 0 bits: todas las IP pasaban
+    $fn  = (string)file_get_contents(dirname(__DIR__) . '/api/jsonsqldb_api.php');
+    $ini = strpos($fn, 'function ipPermitida');
+    $codigo = '<?php ' . substr($fn, $ini, strpos($fn, "\n}", $ini) + 2 - $ini) . '
+        require ' . var_export(dirname(__DIR__) . '/jsonsqldbadmin/lib/util.php', true) . ';
+        $casos = [["203.0.113.9", "10.0.0.0/"], ["203.0.113.9", "10.0.0.0/foo"], ["203.0.113.9", "10.0.0.0/33"],
+                  ["203.0.113.9", "10.0.0.0/-1"], ["2001:db8::1", "2001:db8::/"], ["2001:db8::1", "2001:db8::/129"],
+                  ["203.0.113.9", "0.0.0.0/0"], ["10.0.0.200", "10.0.0.128/25"], ["10.0.0.100", "10.0.0.128/25"],
+                  ["10.0.0.7", " 10.0.0.7 "], ["2001:db8::1", "2001:db8::/32"], ["203.0.113.9", "no-es-ip"]];
+        foreach ($casos as [$ip, $e]) {
+            echo (int)ipPermitida($ip, [$e]), (int)util_ip_permitida($ip, [$e]), (int)(util_rango_ip($e) !== null), ",";
+        }';
+    $tmp = sys_get_temp_dir() . '/ip_' . getmypid() . '.php';
+    file_put_contents($tmp, $codigo);
+    $salida = trim((string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($tmp) . ' 2>&1'));
+    @unlink($tmp);
+    return $salida === '000,000,000,000,000,000,111,111,001,111,111,000,' ?: $salida;
+});
 
 echo "\n== Clientes de ejemplo ==\n";
 chk('su cuenta existe, con escritura sobre pruebas y nada más', function () {
@@ -680,11 +739,12 @@ PY;
 });
 /**
  * La API servida de verdad, por HTTP (php -S), con la configuración de las
- * pruebas: su URL, y con qué pararla. Cada vez en otro puerto.
+ * pruebas y lo que se le pase para php.ini ($ini, de dos en dos: '-d',
+ * 'clave=valor'): su URL, y con qué pararla. Cada vez en otro puerto.
  *
  * @return array{0: string, 1: Closure}
  */
-function servidorApi(): array
+function servidorApi(array $ini = []): array
 {
     global $raizDatos;
     static $veces = 0;
@@ -694,7 +754,7 @@ function servidorApi(): array
         . "define('API_ESTADO_PATH', " . var_export("$raizDatos/api", true) . ");\n"
         . "define('JSONSQLDB_API_CONFIG', " . var_export(__DIR__ . '/_config_api.php', true) . ");\n");
     $puerto = 9600 + (getmypid() + $veces++) % 300;
-    $servidor = proc_open([PHP_BINARY, '-d', 'auto_prepend_file=' . $prepend, '-S', "127.0.0.1:$puerto", '-t', dirname(__DIR__)],
+    $servidor = proc_open([PHP_BINARY, '-d', 'auto_prepend_file=' . $prepend, ...$ini, '-S', "127.0.0.1:$puerto", '-t', dirname(__DIR__)],
         [1 => ['file', '/dev/null', 'a'], 2 => ['file', '/dev/null', 'a']], $tub);
     for ($i = 0; $i < 60 && !@fsockopen('127.0.0.1', $puerto, $e, $m, 0.3); $i++) { usleep(100000); }
     return ["http://127.0.0.1:$puerto/api/jsonsqldb_api.php", static function () use ($servidor, $prepend): void {
@@ -854,6 +914,17 @@ chk('el estado se reparte: cada petición reescribe solo los ficheros pequeños 
     // 2.000 nonces en ~256 ficheros: ninguno pasa de unas decenas
     return $ficheros > 200 && $max < 40 && $repetido === 'nonce' && $unico === false ?: $r;
 });
+chk('el estado se reescribe sin vaciar su fichero: si queda más corto, con espacios detrás, y se sigue leyendo bien (2.10)', function () {
+    $d = sys_get_temp_dir() . '/jsonsqldb_test_limites_' . getmypid();
+    // Un fichero con muchos nonces caducados: al anotar uno nuevo se purgan y lo que queda es más corto
+    $r = conLimites('$f = ' . var_export("$d/estado/n-", true) . ' . substr(md5("nuevo"), 0, 2) . ".json"; @mkdir(dirname($f), 0775, true);'
+        . '$viejos = []; for ($i = 0; $i < 200; $i++) { $viejos["v$i"] = time() - 100000; }'
+        . 'file_put_contents($f, json_encode(["nonces" => $viejos]) . "\n"); clearstatcache(); $antes = filesize($f);'
+        . '$a = $s->nonceYContar("nuevo", "1.1.1.1"); clearstatcache();'
+        . '$e = json_decode(file_get_contents($f), true);'
+        . 'echo json_encode([$a, filesize($f) === $antes, array_keys($e["nonces"] ?? []), $s->nonceYContar("nuevo", "1.1.1.1")]);');
+    return $r === '[true,true,["nuevo"],"nonce"]' ?: $r;
+});
 chk('un nonce del estado.json de antes de la 2.9 se sigue rechazando unos minutos, y luego ese fichero se borra', function () {
     $d = sys_get_temp_dir() . '/jsonsqldb_test_limites_' . getmypid();
     $r = conLimites('file_put_contents(' . var_export("$d/estado.json", true) . ', json_encode(["nonces" => ["viejo" => time()]]));'
@@ -889,6 +960,34 @@ chk('el token de un cliente con el reloj adelantado se recuerda hasta que deja d
         . 'echo $n >= $hora ? "bien" : "guardado con $n, y el token vale hasta " . ($hora + RATE_TIMESTAMP_DIFF);');
     return $r === 'bien' ?: $r;
 });
+chk('una clave admin, la del panel, no gasta el cupo de su IP; las demás sí (2.10)', function () {
+    // El panel llama desde la IP de su servidor y agotaba las 150 del día
+    global $CLAVE_ADMIN, $base;
+    $r = [];
+    foreach (['admin' => $CLAVE_ADMIN, 'app' => $GLOBALS['CLAVE_APP']] as $quien => $clave) {
+        for ($i = 0; $i < 3; $i++) {
+            $sql = "SELECT $i AS n";
+            $ts  = (string)time();
+            $res = peticion(['__cupo' => 2, 'api_key' => $clave, 'db' => $base, 'sql' => $sql, 'params' => '', 'timestamp' => $ts,
+                'token' => hash_hmac('sha256', '+' . $clave . '|' . $base . '|' . $ts . '|' . $sql . '¿', secretoDe($clave))], true);
+            $r[$quien][] = $res['error'] ?? 'ok';
+        }
+    }
+    return $r === ['admin' => ['ok', 'ok', 'ok'], 'app' => ['ok', 'ok', 'Límite de peticiones superado']] ?: json_encode($r, JSON_UNESCAPED_UNICODE);
+});
+chk('si el estado de la API o un registro no se pueden escribir, se cierra el paso y se dice una vez en el registro de errores de PHP (2.10: en silencio)', function () {
+    // Un fichero donde debería estar la carpeta del estado: ni root puede crearla
+    $d   = sys_get_temp_dir() . '/jsonsqldb_test_limites_' . getmypid();
+    $log = sys_get_temp_dir() . '/jsonsqldb_test_errorlog_' . getmypid() . '.txt';
+    $r = conLimites('ini_set("error_log", ' . var_export($log, true) . '); file_put_contents(' . var_export("$d/estado", true) . ', "x");'
+        . 'echo json_encode([$s->nonceYContar("a", "1.1.1.1"), $s->nonceYContar("a", "1.1.1.1")]);'
+        . 'JsonSQLDB\Logger::noSeEscribe("/no/existe.json"); JsonSQLDB\Logger::noSeEscribe("/no/existe.json");');
+    $lineas = is_file($log) ? file($log) : [];
+    @unlink($log);
+    $estado = count(preg_grep('#no se puede escribir .*estado/n-#', $lineas));
+    $otro   = count(preg_grep('#/no/existe\.json#', $lineas));
+    return $r === '[false,false]' && $estado === 1 && $otro === 1 ?: json_encode([$r, $lineas]);
+});
 chk('el cupo por API key cuenta las peticiones de esa clave desde cualquier IP', function () {
     $r = conLimites('echo json_encode([$s->nonceYContar("n1", "1.1.1.1", "A"), $s->nonceYContar("n2", "2.2.2.2", "A"),'
         . '$s->nonceYContar("n3", "3.3.3.3", "A"), $s->nonceYContar("n4", "3.3.3.3", "B")]);', 'define("RATE_LIMIT_POR_CLAVE", 2);');
@@ -907,6 +1006,21 @@ chk('con JSONSQLDB_API_ACTIVA a false no se atiende nada: ni una petición bien 
         ?: json_encode([$r, $antes, $peticiones(), $filas], JSON_UNESCAPED_UNICODE);
 });
 
+chk('la API responde los decimales con las cifras justas aunque php.ini tenga otro serialize_precision (2.10: con 10, 0.30000000000000004 salía 0.3)', function () use ($base) {
+    global $API_KEYS;
+    $clave   = $GLOBALS['CLAVE_APP'];
+    $secreto = '';
+    foreach ($API_KEYS as $c) { if (($c['key'] ?? '') === $clave) { $secreto = (string)$c['hmac_secret']; } }
+    [$url, $parar] = servidorApi(['-d', 'serialize_precision=10']);
+    try {
+        // Un SELECT sale fila a fila mientras trabaja el motor; un lote, después
+        $cli = new JsonSqlDbCliente($url, $clave, $secreto, $base);
+        $r   = [$cli->consultar('SELECT 0.1 + 0.2 AS x, 1.0 / 3 AS y'), $cli->lote(['SELECT 0.1 + 0.2 AS x, 1.0 / 3 AS y'])];
+    } finally {
+        $parar();
+    }
+    return $r === [[['x' => 0.1 + 0.2, 'y' => 1.0 / 3]], [[['x' => 0.1 + 0.2, 'y' => 1.0 / 3]]]] ?: json_encode($r);
+});
 chk('una consulta que pasa de TIME_LIMIT responde con un error en JSON, y el registro dice de qué clave y qué operación (2.9: respuesta vacía, y sin anotar)', function () use ($raizDatos, $base) {
     $ultima = static function () use ($raizDatos): array {
         $ficheros = (array)glob($raizDatos . '/api/peticiones-*.json');

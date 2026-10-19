@@ -38,7 +38,11 @@ data/             one folder per database, a few JSON files per table
 > [Upgrading from an earlier version](01-core.md#12-upgrading-from-an-earlier-version)
 > before replacing the folder. The data needs no conversion, but if you come
 > from 1.x **the HMAC signature of the API changed** and your own clients stop
-> working until they are updated.
+> working until they are updated. From 2.9 or earlier, **texts that are numbers
+> compare as texts** since 2.10 (`'7' = '007'` is false), `LIKE` ignores the
+> case of `A` to `Z` only and `SUM` past 64 bits is an error, as in SQLite, and
+> the indexes on `TEXT` columns are rebuilt once, on their own: see the
+> [changelog](../CHANGELOG.md).
 
 | Document | What it covers |
 |---|---|
@@ -75,7 +79,7 @@ with `CREATE DATABASE mydb` through the API with an empty `db`, or with
 use bound parameters:
 
 ```php
-$rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja']);
+$rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Malaga']);
 ```
 
 ## Worth knowing first
@@ -88,6 +92,9 @@ $rows = $cli->consultar('SELECT * FROM customers WHERE city = ?', ['Torrevieja']
 - **Several statements can be one transaction** (2.9): all of them or none.
   While it runs the whole database waits for it, and it never spans requests.
   See [03-writes.md](03-writes.md).
+- **Texts and numbers compare as in SQLite** (2.10): by the affinity of the
+  column, so in a `TEXT` column `'7'` and `'007'` are two values, and `'10'`
+  sorts before `'9'`. See [02-queries.md](02-queries.md).
 - **`DECIMAL` is rounded floating point**, not exact decimal. For money that
   has to add up to the cent, store cents in an `INTEGER`. See
   [01-core.md](01-core.md).
@@ -111,33 +118,38 @@ data. The ones that load dumps into other systems or run PowerShell scripts do
 more where those are installed (CI has them).
 
 ```
-php tests/f1_nucleo.php       → OK: 73    storage, types, locking, direct access
-php tests/f2_parser.php       → OK: 83    parser and bound parameters
-php tests/f2_select.php       → OK: 164   SELECT execution and collation
-php tests/f3_escrituras.php   → OK: 111   writes, DDL, keys, triggers, transactions and holes
-php tests/f4_api.php          → OK: 76    real requests against the API
-php tests/f5_esquema.php      → OK: 122   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
-php tests/f5_admin.php        → OK: 176   the panel, driven like a user
-php tests/f6_cortes.php       → OK: 35    crash recovery, killing real processes
+php tests/f1_nucleo.php       → OK: 76    storage, types, locking, direct access
+php tests/f2_parser.php       → OK: 86    parser and bound parameters
+php tests/f2_select.php       → OK: 165   SELECT execution and collation
+php tests/f3_escrituras.php   → OK: 122   writes, DDL, keys, triggers, transactions and holes
+php tests/f4_api.php          → OK: 84    real requests against the API
+php tests/f5_esquema.php      → OK: 125   SHOW, ALTER, CREATE TABLE … AS, constraints, views, integrity, journal, result cache
+php tests/f5_admin.php        → OK: 189   the panel, driven like a user
+php tests/f6_cortes.php       → OK: 36    crash recovery, killing real processes
 php tests/f7_concurrencia.php → OK: 35    real simultaneous processes and locking
-php tests/f8_indices.php      → OK: 85    indexes, against a full scan every time
+php tests/f8_indices.php      → OK: 93    indexes, against a full scan every time
 php tests/f9_journal.php      → OK: 36    every intermediate state a crash can leave
-php tests/f10_indices_incrementales.php → OK: 21   indexes corrected instead of rebuilt
-php tests/f11_asistente.php    → OK: 41    panel setup wizard and direct connection
-php tests/f12_contra_sqlite.php → OK: 12   164 queries, 16 writes and 8 triggers that touch rows of their own statement, same results as SQLite
+php tests/f10_indices_incrementales.php → OK: 22   indexes corrected instead of rebuilt
+php tests/f11_asistente.php    → OK: 45    panel setup wizard and direct connection
+php tests/f12_contra_sqlite.php → OK: 16   238 queries, 32 writes and 8 triggers that touch rows of their own statement, same results as SQLite
 php tests/f13_fuzz_contra_sqlite.php → OK: 2000  random queries against SQLite (day's seed; --n, --semilla)
-php tests/f14_volcados.php     → OK: 57    dumps to and from SQLite, MySQL, PostgreSQL, SQL Server (more with the servers)
+php tests/f14_volcados.php     → OK: 65    dumps to and from SQLite, MySQL, PostgreSQL, SQL Server (more with the servers)
 php tests/f15_idiomas.php      → OK: 6     the panel's translations and the choice of language
-php tests/f16_vistas_triggers.php → OK: 10  views and triggers exported to other systems (more with MySQL and PostgreSQL: they must do the same there)
-php tests/f17_rutinas_importadas.php → OK: 7 views and triggers imported from MySQL, PostgreSQL and SQL Server (more with the servers)
+php tests/f16_vistas_triggers.php → OK: 11  views and triggers exported to other systems (more with MySQL and PostgreSQL: they must do the same there)
+php tests/f17_rutinas_importadas.php → OK: 9 views and triggers imported from MySQL, PostgreSQL and SQL Server (more with the servers)
 php tests/f18_access.php       → OK: 10    Microsoft Access: import and export (more with PowerShell: the script)
 php tests/f19_escrituras_contra_sqlite.php → OK: 19  random writes and queries on tables of many parts, against SQLite
-php tests/f20_memoria.php      → OK: 31    the panel with 32 MB: export, import and backups of a larger database (also --directa)
-php tests/f21_compatibilidad.php → OK: 96  SQLite and MySQL syntax and functions, windows, recursion, COLLATE, against SQLite
+php tests/f20_memoria.php      → OK: 32    the panel with 32 MB: export, import and backups of a larger database (also --directa)
+php tests/f21_compatibilidad.php → OK: 132 SQLite and MySQL syntax and functions, windows, recursion, COLLATE, against SQLite
 php tests/f22_sqlserver.php    → OK: 4     SQL Server's script and import (more with PowerShell)
-php tests/f23_reparar.php      → OK: 28    hand-broken JSON files repaired, or set aside
+php tests/f23_reparar.php      → OK: 29    hand-broken JSON files repaired, or set aside; indexes checked against the rows
 php tests/f24_versiones_anteriores.php → OK: 28  every published version's database opened by this one (needs the git tags)
+php tests/f25_ficheros_abiertos.php → OK: 5  files another process holds open while a write replaces them (Windows; the CI runs it there too)
 ```
+
+The CI runs them all with PHP 8.0 to 8.5 on Linux; on Windows, `f25` and the
+engine's suites (`f1`, `f2_parser`, `f2_select`, `f3`, `f8`, `f9`, `f10` and
+`f23`, 2.10); and PHPStan.
 
 `f5_admin.php` needs the cURL extension and starts two PHP built-in servers,
 one for the panel and one for the API, because the built-in server handles one

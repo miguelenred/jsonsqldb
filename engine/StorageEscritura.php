@@ -20,6 +20,8 @@ final class StorageEscritura extends Storage
 {
     /** Trozos de índice de una escritura que van a la caché al confirmarla (ver escribirTrozo()) */
     private const TROZOS_A_CACHE = 64;
+    /** Lo que una sentencia de una transacción escribe en su sitio, como mucho (ver escribirAtomico()) */
+    private const EN_SITIO_MAX = 1048576;
 
     private function __construct()
     {
@@ -72,14 +74,37 @@ final class StorageEscritura extends Storage
         if ($st->txAmbito !== null) {
             throw JsonSqlDbError::lock('Ya hay una escritura abierta');
         }
-        if (isset($st->lote['rota'])) {
-            throw JsonSqlDbError::io('Una escritura de la transacción se quedó a medias: la transacción ya solo se puede deshacer');
-        }
+        self::exigirEntera($st);
         if ($ambito !== null && !isset($st->locksTabla[$ambito])) {
             throw JsonSqlDbError::lock("Escritura acotada a '$ambito' sin su bloqueo");
         }
         $st->txAmbito    = $ambito ?? '_base';
         $st->txOperacion = $operacion;
+    }
+
+    /**
+     * Nada más en una transacción que ya solo se puede deshacer (ver
+     * loteAMedias()): ninguna escritura, y tampoco una lectura (2.10), que
+     * vería lo escrito a medias.
+     */
+    public static function exigirEntera(Storage $st): void
+    {
+        if (isset($st->lote['rota'])) {
+            throw JsonSqlDbError::io('Una escritura de la transacción se quedó a medias: la transacción ya solo se puede deshacer');
+        }
+    }
+
+    /**
+     * En una transacción, una escritura que se queda a medias (un renombrado
+     * que falla, o una sentencia que falla después de escribir parte por
+     * tramos: 2.10, ver Writer::tramo()): la transacción se deshace entera,
+     * con los originales ya guardados, y no se puede confirmar.
+     */
+    public static function loteAMedias(Storage $st): void
+    {
+        if ($st->lote !== null) {
+            $st->lote['rota'] = true;
+        }
     }
 
     /**
@@ -115,8 +140,8 @@ final class StorageEscritura extends Storage
             StorageMantenimiento::loteGuardar($st, array_merge(array_values($st->txRenombrar), array_keys($st->txBorrar)));
         }
         $manifiesto = null;
-        $varios     = count($st->txRenombrar) + count($st->txBorrar) > 1;
-        // Dentro de una transacción no hace falta (2.9.1): si el proceso muere a
+        $varios     = \count($st->txRenombrar) + \count($st->txBorrar) + \count($st->txEnSitio) > 1;
+        // Dentro de una transacción no hace falta (2.10): si el proceso muere a
         // mitad, al abrir la base se devuelven los originales que acaban de
         // guardarse, y el diario solo era un fichero y un fsync más por sentencia
         if ($varios && $st->lote === null) {
@@ -147,16 +172,29 @@ final class StorageEscritura extends Storage
         }
 
         try {
+            foreach ($st->txEnSitio as $f => $texto) {
+                $fh = @fopen((string)$f, 'c+');
+                if ($fh === false || @fwrite($fh, $texto) !== \strlen($texto) || !@ftruncate($fh, \strlen($texto))) {
+                    throw JsonSqlDbError::io('No se puede escribir ' . basename((string)$f));
+                }
+                fclose($fh);
+            }
             self::rehacer($st, $st->txRenombrar, array_keys($st->txBorrar), $st->txRegenerables);
+            if ($st->lote !== null) {
+                foreach ($st->txRenombrar as $f) {
+                    $st->lote['propios'][basename($f)] = true;   // ya no es el inodo del original
+                }
+            }
         } catch (\Throwable $e) {
             if ($manifiesto !== null) {
                 // Ya es irrevocable: sus temporales se quedan y se termina al
                 // abrir la base (2.9: se borraban, y la base ya no se abría)
                 $st->txRenombrar = $st->txRegenerables = $st->txBorrar = [];
-            } elseif ($varios && $st->lote !== null) {
-                // En una transacción, a medias: se deshace entera, con los
-                // originales ya guardados, y no se puede confirmar
-                $st->lote['rota'] = true;
+            } elseif ($varios || $st->txEnSitio !== []) {
+                // Con lo de varios ficheros ya puesto en parte, o uno escrito
+                // en su sitio a medias: la transacción solo se puede deshacer.
+                // Un solo renombrado que falla deja el fichero como estaba
+                self::loteAMedias($st);
             }
             throw $e;
         }
@@ -177,9 +215,70 @@ final class StorageEscritura extends Storage
             $st->cacheGuardar($clave, array_map(static fn(array $p): array => [self::sello($p[1]), $p[0]], $partes));
         }
         $st->partesMemo = [];                    // los ficheros de datos han cambiado
+        self::desmarcar($st);                    // ya no queda ningún temporal suyo
         $st->txAmbito = null;
         $st->txPropia = false;
-        $st->txRenombrar = $st->txRegenerables = $st->txBorrar = $st->txTablas = $st->txCache = $st->txHuellas = $st->txPartes = [];
+        $st->txRenombrar = $st->txRegenerables = $st->txBorrar = $st->txTablas = $st->txCache = $st->txHuellas = $st->txPartes = $st->txEnSitio = [];
+    }
+
+    /**
+     * Las tablas, para ver quién apunta a quién al escribir (2.10): sin mirar
+     * la carpeta mientras _database.json siga igual, porque el DDL que crea o
+     * borra una tabla lo reescribe y cuenta en él cuántas veces ha cambiado el
+     * esquema (ver StorageMantenimiento::anotarEsquema()). Con 200.000 filas
+     * la carpeta tiene 800 ficheros, y un UPDATE la miraba tres veces. Por si
+     * alguien copió una tabla a mano o la tocó una versión anterior, se mira
+     * igual en una de cada 32 escrituras de la tabla, y si falta alguna.
+     *
+     * @return list<string>
+     */
+    public static function tablasEsquema(Storage $st): array
+    {
+        // Con el sello del fichero y su cuenta: dos reescrituras en el mismo
+        // segundo pueden dejarlo con el mismo tamaño y un inodo reutilizado
+        $f      = $st->dir . '/_database.json';
+        $sello  = self::sello($f);
+        $sello  = $sello === '' ? '' : $sello . ':' . (preg_match('/"esquema": *(\d+)/', (string)@file_get_contents($f), $m) ? $m[1] : '0');
+        $clave  = $st->prefijo . '.base:t:0';
+        $mirar  = $sello === '' || ($st->aEscribir !== null && $st->existe($st->aEscribir)
+            && ((int)($st->estado($st->aEscribir)['rev'] ?? 0) + 1) % 32 === 0);
+        $v = self::$tablasProceso[$st->dir] ?? null;
+        if (!$mirar && $v !== null && $v['s'] === $sello) {
+            return $v['t'];
+        }
+        // De la caché compartida, si siguen todas ahí (una borrada a mano: se mira la carpeta)
+        $v = $mirar ? null : $st->cacheLeer($clave);
+        if (\is_array($v) && ($v['s'] ?? null) === $sello && \is_array($v['t'] ?? null)) {
+            foreach ($v['t'] as $t) {
+                if (!is_file($st->ficheroMeta((string)$t))) {
+                    $v = null;
+                    break;
+                }
+            }
+            if ($v !== null) {
+                self::$tablasProceso[$st->dir] = $v;
+                return $v['t'];
+            }
+        }
+        $v = ['s' => $sello, 't' => $st->tablas()];
+        if ($sello !== '') {
+            self::$tablasProceso[$st->dir] = $v;
+            $st->cacheGuardar($clave, $v);
+        }
+        return $v['t'];
+    }
+
+    /**
+     * @var array<string, array{s: string, t: list<string>}> carpeta de la base
+     * => sus tablas (ver tablasEsquema()). Pública para que la olvide
+     * StorageMantenimiento::anotarEsquema(), sin compilarla en cada lectura
+     */
+    public static array $tablasProceso = [];
+
+    /** Apunta la tabla que va a escribir la sentencia que empieza, o null al acabar (ver Storage::leerMeta()) */
+    public static function escribiendo(Storage $st, ?string $tabla): void
+    {
+        $st->aEscribir = $tabla === null ? null : strtolower($tabla);
     }
 
     /** Tira una escritura que no se confirmó: los temporales sobran, los datos siguen intactos. */
@@ -193,9 +292,10 @@ final class StorageEscritura extends Storage
         }
         $st->partesMemo = [];
         $st->autoincPendiente = [];
+        self::desmarcar($st);
         $st->txAmbito = null;
         $st->txPropia = false;
-        $st->txRenombrar = $st->txRegenerables = $st->txBorrar = $st->txTablas = $st->txCache = $st->txHuellas = $st->txPartes = [];
+        $st->txRenombrar = $st->txRegenerables = $st->txBorrar = $st->txTablas = $st->txCache = $st->txHuellas = $st->txPartes = $st->txEnSitio = [];
     }
 
     /**
@@ -212,26 +312,34 @@ final class StorageEscritura extends Storage
      */
     public static function rehacer(Storage $st, array $renombrar, array $borrar, array $regenerables = []): void
     {
-        foreach ($renombrar as $tmp => $fichero) {
-            $tmp = (string)$tmp;
-            if (!is_file($tmp)) {
-                if (is_file($fichero) || isset($regenerables[$tmp])) {
-                    continue;                     // ya se había renombrado, o se puede rehacer
+        $poner = static function (array $lista) use ($regenerables): void {
+            foreach ($lista as $tmp => $fichero) {
+                $tmp = (string)$tmp;
+                if (!is_file($tmp)) {
+                    if (is_file($fichero) || isset($regenerables[$tmp])) {
+                        continue;                 // ya se había renombrado, o se puede rehacer
+                    }
+                    throw JsonSqlDbError::io('Falta el temporal de ' . basename($fichero) . ' al rehacer la escritura');
                 }
-                throw JsonSqlDbError::io('Falta el temporal de ' . basename($fichero) . ' al rehacer la escritura');
-            }
-            if (!@rename($tmp, $fichero)) {
-                @unlink($fichero);                // Windows: rename falla si el destino existe
-                if (!@rename($tmp, $fichero)) {
+                if (!@rename($tmp, $fichero) && !self::reemplazar($tmp, $fichero)) {
                     throw JsonSqlDbError::io('No se puede reemplazar ' . basename($fichero));
                 }
             }
-        }
+        };
+        // _database.json, el último, después de borrar (2.10): quien lea su
+        // cuenta de cambios del esquema ve ya las tablas como quedan, y no
+        // guarda una lista sin la tabla nueva o con la borrada (ver tablasEsquema())
+        $esquema = array_filter($renombrar, static fn(string $f): bool => basename($f) === '_database.json');
+        $poner(array_diff_key($renombrar, $esquema));
         foreach ($borrar as $f) {
             @unlink($f);
         }
-        // El contenido ya está en el disco; ahora los nombres
-        self::fsyncDir($st->dir);
+        $poner($esquema);
+        // El contenido ya está en el disco; ahora los nombres. En una
+        // transacción, todo junto al confirmarla (2.10)
+        if ($st->lote === null) {
+            self::fsyncDir($st->dir);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -302,97 +410,6 @@ final class StorageEscritura extends Storage
     // ------------------------------------------------------------------
 
     /**
-     * Escribe de una vez todo lo que cambia de una tabla: datos, estructura e
-     * índices, con una sola subida de revisión. Van juntos porque el fichero
-     * de revisión dice qué índices y qué partes siguen valiendo.
-     *
-     * $filas o $meta a null significa «esto no cambia». $definiciones son los
-     * índices que deben quedar escritos (ver Indexes).
-     *
-     * Sin $sabeQueCambio se reescribe la tabla entera, que es lo seguro. Con
-     * él, $desdePos es la posición a partir de la cual las filas se
-     * desplazaron (null si ninguna) y $posSueltas las que cambiaron sin mover
-     * a las demás: solo se reescriben las partes afectadas, y los índices se
-     * corrigen en vez de rehacerse.
-     *
-     * Si no hay una escritura abierta con txIniciar(), esta se confirma sola.
-     *
-     * @param list<array>|null $filas
-     * @param list<array{name: string, columns: list<string>, auto: bool}> $definiciones
-     * @param list<int> $posSueltas
-     */
-    public static function guardarTabla(
-        Storage $st,
-        string $tabla,
-        ?array $filas,
-        ?array $meta,
-        array $definiciones = [],
-        ?int $desdePos = null,
-        array $posSueltas = [],
-        bool $sabeQueCambio = false
-    ): void {
-        self::abrirEscritura($st, $tabla, 'ESCRITURA');
-        $estado      = $st->estado($tabla);
-        $partesAntes = $st->partes($tabla);
-        $filasAntes  = isset($estado['rows']) ? (int)$estado['rows'] : null;
-
-        if ($filas === null) {
-            // Solo cambia la estructura: ni partes ni posiciones se mueven. Con
-            // otro tamaño de parte que el de las partes que hay, sí: la tabla
-            // se reescribe entera con el de ahora (2.9). Antes, las partes que
-            // no cabían en la cuenta con el tamaño nuevo se borraban (también
-            // en la 2.8: un CREATE INDEX tras cambiar JSONSQLDB_FILAS_POR_PARTE)
-            if (($estado['chunk'] ?? null) === $st->filasPorParte) {
-                $nFilas = $filasAntes ?? StorageLectura::contarFilas($st, $tabla);
-                self::escribirTabla($st, $tabla, $meta, $definiciones, fn(): \Generator => self::enPartes($st->filas($tabla), $st->filasPorParte),
-                    [], $nFilas, $filasAntes, null, [], $partesAntes);
-                return;
-            }
-            self::reescribirEntera($st, $tabla, fn(): \Generator => $st->filas($tabla), StorageLectura::contarFilas($st, $tabla), $partesAntes, $definiciones, $meta);
-            return;
-        }
-        $filas  = array_values($filas);
-        $nFilas = count($filas);
-        $partes = $filas === [] ? [[]] : array_chunk($filas, $st->filasPorParte);
-
-        // Solo se reescriben las partes que pudieron cambiar: insertar una fila
-        // en una tabla de cien partes cambia la última, y rehacer las cien es
-        // el grueso del coste. Si el tamaño de parte no es el de antes, los
-        // límites se han movido y hay que rehacerlas todas.
-        // Con huecos (2.9), las posiciones de lo que llega de memoria ya no son
-        // las del disco: la tabla se escribe entera, y sin ellos
-        if (!$sabeQueCambio || ($estado['chunk'] ?? null) !== $st->filasPorParte
-            || array_sum((array)($estado['huecos'] ?? [])) > 0) {
-            self::escribirTabla($st, $tabla, $meta, $definiciones, fn(): \Generator => self::enPartes($filas, $st->filasPorParte), $partes, $nFilas, null, null, [], $partesAntes);
-            return;
-        }
-        $aEscribir = [];
-        $sueltas   = [];
-        foreach ($posSueltas as $pos) {
-            if ($desdePos !== null && $pos >= $desdePos) {
-                continue;                          // va con las desplazadas (2.9: con huecos, era otra fila)
-            }
-            $aEscribir[intdiv((int)$pos, $st->filasPorParte)] = true;
-            $sueltas[(int)$pos] = $filas[$pos];
-        }
-        $primera = $desdePos === null ? count($partes) : intdiv($desdePos, $st->filasPorParte);
-        for ($i = min($primera, $partesAntes); $i < count($partes); $i++) {
-            $aEscribir[$i] = true;                 // desplazadas, o partes que no existían
-        }
-        $partes = array_intersect_key($partes, $aEscribir);
-
-        // Con qué se puede corregir el índice anterior en vez de rehacerlo:
-        // desde dónde se desplazaron las filas (nada, si solo se añadieron al
-        // final) y cuáles cambiaron en su sitio
-        $desde = $desdePos ?? $nFilas;
-        if ($filasAntes === null || $desde > $filasAntes || $sueltas !== [] && $nFilas !== $filasAntes) {
-            $desde = null;
-        }
-        self::escribirTabla($st, $tabla, $meta, $definiciones, fn(): \Generator => self::enPartes($filas, $st->filasPorParte), $partes, $nFilas, $desde,
-            $desde === null ? null : array_slice($filas, $desde), $sueltas, $partesAntes);
-    }
-
-    /**
      * Añade filas al final de una tabla sin leerla entera: se reescribe la
      * última parte y las que hagan falta, y los índices se amplían con las
      * nuevas. Si el estado de la tabla no permite afirmar dónde acaba, se
@@ -408,7 +425,7 @@ final class StorageEscritura extends Storage
         if ($filasAntes === null) {
             $filas = array_merge(array_values(self::leerFilas($st, $tabla)), $nuevas);
             self::escribirTabla($st, $tabla, null, $definiciones, fn(): \Generator => self::enPartes($filas, $st->filasPorParte),
-                array_chunk($filas, $st->filasPorParte) ?: [[]], count($filas), null, null, [], $partesAntes);
+                array_chunk($filas, $st->filasPorParte) ?: [[]], \count($filas), null, null, [], $partesAntes);
             return;
         }
         // Si hay que rehacer un índice: las de antes, del disco, y las nuevas detrás
@@ -424,14 +441,14 @@ final class StorageEscritura extends Storage
         $enUltima = $filasAntes - ($ultima - 1) * $st->filasPorParte;
         $caben    = max(0, $st->filasPorParte - $enUltima);
         $texto    = $filasAntes > 0 && $caben > 0
-            ? self::empalmarParte($st, $tabla, $ultima, $enUltima, [], array_slice($nuevas, 0, $caben)) : null;
+            ? self::empalmarParte($st, $tabla, $ultima, $enUltima, [], \array_slice($nuevas, 0, $caben)) : null;
         if ($texto !== null || ($filasAntes > 0 && $caben === 0)) {
             // Con la última parte llena, las filas van enteras a partes nuevas
             // y la última no se toca
             if ($texto !== null) {
                 $partes[$ultima - 1] = $texto;
             }
-            foreach (array_chunk(array_slice($nuevas, $caben), $st->filasPorParte) as $i => $bloque) {
+            foreach (array_chunk(\array_slice($nuevas, $caben), $st->filasPorParte) as $i => $bloque) {
                 $partes[$ultima + $i] = $bloque;
             }
         } else {
@@ -443,30 +460,8 @@ final class StorageEscritura extends Storage
                 $partes[$ultima - 1 + $i] = $bloque;
             }
         }
-        self::escribirTabla($st, $tabla, null, $definiciones, $todas, $partes, $filasAntes + count($nuevas),
+        self::escribirTabla($st, $tabla, null, $definiciones, $todas, $partes, $filasAntes + \count($nuevas),
             $filasAntes, $nuevas, [], $partesAntes);
-    }
-
-    /**
-     * Escribe como tabla, renumeradas sin huecos y en partes del tamaño de
-     * ahora, las filas que da $quedan, con sus índices rehechos. Se leen
-     * una vez, cuando se escriben (ver escribirTabla()). La escritura de la
-     * tabla ya está abierta.
-     *
-     * @param callable(): iterable<int, array> $quedan las filas que quedan, en orden
-     */
-    public static function reescribirEntera(Storage $st, string $tabla, callable $quedan, int $nFilas, int $partesAntes,
-                                             array $definiciones, ?array $meta = null): void
-    {
-        $compactas = static function () use ($quedan): \Generator {
-            $n = 0;
-            foreach ($quedan() as $fila) {
-                yield $n++ => $fila;
-            }
-        };
-        $chunk = $st->filasPorParte;
-        self::escribirTabla($st, $tabla, $meta, $definiciones, fn(): iterable => $nFilas === 0 ? [] : self::enPartes($compactas(), $chunk),
-            $nFilas === 0 ? [[]] : self::enPartes($compactas(), $chunk), $nFilas, null, null, [], $partesAntes);
     }
 
     /**
@@ -514,11 +509,64 @@ final class StorageEscritura extends Storage
         }
         $st->txTablas[$tabla] = true;
         // Un proceso muerto de golpe no ejecuta el finally de escribirTemporal()
-        // y deja su temporal ahí. Pero ni con el exclusivo de la tabla se puede
-        // dar por muerto todo temporal: una escritura por partes que espera
-        // para confirmar tiene los suyos escritos y ha soltado la tabla. Se
-        // borran solo los de procesos que ya no existen
-        self::barrerTemporalesMuertos($st, $tabla);
+        // y deja su temporal ahí. Se barren si la escritura anterior de la tabla
+        // no llegó a acabar (lo dice su .lock, ver marcar()), y cada 32
+        // revisiones por si acaso: mirar la carpeta en cada escritura costaba
+        // 0,26 ms con 200.000 filas (2.10). Pero ni con el exclusivo de la tabla
+        // se puede dar por muerto todo temporal: una escritura por partes que
+        // espera para confirmar tiene los suyos escritos y ha soltado la tabla.
+        // Se borran solo los de procesos que ya no existen
+        if (self::marcar($st, $tabla) || ((int)($st->estado($tabla)['rev'] ?? 0) + 1) % 32 === 0) {
+            StorageBarrido::temporalesMuertos($st, $tabla);
+        }
+    }
+
+    /**
+     * Deja en el .lock de la tabla una línea que dice quién la está
+     * escribiendo, «escribiendo: pid 1234 desde 2026-10-13 15:04:05» (2.10), y
+     * dice si la escritura anterior dejó la suya: un proceso que no la quitó al
+     * acabar murió a medias y pudo dejar temporales. Si el .lock no se puede
+     * leer o escribir (en Windows, con el compartido de una escritura por
+     * partes), true: se barre, como antes.
+     */
+    private static function marcar(Storage $st, string $tabla): bool
+    {
+        if (isset($st->txMarcas[$tabla])) {
+            return false;
+        }
+        $fh = $st->locksTabla[$tabla] ?? @fopen($st->dir . '/.' . $tabla . '.lock', 'c+');
+        if ($fh === false) {
+            return true;
+        }
+        $linea = \sprintf("escribiendo: pid %d desde %s\n", getmypid(), date('Y-m-d H:i:s'));
+        $antes = rewind($fh) ? (string)fread($fh, 256) : null;
+        $ok    = $antes !== null && rewind($fh) && @fwrite($fh, $linea) === \strlen($linea) && ftruncate($fh, \strlen($linea));
+        if (!isset($st->locksTabla[$tabla])) {
+            fclose($fh);
+        }
+        if (!$ok) {
+            return true;
+        }
+        $st->txMarcas[$tabla] = $linea;
+        return $antes !== '' && !StorageBarrido::vivo($antes);
+    }
+
+    /** Quita las líneas de marcar() al acabar la escritura, si nadie ha puesto otra encima. */
+    private static function desmarcar(Storage $st): void
+    {
+        foreach ($st->txMarcas as $tabla => $linea) {
+            $fh = $st->locksTabla[$tabla] ?? @fopen($st->dir . '/.' . $tabla . '.lock', 'c+');
+            if ($fh === false) {
+                continue;
+            }
+            if (rewind($fh) && fread($fh, 256) === $linea) {
+                ftruncate($fh, 0);
+            }
+            if (!isset($st->locksTabla[$tabla])) {
+                fclose($fh);
+            }
+        }
+        $st->txMarcas = [];
     }
 
     /**
@@ -531,7 +579,7 @@ final class StorageEscritura extends Storage
      *                                        o su texto ya hecho (ver empalmarParte());
      *                                        se recorren una vez, y pueden irse haciendo
      * @param int|callable(): int    $nFilas  cuántas filas queda teniendo la tabla; una función si solo se
-     *                                        sabe al acabar de escribir las partes (ver compactarPorBloques())
+     *                                        sabe al acabar de escribir las partes (ver StorageCompactacion::compactarPorBloques())
      * @param int|null               $desde   primera posición cuyo contenido cambió
      *                                        respecto al índice anterior; null si
      *                                        hay que rehacerlo
@@ -540,7 +588,7 @@ final class StorageEscritura extends Storage
      *                                        sitio por debajo de $desde
      * @param (callable(int): ?array)|null $clavesDe de una parte que llega como
      *                                        texto, [índice => sus claves, índice => el resumen de antes que
-     *                                        sigue valiendo] (ver compactarPorBloques())
+     *                                        sigue valiendo] (ver StorageCompactacion::compactarPorBloques())
      */
     public static function escribirTabla(
         Storage $st,
@@ -560,7 +608,7 @@ final class StorageEscritura extends Storage
         $estado       = $st->estado($tabla);
         $revAntes     = $estado['rev'];
         $rev          = $revAntes + 1;
-        $revsAntes    = array_slice(array_pad((array)($estado['parts'] ?? []), $partesAntes, $revAntes), 0, $partesAntes);
+        $revsAntes    = \array_slice(array_pad((array)($estado['parts'] ?? []), $partesAntes, $revAntes), 0, $partesAntes);
         $revsPartes   = [];                           // las que se escriben ahora; el resto, abajo
         $huecosPartes = [];                           // los huecos de las filas borradas en ellas (2.9)
         $revsIndices  = [];
@@ -588,13 +636,13 @@ final class StorageEscritura extends Storage
                 $vistas++;
                 foreach ($definiciones as $def) {
                     $plegar = $def['plegar'] ?? [];
-                    if (Indexes::cambiaClave($def['columns'], $fila, $cambiadas[$pos], $plegar)) {
+                    if (IndexesEscritura::cambiaClave($def['columns'], $fila, $cambiadas[$pos], $plegar)) {
                         $cambiosIdx[$def['name']][$pos] = [Indexes::claveFila($fila, $def['columns'], $plegar),
                                                            Indexes::claveFila($cambiadas[$pos], $def['columns'], $plegar)];
                     }
                 }
             }
-            if ($vistas !== count($cambiadas)) {
+            if ($vistas !== \count($cambiadas)) {
                 $desde = null;                     // el disco no cuadra con lo que se creía
             }
             foreach ($sueltas as $pos => $fila) {
@@ -629,7 +677,7 @@ final class StorageEscritura extends Storage
         $alPaso   = $desde === null && $definiciones !== [] ? [] : null;   // índice => trozo => rango
         $escritas = 0;
         foreach ($partes as $i => $bloque) {
-            if (is_string($bloque)) {
+            if (\is_string($bloque)) {
                 self::escribirAtomico($st, $st->ficheroDatos($tabla, $i + 1), $bloque);
                 $huella = hash(self::HUELLA, $bloque);
                 // De texto, con las claves de cada índice si quien la hizo las da
@@ -650,10 +698,10 @@ final class StorageEscritura extends Storage
                     // clave: array_is_list() no existe en PHP 8.0 (2.9)
                     $base   = $i * $st->filasPorParte;
                     $conPos = $base > 0 && array_key_first($bloque) === 0
-                        ? array_combine(range($base, $base + count($bloque) - 1), $bloque) : $bloque;
+                        ? array_combine(range($base, $base + \count($bloque) - 1), $bloque) : $bloque;
                     foreach ($definiciones as $def) {
                         $alPaso[$def['name']][$i] = self::escribirTrozo($st, $tabla, $def, $i + 1, $rev,
-                            Indexes::construir($conPos, $def['columns'], $def['plegar'] ?? []));
+                            self::construir($conPos, $def['columns'], $def['plegar'] ?? []));
                     }
                     unset($conPos);
                 }
@@ -666,11 +714,11 @@ final class StorageEscritura extends Storage
             $st->txPartes[$st->claveCache($tabla, 'h', $rev)][$i + 1] = [$huella, $st->ficheroDatos($tabla, $i + 1)];
             $escritas++;
             $revsPartes[$i]   = $rev;
-            $huecosPartes[$i] = is_string($bloque) ? (int)preg_match_all('/^[ \t]*null,?$/m', $bloque)
-                : count(array_keys($bloque, null, true));
+            $huecosPartes[$i] = \is_string($bloque) ? (int)preg_match_all('/^[ \t]*null,?$/m', $bloque)
+                : \count(array_keys($bloque, null, true));
         }
         unset($partes, $bloque);
-        if (!is_int($nFilas)) {
+        if (!\is_int($nFilas)) {
             $nFilas = $nFilas();                      // ya se sabe: las partes están escritas
         }
         $total = max(1, (int)ceil($nFilas / $st->filasPorParte));
@@ -678,13 +726,16 @@ final class StorageEscritura extends Storage
             $alPaso = null;
         }
         // Las partes que no se han escrito siguen en su revisión, con sus huecos
-        $revsPartes   = array_replace(array_slice(array_pad($revsAntes, $total, $rev), 0, $total), $revsPartes);
-        $huecosPartes = array_replace(array_slice(array_pad(array_map('intval', (array)($estado['huecos'] ?? [])), $total, 0), 0, $total), $huecosPartes);
+        $revsPartes   = array_replace(\array_slice(array_pad($revsAntes, $total, $rev), 0, $total), $revsPartes);
+        $huecosPartes = array_replace(\array_slice(array_pad(array_map('intval', (array)($estado['huecos'] ?? [])), $total, 0), 0, $total), $huecosPartes);
         for ($parte = $total + 1; $parte <= $partesAntes; $parte++) {
             self::borrarFichero($st, $st->ficheroDatos($tabla, $parte));
         }
 
         if ($meta !== null) {
+            if (!is_file($st->ficheroMeta($tabla))) {
+                StorageMantenimiento::anotarEsquema($st);           // una tabla nueva
+            }
             $meta['updated_at'] = date('Y-m-d H:i:s');
             self::escribirAtomico($st, $st->ficheroMeta($tabla), json_encode($meta, self::JSON_META) . "\n");
             $st->txCache[] = [$st->claveCache($tabla, 'm', $rev), $meta, $st->ficheroMeta($tabla)];
@@ -715,6 +766,14 @@ final class StorageEscritura extends Storage
         $nuevo = ['rev' => $rev, 'chunk' => $st->filasPorParte, 'rows' => $nFilas, 'creada' => $creada,
                   'parts' => array_values($revsPartes), 'indexes' => (object)$revsIndices,
                   'rangos' => (object)$rangosIndices];
+        // Los índices con alguna columna de texto o decimal quedan con las claves
+        // de la 2.10, y «textos» dice hasta qué revisión (ver Storage::clavesAlDia());
+        // los demás tienen las mismas claves que antes y no lo necesitan
+        foreach ($definiciones as $def) {
+            if (($def['texto'] ?? true) && isset($revsIndices[$def['name']])) {
+                $nuevo['textos'][$def['name']] = $rev;
+            }
+        }
         if (array_sum($huecosPartes) > 0) {
             $nuevo['huecos'] = array_values($huecosPartes);
         }
@@ -744,7 +803,7 @@ final class StorageEscritura extends Storage
                 'antes' => $estado, 'nuevo' => $nuevo, 'partesAntes' => $partesAntes,
                 'meta' => (string)@md5_file($st->ficheroMeta($tabla)), 'indicesAntes' => array_keys($indicesAntes),
             ];
-            unset($st->indicesMemo[$tabla]);
+            unset($st->indicesMemo[$tabla], $st->preguntasTexto[$tabla]);
             return;
         }
         self::escribirAtomico($st, $st->ficheroRev($tabla), json_encode($nuevo, self::JSON_META) . "\n");
@@ -753,47 +812,16 @@ final class StorageEscritura extends Storage
 
         self::limpiarCache($st, $tabla, $estado, $nuevo, array_keys($indicesAntes));
         $st->estados[$tabla] = $nuevo;
-        unset($st->indicesMemo[$tabla]);
+        // Y las preguntas por claves de texto, que se cuentan para decidir si
+        // compensa juntar el índice entero en memoria (ver posicionesDeTexto()):
+        // sin él, ya no hay nada que aprovechar (2.10: en una transacción de
+        // INSERT de una fila, desde el noveno cada uno lo volvía a juntar, y
+        // tardaba el doble que buscando la clave en el texto de los trozos)
+        unset($st->indicesMemo[$tabla], $st->preguntasTexto[$tabla]);
 
         if ($st->txPropia) {
             $st->txPropia = false;
             self::txConfirmar($st);
-        }
-    }
-
-    /** Reescribe todas las filas de una tabla. */
-    public static function guardarFilas(Storage $st, string $tabla, array $filas, array $definiciones = []): void
-    {
-        self::guardarTabla($st, $tabla, $filas, null, $definiciones);
-    }
-
-    /**
-     * Borra los temporales de una tabla que son de procesos que ya no existen:
-     * el nombre lleva el pid de quien lo escribió. Si no se puede saber si ese
-     * proceso vive (sin /proc ni posix), solo los de más de un minuto.
-     */
-    private static function barrerTemporalesMuertos(Storage $st, string $tabla): void
-    {
-        $yo   = getmypid();
-        // Con @: un hosting con open_basedir no deja ni mirar /proc, y el aviso
-        // salía por pantalla en medio de la respuesta
-        $proc = @is_dir('/proc/self');
-        foreach ((array)glob($st->dir . '/' . $tabla . '.*.tmp') as $f) {
-            $f = (string)$f;
-            if (!preg_match('/\.(\d+)(?:\.[a-z]+)?\.tmp$/', $f, $m) || (int)$m[1] === $yo) {
-                continue;
-            }
-            $pid = (int)$m[1];
-            if ($proc) {
-                $muerto = !@is_dir("/proc/$pid");
-            } elseif (function_exists('posix_kill')) {
-                $muerto = !@posix_kill($pid, 0) && posix_get_last_error() === 3;   // ESRCH
-            } else {
-                $muerto = (time() - (int)@filemtime($f)) > 60;
-            }
-            if ($muerto) {
-                @unlink($f);
-            }
         }
     }
 
@@ -805,9 +833,15 @@ final class StorageEscritura extends Storage
     public static function noCodificable(string $tabla, array $fila): JsonSqlDbError
     {
         foreach ($fila as $col => $v) {
-            if (is_string($v) && !preg_match('//u', $v)) {
+            if (\is_string($v) && !preg_match('//u', $v)) {
                 return JsonSqlDbError::type("La columna '$col' de '$tabla' recibe bytes que no son texto (RANDOMBLOB, "
                     . 'ZEROBLOB, UNHEX…): no se pueden guardar tal cual; guárdalos como texto, con HEX()');
+            }
+            // Un número fuera de rango (1e400, 1e300 * 1e300) es infinito, y en
+            // JSON no cabe (2.10: «No se puede codificar una fila»)
+            if (\is_float($v) && !is_finite($v)) {
+                return JsonSqlDbError::type("La columna '$col' de '$tabla' recibe un número fuera de rango (infinito o NaN), "
+                    . 'que no se puede guardar');
             }
         }
         return JsonSqlDbError::io("No se puede codificar una fila de '$tabla' a JSON");
@@ -830,11 +864,11 @@ final class StorageEscritura extends Storage
             $bloque = "{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [";
             $pos    = 0;
             $volcar = static function (string &$bloque) use ($fh, $fichero, &$pos, $huella): void {
-                if (@fwrite($fh, $bloque) !== strlen($bloque)) {
+                if (@fwrite($fh, $bloque) !== \strlen($bloque)) {
                     throw JsonSqlDbError::io('Escritura incompleta de ' . basename($fichero));
                 }
                 hash_update($huella, $bloque);
-                $pos   += strlen($bloque);
+                $pos   += \strlen($bloque);
                 $bloque = '';
             };
             // Dónde empieza cada fila: con ello una lectura por clave lee
@@ -848,15 +882,15 @@ final class StorageEscritura extends Storage
                 if ($json === false) {
                     throw self::noCodificable($tabla, $fila);
                 }
-                $desfases[] = $pos + strlen($bloque) + strlen($sep);
+                $desfases[] = $pos + \strlen($bloque) + \strlen($sep);
                 $bloque    .= $sep . $json;
                 $sep        = ",\n    ";
-                if (strlen($bloque) >= 65536) {
+                if (\strlen($bloque) >= 65536) {
                     $volcar($bloque);
                 }
             }
             $bloque .= $filas === [] ? "],\n" : "\n  ],\n";
-            $aqui    = $pos + strlen($bloque);
+            $aqui    = $pos + \strlen($bloque);
             $bloque .= '  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n";
             $volcar($bloque);
         });
@@ -883,15 +917,15 @@ final class StorageEscritura extends Storage
         $fichero = $st->ficheroDatos($tabla, $parte);
         $desf    = $st->desfasesDeParte($tabla, $parte, $fichero);
         $texto   = $desf === null ? false : @file_get_contents($fichero);
-        if ($texto === false || strlen($desf) !== 4 * $filas
+        if ($texto === false || \strlen($desf) !== 4 * $filas
             || !preg_match('/"offsets_at": (\d+)\n\}\n$/', substr($texto, -40), $m)) {
             return null;
         }
         $finFilas = (int)$m[1];
         $cierre   = $filas === 0 ? "],\n" : "\n  ],\n";
         $cabecera = "{\n  \"table\": " . json_encode($tabla, self::JSON_FILA) . ",\n  \"rows\": [";
-        if (strncmp($texto, $cabecera, strlen($cabecera)) !== 0
-            || substr($texto, $finFilas - strlen($cierre), strlen($cierre)) !== $cierre) {
+        if (strncmp($texto, $cabecera, \strlen($cabecera)) !== 0
+            || substr($texto, $finFilas - \strlen($cierre), \strlen($cierre)) !== $cierre) {
             return null;
         }
         // La lista de desfases se escribió junto con las filas y offsets_at dice
@@ -899,14 +933,14 @@ final class StorageEscritura extends Storage
         // línea, el final de las filas ya no estaría ahí y no se habría llegado
         // hasta aquí. Se trabaja por tramos del texto, sin recorrer las filas
         $desfases = $filas === 0 ? [] : array_values(unpack('N*', $desf));
-        $finUltima = $finFilas - strlen($cierre);
-        if ($filas > 0 && ($desfases[0] !== strlen($cabecera) + 5 || !in_array($texto[$desfases[$filas - 1]], ['{', 'n'], true))) {
+        $finUltima = $finFilas - \strlen($cierre);
+        if ($filas > 0 && ($desfases[0] !== \strlen($cabecera) + 5 || !\in_array($texto[$desfases[$filas - 1]], ['{', 'n'], true))) {
             return null;
         }
         $quedan = min($quedan ?? $filas, $filas);
         if ($quedan < $filas) {
             $finUltima = $quedan === 0 ? $finUltima : $desfases[$quedan] - 6;   // donde acaba la última que se queda
-            $desfases  = array_slice($desfases, 0, $quedan);
+            $desfases  = \array_slice($desfases, 0, $quedan);
         }
         ksort($cambios);
         $nuevo  = '';
@@ -932,7 +966,7 @@ final class StorageEscritura extends Storage
             }
             $nuevo .= substr($texto, $desde, $ini - $desde) . $json;
             $desde  = $fin;
-            $delta += strlen($json) - ($fin - $ini);
+            $delta += \strlen($json) - ($fin - $ini);
             $ajuste[$k + 1] = $delta;
         }
         $nuevo .= substr($texto, $desde, $finUltima - $desde);
@@ -952,20 +986,41 @@ final class StorageEscritura extends Storage
             if ($json === false) {
                 throw self::noCodificable($tabla, $fila);
             }
-            $desfases[] = strlen($nuevo) + strlen($sep);
+            $desfases[] = \strlen($nuevo) + \strlen($sep);
             $nuevo     .= $sep . $json;
             $sep        = ",\n    ";
         }
         $nuevo .= $desfases === [] ? "],\n" : "\n  ],\n";
-        $aqui   = strlen($nuevo);
+        $aqui   = \strlen($nuevo);
         return $nuevo . '  "offsets": [' . implode(',', $desfases) . "],\n  \"offsets_at\": $aqui\n}\n";
     }
 
     /** Escribe un fichero entero dentro de la escritura abierta. */
     public static function escribirAtomico(Storage $st, string $fichero, string $contenido, bool $sincronizar = true): void
     {
+        // En una transacción, un fichero que ya ha reemplazado una sentencia
+        // anterior se escribe en su sitio al confirmar, sin temporal ni
+        // renombrado (2.10): su original está a salvo en .lote/ en otro inodo
+        // (ver txConfirmar(), 'propios'; antes de reemplazarlo, .lote/ guarda
+        // un enlace al mismo inodo, y escribir en él estropearía el original) y la base,
+        // bloqueada entera, no la lee nadie más. Si el proceso muere, vuelve
+        // el original; al confirmar la transacción se fuerza a disco, también
+        // un trozo de índice, que en su sitio podría quedar a medias; por eso
+        // no en PHP 8.0, que no puede forzarlo. Con un tope por sentencia,
+        // para no tener en memoria lo que no cabe (ver Writer::tramo()); lo
+        // que pasa de él va como siempre
+        if ($st->lote !== null && function_exists('fsync')
+            && isset($st->lote['propios'][$nombre = basename($fichero)])
+            && $nombre !== '_database.json'
+            && \strlen($contenido) + array_sum(array_map('strlen', $st->txEnSitio)) <= self::EN_SITIO_MAX) {
+            self::borrarTemporalDe($st, $fichero);
+            unset($st->txBorrar[$fichero]);
+            $st->txEnSitio[$fichero] = $contenido;
+            $st->lote['sincronizar'][$fichero] = true;
+            return;
+        }
         self::escribirTemporal($st, $fichero, static function ($fh) use ($contenido, $fichero): void {
-            if (@fwrite($fh, $contenido) !== strlen($contenido)) {
+            if (@fwrite($fh, $contenido) !== \strlen($contenido)) {
                 throw JsonSqlDbError::io('Escritura incompleta de ' . basename($fichero));
             }
         }, $sincronizar);
@@ -995,7 +1050,15 @@ final class StorageEscritura extends Storage
             $volcar($fh);
             @fflush($fh);
             if ($sincronizar && function_exists('fsync')) {
-                @fsync($fh);                // los datos, en el disco de verdad
+                // Dentro de una transacción, al confirmarla, una vez por fichero
+                // (2.10, ver StorageMantenimiento::loteConfirmar()): hasta entonces,
+                // si el proceso muere, se devuelven los originales de .lote/
+                if ($st->lote === null) {
+                    @fsync($fh);            // los datos, en el disco de verdad
+                    self::$sincronizados++;
+                } else {
+                    $st->lote['sincronizar'][$fichero] = true;
+                }
             }
         } catch (\Throwable $e) {
             @fclose($fh);
@@ -1003,11 +1066,20 @@ final class StorageEscritura extends Storage
             throw $e;
         }
         @fclose($fh);
-        unset($st->txBorrar[$fichero]);   // si se borraba y se vuelve a escribir, gana lo último
+        unset($st->txBorrar[$fichero], $st->txEnSitio[$fichero]);   // si se borraba y se vuelve a escribir, gana lo último
         $st->txRenombrar[$tmp] = $fichero;
         if (!$sincronizar) {
             $st->txRegenerables[$tmp] = true;
         }
+    }
+
+    /** Ficheros de datos forzados a disco en este proceso (para las pruebas; ver escribirTemporal()) */
+    private static int $sincronizados = 0;
+
+    /** Cuántos van; con $mas, se suman antes (ver StorageMantenimiento::loteConfirmar()) */
+    public static function sincronizados(int $mas = 0): int
+    {
+        return self::$sincronizados += $mas;
     }
 
     /** ¿Va la escritura dentro de una transacción (ver StorageMantenimiento::loteIniciar())? */
@@ -1019,12 +1091,41 @@ final class StorageEscritura extends Storage
     /** Apunta un fichero para borrarlo al confirmar. */
     public static function borrarFichero(Storage $st, string $fichero): void
     {
+        self::borrarTemporalDe($st, $fichero);
+        unset($st->txEnSitio[$fichero]);
+        $st->txBorrar[$fichero] = true;
+    }
+
+    /** Lo que esta escritura llevaba ya para $fichero en un temporal: sobra */
+    private static function borrarTemporalDe(Storage $st, string $fichero): void
+    {
         $tmp = array_search($fichero, $st->txRenombrar, true);
         if ($tmp !== false) {
             @unlink((string)$tmp);
             unset($st->txRenombrar[$tmp], $st->txRegenerables[$tmp]);
         }
-        $st->txBorrar[$fichero] = true;
+    }
+
+    /**
+     * Pone $origen en el sitio de $destino cuando renombrarlo encima acaba de
+     * fallar (quien llama lo intenta antes: es lo de casi siempre). En Windows
+     * falla mientras otro proceso tiene abierto el destino: se reintenta
+     * durante un segundo, sin borrarlo nunca (2.10: se borraba y se volvía a
+     * renombrar, y en ese momento otro proceso no lo encontraba; si seguía
+     * abierto, ni se podía borrar y la escritura fallaba). False si no se ha podido.
+     */
+    public static function reemplazar(string $origen, string $destino): bool
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            return false;
+        }
+        for ($i = 0; $i < 20; $i++) {
+            usleep(50000);
+            if (@rename($origen, $destino)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Escribe un fichero y lo pone en su sitio ya mismo (temporal + fsync + rename). */
@@ -1033,7 +1134,7 @@ final class StorageEscritura extends Storage
         $tmp = $fichero . '.' . getmypid() . '.tmp';
         try {
             $fh = @fopen($tmp, 'wb');
-            if ($fh === false || @fwrite($fh, $contenido) !== strlen($contenido)) {
+            if ($fh === false || @fwrite($fh, $contenido) !== \strlen($contenido)) {
                 throw JsonSqlDbError::io('No se puede escribir ' . basename($fichero));
             }
             @fflush($fh);
@@ -1041,11 +1142,8 @@ final class StorageEscritura extends Storage
                 @fsync($fh);
             }
             @fclose($fh);
-            if (!@rename($tmp, $fichero)) {
-                @unlink($fichero);
-                if (!@rename($tmp, $fichero)) {
-                    throw JsonSqlDbError::io('No se puede reemplazar ' . basename($fichero));
-                }
+            if (!@rename($tmp, $fichero) && !self::reemplazar($tmp, $fichero)) {
+                throw JsonSqlDbError::io('No se puede reemplazar ' . basename($fichero));
             }
             self::fsyncDir($fichero);
         } finally {
@@ -1088,7 +1186,7 @@ final class StorageEscritura extends Storage
     public static function indicesEnDisco(Storage $st, string $tabla): array
     {
         $out    = [];
-        $inicio = strlen($tabla) + 5;                 // '<tabla>.idx.'
+        $inicio = \strlen($tabla) + 5;                 // '<tabla>.idx.'
         foreach ((array)glob($st->dir . '/' . $tabla . '.idx.*.json') as $f) {
             $nombre = substr(basename((string)$f, '.json'), $inicio);
             if (preg_match('/^(.+)\.part\d+$/', $nombre, $m)) {
@@ -1118,7 +1216,7 @@ final class StorageEscritura extends Storage
      *                                        no son la misma; [null, null] es una fila borrada, que sale
      *                                        de la clave que tenga (ver escribirTabla())
      * @param array<int,array|null>|null $hechos trozo => rango de los ya escritos con su parte, si se rehace entero (ver escribirTabla())
-     * @return array{0: list<int>, 1: list<array|null>} revisión y rango de cada trozo (ver Indexes::rango())
+     * @return array{0: list<int>, 1: list<array|null>} revisión y rango de cada trozo (ver IndexesEscritura::rango())
      */
     private static function escribirIndice(
         Storage $st,
@@ -1138,6 +1236,10 @@ final class StorageEscritura extends Storage
         $revs   = $estado['indexes'][$nombre] ?? null;
         $rangos = $estado['rangos'][$nombre] ?? [];
         $chunk  = $st->filasPorParte;
+        // Con claves de antes de la 2.10 en una columna de texto o decimal, entero (ver Storage::clavesAlDia())
+        if (!$st->clavesAlDia($tabla, $def)) {
+            $desde = null;
+        }
         // El de un UNIQUE que se añade (ver CatalogDdl::guardar()) se construye
         // entero, mirando de paso que ninguna clave se repita
         $vistas = empty($def['exigir']) ? null : [];
@@ -1150,7 +1252,7 @@ final class StorageEscritura extends Storage
         // Los que se rehacen enteros desde la cola no necesitan el de antes.
         $tocar   = [];
         $cambian = [];                                 // trozo => posiciones cuya clave cambia
-        if ($desde !== null && is_array($revs) && count($revs) >= (int)ceil($desde / $chunk)) {
+        if ($desde !== null && \is_array($revs) && \count($revs) >= (int)ceil($desde / $chunk)) {
             // Una fila cambiada solo toca su trozo si cambia su clave en este
             // índice: un UPDATE de una columna sin índice no lee ni reescribe
             // ningún trozo (antes los leía y decodificaba todos los de las
@@ -1178,7 +1280,7 @@ final class StorageEscritura extends Storage
             // a mano no se quede así para siempre. Cien trozos cuestan un
             // milisegundo: se paga en cada escritura.
             $st->trozosSinCache = true;                   // los que se corrigen se reescriben: no a la caché
-            $hasta = min($total, count($revs));
+            $hasta = min($total, \count($revs));
             for ($p = 0; $p < $hasta; $p++) {
                 if (isset($tocar[$p]) && $p * $chunk < $desde && $st->trozoIndice($tabla, $def, $p + 1) === null) {
                     $desde = null;
@@ -1203,7 +1305,7 @@ final class StorageEscritura extends Storage
                 $salida[$p] = $rev;
             }
             foreach ($hechos === null ? $todas() : [] as $p => $filasParte) {
-                $keys = Indexes::construir($filasParte, $def['columns'], $def['plegar'] ?? []);
+                $keys = self::construir($filasParte, $def['columns'], $def['plegar'] ?? []);
                 if ($vistas !== null) {
                     StorageMantenimiento::exigirUnica($tabla, $def, $keys, $filasParte, $vistas);
                 }
@@ -1220,6 +1322,7 @@ final class StorageEscritura extends Storage
             ksort($tramos);
         } else {
             $st->trozosSinCache = true;
+            $filasAntes = isset($st->estado($tabla)['rows']) ? (int)$st->estado($tabla)['rows'] : null;
             for ($p = 0; $p < $total; $p++) {
                 if (!isset($tocar[$p])) {
                     $salida[$p] = (int)$revs[$p];
@@ -1231,6 +1334,7 @@ final class StorageEscritura extends Storage
                 $keys   = $inicio >= $desde ? [] : (array)$st->trozoIndice($tabla, $def, $p + 1);
                 $cambio = $inicio >= $desde;
                 $pierde = !$cambio;                       // ¿solo salen claves? Su filtro de antes sigue valiendo
+                $gana   = !$cambio && !isset($cambian[$p]) && \array_key_exists($p, $rangos);  // ¿solo entran? (ver abajo)
                 $dePos  = null;
                 // Solo las de este trozo (2.9: se miraban todas en cada trozo, y
                 // un UPDATE de cien mil filas que cambiaba la clave se hacía cuadrático)
@@ -1238,33 +1342,57 @@ final class StorageEscritura extends Storage
                     [$antes, $ahora] = $cambia[$pos];
                     if ($antes === null && $ahora === null) {
                         // Una fila borrada: la clave que tenga, del trozo, sin leer la fila
-                        $dePos ??= Indexes::porPosicion($keys);
+                        $dePos ??= IndexesEscritura::porPosicion($keys);
                         $antes   = $dePos[$pos] ?? null;
                         if ($antes === null) {
                             continue;
                         }
                     }
                     $pierde = $pierde && $ahora === null;
-                    Indexes::sustituir($keys, $pos, $antes, $ahora);
+                    IndexesEscritura::sustituir($keys, $pos, $antes, $ahora);
                     $cambio = true;
                 }
+                $ampliado = null;
                 if ($fin > $desde) {
-                    if ($inicio < $desde) {
-                        $keys   = Indexes::recortar($keys, $desde);
-                        $cambio = true;
+                    // Las posiciones desde $desde, si las había: sin filas
+                    // detrás de $desde no queda nada que cortar (2.10: cada
+                    // INSERT repasaba las mil claves del último trozo)
+                    if ($inicio < $desde && ($filasAntes === null || $desde < $filasAntes)) {
+                        $keys = self::recortar($keys, $desde);
+                        $gana = false;                    // alguna clave puede haber salido
                     }
+                    $cambio = $cambio || $inicio < $desde;
                     // Las filas nuevas de este trozo: la cola empieza en $desde
                     $primera = max($inicio, $desde);
                     $ultima  = min($fin, $nFilas);
                     if ($primera < $ultima) {
-                        $keys   = Indexes::ampliar($keys, array_slice($cola ?? [], $primera - $desde, $ultima - $primera), $def['columns'], $primera, $def['plegar'] ?? []);
+                        $suyas  = IndexesEscritura::ampliar([], \array_slice($cola ?? [], $primera - $desde, $ultima - $primera), $def['columns'], $primera, $def['plegar'] ?? []);
+                        $nuevas = array_diff_key($suyas, $keys);
+                        // Las que ya estaban, con sus posiciones nuevas detrás;
+                        // las nuevas, detrás de todas y de una vez, que es lo
+                        // mismo (2.10, antes de publicarla: clave a clave, un
+                        // DELETE con cascada hacía un 2 % más que en la 2.9)
+                        foreach (\count($nuevas) === \count($suyas) ? [] : array_diff_key($suyas, $nuevas) as $clave => $donde) {
+                            foreach (Indexes::posiciones($donde) as $pos) {
+                                IndexesEscritura::anotar($keys, (string)$clave, $pos);
+                            }
+                        }
+                        $keys  += $nuevas;
+                        $nuevas = array_keys($nuevas);
+                        // Si solo entran claves al final del trozo, su rango y su
+                        // cabecera se amplían con las nuevas, sin rehacerlos (2.10)
+                        $resumenAntes = $st->indicesMemo[$tabla][$nombre]['resumen'][$p + 1] ?? null;
+                        if ($gana && $resumenAntes !== null) {
+                            $ampliado = ['rango' => self::rangoAmpliado($rangos[$p], IndexesEscritura::rango($suyas)),
+                                         'resumen' => $resumenAntes, 'nuevas' => array_map('strval', $nuevas)];
+                        }
                         $cambio = true;
                         $pierde = false;
                     }
                 }
                 if ($cambio) {
                     $tramos[$p] = self::escribirTrozo($st, $tabla, $def, $p + 1, $rev, $keys,
-                        $pierde ? $st->indicesMemo[$tabla][$nombre]['resumen'][$p + 1] ?? null : null);
+                        $pierde ? $st->indicesMemo[$tabla][$nombre]['resumen'][$p + 1] ?? null : null, $ampliado);
                     $salida[$p] = $rev;
                 } else {
                     $salida[$p] = (int)$revs[$p];
@@ -1308,7 +1436,7 @@ final class StorageEscritura extends Storage
         // estaba en el trozo de verdad
         $desfasados = self::filtrosDesfasados($st, $tabla, $nombre, $salida, $total);
         if ($desfasados === null || $desfasados > max(16, $total >> 4)) {
-            if (is_array($revs)) {
+            if (\is_array($revs)) {
                 $st->cargarFiltros($tabla, $nombre, $revs);
             }
             $st->guardarFiltros($tabla, $nombre, $salida, $total);
@@ -1346,7 +1474,7 @@ final class StorageEscritura extends Storage
             'index' => $def['name'], 'table' => $tabla, 'columns' => $def['columns'],
             'part' => $parte, 'rev' => $rev,
         ], self::JSON_FILA), 1, -1);
-        $sano = strncmp($cabecera, '{' . $esperada . ',', strlen($esperada) + 2) === 0 && $cola === "}}\n";
+        $sano = strncmp($cabecera, '{' . $esperada . ',', \strlen($esperada) + 2) === 0 && $cola === "}}\n";
         if ($sano) {
             $st->trozosSanos[$etiqueta][$nombre][$parte] = $rev;
             $st->tamTrozos[$etiqueta][$nombre][$parte]   = $tam;
@@ -1404,18 +1532,88 @@ final class StorageEscritura extends Storage
     private static function veredicto(Storage $st, string $tabla, string $nombre): ?array
     {
         $v = $st->cacheLeer($st->claveCache($tabla, 'v' . $nombre, 0));
-        return is_array($v) && is_array($v['r'] ?? null) && is_array($v['t'] ?? null) ? $v : null;
+        return \is_array($v) && \is_array($v['r'] ?? null) && \is_array($v['t'] ?? null) ? $v : null;
     }
 
     /**
-     * Escribe un trozo de índice y devuelve su rango numérico (ver Indexes::rango()).
+     * La cabecera de un trozo de claves de texto al que solo se le añaden
+     * claves (2.10), a partir de la de antes: los bits de las nuevas en el
+     * mismo filtro, y el mínimo y el máximo ampliados. Rehacerlo entero, dos
+     * crc32 por cada una de sus mil claves, era lo que más pesaba de un INSERT
+     * con un UNIQUE de texto. Null si no se puede: el trozo tiene otras claves
+     * que textos, o el filtro ya no tiene sus FILTRO_BITS por clave (quien
+     * llama lo rehace entonces con holgura, ver IndexesEscritura::resumenDeTexto()).
+     *
+     * @param array{filtro?: string, cubre?: string, min?: string, max?: string} $resumen el de antes
+     * @param list<string> $nuevas las claves que no estaban
+     * @param int          $total  cuántas claves tiene ahora el trozo
+     */
+    private static function resumenAmpliado(array $resumen, array $nuevas, int $total): ?array
+    {
+        if ($nuevas === []) {
+            return $resumen;                                // los mismos textos: todo sigue valiendo
+        }
+        $bits = base64_decode((string)($resumen['filtro'] ?? ''), true);
+        $m    = $bits === false ? 0 : \strlen($bits) << 3;
+        if (($resumen['cubre'] ?? '') !== 'texto' || !isset($resumen['min'], $resumen['max'])
+            || $m === 0 || $total * Indexes::FILTRO_BITS > $m) {
+            return null;
+        }
+        $min = (string)$resumen['min'];
+        $max = (string)$resumen['max'];
+        foreach ($nuevas as $clave) {
+            if ($clave === '' || $clave[0] !== 't') {
+                return null;
+            }
+            // Los mismos bits que IndexesEscritura::resumenDeTexto()
+            $b = crc32($clave) % $m;
+            $s = (crc32(strrev($clave)) | 1) % $m;
+            for ($i = 0; $i < Indexes::FILTRO_K; $i++) {
+                $bits[$b >> 3] = \chr(\ord($bits[$b >> 3]) | 1 << ($b & 7));
+                $b += $s;
+                if ($b >= $m) {
+                    $b -= $m;
+                }
+            }
+            $sep = (int)strpos($clave, ':');
+            $v   = substr($clave, $sep + 1, (int)substr($clave, 1, $sep - 1));
+            if (strcmp($v, $min) < 0) {
+                $min = $v;
+            } elseif (strcmp($v, $max) > 0) {
+                $max = $v;
+            }
+        }
+        return ['filtro' => base64_encode($bits), 'cubre' => 'texto', 'min' => $min, 'max' => $max];
+    }
+
+    /**
+     * El rango numérico de un trozo al que solo se le añaden claves (2.10), a
+     * partir del de antes y del de las nuevas (ver IndexesEscritura::rango()), sin volver a
+     * mirar las mil que ya tenía.
+     *
+     * @param array|null $antes el de antes: null si tiene algún texto, [] si no tenía claves
+     * @param array|null $nuevas el de las claves que se añaden, igual
+     */
+    private static function rangoAmpliado(?array $antes, ?array $nuevas): ?array
+    {
+        if ($antes === null || $nuevas === null) {
+            return null;
+        }
+        if ($antes === [] || $nuevas === []) {
+            return $antes === [] ? $nuevas : $antes;
+        }
+        return [min($antes[0], $nuevas[0]), max($antes[1], $nuevas[1])];
+    }
+
+    /**
+     * Escribe un trozo de índice y devuelve su rango numérico (ver IndexesEscritura::rango()).
      *
      * @param array<string, int|list<int>> $keys
      * @param array|null $resumen el de antes (filtro, min y max), si el trozo solo ha perdido claves: un
      *                            filtro con claves de más solo da algún falso positivo más, y hacerlo era
      *                            una décima parte de un DELETE de muchas filas (2.9)
      */
-    private static function escribirTrozo(Storage $st, string $tabla, array $def, int $parte, int $rev, array $keys, ?array $resumen = null): ?array
+    private static function escribirTrozo(Storage $st, string $tabla, array $def, int $parte, int $rev, array $keys, ?array $resumen = null, ?array $ampliado = null): ?array
     {
         $idx = [
             'index'   => $def['name'],
@@ -1432,9 +1630,16 @@ final class StorageEscritura extends Storage
         // no hay nada que resumir y no se recorren otra vez (cada trozo de un
         // índice numérico que se reescribe: el de la clave primaria en cada
         // INSERT, los de una clave foránea en una cascada)
-        $rango   = Indexes::rango($keys);
+        // Si solo ha ganado claves (ver escribirIndice()), rango y cabecera se
+        // amplían; si el filtro ya va justo, se rehace con sitio para otras
+        // tantas como la cuarta parte de las que tiene (2.10)
+        $rango   = $ampliado === null ? IndexesEscritura::rango($keys) : $ampliado['rango'];
         $numeros = Indexes::filtraNumeros($rango, $st->filasPorParte);
-        $idx     = $idx + ($resumen ?? ($rango !== null && !$numeros ? ['filtro' => ''] : Indexes::resumenDeTexto($keys, $numeros)));
+        if ($resumen === null && $ampliado !== null && !$numeros && $rango === null) {
+            $resumen = self::resumenAmpliado($ampliado['resumen'], $ampliado['nuevas'], \count($keys))
+                ?? IndexesEscritura::resumenDeTexto($keys, false, \count($keys) >> 2);
+        }
+        $idx     = $idx + ($resumen ?? ($rango !== null && !$numeros ? ['filtro' => ''] : IndexesEscritura::resumenDeTexto($keys, $numeros)));
         $idx['keys'] = $keys;
         // Su filtro, para guardarlos todos al acabar (ver Storage::guardarFiltros())
         $st->indicesMemo[$tabla][$def['name']]['filtros'][$parte] = Indexes::filtro($idx) ?? '';
@@ -1442,12 +1647,12 @@ final class StorageEscritura extends Storage
         // {} y no como [], igual que con ellas: trozoSano() mira que acabe en }}
         $texto = json_encode($keys === [] ? array_merge($idx, ['keys' => new \stdClass()]) : $idx, self::JSON_FILA) . "\n";
         self::escribirAtomico($st, $st->ficheroIndice($tabla, $def['name'], $parte), $texto, false);
-        $st->tamTrozos[$st->etiqueta($tabla)][$def['name']][$parte] = strlen($texto);
+        $st->tamTrozos[$st->etiqueta($tabla)][$def['name']][$parte] = \strlen($texto);
         // A la caché al confirmar, los primeros: una escritura que reescribe
         // cientos de trozos los tenía todos en memoria hasta el final (2.9);
         // los demás se guardan cuando se leen. Y ninguno si la memoria ya va
         // justa: con claves largas, 64 trozos eran más de 16 MB (2.9)
-        if (count($st->txCache) < self::TROZOS_A_CACHE && !Memoria::apretado()) {
+        if (\count($st->txCache) < self::TROZOS_A_CACHE && !Memoria::apretado()) {
             $st->txCache[] = [$st->claveCache($tabla, 'x' . $def['name'] . 'p' . $parte, $rev), $idx, $st->ficheroIndice($tabla, $def['name'], $parte), 'i'];
         }
         return $rango;
@@ -1554,7 +1759,7 @@ final class StorageEscritura extends Storage
             // para las filas que junta la sentencia antes de escribirlas
             // (ver Writer::tramo()); con un millón de filas, unos 100 MB por
             // índice. Si no, por la huella de cada clave (ver
-            // Indexes::huella()), menos de la mitad; y si tampoco, cada clave
+            // huella()), menos de la mitad; y si tampoco, cada clave
             // se busca en los trozos que según su filtro pueden tenerla
             $limite = Memoria::limiteEnBytes();
             $libre  = $limite > 0 ? intdiv(intdiv($limite, 2) - memory_get_usage(), 3) : PHP_INT_MAX;
@@ -1563,9 +1768,9 @@ final class StorageEscritura extends Storage
             if ($cuenta <= 8 || $forma === null) {
                 $filtros = $memo['filtros'] ?? [];
                 $trozos  = $plan['partes'];
-                if ($forma === null && $clave !== '' && $clave[0] === 't' && count($filtros) === $plan['partes']) {
+                if ($forma === null && $clave !== '' && $clave[0] === 't' && \count($filtros) === $plan['partes']) {
                     // Los filtros de todos, ya leídos (solo cubren las de texto)
-                    $trozos = array_fill_keys(Indexes::trozosPosibles($filtros, $clave), [$clave]);
+                    $trozos = array_fill_keys(self::trozosPosibles($filtros, $clave), [$clave]);
                 }
                 $hay = $trozos === [] ? [] : $st->clavesEnTexto($tabla, $def, $trozos, [$clave], true);
                 if ($hay !== null || $forma === null) {
@@ -1579,7 +1784,7 @@ final class StorageEscritura extends Storage
                     return null;
                 }
                 foreach ($keys as $k => $donde) {
-                    $h = $forma === '*' ? $k : Indexes::huella((string)$k);
+                    $h = $forma === '*' ? $k : self::huella((string)$k);
                     $mapa[$h] = isset($mapa[$h]) ? array_merge(Indexes::posiciones($mapa[$h]), Indexes::posiciones($donde)) : $donde;
                 }
             }
@@ -1592,7 +1797,7 @@ final class StorageEscritura extends Storage
         // Por la huella, las posiciones que pueden ser; la clave se confirma
         // en el texto de sus trozos, que una huella puede ser de otra
         $trozos = [];
-        foreach (Indexes::posiciones($memo['#'][Indexes::huella($clave)] ?? null) as $pos) {
+        foreach (Indexes::posiciones($memo['#'][self::huella($clave)] ?? null) as $pos) {
             $trozos[intdiv($pos, $st->filasPorParte) + 1] = [$clave];
         }
         $hay = $trozos === [] ? [] : $st->clavesEnTexto($tabla, $def, $trozos, [$clave], false);
@@ -1609,7 +1814,7 @@ final class StorageEscritura extends Storage
     private static function trozoConValor(array $orden, int|float $v): array
     {
         $a = 0;
-        $b = count($orden) - 1;
+        $b = \count($orden) - 1;
         while ($a <= $b) {
             $m = ($a + $b) >> 1;
             if ($v < $orden[$m][0]) {
@@ -1646,10 +1851,10 @@ final class StorageEscritura extends Storage
             return true;
         }
         $revs = $st->estado($tabla)['indexes'][$def['name']] ?? null;
-        if (!is_array($revs)) {
+        if (!\is_array($revs)) {
             return false;
         }
-        $firma = $plan['partes'] . ':' . implode(',', array_slice($revs, 0, $plan['partes']));
+        $firma = $plan['partes'] . ':' . implode(',', \array_slice($revs, 0, $plan['partes']));
         // Por la etiqueta de la tabla: una borrada y creada otra vez con el
         // mismo nombre vuelve a empezar en las mismas revisiones
         $firma = $st->etiqueta($tabla) . ':' . $firma;
@@ -1672,7 +1877,7 @@ final class StorageEscritura extends Storage
     private static function filtrosDesfasados(Storage $st, string $tabla, string $nombre, array $revs, int $partes): ?int
     {
         $v = $st->cacheLeer($st->claveCache($tabla, 'f' . $nombre, 0));
-        if (!is_array($v) || !is_array($v['r'] ?? null)) {
+        if (!\is_array($v) || !\is_array($v['r'] ?? null)) {
             return null;
         }
         $n = 0;
@@ -1724,7 +1929,7 @@ final class StorageEscritura extends Storage
         }
         foreach ($indices as $n) {
             $ra = $antes['indexes'][$n] ?? $revAntes;
-            if (!is_array($ra)) {
+            if (!\is_array($ra)) {
                 $sobran[] = 'x' . $n . ':' . (int)$ra;      // un índice de antes de la 2.6
                 continue;
             }
@@ -1780,7 +1985,7 @@ final class StorageEscritura extends Storage
             // Cada entrada tiene su .cache y, en modo OPcache, su .php (o un
             // .tmp que se quedó a medias): con la misma búsqueda, sin buscar más
             foreach ((array)glob($st->dirCache . '/' . $md5 . '.*') as $f) {
-                $nombre = substr(basename((string)$f), strlen($md5) + 1);
+                $nombre = substr(basename((string)$f), \strlen($md5) + 1);
                 if (!isset($conservar[substr($nombre, 0, (int)strpos($nombre . '.', '.'))]) || str_ends_with($nombre, '.tmp')) {
                     @unlink((string)$f);
                 }
@@ -1794,5 +1999,118 @@ final class StorageEscritura extends Storage
                 @unlink((string)$f);
             }
         }
+    }
+
+    /**
+     * Construye el contenido de un índice a partir de las filas de la tabla.
+     *
+     * @param list<array>    $filas
+     * @param list<string>   $columnas
+     * @param array<int, ?string> $plegar la colación de cada columna, por posición (2.9; ver claveFila())
+     * @return array<string, list<int>>
+     */
+    public static function construir(array $filas, array $columnas, array $plegar = []): array
+    {
+        $keys = [];
+        foreach ($filas as $pos => $fila) {
+            // Sin colación, la clave aquí mismo: esto va una vez por fila
+            if ($plegar === []) {
+                $valores = [];
+                foreach ($columnas as $c) {
+                    $valores[] = $fila[$c] ?? null;
+                }
+                $clave = Indexes::clave($valores);
+            } else {
+                $clave = Indexes::claveFila($fila, $columnas, $plegar);
+            }
+            if ($clave === null) {
+                continue;                       // los NULL no se indexan
+            }
+            IndexesEscritura::anotar($keys, $clave, $pos);
+            Memoria::comprobar('la construcción del índice');
+        }
+        return $keys;
+    }
+
+    /**
+     * Quita del índice todas las posiciones a partir de $desde: las que se
+     * han desplazado o desaparecido. Lo que queda son las filas de delante,
+     * que no se han movido.
+     *
+     * @param array<string, int|list<int>> $keys
+     * @return array<string, int|list<int>>
+     */
+    public static function recortar(array $keys, int $desde): array
+    {
+        foreach ($keys as $clave => $v) {
+            if (\is_int($v)) {
+                if ($v >= $desde) {
+                    unset($keys[$clave]);
+                }
+                continue;
+            }
+            $quedan = [];
+            foreach ($v as $p) {
+                if ((int)$p < $desde) {
+                    $quedan[] = (int)$p;
+                }
+            }
+            if ($quedan === []) {
+                unset($keys[$clave]);
+            } elseif (\count($quedan) === 1) {
+                $keys[$clave] = $quedan[0];
+            } else {
+                $keys[$clave] = $quedan;
+            }
+        }
+        return $keys;
+    }
+
+    /**
+     * Los trozos cuyo filtro dice que pueden tener una clave de texto (2.9),
+     * como puedeEstar() en cada uno, para buscar una en todos los de un índice
+     * grande: sus bits se calculan una vez por tamaño de filtro, no en cada
+     * trozo.
+     *
+     * @param array<int, string> $filtros trozo => filtro
+     * @return list<int>
+     */
+    public static function trozosPosibles(array $filtros, string $clave): array
+    {
+        $h1   = crc32($clave);
+        $h2   = crc32(strrev($clave)) | 1;
+        $bits = [];                                         // por tamaño de filtro: [byte, máscara] de cada bit
+        $out  = [];
+        foreach ($filtros as $p => $filtro) {
+            if ($filtro === '') {
+                continue;                                   // el trozo no tiene claves de texto
+            }
+            $m = (\strlen($filtro) - 1) << 3;                // tras el byte que dice qué cubre (ver puedeEstar())
+            if (!isset($bits[$m])) {
+                $bits[$m] = [];
+                for ($i = 0; $i < Indexes::FILTRO_K; $i++) {
+                    $b = ($h1 + $i * $h2) % $m;
+                    $bits[$m][] = [1 + ($b >> 3), 1 << ($b & 7)];
+                }
+            }
+            foreach ($bits[$m] as [$byte, $mascara]) {
+                if ((\ord($filtro[$byte]) & $mascara) === 0) {
+                    continue 2;
+                }
+            }
+            $out[] = $p;
+        }
+        return $out;
+    }
+
+    /**
+     * Un número de 64 bits que resume una clave (2.9): con las de un índice
+     * grande en un mapa de huellas, que ocupa menos de la mitad que el de sus
+     * claves (ver StorageEscritura::posicionesDeClave()). Dos claves distintas
+     * pueden tener la misma: quien la usa confirma la clave.
+     */
+    public static function huella(string $clave): int
+    {
+        return crc32($clave) << 32 | crc32(strrev($clave));
     }
 }

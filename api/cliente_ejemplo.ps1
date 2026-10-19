@@ -26,7 +26,7 @@
         Set-JsonSqlDbConexion -Url 'https://example.com/jsonsqldb/api/jsonsqldb_api.php' `
                              -ApiKey '...' -HmacSecret '...' -Base 'pruebas'
 
-        API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ?" @('Torrevieja')
+        API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ?" @('Malaga')
 
         # Varias sentencias como una transacción, todas o ninguna (2.9)
         API-SQL-Lote @(
@@ -165,7 +165,7 @@ function API-SQL-JSON {
         Base de datos. Si no la indicas, se usa la de la configuración.
 
         .EXAMPLE
-        API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ? AND saldo > ?" @('Torrevieja', 100.5)
+        API-SQL-JSON "SELECT * FROM clientes WHERE ciudad = ? AND saldo > ?" @('Malaga', 100.5)
 
         .EXAMPLE
         API-SQL-JSON "SHOW DATABASES" -Base ''
@@ -363,7 +363,7 @@ API-SQL-JSON "SELECT cod, nombre, saldo FROM clientes WHERE saldo > ? AND alta >
              @(100.5, '2026-01-01', 20)
 
 # IN de tamaño variable: un ? por elemento
-$ciudades = @('Torrevieja', 'Alicante', 'Murcia')
+$ciudades = @('Malaga', 'Alicante', 'Murcia')
 $huecos   = ($ciudades | ForEach-Object { '?' }) -join ','
 API-SQL-JSON "SELECT nombre FROM clientes WHERE ciudad IN ($huecos)" $ciudades
 

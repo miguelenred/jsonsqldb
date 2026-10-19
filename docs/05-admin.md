@@ -29,7 +29,17 @@ What is new since 2.7.1, and where it is described:
 | 2.9 | `COLLATE`, `CHECK` and `ENUM` in the Structure tab, the imports and the dumps | 3 |
 | 2.9 | A PowerShell script that dumps a SQL Server database and loads a dump into one | 3 |
 | 2.9 | Imports sized to the API's limits per request; an all-or-nothing import runs in one transaction of the engine and no longer undoes what others wrote meanwhile | 3 |
-| 2.9.1 | The form for a new index says that one on `(a, b)` serves a search by `a` alone only when `b` is `NOT NULL` | 3 |
+| 2.10 | The form for a new index says that one on `(a, b)` serves a search by `a` alone fully only when `b` is `NOT NULL` | 3 |
+| 2.10 | The home page shows administrators whether the data folder can be downloaded; with the direct connection the browser checks it | 7 |
+| 2.10 | Rows of a table without a primary key are edited and deleted one by one | 3 |
+| 2.10 | Importing a dump leaves out a view whose table is not in it, and says so | 3 |
+| 2.10 | The Integrity tab also checks the indexes against their rows (`CHECK INDEXES`) and rebuilds them (`REPAIR INDEXES`) | 3 |
+| 2.10 | The data filter searches `%` and `_` as they are; read-only users can run `WITH`, `EXPLAIN`, `CHECK` and `DESCRIBE` in the SQL editor | 2, 3 |
+| 2.10 | The Audit tab shows 500 events at a time, newest first, and old days are deleted by the first event of each day | 2 |
+| 2.10 | Dumps carry each table's `AUTOINCREMENT` counter, in every dialect and back; MySQL dumps with `#` comments and `"…"` texts import | 3 |
+| 2.10 | Through the API, a table sorted by its numeric primary key is exported in batches by that key; otherwise the data view says that a change made meanwhile can repeat or skip rows | 3.1 |
+| 2.10 | The Backups page shows the copies that no schedule deletes any more, and deletes them at once | 3.2 |
+| 2.10 | The panel's files are written with `fsync`; an allow-list entry that is not valid lets nobody in | 2, 5 |
 
 The panel talks to the engine in one of two ways, chosen when it is installed:
 
@@ -132,13 +142,22 @@ Apache, IIS, nginx and LiteSpeed refuse it over HTTP.
 
 ## 2. Panel users
 
-They are independent of the API keys. They are stored in `datos/usuarios.json`
-with bcrypt and have nothing to do with the API keys.
+They are independent of the API keys, and are stored in `datos/usuarios.json`
+with bcrypt. The panel writes its files (users, backup schedules,
+`config.php`) as the engine writes its own: to a temporary file forced to disk
+with `fsync`, then renamed over the old one (2.10; before, without `fsync`, a
+power cut could leave one empty). The temporary file of one with keys is
+created already readable only by its owner, with a name that cannot be guessed
+(2.10; on Windows the folder's permissions decide). The users, the sign-in
+attempts (`intentos.json`) and the backup schedules (`copias.json`) are created
+readable only by their owner too, `0600` (2.10; before, with the umask's
+permissions, and on a shared server the other accounts could read the
+password hashes).
 
 | Role | Can |
 |---|---|
 | `admin` | everything: create and delete databases, tables, columns, keys, triggers, rows and users; import, export and dump |
-| `lectura` | see structure and data, and run `SELECT` and `SHOW` from the SQL editor. Since 2.9 it cannot export: the buttons are not shown and the panel refuses the request |
+| `lectura` | see structure and data, and run queries from the SQL editor (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`, `CHECK`, `DESCRIBE`). Since 2.9 it cannot export: the buttons are not shown and the panel refuses the request |
 
 Included protections: session expiry on inactivity (`ADMIN_SESION_MINUTOS`), IP
 lockout after repeated failures (`ADMIN_LOGIN_MAX_FALLOS`), CSRF token on every
@@ -146,8 +165,11 @@ form, `HttpOnly` + `SameSite=Strict` cookie, and `Secure` automatically when you
 come in over HTTPS.
 
 Everything that is done is recorded in `datos/auditoria-YYYY-MM-DD.json`: user,
-IP, database, action and detail. It is browsed from the **Audit** tab and purged
-on its own after `ADMIN_AUDIT_DIAS` days.
+IP, database, action and detail. It is browsed from the **Audit** tab, 500
+events at a time from the most recent, read from the end of the file (2.10:
+the whole day was loaded, and a day with tens of thousands of events did not
+fit in memory), and purged after `ADMIN_AUDIT_DIAS` days by the first event of
+each day (2.10; before, by one event in a hundred, at random).
 
 ## 3. What it can do
 
@@ -241,8 +263,9 @@ for more, plus an X to remove the spare ones; blank ones are ignored.
   `NEW.column`, `OLD.column`, `RAISE(ABORT, 'message')`, `IF … END IF` and, in
   a `BEFORE INSERT`/`BEFORE UPDATE`, `SET NEW.column = …` are valid.
 - Indexes: create one on one or more columns — the form warns that order
-  matters, and that one on `(a, b)` serves a search by `a` alone only when `b`
-  is `NOT NULL` (2.9.1) — and drop it. The automatic ones of the primary key and the
+  matters, and that one on `(a, b)` serves a search by `a` alone fully only
+  when `b` is `NOT NULL`, and otherwise only in the parts of the table without
+  rows whose `b` is `NULL` (2.10) — and drop it. The automatic ones of the primary key and the
   `UNIQUE`s are shown as such and cannot be dropped on their own: they go with
   their constraint.
 - Drop any unique or foreign key, any named `CHECK`, any trigger and any
@@ -257,15 +280,17 @@ duplicate values or orphan rows the operation is rejected and the structure is
 not touched.
 
 **Data** — paginated listing, ordering by any column, a **filter** that searches
-the text in every column at once (combined with ordering, pagination and
-export), and inserting, editing and deleting rows. `AUTOINCREMENT` columns are
+the text in every column at once, `%` and `_` included as they are (2.10;
+before, they were wildcards), combined with ordering, pagination and export, and inserting, editing and deleting rows. `AUTOINCREMENT` columns are
 read-only and have no NULL box, because the database sets the value; `NOT NULL`
 columns are marked as «required» and offer no NULL box either. An empty box
 means «no value»: in automatic, numeric and date columns the column is not sent
 and the engine applies the autoincrement or the `DEFAULT`; in text columns the
-empty string is stored. To store a null, tick the NULL box. To edit or delete a
-single row the table needs a primary key; if it has none, the panel says so and
-sends you to the SQL editor.
+empty string is stored. To store a null, tick the NULL box. A row is edited or
+deleted by its primary key; in a table without one (2.10), by all its values,
+`NULL`s and decimals with all their digits included, and of two equal rows only
+one changes. The panel says which of the two it does. Before 2.10 a table
+without a primary key sent you to the SQL editor.
 
 **Read-only key** — if you configure `ADMIN_API_KEY_LECTURA` with a key of
 `lectura` permission, the panel signs with it whenever the logged-in user is not
@@ -273,14 +298,19 @@ an administrator. The engine then becomes the second barrier: even if a panel
 bug let a `DELETE` through, the API would reject it. Without it, every user
 signs with the admin key and the only barrier is the panel's own check.
 
-**Integrity** — a screen of its own that runs two checks when it opens:
-`CHECK KEYS`, that no row points at a non-existent value in its target table,
-and since 2.9 `CHECK TABLES`, that the JSON files of every table can be read
-and agree with each other. An administrator can fix what they find: the keys
-with `REPAIR KEYS`, which sets to `NULL` what can be and never deletes rows, and
-the files with `REPAIR TABLES`, which repairs only what can be repaired without
-guessing and sets aside a row it cannot read, keeping the original in
-`.reparados/` (see [01-core.md](01-core.md#editing-the-files-by-hand-29)).
+**Integrity** — a screen of its own that runs three checks when it opens:
+`CHECK KEYS`, that no row points at a non-existent value in its target table;
+since 2.9 `CHECK TABLES`, that the JSON files of every table can be read and
+agree with each other; and since 2.10 `CHECK INDEXES`, that every index matches
+the rows of its table (a hand edit of an index file, or a table copied without
+its indexes, can make a lookup return fewer rows). An administrator can fix
+what they find: the keys with `REPAIR KEYS`, which sets to `NULL` what can be
+and never deletes rows; the files with `REPAIR TABLES`, which repairs only what
+can be repaired without guessing and sets aside a row it cannot read, keeping
+the original in `.reparados/` (see
+[01-core.md](01-core.md#editing-the-files-by-hand-29)); and the indexes with
+`REPAIR INDEXES`, which rebuilds from the rows those of each table with a
+problem, without touching the rows.
 Each row set aside stays listed as pending, as it was, next to a real row of
 its table as an example: the administrator corrects it in an editor and saves
 it, which inserts it and forgets it in one transaction, or discards it
@@ -297,7 +327,9 @@ delete them.
 Several statements separated by `;` (2.9) run as **one transaction**: all of
 them or none, and the result shown is the last one's; the export buttons
 appear only after a single statement. With the `lectura` role only statements
-that start with `SELECT` or `SHOW` are accepted, each one checked.
+that start with `SELECT`, `WITH`, `SHOW`, `EXPLAIN`, `CHECK` or `DESCRIBE` are
+accepted, each one checked: the ones the engine allows a read-only key (before
+2.10, only `SELECT` and `SHOW`).
 
 The **SQL dump of a database** comes in five dialects, chosen in the list of
 databases; the header of each file says how to load it:
@@ -306,7 +338,7 @@ databases; the header of each file says how to load it:
   (`sqlite3 base.db < base.sql`). Each table carries its unique and foreign
   keys in its `CREATE TABLE`, the tables come in the order of their foreign
   keys, the rows of a self-referencing table parents first, then its indexes;
-  views and triggers at the end. Only a foreign key in a cycle between tables
+  views (each after the ones it uses, 2.10) and triggers at the end. Only a foreign key in a cycle between tables
   goes after the data with `ALTER TABLE`, which SQLite does not accept; the
   dump marks it.
 - **MySQL and MariaDB** (`base.mysql.sql`, for MySQL 8 and MariaDB 10.3 or
@@ -339,6 +371,15 @@ databases; the header of each file says how to load it:
   not accept cascading actions that could form a cycle.
 - **Microsoft Access** (`base.access.sql`, 2.7.3): in Access's own SQL; see
   [The Access SQL file](#the-access-sql-file-and-accesss-limits).
+
+**The `AUTOINCREMENT` counter** of each table goes after its rows (2.10):
+`sqlite_sequence` in the jsonSQLDB/SQLite dump (when the column is the
+`INTEGER PRIMARY KEY`, the only one SQLite gives `AUTOINCREMENT`), `ALTER TABLE
+… AUTO_INCREMENT` in MySQL, `setval()` of the column's sequence in PostgreSQL,
+`DBCC CHECKIDENT` in SQL Server, and in Access, which cannot set it with SQL, a
+comment with the value. Before 2.10 only the keyword went, and a copy gave
+again the ids of the last rows deleted; importing any of these files but the
+Access one puts the counter back.
 
 **Views and triggers** go at the end of every dump. In the jsonSQLDB/SQLite
 one they are written as they are; for the other four they are translated
@@ -378,7 +419,11 @@ What a system cannot express at all — any trigger, window function, or `WITH`
 that is recursive or has a column list, in Access; inside a trigger, in any of
 them, an upsert, `RETURNING`, or an `UPDATE`/`DELETE` with an alias, other
 tables, `ORDER BY` or `LIMIT` — is written commented out with its reason, and
-listed in a line `-- Not translated (commented out at the end): …`.
+listed in a line `-- Not translated (commented out at the end): …`. Each
+trigger is written, or commented out, on its own (2.10; before, one that could
+not be written commented out the others of its table, each with its reason),
+except the `BEFORE` triggers of one event in SQL Server, which are one
+`INSTEAD OF` trigger there.
 `tests/f16_vistas_triggers.php` loads views and triggers into MariaDB and
 PostgreSQL, runs the same writes there and here, and checks that every table
 and view ends up the same.
@@ -419,13 +464,19 @@ the autoincrement continuing.
   Windows line endings),
   or chosen by hand. Dumps of other systems are translated statement by
   statement (`lib/Traductor.php`): backtick and bracket names, MySQL's
-  backslash escapes, `X'…'`, `0x…`, `b'…'` and SQLite's `char(10)`; MySQL
+  backslash escapes, its `#` comments and its `"…"` texts (names only with
+  `ANSI_QUOTES` in its `sql_mode`; both 2.10: before, a `#` stopped the import
+  and `"Madrid"` was taken for a column), `X'…'`, `0x…`, `b'…'` and SQLite's `char(10)`; MySQL
   types to the ones here (`INT(11) UNSIGNED` → `INTEGER`, `LONGTEXT` → `TEXT`,
   `SET` → `TEXT`…; `ENUM` keeps its list since 2.9); the `KEY`s inside a `CREATE TABLE` become `CREATE INDEX`;
   a `CREATE UNIQUE INDEX` becomes a `UNIQUE` constraint; the foreign keys go at
   the end, because dumps create tables in any order and load data with checks
-  off; and session statements (`PRAGMA`, `SET`, `LOCK TABLES`, `BEGIN`…) and
-  the `sqlite_sequence` table are skipped, and so are mysqldump's `/*! … */`
+  off; session statements (`PRAGMA`, `SET`, `LOCK TABLES`, `BEGIN`…) are
+  skipped; the `AUTOINCREMENT` counter of each table (its `sqlite_sequence`
+  row, `AUTO_INCREMENT = n`, PostgreSQL's `setval()` of the column's sequence
+  and SQL Server's `DBCC CHECKIDENT`) becomes `ALTER TABLE … AUTO_INCREMENT`
+  (2.10; before, it was skipped and the copy reused the ids of the last
+  deleted rows); and so are mysqldump's `/*! … */`
   version comments, except what is SQL inside them (its views and triggers,
   translated as described below). What has no equivalent here — computed
   defaults other than the current date and time, `ON UPDATE`, `SET`'s list of
@@ -643,7 +694,16 @@ is translated with it — `IF/ELSIF`, `NEW.x := …`, `RAISE EXCEPTION`,
 per event, named `name_insert`, `name_update`…, with `TG_OP` set to its event.
 As in PostgreSQL, `OLD.col` is `NULL` in the `INSERT` one and `NEW.col` in the
 `DELETE` one (2.9), so a function that names both, in branches for each event
-or in `COALESCE(NEW.id, OLD.id)`, comes in whole.
+or in `COALESCE(NEW.id, OLD.id)`, comes in whole. Since 2.10 each one keeps
+only the branches of its event: an `IF`/`ELSIF` whose condition compares
+`TG_OP` with another event (`=`, `<>`, `IN`, with `AND`, `OR` and brackets)
+is left out, one that compares it with its own event loses that part of the
+condition or the `IF` altogether, and a `CASE TG_OP WHEN …` keeps only its
+branch. Before, every trigger carried the branches of the other events and
+checked them on every row: with the function of the first `TG_OP` check of
+`tests/f17_rutinas_importadas.php`, 3,000 `INSERT`s, 3,000 `UPDATE`s and
+1,500 `DELETE`s in one transaction take 324 ms instead of 536 (median of six
+rounds, same rows).
 Other functions and procedures are skipped.
 
 **SQL Server** — with Management Studio:
@@ -769,7 +829,13 @@ reports. The script lists them when it finishes. The saved queries are
 translated as Access stores them: text in double quotes, `#dates#`, `&`, `IIf`,
 `Nz`, `Mid`, `Len`, `InStr`, `Format`, `DateAdd`, `DateDiff`, `Year`…,
 `CCur`/`CLng`/`CDate`…, the `*`, `?` and `#` wildcards of `Like`, `Table!Field`,
-joins in parentheses and `TOP`.
+joins in parentheses and `TOP`. Each side of `&`, `\`, `Mod` and `Like` reaches
+as far as Access reads it: `[n] + 1 & [a]` is `([n] + 1) & [a]` (2.10: it
+became `[n] + (1 & [a])`); the same with `MOD`, `DIV` and `<=>` from MySQL,
+where `<=>` also takes the comparisons on its left, as MySQL does (`n = 7 <=> 1`
+is `(n = 7) <=> 1`), and an `IF(…)` or a `CASE … END` on the left of `MOD`,
+`DIV` or `<=>` is all of that side. `<<` and `>>` from MySQL and `->` and `->>` from
+PostgreSQL arrive whole (2.10: they came out split, and the view failed).
 
 What does not arrive the same in any of them: computed
 default values other than the current date and time (`CURRENT_TIMESTAMP`,
@@ -784,7 +850,12 @@ letters, digits and `_`: `Order Details` → `Order_Details`, and a letter with
 an accent becomes its plain letter, `Año` → `Ano` (2.9; it became one `_` per
 byte, `A__o`). A view of an Access database that uses a table of another
 Access database (`[C:\…\other.mdb].table` or `table IN '…'`) is skipped and
-the summary says which table and file. And if the dump contains `DROP TABLE`, a table with the same name
+the summary says which table and file. Since 2.10 so is, in any dump, a view
+that uses a table that is neither in the dump nor in the database (a linked
+table in Access, say): it was created and failed when used, and since 2.10 the
+engine does not create it (see *Views* in `docs/03-writes.md`). A view that
+comes before its table in the dump is left for the end and imported. The PowerShell scripts still export
+every view, since Access itself accepts linked tables. And if the dump contains `DROP TABLE`, a table with the same name
 here is replaced: import into a new, empty database if in doubt.
 
 **The SQL dump of a whole database is written table by table** (2.7.3): the
@@ -858,9 +929,21 @@ downloading an empty file.
 20 takes and works out how many fit in the free memory (`memory_limit` minus
 what is already in use, with room left for the API's answer and the text being
 written). If the whole table or result fits, it is asked for at once, as
-before; if not, in batches of that size (`LIMIT … OFFSET …`, at most 100,000
-rows per request, and as few as one when rows are very wide), and only one
-batch is in memory. This holds for the SQL dumps in every dialect, the
+before; if not, in batches of that size (at most 100,000 rows per request,
+and as few as one when rows are very wide), and only one batch is in memory.
+Through the API, a table sorted by its primary key, when that key is one
+numeric column, goes in batches by the key (2.10): each one starts after the
+last key of the one before (`WHERE id > ? ORDER BY id LIMIT n`), without
+sorting again all that comes after it, and a row written or deleted meanwhile
+neither repeats nor skips another. On 300,000 rows, 6.5 → 2.1 s in batches of
+30,000 and 40.1 → 1.5 s in batches of 5,000, with a fifth of the memory in the
+engine. Anything else goes by position (`LIMIT … OFFSET …`), as before 2.10:
+unsorted, that is faster than by key (the batches skip whole parts: 0.4 s
+against 2.1 s on those 300,000 rows in batches of 30,000), and a key of text or of several columns
+would not keep its order (the `ORDER BY` follows the collation, the `>`
+compares byte by byte). The table view says that, by position, a change made
+during the download can repeat or skip rows; for an exact copy of a database,
+its ZIP. This holds for the SQL dumps in every dialect, the
 whole-database JSON, CSV, `INSERT`, JSON and Excel of a table or a query, and
 scheduled backups. The types a dump works out from the data (text lengths, digits, the
 range of integers for Access) come from a first pass that keeps no rows; and a
@@ -958,6 +1041,12 @@ A lock stops two backups from running at the same time. A backup that fails
 shows its error on the page, is written to the audit trail, and is tried again
 at its next time.
 
+Each schedule deletes only the copies of its own format. When a schedule is
+removed, or changed to another format, its copies stay; the page lists every
+database that has copies, with or without a schedule, marks those that no
+schedule deletes («not deleted automatically») and offers to delete them at
+once (2.10; before, they were no longer shown and stayed for good).
+
 ### 3.3. The panel's data folder
 
 `jsonsqldbadmin/datos/` (`ADMIN_DATA_PATH`) holds the panel's users and audit
@@ -1018,8 +1107,8 @@ the file does not exist or cannot be read, the panel says so clearly instead of
 failing with a confusing network error.
 
 With option 1, **the server name in `ADMIN_API_URL` must match the one in the
-certificate**. If the certificate is for `shirka`, the URL must be
-`https://shirka:44311/...`, not the IP nor `localhost`. If they do not match,
+certificate**. If the certificate is for `myserver`, the URL must be
+`https://myserver/...`, not the IP nor `localhost`. If they do not match,
 cURL keeps complaining (about the name now, not the signature) and you need
 option 2 or a certificate regenerated with the right name.
 
@@ -1076,6 +1165,10 @@ $cli->aceptarAutofirmado();
   taken as empty (2.9): the request gets the usual error for a missing value.
   Before, PHP turned it into the text `Array` with a warning, and, for
   example, a backup was scheduled for a database called `Array`.
+- **The record of failed sign-ins keeps at most 1,000 IPs** (2.10):
+  `datos/intentos.json`, which every sign-in reads, grew without limit with
+  failures from many addresses at once. The locked-out IPs are kept first,
+  then the most recent.
 - **The Configuration page writes `config.php` by PHP's own tokens** (2.9): a
   key or secret with `);` or `;` in it, saved twice, left the rest of it
   outside the text, as PHP code.
@@ -1087,7 +1180,9 @@ $cli->aceptarAutofirmado();
   or the folders are reachable from the browser.
 - `ADMIN_IPS_PERMITIDAS` limits who can open the panel, by IP or CIDR range. If
   only you use it, from the office or over a VPN, it is the most effective
-  measure: whoever is not on the list does not even see the login screen.
+  measure: whoever is not on the list does not even see the login screen. An
+  entry written wrong by hand (`10.0.0.0/`) lets nobody in, as in the API
+  (before 2.10, everybody); the Configuration page does not save one.
 - `ADMIN_EXIGIR_HTTPS` rejects access over HTTP. Passwords and data travel
   through the panel, so in production it should be `true`.
 - `Content-Security-Policy` header restricted to `self`: everything the panel
@@ -1154,6 +1249,23 @@ separator). What it saves goes into `config.php`, replacing each
   cannot be downloaded. Before 2.9 the wizard also used the `Host` header, so
   anyone could make the server send a request to any machine and port of its
   network.
+- **With the direct connection the browser makes that check** (2.10), on this
+  page and on the home page. The server works out the address of a real file
+  of a database (`<database>/_database.json`; with no database yet, the data
+  folder's `web.config`) by walking up the panel's folder and its address at
+  the same time until it reaches the folder that holds the data, so it also
+  works with the engine in another folder (`ADMIN_MOTOR_RUTA`). The browser
+  requests that address with `HEAD` and without cookies, as anyone outside
+  would: 200 is shown in red, 401, 403 or 404 as protected, anything else as
+  not checked. With `HEAD` nothing is downloaded even if the folder is exposed,
+  and the server does not have to request its own address, which fails behind
+  a NAT, a firewall or a proxy. A data folder outside the panel's site is
+  reported as such, with no request; one published under another address or
+  domain cannot be checked from the panel. Before 2.10 the server made the
+  request, and with the engine in another folder it said it could not check.
+- **The home page shows the same check to administrators** (2.10): through the
+  API, once per session, because the request can take a few seconds if the
+  address does not answer; this page repeats it every time it is opened.
 - Where the users are kept (`ADMIN_DATA_PATH`), the engine's data folder for the
   ZIP copy and the session cookie name are only changed by hand: changing them
   with the panel running would leave whoever is using it out.
@@ -1218,7 +1330,7 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/lib/Store.php` | reading and writing of the panel's JSON files |
 | `jsonsqldbadmin/lib/iconos.php` | the icons, inline SVG |
 | `jsonsqldbadmin/lib/util.php` | escaping, URLs, messages and validation |
-| `jsonsqldbadmin/lib/acciones.php` | every action that changes something |
+| `jsonsqldbadmin/lib/acciones.php` | every action that changes something, one function `accion_<name>` each; all of them need an administrator except changing your own password, the scheduled backups that are due and an upload piece, which check it themselves |
 | `jsonsqldbadmin/vistas/` | pages |
 | `jsonsqldbadmin/assets/` | Bootstrap 5.3.3 (CSS and JS), local |
 | `jsonsqldbadmin/herramientas/access-to-jsonsqldb.ps1` | the PowerShell script that dumps a Microsoft Access database and loads a dump into one (Windows), downloaded from the import box |
@@ -1226,9 +1338,9 @@ refusal leaves `config.php` untouched.
 | `jsonsqldbadmin/assets/panel.css` | the design: tokens for light and dark theme, layout and components |
 | `jsonsqldbadmin/assets/panel.js` | sidebar, theme, confirmations, Ctrl+Enter, wizard options, column fields, selects that submit their form, uploads in pieces, scheduled backups without cron |
 | `jsonsqldbadmin/datos/` | `usuarios.json`, `intentos.json`, `auditoria-*.json`, `copias.json`, the `copias/` and `importar/` folders, and `codigo-instalacion.txt` until the installation finishes |
-| `tests/f5_admin.php` | 176 checks driving the real panel through the API |
-| `tests/f20_memoria.php` | 31 checks, with the API and with `--directa`: a database larger than memory exported and imported, uploads in pieces, the import folder, scheduled backups |
-| `tests/f11_asistente.php` | 41 checks of the setup wizard, the configuration page, sessions and the direct connection |
+| `tests/f5_admin.php` | 189 checks driving the real panel through the API |
+| `tests/f20_memoria.php` | 32 checks, with the API and with `--directa`: a database larger than memory exported and imported, uploads in pieces, the import folder, scheduled backups |
+| `tests/f11_asistente.php` | 45 checks of the setup wizard, the configuration page, sessions and the direct connection |
 
 ## 9. Tests
 
@@ -1239,15 +1351,15 @@ triggers, data, SQL editor, read-role permissions and audit. It uses a temporary
 folder, so it does not touch your data.
 
 ```
-php tests/f5_admin.php      → OK: 176   the panel, page by page
-php tests/f11_asistente.php → OK: 41    setup wizard, direct connection, configuration, sessions, languages
-php tests/f14_volcados.php  → OK: 57    dumps, difficult dumps, ZIP paths, all-or-nothing (12 more with servers)
+php tests/f5_admin.php      → OK: 189   the panel, page by page
+php tests/f11_asistente.php → OK: 45    setup wizard, direct connection, configuration, sessions, languages
+php tests/f14_volcados.php  → OK: 65    dumps, difficult dumps, ZIP paths, all-or-nothing (10 more with servers)
 php tests/f15_idiomas.php   → OK: 6     every text translated, none left over, browser language
-php tests/f16_vistas_triggers.php → OK: 10    views and triggers exported (6 more run them in MySQL and PostgreSQL)
-php tests/f17_rutinas_importadas.php → OK: 7    views and triggers imported (8 more with MySQL and PostgreSQL)
+php tests/f16_vistas_triggers.php → OK: 11    views and triggers exported (6 more run them in MySQL and PostgreSQL)
+php tests/f17_rutinas_importadas.php → OK: 9    views and triggers imported (8 more with MySQL and PostgreSQL)
 php tests/f18_access.php    → OK: 10    importing and exporting Access (3 more with PowerShell)
 php tests/f19_escrituras_contra_sqlite.php → OK: 19  random writes and queries against SQLite
-php tests/f20_memoria.php   → OK: 31    larger than memory, uploads in pieces, backups (also with --directa)
+php tests/f20_memoria.php   → OK: 32    larger than memory, uploads in pieces, backups (also with --directa)
 php tests/f22_sqlserver.php → OK: 4     the SQL Server script and its dump imported (more with PowerShell)
 ```
 

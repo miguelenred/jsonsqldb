@@ -55,8 +55,9 @@ final class Volcado
         // A bloques de 16 KB por partición, no fila a fila (2.9): un fwrite()
         // por fila era una séptima parte de un GROUP BY de un millón por el disco
         $s = serialize($fila);
-        $this->pendiente[$p] = ($this->pendiente[$p] ?? '') . pack('N', strlen($s)) . $s;
-        if (strlen($this->pendiente[$p]) >= 16384) {
+        $this->pendiente[$p] ??= '';
+        $this->pendiente[$p] .= pack('N', \strlen($s)) . $s;      // .= añade sin copiar lo que ya había
+        if (\strlen($this->pendiente[$p]) >= 16384) {
             $this->escribir($p);
         }
     }
@@ -90,7 +91,7 @@ final class Volcado
             $pos     = 0;
             $vigilar = Memoria::cada();            // filas hasta mirar la memoria (ver Storage::filas())
             while (true) {
-                if ($pos + 4 > strlen($bloque) || $pos + 4 + ($largo = unpack('N', $bloque, $pos)[1]) > strlen($bloque)) {
+                if ($pos + 4 > \strlen($bloque) || $pos + 4 + ($largo = unpack('N', $bloque, $pos)[1]) > \strlen($bloque)) {
                     $mas = fread($fh, 65536);
                     if ($mas === false || $mas === '') {
                         break;

@@ -94,8 +94,34 @@ function util_https(): bool
 }
 
 /**
- * ¿La IP está en la lista? Admite IP suelta y rango CIDR, IPv4 e IPv6.
- * Lista vacía = no se filtra.
+ * Una entrada de la lista de IPs: una IP suelta o un rango CIDR, IPv4 o IPv6.
+ * Devuelve la dirección en binario y los bits que cuentan (los de toda la
+ * dirección si es una IP suelta), o null si no es válida. La usan la
+ * comprobación de cada petición y el asistente al guardar la lista (2.10:
+ * cada uno validaba a su manera, y la comprobación tomaba «10.0.0.0/» por un
+ * rango de 0 bits, que deja pasar a todas). La API tiene su propia copia,
+ * ipPermitida(), porque se instala sin el panel: tests/f4_api.php comprueba
+ * que las dos aceptan y rechazan lo mismo.
+ *
+ * @return array{0:string,1:int}|null
+ */
+function util_rango_ip(string $entrada): ?array
+{
+    [$red, $bits] = array_pad(explode('/', trim($entrada), 2), 2, null);
+    $bin = @inet_pton(trim($red));
+    if ($bin === false) {
+        return null;
+    }
+    if ($bits === null) {
+        return [$bin, 8 * strlen($bin)];
+    }
+    $bits = trim($bits);
+    return ctype_digit($bits) && (int)$bits <= 8 * strlen($bin) ? [$bin, (int)$bits] : null;
+}
+
+/**
+ * ¿La IP está en la lista? Lista vacía = no se filtra; una entrada que no es
+ * válida no deja pasar a nadie.
  *
  * @param string[] $lista
  */
@@ -109,33 +135,21 @@ function util_ip_permitida(string $ip, array $lista): bool
         return false;
     }
     foreach ($lista as $entrada) {
-        $entrada = trim((string)$entrada);
-        if ($entrada === '') {
+        $rango = util_rango_ip((string)$entrada);
+        if ($rango === null || strlen($rango[0]) !== strlen($bin)) {
             continue;
         }
-        if (strpos($entrada, '/') === false) {
-            if (@inet_pton($entrada) === $bin) {
-                return true;
-            }
-            continue;
-        }
-        [$red, $bits] = explode('/', $entrada, 2);
-        $redBin = @inet_pton(trim($red));
-        $bits   = (int)$bits;
-        if ($redBin === false || strlen($redBin) !== strlen($bin) || $bits < 0) {
-            continue;
-        }
+        [$red, $bits] = $rango;
         $bytes = intdiv($bits, 8);
         $resto = $bits % 8;
-        if ($bytes > 0 && strncmp($bin, $redBin, $bytes) !== 0) {
+        if ($bytes > 0 && strncmp($bin, $red, $bytes) !== 0) {
             continue;
         }
         if ($resto === 0) {
             return true;
         }
         $mascara = chr((0xFF << (8 - $resto)) & 0xFF);
-        if (isset($bin[$bytes], $redBin[$bytes])
-            && (($bin[$bytes] & $mascara) === ($redBin[$bytes] & $mascara))) {
+        if (($bin[$bytes] & $mascara) === ($red[$bytes] & $mascara)) {
             return true;
         }
     }
@@ -345,11 +359,14 @@ function condicionFiltro(array $columnas, string $filtro): array
     if ($filtro === '' || $columnas === []) {
         return ['', []];
     }
+    // Lo escrito se busca tal cual (2.10): un % o un _ eran comodines, y «%»
+    // devolvía la tabla entera
+    $patron = '%' . strtr($filtro, ['\\' => '\\\\', '%' => '\\%', '_' => '\\_']) . '%';
     $partes = [];
     $params = [];
     foreach ($columnas as $c) {
-        $partes[] = cita((string)$c['columna']) . ' LIKE ?';
-        $params[] = '%' . $filtro . '%';
+        $partes[] = cita((string)$c['columna']) . " LIKE ? ESCAPE '\\'";
+        $params[] = $patron;
     }
     return [' WHERE ' . implode(' OR ', $partes), $params];
 }
@@ -473,6 +490,31 @@ function mismoHostQueLaApi(): ?bool
         return true;
     }
     return false;
+}
+
+/**
+ * El estado de la carpeta de datos para una vista (2.10), en dos trozos de
+ * HTML: el aviso, oculto mientras no se sepa que se puede descargar, y el
+ * texto del estado. Con la conexión directa los completa assets/panel.js al
+ * comprobarlo desde el navegador, con estos textos ({url} y {codigo} los pone él).
+ *
+ * @return array{0: string, 1: string} aviso y estado
+ */
+function carpetaDatosHtml(bool $deNuevo = false): array
+{
+    [$bien, $texto, $url] = Instalador::estadoDatos($deNuevo);
+    $atributos = $url === null ? '' : ' data-comprobar-datos="' . h($url) . '"'
+        . ' data-texto-mal="' . h(t('DESCARGABLE: {url} responde. Cualquiera puede bajarse las bases. En nginx, añade las reglas de nginx/jsonsqldb.conf; en Apache, comprueba que se leen los .htaccess (AllowOverride)', ['url' => '{url}'])) . '"'
+        . ' data-texto-bien="' . h(t('protegida ({url} responde {codigo})', ['url' => '{url}', 'codigo' => '{codigo}'])) . '"'
+        . ' data-texto-duda="' . h(t('no se ha podido comprobar ({url} responde {codigo})', ['url' => '{url}', 'codigo' => '{codigo}'])) . '"'
+        . ' data-texto-sin="' . h(t('no se ha podido comprobar ({url} no contesta)', ['url' => '{url}'])) . '"';
+    $clase = $bien === true ? 'text-success' : ($bien === false ? 'text-danger' : 'text-body-secondary');
+    $aviso = $bien === false || $url !== null
+        ? '<div class="alert alert-danger" data-aviso-datos' . ($bien === false ? '' : ' hidden') . '>'
+          . t('<strong>La carpeta de datos se puede descargar desde fuera.</strong> {1}.', [1 => '<span>' . ($bien === false ? h($texto) : '') . '</span>'])
+          . '</div>'
+        : '';
+    return [$aviso, '<strong class="' . $clase . '"' . $atributos . '>' . h($texto) . '</strong>'];
 }
 
 /**

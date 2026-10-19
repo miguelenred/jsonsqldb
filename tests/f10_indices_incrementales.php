@@ -32,6 +32,7 @@ require_once __DIR__ . '/../engine/bootstrap.php';
 use JsonSQLDB\Catalog;
 use JsonSQLDB\Database;
 use JsonSQLDB\Indexes;
+use JsonSQLDB\IndexesEscritura;
 use JsonSQLDB\Storage;
 use JsonSQLDB\StorageCambios;
 use JsonSQLDB\StorageEscritura;
@@ -121,7 +122,7 @@ function indicesEnDisco(string $raiz): array
                 if ($pos < $desde || $pos >= $hasta) {
                     $out[$nombre . '.json']['error'] = "posición $pos fuera de su trozo (" . basename((string)$f) . ')';
                 }
-                Indexes::anotar($out[$nombre . '.json']['keys'], (string)$k, (int)$pos);
+                IndexesEscritura::anotar($out[$nombre . '.json']['keys'], (string)$k, (int)$pos);
             }
         }
     }
@@ -147,7 +148,7 @@ function indicesRehechos(string $raiz): array
             'columns' => $def['columns'],
             'chunk'   => (int)JSONSQLDB_FILAS_POR_PARTE,
             'rows'    => count($filas),
-            'keys'    => Indexes::construir($filas, $def['columns']),
+            'keys'    => StorageEscritura::construir($filas, $def['columns']),
         ];
     }
     ksort($out);
@@ -535,6 +536,37 @@ chk('un trozo con la cabecera bien y el final cortado no se da por bueno: la cla
     $bien = $bd->consultar("SELECT COUNT(*) AS n FROM t WHERE cod = 'c2'")[0]['n'] ?? null;
     unset($bd);
     return $r === true && (int)$bien === 1 ?: (is_string($r) ? $r : "c2 aparece $bien veces");
+});
+
+echo "\n== Filas añadidas una a una (2.10) ==\n";
+chk('130 INSERT de una fila: el filtro y el rango de cada trozo se amplían sin rehacerlos, CHECK INDEXES no ve nada, cada correo y cada número se encuentran y el rango guardado es el de sus claves', function () use ($raiz) {
+    Database::crear('amp', $raiz);
+    $bd = new Database('amp', $raiz);
+    $bd->consultar('CREATE TABLE u (id INTEGER PRIMARY KEY, email TEXT UNIQUE, n INTEGER)');
+    $bd->consultar('CREATE INDEX ix_n ON u (n)');
+    for ($i = 1; $i <= 130; $i++) {
+        $bd->consultar('INSERT INTO u VALUES (?, ?, ?)', [$i, "persona$i@ejemplo.es", ($i * 37) % 101 - 50]);
+    }
+    $problemas = $bd->consultar('CHECK INDEXES');
+    $faltan = [];
+    for ($i = 1; $i <= 130; $i++) {
+        if ((int)$bd->consultar('SELECT COUNT(*) AS c FROM u WHERE email = ?', ["persona$i@ejemplo.es"])[0]['c'] !== 1) {
+            $faltan[] = "email $i";
+        }
+        if ((int)$bd->consultar('SELECT COUNT(*) AS c FROM u WHERE n = ?', [($i * 37) % 101 - 50])[0]['c'] < 1) {
+            $faltan[] = "n $i";
+        }
+    }
+    $nada = (int)$bd->consultar("SELECT COUNT(*) AS c FROM u WHERE email = 'nadie@ejemplo.es'")[0]['c'];
+    $estado = json_decode((string)file_get_contents("$raiz/amp/u.rev.json"), true);
+    $rangos = [];
+    foreach ($estado['indexes']['ix_n'] as $p => $_) {
+        $trozo = json_decode((string)file_get_contents("$raiz/amp/u.idx.ix_n" . ($p === 0 ? '' : '.part' . ($p + 1)) . '.json'), true);
+        $rangos[] = IndexesEscritura::rango($trozo['keys']) === $estado['rangos']['ix_n'][$p];
+    }
+    unset($bd);
+    return $problemas === [] && $faltan === [] && $nada === 0 && $rangos !== [] && !in_array(false, $rangos, true)
+        ?: json_encode([$problemas, $faltan, $nada, $rangos], JSON_UNESCAPED_UNICODE);
 });
 
 echo "\n== Limpieza ==\n";

@@ -19,7 +19,8 @@ declare(strict_types=1);
  * cubre es lo que cambió en 2.7.4 y 2.7.5: saltarse partes por su texto,
  * escribir sin cargar la tabla, el mapa de las cascadas y los atajos por fila.
  * Y desde la 2.9, upserts y cascadas de varios niveles con triggers, UNIQUE
- * y SET DEFAULT (ver upserts() y cascadas()).
+ * y SET DEFAULT (ver upserts() y cascadas()); desde la 2.10, UPDATE OR
+ * IGNORE y OR REPLACE.
  *
  * Los empates de un ORDER BY no tienen orden fijo ni en SQLite ni aquí: las
  * consultas con LIMIT sobre una columna con empates comparan solo esa columna.
@@ -178,12 +179,21 @@ function upserts(int $semilla): ?string
         $alli = @$l->exec($q) ? 'bien' : 'error';
         return $aqui === $alli ? null : "aquí $aqui, SQLite $alli: $q";
     };
-    foreach (['CREATE TABLE u (id INTEGER PRIMARY KEY, k TEXT UNIQUE, v INTEGER)',
+    foreach (['CREATE TABLE u (id INTEGER PRIMARY KEY, k TEXT UNIQUE, v INTEGER NOT NULL DEFAULT 5)',
               'CREATE TABLE h (id INTEGER PRIMARY KEY, uid INTEGER, FOREIGN KEY (uid) REFERENCES u (id) ON DELETE CASCADE)',
               'CREATE INDEX ix_uid ON h (uid)'] as $q) {
         $ambos($q);
     }
-    $fila = static fn(): string => '(' . mt_rand(1, 300) . ", 'k" . mt_rand(1, 300) . "', " . mt_rand(0, 9) . ')';
+    // La clave, a veces un texto que es un número, con ceros delante o sin
+    // ellos, o un número (2.10: '7' y '07' son distintos, y 7 es '7')
+    $clave = static function (): string {
+        $n = mt_rand(1, 300);
+        return ["'k$n'", "'k$n'", "'$n'", "'0$n'", (string)$n][mt_rand(0, 4)];
+    };
+    // Con algún id NULL (2.10: una fila ignorada no gasta su número) y algún
+    // v NULL (OR REPLACE pone su valor por defecto; OR IGNORE la salta)
+    $fila = static fn(): string => '(' . (mt_rand(0, 9) === 0 ? 'NULL' : mt_rand(1, 300)) . ', ' . $clave() . ', '
+        . (mt_rand(0, 9) === 0 ? 'NULL' : mt_rand(0, 9)) . ')';
     for ($i = 1; $i <= 200; $i++) {
         $ambos('INSERT OR IGNORE INTO u VALUES ' . $fila());
     }
@@ -200,12 +210,21 @@ function upserts(int $semilla): ?string
             "INSERT INTO u VALUES $varias ON CONFLICT (id) DO UPDATE SET k = excluded.k || 'x', v = excluded.v",
             "INSERT INTO u VALUES $varias ON CONFLICT DO NOTHING",
             "INSERT INTO u VALUES $varias ON CONFLICT (k) DO UPDATE SET v = excluded.v WHERE excluded.v > v",
-        ][mt_rand(0, 6)];
+            // UPDATE OR IGNORE y OR REPLACE (2.10)
+            'UPDATE OR IGNORE u SET k = ' . $clave() . ' WHERE id = ' . mt_rand(1, 300),
+            'UPDATE OR REPLACE u SET k = ' . $clave() . ' WHERE id = ' . mt_rand(1, 300),
+            // De varias filas, sin tocar la clave única: con qué choca cada
+            // una depende del orden en que se cambian, que no está definido
+            // (SQLite va por rowid; aquí, por posición en la tabla)
+            'UPDATE OR IGNORE u SET v = CASE WHEN id % 3 = 0 THEN NULL ELSE v + 1 END WHERE id > ' . mt_rand(1, 300),
+            'UPDATE OR REPLACE u SET v = NULL WHERE id % 7 = ' . mt_rand(0, 6),
+            'UPDATE OR REPLACE u SET id = ' . mt_rand(1, 300) . ' WHERE id = ' . mt_rand(1, 300),
+        ][mt_rand(0, 11)];
         $r = $ambos($q);
         if ($r !== null) {
             return "vuelta $vuelta: $r";
         }
-        foreach (['SELECT * FROM u ORDER BY id', 'SELECT * FROM h ORDER BY id', "SELECT id FROM u WHERE k = 'k" . mt_rand(1, 300) . "'"] as $c) {
+        foreach (['SELECT * FROM u ORDER BY id', 'SELECT * FROM h ORDER BY id', 'SELECT id FROM u WHERE k = ' . $clave()] as $c) {
             $esperado = [];
             $res = $l->query($c);
             while ($f = $res->fetchArray(SQLITE3_ASSOC)) { $esperado[] = $f; }

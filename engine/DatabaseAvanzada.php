@@ -20,6 +20,110 @@ final class DatabaseAvanzada extends Database
     {
     }
 
+    /** Database::transaccion() */
+    public static function correrTransaccion(Database $db, callable $fn)
+    {
+        self::exigirAcceso();
+        if ($db->enTransaccion) {
+            throw JsonSqlDbError::lock('Ya hay una transacción abierta en esta base');
+        }
+        // Deshacerla, o deshacer al bloquear la que un proceso dejó a medias,
+        // reescribe rev.json fuera de cada sentencia: con serialize_precision a
+        // -1 (ver Config::precisionExacta()). $fn, con la de la aplicación
+        $suya = Config::precisionExacta();
+        try {
+            $db->st->bloquear(true);
+            $db->cat->olvidar();
+            try {
+                StorageMantenimiento::loteIniciar($db->st);
+                $db->enTransaccion = true;
+                try {
+                    $suya === null || ini_set('serialize_precision', $suya);
+                    try {
+                        $r = $fn($db);
+                    } finally {
+                        $suya = Config::precisionExacta();      // la puede haber cambiado
+                    }
+                } catch (\Throwable $e) {
+                    StorageMantenimiento::loteDeshacer($db->st);
+                    throw $e;
+                }
+                StorageMantenimiento::loteConfirmar($db->st);
+                return $r;
+            } finally {
+                $db->enTransaccion = false;
+                $db->st->desbloquear();
+                $db->cat->olvidar();
+                $db->repararPendientes();
+            }
+        } finally {
+            $suya === null || ini_set('serialize_precision', $suya);
+        }
+    }
+
+    /**
+     * Repara en disco los ficheros que la consulta leyó estropeados a mano y
+     * reparados en memoria (2.9, ver Storage::decodificarParte()), y rehace
+     * los índices de claves viejas que encontró (2.10). Al acabar,
+     * sin ningún bloqueo: reparar es escribir, con el exclusivo de la base.
+     * La consulta ya ha ido bien, así que un fallo aquí no la estropea: se
+     * apunta en el registro y la tabla sigue como estaba hasta repararla.
+     * Aparte de Database (2.10) para que una consulta que no deja nada no
+     * tenga que compilarlo.
+     *
+     * @param array<string, array<string, string>> $reparar de Storage::porReparar()
+     */
+    public static function reparar(Database $db, array $reparar): void
+    {
+        foreach ($reparar as $tabla => $ficheros) {
+            $t0 = microtime(true);
+            $sql = "REPAIR TABLES FROM $tabla -- automática: " . implode(', ', array_map(
+                static fn(string $f, string $motivo): string => "$f ($motivo)", array_keys($ficheros), $ficheros));
+            try {
+                $db->st->bloquear(true);
+                $db->cat->olvidar();
+                $hecho = $db->cat->existe($tabla)
+                    ? StorageMantenimiento::revisarFicheros($db->st, $tabla, $db->cat->indicesDe($tabla), false, \in_array('editado', $ficheros, true))
+                    : [];
+                if (Config::seRegistra('REPAIR', false)) {
+                    Logger::registrar($db->nombre(), 'REPAIR', $sql, \count($hecho), (microtime(true) - $t0) * 1000);
+                }
+            } catch (\Throwable $e) {
+                if (Config::seRegistra('REPAIR', true)) {
+                    Logger::registrar($db->nombre(), 'REPAIR', $sql, null, (microtime(true) - $t0) * 1000, $e->getMessage());
+                }
+            } finally {
+                $db->st->desbloquear();
+                $db->cat->olvidar();
+            }
+        }
+        $db->st->porReparar();            // lo que la propia reparación volvió a leer roto ya está arreglado
+        // Y los índices sobre columnas de texto con las claves de antes de la
+        // 2.10, que la consulta no ha podido usar (ver Storage::clavesAlDia()):
+        // se rehacen una vez, como haría VACUUM, y las siguientes ya los usan
+        foreach ($db->st->porRehacer() as $tabla) {
+            $t0  = microtime(true);
+            $sql = "VACUUM -- automático: los índices de $tabla, con las claves de la 2.10";
+            try {
+                $db->st->bloquear(true);
+                $db->cat->olvidar();
+                $hecho = $db->cat->existe($tabla)
+                    && StorageMantenimiento::rehacerIndicesViejos($db->st, $tabla, Indexes::definiciones($db->cat->meta($tabla)));
+                if ($hecho && Config::seRegistra('VACUUM', false)) {
+                    Logger::registrar($db->nombre(), 'VACUUM', $sql, 0, (microtime(true) - $t0) * 1000);
+                }
+            } catch (\Throwable $e) {
+                if (Config::seRegistra('VACUUM', true)) {
+                    Logger::registrar($db->nombre(), 'VACUUM', $sql, null, (microtime(true) - $t0) * 1000, $e->getMessage());
+                }
+            } finally {
+                $db->st->desbloquear();
+                $db->cat->olvidar();
+            }
+        }
+        $db->st->porRehacer();
+    }
+
     /**
      * Database::lote(): un lote que solo lee va sentencia a sentencia; el
      * resto, en una transacción.
@@ -38,9 +142,9 @@ final class DatabaseAvanzada extends Database
         $sentencias = array_values($sentencias);
         $control    = [];
         foreach ($sentencias as $i => $s) {
-            $c = self::control(is_array($s) ? (string)($s[0] ?? '') : (string)$s);
+            $c = self::control(\is_array($s) ? (string)($s[0] ?? '') : (string)$s);
             if ($c !== null) {
-                if ($c === 'BEGIN' ? $i !== 0 : $i !== count($sentencias) - 1) {
+                if ($c === 'BEGIN' ? $i !== 0 : $i !== \count($sentencias) - 1) {
                     throw JsonSqlDbError::syntax($c === 'BEGIN' ? 'BEGIN solo vale como primera sentencia del lote'
                         : "$c solo vale como última sentencia del lote");
                 }
@@ -72,7 +176,7 @@ final class DatabaseAvanzada extends Database
         try {
             $db->transaccion(static function () use ($correr, $control, $marca): void {
                 $correr();
-                if (in_array('ROLLBACK', $control, true)) {
+                if (\in_array('ROLLBACK', $control, true)) {
                     throw $marca;                         // transaccion() deshace todo al recibirla
                 }
             });
@@ -119,7 +223,7 @@ final class DatabaseAvanzada extends Database
      */
     private static function sentenciaDelLote($s): array
     {
-        return is_array($s) ? [(string)($s[0] ?? ''), (array)($s[1] ?? [])] : [(string)$s, []];
+        return \is_array($s) ? [(string)($s[0] ?? ''), (array)($s[1] ?? [])] : [(string)$s, []];
     }
 
     /** BEGIN, COMMIT o ROLLBACK si la sentencia es de control de una transacción */
@@ -144,7 +248,7 @@ final class DatabaseAvanzada extends Database
         try {
             $ast = Parser::analizar($sql, $params);
             $op  = self::operacion($ast);
-            if (!in_array($ast['k'], ['show_databases', 'create_database', 'drop_database'], true)) {
+            if (!\in_array($ast['k'], ['show_databases', 'create_database', 'drop_database'], true)) {
                 throw JsonSqlDbError::config('Esta sentencia necesita indicar una base de datos');
             }
             if ($autorizar !== null) {
@@ -156,13 +260,15 @@ final class DatabaseAvanzada extends Database
                 foreach (Storage::bases($raiz) as $b) {
                     $filas[] = ['base' => $b];
                 }
-                Logger::registrar('', $op, $sql, count($filas), (microtime(true) - $t0) * 1000, null, $params);
+                if (Config::seRegistra($op, false)) {
+                    Logger::registrar('', $op, $sql, \count($filas), (microtime(true) - $t0) * 1000, null, $params);
+                }
                 return $filas;
             }
 
             $base = $ast['base'];
             if ($ast['k'] === 'create_database') {
-                $existe = in_array($base, Storage::bases($raiz), true);
+                $existe = \in_array($base, Storage::bases($raiz), true);
                 if ($existe && $ast['si_no_existe']) {
                     $mensaje = "La base '$base' ya existía";
                 } else {
@@ -170,7 +276,7 @@ final class DatabaseAvanzada extends Database
                     $mensaje = "Base de datos '$base' creada";
                 }
             } else {
-                $existe = in_array($base, Storage::bases($raiz), true);
+                $existe = \in_array($base, Storage::bases($raiz), true);
                 if (!$existe && $ast['si_existe']) {
                     $mensaje = "La base '$base' no existía";
                 } else {
@@ -179,12 +285,16 @@ final class DatabaseAvanzada extends Database
                 }
             }
 
-            Logger::registrar($base, $op, $sql, 0, (microtime(true) - $t0) * 1000, null, $params);
+            if (Config::seRegistra($op, false)) {
+                Logger::registrar($base, $op, $sql, 0, (microtime(true) - $t0) * 1000, null, $params);
+            }
             return ['success' => true, 'filas' => 0, 'mensaje' => $mensaje];
 
         } catch (JsonSqlDbError $e) {
-            Logger::registrar('', $op, $sql, null, (microtime(true) - $t0) * 1000,
-                $e->sqlState . ': ' . $e->getMessage(), $params);
+            if (Config::seRegistra($op, true)) {
+                Logger::registrar('', $op, $sql, null, (microtime(true) - $t0) * 1000,
+                    $e->sqlState . ': ' . $e->getMessage(), $params);
+            }
             throw $e;
         }
     }
@@ -215,7 +325,7 @@ final class DatabaseAvanzada extends Database
     protected static function porTramos(Database $db, array $ast): array
     {
         return $db->transaccion(static function () use ($db, $ast): array {
-            foreach ((is_string($ast['tabla'] ?? null) ? $db->cat->cierreDeTablas($ast['tabla']) : null) ?? [] as $t) {
+            foreach ((\is_string($ast['tabla'] ?? null) ? CatalogBloqueos::cierreDeTablas($db->cat, $ast['tabla']) : null) ?? [] as $t) {
                 if ($db->cat->existe($t) && !StorageEscritura::exacta($db->st, $t)) {
                     StorageMantenimiento::compactar($db->st, $t, $db->cat->indicesDe($t));
                 }

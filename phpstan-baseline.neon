@@ -1,0 +1,895 @@
+parameters:
+	ignoreErrors:
+		-
+			message: '#^Parameter \#1 \$array \(list\<array\{0\: string, 1\?\: array\}\|string\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: api/cliente_ejemplo.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<string\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 2
+			path: engine/Catalog.php
+
+		-
+			message: '#^Parameter \#4 \$filas of static method JsonSQLDB\\CatalogDdl\:\:exigirClavesTras\(\) expects array\<int, array\>, IteratorAggregate given\.$#'
+			identifier: argument.type
+			count: 1
+			path: engine/CatalogDdl.php
+
+		-
+			message: '#^Parameter \#5 \$filas of static method JsonSQLDB\\CatalogDdl\:\:restriccionesDeColumna\(\) expects list\<array\>, IteratorAggregate given\.$#'
+			identifier: argument.type
+			count: 2
+			path: engine/CatalogDdl.php
+
+		-
+			message: '#^Call to function is_string\(\) with \*NEVER\* will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 2
+			path: engine/Config.php
+
+		-
+			message: '#^Call to function is_string\(\) with bool will always evaluate to false\.$#'
+			identifier: function.impossibleType
+			count: 1
+			path: engine/Config.php
+
+		-
+			message: '#^Empty array passed to foreach\.$#'
+			identifier: foreach.emptyArray
+			count: 1
+			path: engine/Config.php
+
+		-
+			message: '#^Result of && is always false\.$#'
+			identifier: booleanAnd.alwaysFalse
+			count: 1
+			path: engine/Config.php
+
+		-
+			message: '#^Result of && is always true\.$#'
+			identifier: booleanAnd.alwaysTrue
+			count: 2
+			path: engine/Config.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between \*NEVER\* and '''' will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: engine/Config.php
+
+		-
+			message: '#^Variable \$enviadas on left side of \?\? always exists and is always null\.$#'
+			identifier: nullCoalesce.variable
+			count: 1
+			path: engine/Database.php
+
+		-
+			message: '#^Offset 0 on array\{0\: string, 1\?\: array\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/DatabaseAvanzada.php
+
+		-
+			message: '#^Parameter \#1 \$array \(non\-empty\-list\<array\{0\: string, 1\?\: array\}\|string\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/DatabaseAvanzada.php
+
+		-
+			message: '#^Binary operation "\+" between string and 0 results in an error\.$#'
+			identifier: binaryOp.invalid
+			count: 1
+			path: engine/Evaluator.php
+
+		-
+			message: '#^Binary operation "\+" between string and 0 results in an error\.$#'
+			identifier: binaryOp.invalid
+			count: 1
+			path: engine/EvaluatorConjunto.php
+
+		-
+			message: '#^Method JsonSQLDB\\FunctionsAmpliadas\:\:rutaJson\(\) never assigns null to &\$existe so it can be removed from the by\-ref type\.$#'
+			identifier: parameterByRef.unusedType
+			count: 1
+			path: engine/FunctionsAmpliadas.php
+
+		-
+			message: '#^Result of && is always false\.$#'
+			identifier: booleanAnd.alwaysFalse
+			count: 1
+			path: engine/FunctionsAmpliadas.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between mixed and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 2
+			path: engine/FunctionsAmpliadas.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between mixed and null will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: engine/FunctionsAmpliadas.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between float\|int and null will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: engine/IndexesEscritura.php
+
+		-
+			message: '#^Binary operation "\+" between string and 0 results in an error\.$#'
+			identifier: binaryOp.invalid
+			count: 1
+			path: engine/IndexesBusqueda.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{\}\|array\{string\} and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: engine/IndexesBusqueda.php
+
+		-
+			message: '#^Callable callable\(string\)\: void invoked with 2 parameters, 1 required\.$#'
+			identifier: arguments.count
+			count: 1
+			path: engine/Memoria.php
+
+		-
+			message: '#^Static property JsonSQLDB\\Memoria\:\:\$alAgotarse \(\(callable\(string\)\: void\)\|null\) does not accept \(callable\(string, bool\)\: void\)\|null\.$#'
+			identifier: assign.propertyType
+			count: 1
+			path: engine/Memoria.php
+
+		-
+			message: '#^Static property JsonSQLDB\\Memoria\:\:\$alAgotarse \(\(callable\(string\)\: void\)\|null\) is never assigned callable\(string\)\: void so it can be removed from the property type\.$#'
+			identifier: property.unusedType
+			count: 1
+			path: engine/Memoria.php
+
+		-
+			message: '#^Static property JsonSQLDB\\Memoria\:\:\$reserva is never read, only written\.$#'
+			identifier: property.onlyWritten
+			count: 1
+			path: engine/Memoria.php
+
+		-
+			message: '#^Offset ''binaria'' on array\{dir\: string\} in empty\(\) does not exist\.$#'
+			identifier: empty.offset
+			count: 1
+			path: engine/OrdenExterno.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<array\{dir\: string\}\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/OrdenExterno.php
+
+		-
+			message: '#^Offset ''texto'' on array\{t\: ''num'', v\: float\|int, l\: int, p\: int, texto\: string\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/Parser.php
+
+		-
+			message: '#^If condition is always false\.$#'
+			identifier: if.alwaysFalse
+			count: 1
+			path: engine/ParserConsulta.php
+
+		-
+			message: '#^Negated boolean expression is always true\.$#'
+			identifier: booleanNot.alwaysTrue
+			count: 1
+			path: engine/ParserFunciones.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between null and null will always evaluate to true\.$#'
+			identifier: identical.alwaysTrue
+			count: 1
+			path: engine/ParserFunciones.php
+
+		-
+			message: '#^Right side of && is always true\.$#'
+			identifier: booleanAnd.rightAlwaysTrue
+			count: 2
+			path: engine/ParserSentencias.php
+
+		-
+			message: '#^Empty array passed to foreach\.$#'
+			identifier: foreach.emptyArray
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^If condition is always false\.$#'
+			identifier: if.alwaysFalse
+			count: 2
+			path: engine/Select.php
+
+		-
+			message: '#^Method JsonSQLDB\\Select\:\:correrEntera\(\) should return array\{cols\: array\<string\>, filas\: iterable\<array\>, colaciones\: array\} but returns array\{cols\: array\<string\>, filas\: Generator\<int, array, mixed, mixed\>\}\.$#'
+			identifier: return.type
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Method JsonSQLDB\\Select\:\:correrEntera\(\) should return array\{cols\: array\<string\>, filas\: iterable\<array\>, colaciones\: array\} but returns array\{cols\: array\<string\>, filas\: array\}\.$#'
+			identifier: return.type
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Offset ''afin'' on array\{name\: string, columns\: list\<string\>, auto\: bool\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Offset ''afinidades'' on array\{cols\: array\<string\>, filas\: array\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 4
+			path: engine/Select.php
+
+		-
+			message: '#^Offset ''colaciones'' on array\{cols\: array\<string\>, filas\: array\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 4
+			path: engine/Select.php
+
+		-
+			message: '#^Offset ''plegar'' on array\{name\: string, columns\: list\<string\>, auto\: bool\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectOrden.php
+
+		-
+			message: '#^Offset 3 on array\{string, string, string\} in empty\(\) does not exist\.$#'
+			identifier: empty.offset
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Offset 4 on array\{string, string, string\} in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Offset 5 on array\{string, string, string\} in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Result of && is always false\.$#'
+			identifier: booleanAnd.alwaysFalse
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Result of \|\| is always true\.$#'
+			identifier: booleanOr.alwaysTrue
+			count: 1
+			path: engine/SelectOrden.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{\} and array\{\} will always evaluate to false\.$#'
+			identifier: notIdentical.alwaysFalse
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between null and ''T'' will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between null and null will always evaluate to true\.$#'
+			identifier: identical.alwaysTrue
+			count: 1
+			path: engine/SelectOrden.php
+
+		-
+			message: '#^Ternary operator condition is always false\.$#'
+			identifier: ternary.alwaysFalse
+			count: 1
+			path: engine/Select.php
+
+		-
+			message: '#^Variable \$nv might not be defined\.$#'
+			identifier: variable.undefined
+			count: 2
+			path: engine/SelectAvanzada.php
+
+		-
+			message: '#^Empty array passed to foreach\.$#'
+			identifier: foreach.emptyArray
+			count: 3
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Method JsonSQLDB\\SelectCompuesta\:\:correrUnion\(\) should return array\{cols\: array\<string\>, filas\: array, colaciones\: array\<int, string\>\} but returns array\{cols\: array\<string\>, filas\: list, colaciones\: list\<null\>, afinidades\: list\<string\>\}\.$#'
+			identifier: return.type
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Method JsonSQLDB\\SelectCompuesta\:\:unionHacia\(\) should return array\{cols\: array\<string\>, filas\: array, colaciones\: array\<int, string\>\} but returns array\{cols\: array\<int\|string\>, filas\: array\{\}, colaciones\: list\<null\>, afinidades\: list\<string\>\}\.$#'
+			identifier: return.type
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Offset ''afinidades'' on array\{cols\: array\<string\>, filas\: array\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Offset ''afinidades'' on array\{cols\: array\<string\>, filas\: iterable\<array\>, colaciones\: array\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Offset ''colaciones'' on array\{cols\: array\<string\>, filas\: array\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 4
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Offset ''colaciones'' on array\{cols\: array\<string\>, filas\: iterable\<array\>, colaciones\: array\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<string\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between \*NEVER\* and ''BINARY'' will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between \*NEVER\* and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: engine/SelectCompuesta.php
+
+		-
+			message: '#^Binary operation "\+" between string and 0 results in an error\.$#'
+			identifier: binaryOp.invalid
+			count: 1
+			path: engine/SelectJoin.php
+
+		-
+			message: '#^Method JsonSQLDB\\SelectJoin\:\:semiJoin\(\) never returns array\{array, array\} so it can be removed from the return type\.$#'
+			identifier: return.unusedType
+			count: 1
+			path: engine/SelectJoin.php
+
+		-
+			message: '#^Negated boolean expression is always true\.$#'
+			identifier: booleanNot.alwaysTrue
+			count: 1
+			path: engine/SelectJoin.php
+
+		-
+			message: '#^Static method JsonSQLDB\\SelectJoin\:\:soloDeFuera\(\) is unused\.$#'
+			identifier: method.unused
+			count: 1
+			path: engine/SelectJoin.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between null and null will always evaluate to true\.$#'
+			identifier: identical.alwaysTrue
+			count: 2
+			path: engine/SelectJoin.php
+
+		-
+			message: '#^Unreachable statement \- code above always terminates\.$#'
+			identifier: deadCode.unreachable
+			count: 2
+			path: engine/SelectJoin.php
+
+		-
+			message: '#^Offset ''afin'' on array\{name\: string, columns\: list\<string\>, auto\: bool\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectJoinIndice.php
+
+		-
+			message: '#^Offset ''plegar'' on array\{name\: string, columns\: list\<string\>, auto\: bool\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectJoinIndice.php
+
+		-
+			message: '#^Offset ''plegar'' on array\{name\: string, columns\: non\-empty\-list\<string\>, auto\: bool\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectJoinIndice.php
+
+		-
+			message: '#^Offset int\<0, max\> on array\{\} in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/SelectJoinIndice.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{\} and array\{\} will always evaluate to false\.$#'
+			identifier: notIdentical.alwaysFalse
+			count: 1
+			path: engine/SelectJoinIndice.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between string and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: engine/SelectJoinIndice.php
+
+		-
+			message: '#^Cannot unset offset mixed on array\{\}\.$#'
+			identifier: unset.offset
+			count: 1
+			path: engine/SelectOrden.php
+
+		-
+			message: '#^Offset int does not exist on array\{\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 1
+			path: engine/SelectOrden.php
+
+		-
+			message: '#^Left side of \|\| is always false\.$#'
+			identifier: booleanOr.leftAlwaysFalse
+			count: 1
+			path: engine/Storage.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<string\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/Storage.php
+
+		-
+			message: '#^Parameter \#1 \$s of static method JsonSQLDB\\Storage\:\:selloDe\(\) expects array\<string, int\>, array\<int\|string, int\> given\.$#'
+			identifier: argument.type
+			count: 2
+			path: engine/Storage.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 2
+			path: engine/Storage.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between null and null will always evaluate to true\.$#'
+			identifier: identical.alwaysTrue
+			count: 2
+			path: engine/Storage.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 2
+			path: engine/StorageCambios.php
+
+		-
+			message: '#^Offset ''propios'' on array\{guardados\: array\<string, true\>, nuevos\: array\<string, true\>\} in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/StorageEscritura.php
+
+		-
+			message: '#^Offset ''rota'' on array\{guardados\: array\<string, true\>, nuevos\: array\<string, true\>\}\|null in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/StorageEscritura.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<array\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/StorageEscritura.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<array\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/StorageEntera.php
+
+		-
+			message: '#^Result of && is always false\.$#'
+			identifier: booleanAnd.alwaysFalse
+			count: 3
+			path: engine/StorageEscritura.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between array and null will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: engine/StorageEscritura.php
+
+		-
+			message: '#^Call to function is_string\(\) with string will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 2
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Empty array passed to foreach\.$#'
+			identifier: foreach.emptyArray
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Offset ''olvidar'' on array\{guardados\: array\<string, true\>, nuevos\: array\<string, true\>\}\|null on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 2
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Offset ''plegar'' on array\{name\: string, columns\: list\<string\>\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Offset ''rota'' on array\{guardados\: array\<string, true\>, nuevos\: array\<string, true\>\} in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Offset ''sincronizar'' on array\{guardados\: array\<string, true\>, nuevos\: array\<string, true\>\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Offset mixed on \*NEVER\* in isset\(\) always exists and is not nullable\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Offset mixed on array\{\} in isset\(\) does not exist\.$#'
+			identifier: isset.offset
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<array\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{\} and array\{\} will always evaluate to false\.$#'
+			identifier: notIdentical.alwaysFalse
+			count: 1
+			path: engine/StorageMantenimiento.php
+
+		-
+			message: '#^Binary operation "\+" between string and 0 results in an error\.$#'
+			identifier: binaryOp.invalid
+			count: 3
+			path: engine/Valor.php
+
+		-
+			message: '#^Cannot unset offset \*NEVER\* on array\{\}\.$#'
+			identifier: unset.offset
+			count: 1
+			path: engine/WriterInsercion.php
+
+		-
+			message: '#^Empty array passed to foreach\.$#'
+			identifier: foreach.emptyArray
+			count: 1
+			path: engine/WriterInsercion.php
+
+		-
+			message: '#^Negated boolean expression is always true\.$#'
+			identifier: booleanNot.alwaysTrue
+			count: 2
+			path: engine/Writer.php
+
+		-
+			message: '#^Offset ''afin'' on array\{cols\: list\<string\>, mapa\: array\<string, array\<int, true\>\>\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/Writer.php
+
+		-
+			message: '#^Offset ''plegar'' does not exist on array\{cols\: list\<string\>, mapa\: array\<string, array\<int, true\>\>\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 1
+			path: engine/Writer.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{\} and array\{\} will always evaluate to false\.$#'
+			identifier: notIdentical.alwaysFalse
+			count: 1
+			path: engine/Writer.php
+
+		-
+			message: '#^Offset int does not exist on array\{\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 2
+			path: engine/WriterCambios.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between array and null will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: engine/WriterCambios.php
+
+		-
+			message: '#^Offset ''apartada'' does not exist on array\{tabla\: string, fichero\: string, problema\: string, arreglo\: ''fila apartada\:…''\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 1
+			path: engine/WriterDdl.php
+
+		-
+			message: '#^Offset ''plegar'' on array\{name\: string, columns\: list\<string\>, auto\: bool\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/WriterForaneas.php
+
+		-
+			message: '#^Variable \$p on left side of \?\?\= always exists and is not nullable\.$#'
+			identifier: nullCoalesce.variable
+			count: 1
+			path: engine/WriterForaneas.php
+
+		-
+			message: '#^Offset ''fallos'' on array\{fallos\: int, ultimo\: int, usuarios\?\: array\<string, int\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 2
+			path: jsonsqldbadmin/lib/Auth.php
+
+		-
+			message: '#^Offset ''ultimo'' on array\{fallos\: int, ultimo\: int, usuarios\?\: array\<string, int\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 3
+			path: jsonsqldbadmin/lib/Auth.php
+
+		-
+			message: '#^Offset ''siguiente'' on array\{tabla\: string, columnas\: array, claves\: array, filas\?\: array, n\?\: int\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: jsonsqldbadmin/lib/Exportar.php
+
+		-
+			message: '#^Parameter \#6 \$est of static method Exportar\:\:createTable\(\) expects array\{filas\: int, enteras\: array\<string, int\>, largo\: array\<string, int\>, bytes\: array\<string, int\>, fuera32\: array\<string, true\>\}, array\{filas\: int, enteras\: array\<string, int\>, largo\: array\<string, int\>, fuera32\: array\<string, true\>\} given\.$#'
+			identifier: argument.type
+			count: 1
+			path: jsonsqldbadmin/lib/Exportar.php
+
+		-
+			message: '#^Ternary operator condition is always false\.$#'
+			identifier: ternary.alwaysFalse
+			count: 1
+			path: jsonsqldbadmin/lib/GeneradorSql.php
+
+		-
+			message: '#^Comparison operation "\<" between \*NEVER\* and int\<0, max\> results in an error\.$#'
+			identifier: smaller.invalid
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^If condition is always true\.$#'
+			identifier: if.alwaysTrue
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Left side of && is always true\.$#'
+			identifier: booleanAnd.leftAlwaysTrue
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Method Importar\:\:cargarFilas\(\) never assigns null to &\$cargadas so it can be removed from the by\-ref type\.$#'
+			identifier: parameterByRef.unusedType
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Parameter &\$consumed by\-ref type of method TopeDeLinea\:\:filter\(\) expects int, \(float\|int\) given\.$#'
+			identifier: parameterByRef.type
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Result of && is always false\.$#'
+			identifier: booleanAnd.alwaysFalse
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{\} and array\{\} will always evaluate to false\.$#'
+			identifier: notIdentical.alwaysFalse
+			count: 1
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between array\{\} and array\{\} will always evaluate to true\.$#'
+			identifier: identical.alwaysTrue
+			count: 2
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Unreachable statement \- code above always terminates\.$#'
+			identifier: deadCode.unreachable
+			count: 2
+			path: jsonsqldbadmin/lib/Importar.php
+
+		-
+			message: '#^Parameter \#2 \$callback of function array_filter expects \(callable\(string\)\: bool\)\|null, ''strlen'' given\.$#'
+			identifier: argument.type
+			count: 2
+			path: jsonsqldbadmin/lib/Instalador.php
+
+		-
+			message: '#^Offset ''q'' on array\{k\: ''id'', v\: string\} in empty\(\) does not exist\.$#'
+			identifier: empty.offset
+			count: 1
+			path: jsonsqldbadmin/lib/Traductor.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between non\-falsy\-string and '''' will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: jsonsqldbadmin/lib/Traductor.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 4
+			path: jsonsqldbadmin/vistas/_pestanas.php
+
+		-
+			message: '#^Variable \$tabla might not be defined\.$#'
+			identifier: variable.undefined
+			count: 4
+			path: jsonsqldbadmin/vistas/_pestanas.php
+
+		-
+			message: '#^Variable \$vistaActual might not be defined\.$#'
+			identifier: variable.undefined
+			count: 1
+			path: jsonsqldbadmin/vistas/_pestanas.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 3
+			path: jsonsqldbadmin/vistas/crear_tabla.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 11
+			path: jsonsqldbadmin/vistas/datos.php
+
+		-
+			message: '#^Variable \$tabla might not be defined\.$#'
+			identifier: variable.undefined
+			count: 12
+			path: jsonsqldbadmin/vistas/datos.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 20
+			path: jsonsqldbadmin/vistas/estructura.php
+
+		-
+			message: '#^Variable \$tabla might not be defined\.$#'
+			identifier: variable.undefined
+			count: 24
+			path: jsonsqldbadmin/vistas/estructura.php
+
+		-
+			message: '#^Variable \$mensajes might not be defined\.$#'
+			identifier: variable.undefined
+			count: 1
+			path: jsonsqldbadmin/vistas/instalar.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 14
+			path: jsonsqldbadmin/vistas/integridad.php
+
+		-
+			message: '#^Variable \$mensajes might not be defined\.$#'
+			identifier: variable.undefined
+			count: 1
+			path: jsonsqldbadmin/vistas/layout.php
+
+		-
+			message: '#^Variable \$mensajes might not be defined\.$#'
+			identifier: variable.undefined
+			count: 1
+			path: jsonsqldbadmin/vistas/login.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 6
+			path: jsonsqldbadmin/vistas/sql.php
+
+		-
+			message: '#^Undefined variable\: \$base$#'
+			identifier: variable.undefined
+			count: 1
+			path: jsonsqldbadmin/vistas/tablas.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 12
+			path: jsonsqldbadmin/vistas/tablas.php
+
+		-
+			message: '#^Variable \$base might not be defined\.$#'
+			identifier: variable.undefined
+			count: 8
+			path: jsonsqldbadmin/vistas/vistas.php
+
+		-
+			message: '#^Comparison operation "\>" between 0 and 1 is always false\.$#'
+			identifier: greater.alwaysFalse
+			count: 1
+			path: engine/SelectAgrupada.php
+
+		-
+			message: '#^Offset ''claves'' does not exist on array\{fila\: array, n\: 0, suma\: array\{\}, fuera\: array\{\}, mejor\: array\{\}, lista\: array\{\}\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 2
+			path: engine/SelectAgrupada.php
+
+		-
+			message: '#^Offset ''cuad'' on array\{fila\: array, n\: 0, suma\: array\{\}, fuera\: array\{\}, mejor\: array\{\}, lista\: array\{\}\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: engine/SelectAgrupada.php
+
+		-
+			message: '#^Offset string on array\{\} on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 6
+			path: engine/SelectAgrupada.php
+
+		-
+			message: '#^Parameter \#1 \$array \(array\{\}\) to function array_values is empty, call has no effect\.$#'
+			identifier: arrayValues.empty
+			count: 1
+			path: engine/SelectAgrupada.php
+
+		-
+			message: '#^Result of && is always false\.$#'
+			identifier: booleanAnd.alwaysFalse
+			count: 1
+			path: engine/SelectAgrupada.php

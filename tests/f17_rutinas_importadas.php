@@ -293,6 +293,47 @@ chk('una función con TG_OP para varios eventos: cada trigger lleva solo lo de s
         ?: json_encode([$cuentas, $registro]) . " · $resumen";
 });
 
+chk('cada trigger de una función con TG_OP lleva solo las ramas de su evento, sin mirar en cada fila las de los demás (2.10)', function () {
+    $volcado = "--\n-- PostgreSQL database dump\n--\n"
+        . "CREATE FUNCTION public.saldos_fn() RETURNS trigger\n    LANGUAGE plpgsql\n    AS \$\$\nBEGIN\n"
+        . "  IF TG_OP = 'DELETE' THEN\n    INSERT INTO registro VALUES ('baja ' || OLD.id);\n    RETURN OLD;\n"
+        . "  ELSIF TG_OP IN ('INSERT', 'UPDATE') AND NEW.saldo BETWEEN 1 AND 5 THEN\n    NEW.cambiado := 'poco';\n"
+        . "  ELSIF (TG_OP = 'UPDATE' OR TG_OP = 'INSERT') AND NEW.saldo > 100 THEN\n    NEW.cambiado := 'mucho';\n  END IF;\n"
+        . "  IF TG_OP NOT IN ('DELETE') THEN\n"
+        . "    INSERT INTO registro VALUES (CASE TG_OP WHEN 'INSERT' THEN 'alta ' ELSE 'cambio ' END || NEW.id);\n  END IF;\n"
+        . "  RETURN NEW;\nEND\n\$\$;\n"
+        . "CREATE TABLE public.saldos (\n    id integer NOT NULL,\n    saldo integer,\n    cambiado text\n);\n"
+        . "CREATE TABLE public.registro (\n    msg text\n);\n"
+        . "CREATE TRIGGER saldos_t BEFORE INSERT OR UPDATE OR DELETE ON public.saldos FOR EACH ROW EXECUTE FUNCTION public.saldos_fn();\n";
+    $f = JSONSQLDB_DATA_PATH . '/tg_ramas.pg.sql';
+    file_put_contents($f, $volcado);
+    Database::crear('tg_ramas');
+    $resumen = Importar::sql($f, 'tg_ramas');
+    @unlink($f);
+    $bd = new Database('tg_ramas');
+    $sql = array_column($bd->consultar('SHOW TRIGGERS'), 'sql', 'nombre');
+    // Ni una comparación entre dos eventos, ni un CASE sobre el evento
+    foreach ($sql as $nombre => $s) {
+        if (preg_match("/'(INSERT|UPDATE|DELETE)' *(=|<>|IN|NOT)|CASE '/", $s)) {
+            return "$nombre: $s";
+        }
+    }
+    if (!str_contains($sql['saldos_t_update'] ?? '', 'BETWEEN 1 AND 5') || str_contains($sql['saldos_t_delete'] ?? '', 'cambiado')) {
+        return json_encode($sql, JSON_UNESCAPED_UNICODE) . " · $resumen";
+    }
+    foreach (['INSERT INTO saldos (id, saldo) VALUES (1, 3), (2, 50), (3, 200)', 'UPDATE saldos SET saldo = 4 WHERE id = 2',
+              'DELETE FROM saldos WHERE id = 3'] as $s) {
+        $bd->consultar($s);
+    }
+    // Lo que deja PostgreSQL con las mismas escrituras
+    $saldos = $bd->consultar('SELECT * FROM saldos');
+    $registro = array_column($bd->consultar('SELECT msg FROM registro'), 'msg');
+    sort($registro, SORT_STRING);
+    return $saldos === [['id' => 1, 'saldo' => 3, 'cambiado' => 'poco'], ['id' => 2, 'saldo' => 4, 'cambiado' => 'poco']]
+        && $registro === ['alta 1', 'alta 2', 'alta 3', 'baja 3', 'cambio 2']
+        ?: json_encode([$saldos, $registro], JSON_UNESCAPED_UNICODE);
+});
+
 // ---------------------------------------------------------------------
 echo "\n== SQL Server (sin servidor: contra lo que da la misma base de MySQL) ==\n";
 chk('el script de Management Studio se importa con sus vistas y sus triggers, sin saltarse ninguno', function () {
@@ -445,6 +486,66 @@ chk('un texto \'(\', \')\', \',\' o \';\' en una vista o un trigger es un texto,
     $n = $bd->consultar('SELECT n FROM t WHERE id = 3');
     return $mal === [] && $n === [['n' => 7]] && $my->avisos() === [] && $pg->avisos() === []
         ?: json_encode([$mal, $n, $my->avisos(), $pg->avisos()], JSON_UNESCAPED_UNICODE);
+});
+chk('cada lado de un operador llega hasta donde se une antes que él: & (con su signo delante), \ , Mod y Like de Access, y MOD, DIV y <=> de MySQL, también con operadores que son palabras, con un paréntesis detrás (a MOD (b)) y con las comparaciones a la izquierda de <=> pero no el = de un SET; IF(…) y CASE … END a la izquierda; << y >> de MySQL y ->> y -> de PostgreSQL, enteros (2.10: solo el operando de al lado, y [n] + 1 & [a] salía [n] + (1 & [a]))', function () {
+    Database::crear('precedencia');
+    $bd = new Database('precedencia');
+    $bd->consultar('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT, n INTEGER, j TEXT, d DATE)');
+    $bd->consultar("INSERT INTO t VALUES (1, 'p', 'q', 7, '{\"k\":1}', '2026-01-01'), (2, NULL, 'r', 3, '{\"k\":2}', '2026-01-01')");
+    $ac = new Traductor('access');
+    $ac->observar('CREATE TABLE [t] ([id] LONG, [a] TEXT(50), [b] TEXT(50), [n] LONG)');
+    $my = new Traductor('mysql');
+    $pg = new Traductor('postgresql');
+    // Lo que dan Access, MySQL y PostgreSQL
+    $vistas = [
+        [$ac, 'CREATE VIEW a1 AS SELECT [n] + 1 & [a] AS x FROM [t]', ['8p', '4']],
+        [$ac, 'CREATE VIEW a2 AS SELECT [a] & [n] * 2 AS x FROM [t]', ['p14', '6']],
+        [$ac, 'CREATE VIEW a3 AS SELECT -[n] & "x" AS x FROM [t]', ['-7x', '-3x']],
+        [$ac, 'CREATE VIEW a4 AS SELECT [n] * 7 \ 2 AS x FROM [t]', [24, 10]],
+        [$ac, 'CREATE VIEW a5 AS SELECT [n] * 2 Mod 4 AS x FROM [t]', [2, 2]],
+        [$ac, 'CREATE VIEW a6 AS SELECT [id] AS x FROM [t] WHERE [n] + 1 Like "8*"', [1]],
+        [$ac, 'CREATE VIEW a7 AS SELECT [n] Mod 4 & [a] AS x FROM [t]', ['3p', '3']],
+        [$ac, 'CREATE VIEW a8 AS SELECT [a] & [n] Mod 4 AS x FROM [t]', ['p3', '3']],
+        [$ac, 'CREATE VIEW a9 AS SELECT [n] Mod 4 * 3 AS x FROM [t]', [7, 3]],
+        [$ac, 'CREATE VIEW a10 AS SELECT 2 * 3 Mod 4 * 5 AS x FROM [t]', [6, 6]],
+        [$ac, 'CREATE VIEW a11 AS SELECT [n] Mod (3) AS x FROM [t]', [1, 0]],
+        [$my, 'CREATE VIEW m1 AS select `t`.`n` * 2 MOD 4 AS `x` from `t`', [2, 2]],
+        [$my, 'CREATE VIEW m2 AS select `t`.`n` MOD 4 * 2 AS `x` from `t`', [6, 6]],
+        [$my, 'CREATE VIEW m3 AS select `t`.`n` * 3 DIV 2 AS `x` from `t`', [10, 4]],
+        [$my, 'CREATE VIEW m4 AS select `t`.`n` + 1 <=> 8 AS `x` from `t`', [1, 0]],
+        [$my, 'CREATE VIEW m5 AS select `t`.`n` <=> 3 MOD 4 AS `x` from `t`', [0, 1]],
+        [$my, 'CREATE VIEW m6 AS select `t`.`n` <=> 6 DIV 2 AS `x` from `t`', [0, 1]],
+        [$my, 'CREATE VIEW m7 AS select `t`.`n` <=> 1 | 2 AS `x` from `t`', [0, 1]],
+        [$my, 'CREATE VIEW m8 AS select `t`.`n` = 7 <=> 1 AS `x` from `t`', [1, 0]],
+        [$my, 'CREATE VIEW m9 AS select `t`.`n` MOD (3) AS `x` from `t`', [1, 0]],
+        [$my, 'CREATE VIEW m10 AS select `t`.`n` << 1 AS `x` from `t`', [14, 6]],
+        [$my, 'CREATE VIEW m11 AS select `t`.`n` >> 1 AS `x` from `t`', [3, 1]],
+        [$pg, "CREATE VIEW p1 AS SELECT (t.j ->> 'k') AS x FROM t", [1, 2]],
+        [$pg, "CREATE VIEW p2 AS SELECT (t.j -> 'k') AS x FROM t", ['1', '2']],
+        [$my, 'CREATE VIEW m12 AS select `t`.`n` DIV mod(`t`.`n`, 4) AS `x` from `t`', [2, 1]],
+        [$my, 'CREATE VIEW m13 AS select date_add(`t`.`d`, interval mod(`t`.`n`, 4) day) AS `x` from `t`', ['2026-01-04 00:00:00', '2026-01-04 00:00:00']],
+        [$pg, 'CREATE VIEW p3 AS SELECT mod(t.n, 2) AS x FROM t', [1, 1]],
+        [$my, 'CREATE VIEW m14 AS select if(`t`.`n` > 5, 7, 2) DIV 2 AS `x` from `t`', [3, 1]],
+        [$my, 'CREATE VIEW m15 AS select case when `t`.`n` > 5 then 7 else 2 end DIV 2 AS `x` from `t`', [3, 1]],
+        [$my, 'CREATE VIEW m16 AS select case when `t`.`n` > 5 then 7 else 2 end MOD (4) AS `x` from `t`', [3, 2]],
+    ];
+    $mal = [];
+    foreach ($vistas as [$tr, $sql, $esperado]) {
+        foreach ($tr->traducir($sql) as $x) { $bd->consultar($x); }
+        preg_match('/VIEW (\w+)/', $sql, $v);
+        $r = array_column($bd->consultar("SELECT * FROM {$v[1]}"), 'x');
+        if ($r !== $esperado) { $mal[] = "{$v[1]}: " . json_encode($r); }
+    }
+    // <=> en el SET de un UPDATE de un trigger: el = es la asignación
+    $bd->consultar('CREATE TABLE t2 (id INTEGER PRIMARY KEY, e INTEGER, f INTEGER)');
+    $bd->consultar('INSERT INTO t2 VALUES (1, NULL, NULL), (2, NULL, NULL)');
+    $my->traducir("CREATE TRIGGER t3 AFTER UPDATE ON t FOR EACH ROW UPDATE t2 SET f = CASE WHEN NEW.n > 1 THEN 1 END, e = NEW.a <=> 'p' WHERE id = NEW.id");
+    foreach ($my->triggers() as [, $x]) { $bd->consultar($x); }
+    $bd->consultar('UPDATE t SET n = n');
+    $e = array_map('array_values', $bd->consultar('SELECT e, f FROM t2 ORDER BY id'));
+    if ($e !== [[1, 1], [0, 1]]) { $mal[] = 't3: ' . json_encode($e); }
+    Database::borrar('precedencia');
+    return $mal === [] && $ac->avisos() === [] && $my->avisos() === [] && $pg->avisos() === [] ?: json_encode([$mal, $ac->avisos(), $my->avisos(), $pg->avisos()], JSON_UNESCAPED_UNICODE);
 });
 chk('PostgreSQL: date - date son los días entre las dos y date ± n otra fecha, como allí; lo que da un intervalo (timestamp - timestamp) no se traduce y esa vista se salta con el motivo (2.9: se restaban como textos y daban otro número)', function () use ($pgConexion) {
     // Como lo escribe pg_dump; los resultados, los de PostgreSQL 16

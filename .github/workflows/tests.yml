@@ -41,6 +41,11 @@ jobs:
         # publicadas en el repositorio y ahora impiden arrancar a propósito.
         run: php configurar.php --local
 
+      - name: A locale with a decimal comma
+        # f21 comprueba que un decimal pasado a texto no depende del locale
+        # de la aplicación; sin uno de coma, esa prueba se salta
+        run: sudo locale-gen es_ES.UTF-8
+
       - name: Lint every PHP file
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
 
@@ -116,6 +121,9 @@ jobs:
       - name: Concurrency
         run: php tests/f7_concurrencia.php
 
+      - name: Files held open by another process while they are replaced
+        run: php tests/f25_ficheros_abiertos.php
+
       - name: Indexes
         run: php tests/f8_indices.php
 
@@ -130,3 +138,56 @@ jobs:
 
       - name: Every earlier version upgraded by this engine
         run: php tests/f24_versiones_anteriores.php
+
+  windows:
+    # En Windows, renombrar encima de un fichero que otro proceso tiene
+    # abierto falla hasta que lo cierra: es lo que mira f25, y en Linux no se ve
+    runs-on: windows-latest
+    name: Windows, PHP 8.3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Files held open by another process while they are replaced
+        run: php tests/f25_ficheros_abiertos.php
+
+      # El motor entero también en Windows (2.10): rutas, renombrados y
+      # procesos hijos se comportan distinto. Con bash, cada orden que falla
+      # para el paso (con PowerShell solo contaba la última)
+      - name: Engine on Windows
+        shell: bash
+        run: |
+          php configurar.php --local
+          php tests/f1_nucleo.php
+          php tests/f2_parser.php
+          php tests/f2_select.php
+          php tests/f3_escrituras.php
+          php tests/f8_indices.php
+          php tests/f9_journal.php
+          php tests/f10_indices_incrementales.php
+          php tests/f23_reparar.php
+
+  phpstan:
+    # Análisis estático (2.10): PHPStan se descarga aquí, no es una
+    # dependencia del proyecto. phpstan-baseline.neon guarda lo que ya había
+    runs-on: ubuntu-latest
+    name: Static analysis (PHPStan)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: phpstan:2.1.40
+          coverage: none
+
+      - name: PHPStan
+        run: phpstan analyse -c phpstan.neon.dist --no-progress --memory-limit=2G

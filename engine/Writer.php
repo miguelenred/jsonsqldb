@@ -13,10 +13,12 @@ namespace JsonSQLDB;
  * Comprueba NOT NULL, tipos, clave primaria, UNIQUE y claves foráneas (con
  * ON DELETE / ON UPDATE), y ejecuta los triggers BEFORE y AFTER con NEW y OLD.
  *
- * Aquí, lo de todas las escrituras y el INSERT. UPDATE y DELETE están en
- * WriterCambios; las claves foráneas, en WriterForaneas; los choques con una
- * clave (REPLACE, ON CONFLICT…), en WriterConflictos; el cuerpo de los
- * triggers, en WriterTriggers, y la DDL, en WriterDdl.
+ * Aquí, lo de todas las escrituras. El INSERT está en WriterInsercion;
+ * UPDATE y DELETE, en WriterCambios (TRUNCATE y los que cruzan otras tablas,
+ * en WriterCambiosEspeciales); las claves foráneas, en WriterForaneas;
+ * los choques con una clave (REPLACE, ON CONFLICT…), en WriterConflictos; el
+ * cuerpo de los triggers, en WriterTriggers; RETURNING, en WriterAvanzado, y
+ * la DDL, en WriterDdl.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -30,25 +32,39 @@ class Writer
     protected array $anexo      = [];   // tabla => filas añadidas al final sin leer la tabla
     protected array $cambios    = [];   // tabla => posición => fila cambiada sin leer la tabla
     protected array $borradas   = [];   // tabla => posición => true, borrada sin leer la tabla
+    /**
+     * @var array<string, array<string, array<string, array<int, true>>>> de las
+     * filas cambiadas sin leer la tabla, sus posiciones por la clave de una
+     * clave foránea, y las cambiadas desde que se miró (2.10, ver
+     * WriterForaneas::hijasSinCargar())
+     */
+    protected array $idxCambios = [];
+    protected array $cambiosSinMirar = [];
     protected array $metas      = [];   // tabla => estructura en memoria
     protected array $sucioDatos = [];
     protected array $astCache   = [];   // sql de trigger => árbol ya analizado
     protected array $idxPadre   = [];   // tabla|cols => definición de índice, o claves recogidas
-    /** @var array<string,array> resultados de subconsultas que no miran fuera, por su texto */
-    private array $subsFijas = [];
+    /** @var array<string,array> resultados de subconsultas que no miran fuera, por su texto: de una sentencia (ver WriterTriggers::ejecutarCuerpo()) */
+    protected array $subsFijas = [];
     /** @var array<string,array> sus conjuntos de valores, para IN */
-    private array $conjuntosFijos = [];
+    protected array $conjuntosFijos = [];
     /** @var array<string,int> siguiente autoincremento por tabla, movido en esta sentencia */
     protected array $autoinc    = [];
     /** @var array<string,int> siguiente id de una clave primaria entera sin AUTOINCREMENT, en esta sentencia */
     protected array $rowid      = [];
+    /**
+     * La sentencia ya ha escrito parte por tramos (ver tramo()): si falla, la
+     * transacción no puede confirmarse con ella a medias, solo deshacerse
+     * (2.10: si el error se capturaba, se confirmaba con lo escrito hasta él)
+     */
+    private bool $aMedias = false;
     /** @var array<string, array<int, array>> los CHECK de cada tabla, ya analizados */
     private array $checks     = [];
     private int   $anidamiento = 0;
     /** Memoria en uso a partir de la cual la sentencia escribe lo que lleva (ver tramo()) */
     private int   $tope;
-    /** Memoria que puede juntar un INSERT … SELECT antes de meter lo que lleva (ver insertar()) */
-    private int   $lote;
+    /** Memoria que puede juntar un INSERT … SELECT antes de meter lo que lleva (ver WriterInsercion) */
+    protected int $lote;
     private int   $vueltas = 0;
 
     public function __construct(Catalog $cat)
@@ -71,7 +87,7 @@ class Writer
         // Las vistas son de solo lectura: no se escribe ni se altera sobre ellas
         // CREATE TABLE se comprueba aparte, con su propio mensaje
         $destino = $ast['k'] === 'create_table' ? null : ($ast['tabla'] ?? null);
-        if (is_string($destino) && $this->cat->esVista($destino)) {
+        if (\is_string($destino) && $this->cat->esVista($destino)) {
             $operacion = [
                 'insert'      => 'INSERT', 'update' => 'UPDATE', 'delete' => 'DELETE',
                 'alter_table' => 'ALTER TABLE', 'drop_table' => 'DROP TABLE',
@@ -85,7 +101,7 @@ class Writer
         // El DML abre su escritura en volcar(), con el ámbito del bloqueo que
         // tiene. Todo lo demás lleva siempre el exclusivo de la base y puede
         // tocar varias tablas: una sola escritura de base para todo ello.
-        if (in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
+        if (\in_array($ast['k'], ['insert', 'update', 'delete'], true)) {
             return $this->despachar($ast);
         }
         $st = $this->cat->storage();
@@ -95,75 +111,42 @@ class Writer
         return $r;
     }
 
-    /** Funciones que pasan bytes a texto: dentro de ellas, RANDOMBLOB y ZEROBLOB se pueden guardar */
-    private const A_TEXTO = ['HEX', 'QUOTE', 'LENGTH', 'OCTET_LENGTH', 'BIT_LENGTH', 'TO_BASE64', 'MD5', 'SHA1', 'SHA2', 'CRC32', 'TYPEOF'];
-
-    /**
-     * Un valor que se va a guardar no puede salir de RANDOMBLOB ni de ZEROBLOB
-     * tal cual (2.9): son bytes, y aquí las tablas guardan texto. Se mira en la
-     * sentencia, no en los bytes, para que el error no dependa de que unos
-     * bytes al azar formen o no un texto válido. Solo si el analizador vio
-     * alguna de las dos (la marca 'bytes'): el resto no paga nada.
-     */
-    private static function exigirTexto(array $ast): void
-    {
-        $valores = [];
-        foreach ($ast['filas'] ?? [] as $fila) {
-            array_push($valores, ...$fila);
-        }
-        foreach ($ast['select']['cols'] ?? [] as $c) {
-            $valores[] = $c['expr'] ?? null;
-        }
-        foreach (array_merge($ast['set'] ?? [], $ast['conflicto']['set'] ?? []) as $s) {
-            $valores[] = $s['expr'];
-        }
-        foreach ($valores as $e) {
-            if (is_array($e) && self::daBytes($e)) {
-                throw JsonSqlDbError::type('RANDOMBLOB() y ZEROBLOB() dan bytes, que no se pueden guardar en una tabla: '
-                    . 'guárdalos como texto, con HEX(…)');
-            }
-        }
-    }
-
-    private static function daBytes(array $n): bool
-    {
-        if (($n['k'] ?? null) === 'fn') {
-            $f = strtoupper((string)$n['nombre']);
-            if ($f === 'RANDOMBLOB' || $f === 'ZEROBLOB') {
-                return true;
-            }
-            if (in_array($f, self::A_TEXTO, true)) {
-                return false;
-            }
-        }
-        foreach ($n as $hijo) {
-            if (is_array($hijo) && self::daBytes($hijo)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private function despachar(array $ast): array
     {
         if ($ast['k'] !== 'insert' && $ast['k'] !== 'update' && $ast['k'] !== 'delete') {
             return WriterDdl::despachar($this, $ast);
         }
         if (isset($ast['bytes'])) {
-            self::exigirTexto($ast);
+            WriterAvanzado::exigirTexto($ast);
         }
-        $this->devueltas = [];
-        $n = $ast['k'] === 'insert' ? $this->insertar($ast) : ($ast['k'] === 'update' ? WriterCambios::actualizar($this, $ast) : WriterCambios::borrar($this, $ast));
-        foreach (array_keys($this->porCompactar) as $t) {
-            $this->compactar((string)$t);
+        $this->devueltas   = [];
+        $this->indicesVivos = [];
+        $this->aMedias     = false;
+        try {
+            $this->foraneasPendientes = [];
+            $n = $ast['k'] === 'insert' ? WriterInsercion::insertar($this, $ast) : ($ast['k'] === 'update' ? WriterCambios::actualizar($this, $ast) : WriterCambios::borrar($this, $ast));
+            if ($this->foraneasPendientes !== []) {
+                WriterForaneas::alAcabar($this);
+            }
+            foreach (array_keys($this->porCompactar) as $t) {
+                $this->compactar((string)$t);
+            }
+            $this->porCompactar = [];
+            // RETURNING, antes de escribir: si da error, la sentencia no deja
+            // nada, como en SQLite (2.10: la fila quedaba escrita)
+            $devueltas = ($ast['returning'] ?? null) !== null ? WriterAvanzado::devolver($this, $ast['tabla'], $ast['returning'], $ast['alias'] ?? null) : null;
+            $this->devueltas = [];
+            $this->volcar();
+        } catch (\Throwable $e) {
+            if ($this->aMedias) {
+                StorageEscritura::loteAMedias($this->cat->storage());
+            }
+            throw $e;
         }
-        $this->porCompactar = [];
-        $this->volcar();
         $r = ['filas' => $n, 'mensaje' => "$n fila(s) " . ['insert' => 'insertada(s)', 'update' => 'actualizada(s)', 'delete' => 'eliminada(s)'][$ast['k']]];
-        if (($ast['returning'] ?? null) !== null) {
-            $r['devueltas'] = $this->devolver($ast['tabla'], $ast['returning'], $ast['alias'] ?? null);
+        if ($devueltas !== null) {
+            $r['devueltas'] = $devueltas;
         }
-        $this->devueltas = [];
         return $r;
     }
 
@@ -182,7 +165,7 @@ class Writer
                 $this->marcarSuelta($tabla, $pos);
             }
             foreach ($this->anexo[$tabla] ?? [] as $fila) {
-                $this->marcarDesde($tabla, count($this->datos[$tabla]));
+                $this->marcarDesde($tabla, \count($this->datos[$tabla]));
                 $this->datos[$tabla][] = $fila;
             }
             foreach (array_keys($this->borradas[$tabla] ?? []) as $pos) {
@@ -190,13 +173,13 @@ class Writer
                 $this->marcarDesde($tabla, $pos);
             }
             if (isset($this->borradas[$tabla])) {
-                $this->porCompactar[$tabla] = true;      // al terminar la sentencia (ver filaActual())
+                $this->porCompactar[$tabla] = true;      // al terminar la sentencia (ver WriterCambios::filaActual())
             }
             // Y lo que un upsert sabía de sus claves sin cargarla: las filas que
             // metía (posiciones negativas) tienen ya su sitio en la tabla. Se
             // vuelve a armar de ella (2.9: se seguía usando, y la fila de una
             // posición negativa ya no estaba)
-            unset($this->cambios[$tabla], $this->anexo[$tabla], $this->borradas[$tabla], $this->unicas[$tabla]);
+            unset($this->cambios[$tabla], $this->anexo[$tabla], $this->borradas[$tabla], $this->unicas[$tabla], $this->idxCambios[$tabla], $this->cambiosSinMirar[$tabla]);
             $this->olvidarIndices($tabla);
         }
         return $this->datos[$tabla];
@@ -216,24 +199,34 @@ class Writer
      * (2.9), solo de las claves que toca la sentencia: una posición negativa
      * es una fila que mete ella (-1 - su sitio en anexo), y false, una clave
      * que ha dejado libre. Las demás se buscan en el índice del disco (ver
-     * chocaCon()). Por tabla (2.9): las sentencias de un trigger usan este
-     * mismo Writer, y un upsert suyo, o un INSERT, vaciaba lo del de fuera.
+     * WriterConflictos::chocaCon()). Por tabla (2.9): las sentencias de un
+     * trigger usan este mismo Writer, y un upsert suyo, o un INSERT, vaciaba
+     * lo del de fuera.
      *
      * @var array<string,array<string,array<string,int|false>>>
      */
     protected array $unicas = [];
-    /** @var array<string, array<string, ?array>> el índice de cada clave única para chocaEnDisco(), una vez por sentencia */
+    /** @var array<string, array<string, ?array>> el índice de cada clave única para WriterConflictos::chocaEnDisco(), una vez por sentencia */
     protected array $defUnica = [];
-    /** @var array<string, array<string, int>> para chocaEnDisco(), el $volcados en que su índice estaba vacío, o -1 */
+    /** @var array<string, array<string, int>> para WriterConflictos::chocaEnDisco(), el $volcados en que su índice estaba vacío, o -1 */
     protected array $vacioUnica = [];
     /**
      * Las claves únicas que una cascada ha puesto en filas de una tabla sin
      * cargarla, por tabla y clave única: clave → posición (2.9). El índice del
-     * disco no las tiene (ver otraConClave()).
+     * disco no las tiene (ver WriterForaneas::otraConClave()).
      *
      * @var array<string,array<string,array<string,int>>>
      */
     protected array $clavesCascada = [];
+    /**
+     * Las claves únicas que lleva la sentencia que escribe cada tabla (ver
+     * indicesUnicos()), por referencia: una cascada sobre la misma tabla (una
+     * clave foránea hacia sí misma) las tiene al día (2.10: no las veía, y un
+     * UPDATE podía repetir un UNIQUE). Ver WriterForaneas::avisarSentencia().
+     *
+     * @var array<string, array>
+     */
+    protected array $indicesVivos = [];
     /** Veces que se ha escrito lo que llevaba la sentencia (ver volcar()): lo visto antes en el disco puede haber cambiado */
     protected int $volcados = 0;
     /** @var array<string, array<string, mixed>> lo que se deduce de la definición de cada tabla, una vez por sentencia (ver unicos()) */
@@ -256,7 +249,7 @@ class Writer
     protected array $conMeta = [];
 
     /** Cambió a partir de $pos, desplazando lo que venga detrás. */
-    private function marcarDesde(string $tabla, int $pos): void
+    protected function marcarDesde(string $tabla, int $pos): void
     {
         $this->desde[$tabla] = min($this->desde[$tabla] ?? PHP_INT_MAX, max(0, $pos));
         $this->sabe[$tabla]  = $this->sabe[$tabla] ?? true;
@@ -270,27 +263,6 @@ class Writer
     }
 
     /**
-     * Añade una fila al final. Nada de lo anterior se mueve, así que solo
-     * cambia la última parte. Si la tabla no está en memoria y se puede, la
-     * fila se apunta aparte y la tabla no se lee.
-     */
-    private function anadirFila(string $tabla, array $fila, bool $sinLeer): void
-    {
-        if ($sinLeer && !isset($this->datos[$tabla])) {
-            $this->anexo[$tabla][] = $fila;
-        } else {
-            $this->filas($tabla);
-            $this->marcarDesde($tabla, count($this->datos[$tabla]));
-            $this->datos[$tabla][] = $fila;
-        }
-        $this->sucioDatos[$tabla] = true;
-        $this->olvidarPadre($tabla);
-        if (isset($this->datos[$tabla])) {
-            $this->apuntarHija($tabla, (int)array_key_last($this->datos[$tabla]), $fila);
-        }
-    }
-
-    /**
      * Escribe una fila en su sitio sin copiar la tabla entera.
      *
      * El patrón de antes era: sacar el array con filas(), tocar una posición y
@@ -301,6 +273,9 @@ class Writer
      */
     protected function ponerFilaEn(string $tabla, int $pos, array $fila): void
     {
+        if ($this->rowid !== [] || $this->foraneasPendientes !== []) {
+            $this->filaCambia($tabla, $this->datos[$tabla][$pos] ?? [], $fila);
+        }
         $this->datos[$tabla][$pos] = $fila;
         $this->sucioDatos[$tabla]  = true;
         $this->marcarSuelta($tabla, $pos);        // no mueve a las demás
@@ -314,10 +289,14 @@ class Writer
      * Compactar con array_values() en cada borrado movía todas las filas
      * siguientes, así que la posición dejaba de valer y había que buscarla otra
      * vez. Dejando el hueco, las posiciones siguen siendo buenas; se compacta
-     * una sola vez al terminar, y guardarTabla() lo haría igualmente al escribir.
+     * una sola vez al terminar, y StorageEntera::guardarTabla() lo haría
+     * igualmente al escribir.
      */
     protected function quitarFilaEn(string $tabla, int $pos): void
     {
+        if ($this->rowid !== [] || $this->foraneasPendientes !== []) {
+            $this->filaCambia($tabla, $this->datos[$tabla][$pos] ?? [], null);
+        }
         unset($this->datos[$tabla][$pos]);
         $this->sucioDatos[$tabla] = true;
         $this->marcarDesde($tabla, $pos);         // al compactar se mueve lo de detrás
@@ -338,27 +317,27 @@ class Writer
     {
         $this->olvidarPadre($tabla);
         foreach (array_keys($this->idxHijo) as $id) {
-            if (strncmp($id, $tabla . '|', strlen($tabla) + 1) === 0) {
+            if (strncmp($id, $tabla . '|', \strlen($tabla) + 1) === 0) {
                 unset($this->idxHijo[$id]);
             }
         }
     }
 
-    private function olvidarPadre(string $tabla): void
+    protected function olvidarPadre(string $tabla): void
     {
         foreach (array_keys($this->idxPadre) as $clave) {
-            if (strncmp($clave, $tabla . '|', strlen($tabla) + 1) === 0) {
+            if (strncmp($clave, $tabla . '|', \strlen($tabla) + 1) === 0) {
                 unset($this->idxPadre[$clave]);
             }
         }
     }
 
     /** Una fila escrita en $pos: entra en los mapas de hijas de su tabla con su clave de ahora. */
-    private function apuntarHija(string $tabla, int $pos, array $fila): void
+    protected function apuntarHija(string $tabla, int $pos, array $fila): void
     {
         foreach ($this->idxHijo as $id => $i) {
-            if (strncmp($id, $tabla . '|', strlen($tabla) + 1) === 0) {
-                $k = self::claveDe($fila, $i['cols'], $i['plegar']);
+            if (strncmp($id, $tabla . '|', \strlen($tabla) + 1) === 0) {
+                $k = self::claveDe($fila, $i['cols'], $i['plegar'], $i['afin'] ?? []);
                 if ($k !== null) {
                     $this->idxHijo[$id]['mapa'][$k][$pos] = true;
                 }
@@ -384,11 +363,21 @@ class Writer
      * exclusivo de TODAS las tablas tocadas, basta con el de una de ellas,
      * que es lo que permite que escrituras en tablas distintas vayan a la vez;
      * si no, se entró con el exclusivo de la base y la escritura es de base.
+     *
+     * Sin $compactar (un tramo, ver tramo()), solo las tablas sin cargar: una
+     * cargada sigue entera en memoria igual, y escrita sin sus huecos sus
+     * posiciones dejarían de ser las del disco, que la sentencia, un trigger
+     * o una cascada aún pueden leer (2.10: una cascada sobre una hija sin
+     * índice dejaba huérfanas y borraba otras filas, desde la 2.9). Se escribe
+     * al acabar la sentencia, con lo demás.
      */
     private function volcar(bool $compactar = true): void
     {
         $st     = $this->cat->storage();
         $tablas = array_keys($this->sucioDatos);
+        if (!$compactar) {
+            $tablas = array_values(array_filter($tablas, fn($t): bool => !isset($this->datos[$t])));
+        }
         if ($tablas === []) {
             return;
         }
@@ -421,7 +410,7 @@ class Writer
                 StorageEscritura::anadirFilas($st, $tabla, $this->anexo[$tabla], $defs);
                 continue;
             }
-            StorageEscritura::guardarTabla($st,
+            StorageEntera::guardarTabla($st,
                 $tabla,
                 isset($this->sucioDatos[$tabla]) ? $this->datos[$tabla] : null,
                 isset($this->conMeta[$tabla]) ? CatalogDdl::compactar($this->metas[$tabla]) : null,
@@ -433,14 +422,15 @@ class Writer
         }
         StorageEscritura::txConfirmar($st);
 
+        // Lo de las tablas sin cargar va todo; de las cargadas, lo escrito
         $this->anexo      = [];
         $this->cambios    = [];
+        $this->idxCambios = $this->cambiosSinMirar = [];
         $this->borradas   = [];
-        $this->sucioDatos = [];
-        $this->desde      = [];
-        $this->sueltas    = [];
-        $this->sabe       = [];
-        $this->conMeta    = [];
+        $this->clavesCascada = [];               // sus posiciones, ya en los índices (2.10: un duplicado falso tras un tramo)
+        foreach ($tablas as $t) {
+            unset($this->sucioDatos[$t], $this->desde[$t], $this->sueltas[$t], $this->sabe[$t], $this->conMeta[$t]);
+        }
         $this->cat->olvidar();
     }
 
@@ -448,10 +438,12 @@ class Writer
      * Una sentencia que cambia más filas de las que caben en memoria (2.9):
      * cuando la memoria en uso pasa de $tope (casi la mitad de memory_limit),
      * escribe lo que lleva y sigue (con una cuarta parte, sentencias que la
-     * 2.8 hacía de una vez se repetían por tramos y tardaban hasta un 60 % más). Solo dentro de una transacción, que la deja ser todo o
-     * nada aunque escriba a medias; fuera, pide que se repita dentro (ver
-     * DatabaseAvanzada::porTramos()), y eso pasa antes de haber escrito nada. Lo que
-     * la sentencia sabía de sus claves únicas queda en los índices del disco.
+     * 2.8 hacía de una vez se repetían por tramos y tardaban hasta un 60 %
+     * más). Solo dentro de una transacción, que la deja ser todo o nada aunque
+     * escriba a medias; fuera, pide que se repita dentro (ver
+     * DatabaseAvanzada::porTramos()), y eso pasa antes de haber escrito nada.
+     * Lo que la sentencia sabía de sus claves únicas queda en los índices del
+     * disco.
      * Antes, un UPDATE de 300.000 filas de una tabla de un millón agotaba los
      * 256 MB con un error fatal.
      *
@@ -465,7 +457,9 @@ class Writer
         if (!StorageEscritura::enLote($this->cat->storage())) {
             throw new SentenciaGrande();
         }
+        $antes = $this->volcados;
         $this->volcar(false);
+        $this->aMedias = $this->aMedias || $this->volcados !== $antes;
         foreach (array_keys($indices) as $n) {
             $indices[$n]['nuevas'] = $indices[$n]['quitadas'] = [];
         }
@@ -473,201 +467,8 @@ class Writer
     }
 
     // ==================================================================
-    // INSERT
+    // Claves únicas y cambio de una fila
     // ==================================================================
-
-    protected function insertar(array $ast): int
-    {
-        $tabla = $ast['tabla'];
-        $meta  = $this->meta($tabla);
-
-        $nombres = [];
-        foreach ($meta['columns'] as $c) {
-            $nombres[] = $c['name'];
-        }
-        $cols = $ast['cols'] ?? $nombres;
-
-        foreach ($cols as $i => $c) {
-            $col = Catalog::columna($meta, $c);
-            if ($col === null) {
-                throw JsonSqlDbError::schema("La columna '$c' no existe en '$tabla'");
-            }
-            $cols[$i] = $col['name'];
-        }
-
-        // Si la tabla no está en memoria y nada obliga a leerla, las filas
-        // nuevas se apuntan aparte y se añaden al final al volcar: la unicidad
-        // se comprueba contra los índices de disco y una tabla de cien mil
-        // filas no pasa por la memoria para insertar una. Con ON CONFLICT, OR
-        // IGNORE u OR REPLACE sí se carga: hay que saber con qué fila choca
-        // Con ON CONFLICT, OR IGNORE u OR REPLACE la fila con que choca se busca
-        // también en el índice (2.9: se cargaba la tabla entera, y con un
-        // millón de filas un upsert de una sola no cabía en 256 MB); sin
-        // índices que sirvan, en la tabla cargada, como siempre
-        $conflicto = $ast['conflicto'] ?? null;
-        $devolver  = ($ast['returning'] ?? null) !== null;
-        $objetivo  = null;
-        $anexar    = $this->sinLeer($tabla, $meta);
-        if ($conflicto !== null) {
-            if (!$anexar) {
-                $this->filas($tabla);
-            }
-            unset($this->unicas[$tabla], $this->defUnica[$tabla], $this->vacioUnica[$tabla]);
-            $objetivo = $conflicto['cols'] === null ? null : WriterConflictos::claveObjetivo($this, $tabla, $meta, $conflicto['cols']);
-        }
-        $indices = $this->indicesUnicos($tabla, $meta);
-        $puestas = 0;
-        $borradasPorReemplazo = false;
-
-        $meter = function (array $valores) use ($tabla, $meta, $cols, $conflicto, $objetivo, $anexar, $devolver,
-                                                &$indices, &$puestas, &$borradasPorReemplazo): void {
-            if ($anexar && !isset($this->datos[$tabla])) {
-                $this->tramo($indices);                 // lo que llevan las anteriores, si ya no cabe
-            }
-            if (count($valores) !== count($cols)) {
-                throw JsonSqlDbError::constraint(
-                    'El número de valores (' . count($valores) . ') no coincide con el de columnas (' . count($cols) . ')'
-                );
-            }
-
-            $nueva = [];
-            foreach ($meta['columns'] as $c) {
-                $nueva[$c['name']] = $c['default_expr'] === null ? $c['default'] : self::porDefecto($c);
-            }
-            foreach ($cols as $i => $c) {
-                if (!(is_array($valores[$i]) && ($valores[$i][0] ?? null) === '__default__')) {
-                    $nueva[$c] = $valores[$i];
-                }
-            }
-
-            $nueva = $this->prepararFila($tabla, $meta, $nueva, true);
-
-            $preparada = $nueva;
-            $nueva = $this->lanzarTriggers($tabla, 'BEFORE', 'INSERT', $nueva, null);
-            if ($nueva !== $preparada) {
-                // Un SET NEW la ha cambiado: otra vez tipos y NOT NULL
-                $nueva = $this->prepararFila($tabla, $meta, $nueva, true);
-            }
-            if ($conflicto !== null) {
-                // OR REPLACE la busca abajo, en cada clave única
-                $choca = $conflicto['modo'] === 'reemplazar' ? null : WriterConflictos::chocaCon($this, $tabla, $meta, $nueva, $objetivo);
-                if ($choca !== null && $conflicto['modo'] === 'nada') {
-                    return;                             // OR IGNORE, DO NOTHING
-                }
-                if ($choca !== null && $conflicto['modo'] === 'actualizar') {
-                    if (WriterConflictos::actualizarConflicto($this, $tabla, $meta, $choca, $nueva, $conflicto, $indices, $devolver)) {
-                        $puestas++;
-                    }
-                    return;
-                }
-                if ($conflicto['modo'] === 'reemplazar') {
-                    // Las filas con las que choca, en cualquier clave única, se
-                    // borran (con sus acciones de clave foránea, sin triggers:
-                    // como SQLite con recursive_triggers desactivado). Aquí la
-                    // cascada va antes, no como en un DELETE (ver borrar()): la
-                    // fila que entra suele traer la misma clave, y SQLite, que
-                    // mira las claves foráneas al acabar la sentencia, acepta
-                    // que lo que hagan los triggers de las hijas apunte a ella
-                    while (($choca = WriterConflictos::chocaCon($this, $tabla, $meta, $nueva, null)) !== null) {
-                        $vieja = WriterConflictos::filaEn($this, $tabla, $choca);
-                        $this->propagarHijos($tabla, $meta, $vieja, null);
-                        $this->ponerEn($tabla, $choca, null);
-                        WriterCambios::quitarDeIndices($this, $meta, $vieja, $indices);
-                        WriterConflictos::apuntarUnicas($this, $tabla, $meta, $choca, $vieja, null);
-                        $borradasPorReemplazo = $borradasPorReemplazo || isset($this->datos[$tabla]);
-                    }
-                }
-            }
-            $this->comprobarUnicos($tabla, $meta, $nueva, $indices, null);
-            $this->comprobarForaneas($tabla, $meta, $nueva);
-            $this->anadirAIndices($meta, $nueva, $indices);
-
-            $this->anadirFila($tabla, $nueva, $anexar);
-            $puestas++;
-            if ($conflicto !== null) {
-                WriterConflictos::apuntarUnicas($this, $tabla, $meta, isset($this->datos[$tabla])
-                    ? (int)array_key_last($this->datos[$tabla]) : -1 - (int)array_key_last($this->anexo[$tabla]), null, $nueva);
-            }
-            if ($devolver) {
-                $this->devueltas[] = $nueva;
-            }
-
-            $this->lanzarTriggers($tabla, 'AFTER', 'INSERT', $nueva, null);
-        };
-
-        // Valores de origen: VALUES(...) o SELECT. Un SELECT de otras tablas va
-        // por lotes según sale, sin juntar su resultado (2.9: un INSERT …
-        // SELECT de un millón de filas lo tenía entero en memoria); si lee la
-        // tabla en la que se inserta, entero antes, que no vea lo que se mete
-        if ($ast['select'] !== null) {
-            $tablas = Select::tablasDe($ast['select'], $this->cat);
-            $enMemoria = $tablas === null || array_intersect_key(array_change_key_case($this->sucioDatos + $this->datos),
-                array_change_key_case(array_flip($tablas))) !== [];
-            if ($enMemoria || in_array(strtolower($tabla), array_map('strtolower', $tablas), true)) {
-                // Cada fila se suelta al meterla: con muchas, lo que lleva la
-                // sentencia crece según el origen mengua (ver tramo())
-                $origen = $this->seleccionar($ast['select']);
-                foreach (array_keys($origen) as $k) {
-                    $meter(array_values($origen[$k]));
-                    unset($origen[$k]);
-                }
-            } else {
-                // Por lotes de hasta 8.192 filas o $lote bytes: turnarse el
-                // SELECT y la escritura en cada fila era un 10 % más lento que
-                // la 2.8.0, que juntaba el resultado entero
-                $lote    = [];
-                $inicio  = memory_get_usage();
-                $limite  = $this->lote;
-                $soltar  = static function () use (&$lote, &$inicio, $meter): void {
-                    foreach (array_keys($lote) as $k) {
-                        $meter($lote[$k]);
-                        unset($lote[$k]);               // cada fila se suelta al meterla
-                    }
-                    $lote   = [];
-                    $inicio = memory_get_usage();
-                };
-                $porFila = static function (array $fila) use (&$lote, &$inicio, $limite, $soltar): void {
-                    $lote[] = array_values($fila);
-                    if (count($lote) === 8192 || memory_get_usage() - $inicio > $limite) {
-                        $soltar();
-                    }
-                };
-                foreach ((new Select($this->cat))->ejecutarHacia($ast['select'], $porFila) ?? [] as $fila) {
-                    $porFila($fila);
-                }
-                $soltar();
-            }
-        } else {
-            // Todos los valores antes de meter ninguno: una subconsulta de la
-            // tabla no ve las filas de esta misma sentencia
-            $origen = [];
-            $ctx = ['fila' => [], 'sub' => fn(array $s): array => $this->seleccionar($s)];
-            foreach ($ast['filas'] as $fila) {
-                $valores = [];
-                foreach ($fila as $e) {
-                    // Un literal, o un número negativo, es su valor: sin pasar
-                    // por Evaluator, que ni se carga
-                    $n = $e['k'] === 'un' && $e['op'] === '-' && $e['e']['k'] === 'lit' ? $e['e']['v'] : null;
-                    $valores[] = match (true) {
-                        $e['k'] === 'lit'           => $e['v'],
-                        $e['k'] === 'default'       => ['__default__'],
-                        is_int($n) || is_float($n)  => -$n,
-                        default                     => Evaluator::evaluar(Evaluator::resolver($e, []), $ctx),
-                    };
-                }
-                $origen[] = $valores;
-            }
-            foreach ($origen as $valores) {
-                $meter($valores);
-            }
-        }
-
-        if ($borradasPorReemplazo) {
-            $this->porCompactar[$tabla] = true;  // al terminar la sentencia (ver filaActual())
-        }
-        unset($this->unicas[$tabla], $this->defUnica[$tabla], $this->vacioUnica[$tabla]);
-        return $puestas;
-    }
 
     /**
      * Catalog::conjuntosUnicos() de la tabla, una vez por sentencia: se pide
@@ -679,12 +480,15 @@ class Writer
         return $this->deMeta[$meta['table']]['unicos'] ??= Catalog::conjuntosUnicos($meta);
     }
 
-    /** Cambia (o borra, con null) la fila de una posición, con la tabla en memoria o sin cargarla. */
-    protected function ponerEn(string $tabla, int $pos, ?array $fila): void
+    /** Cambia (o borra, con null) la fila $vieja de una posición, con la tabla en memoria o sin cargarla. */
+    protected function ponerEn(string $tabla, int $pos, ?array $fila, array $vieja): void
     {
         if (isset($this->datos[$tabla])) {
             $fila === null ? $this->quitarFilaEn($tabla, $pos) : $this->ponerFilaEn($tabla, $pos, $fila);
             return;
+        }
+        if ($this->rowid !== [] || $this->foraneasPendientes !== []) {
+            $this->filaCambia($tabla, $vieja, $fila);
         }
         if ($pos < 0) {
             if ($fila === null) {
@@ -697,43 +501,23 @@ class Writer
             unset($this->cambios[$tabla][$pos]);
         } else {
             $this->cambios[$tabla][$pos] = $fila;
+            if (isset($this->idxCambios[$tabla])) {
+                $this->cambiosSinMirar[$tabla][$pos] = true;
+            }
         }
         $this->sucioDatos[$tabla] = true;
-    }
-
-    /**
-     * RETURNING: las filas escritas, proyectadas como las columnas de un
-     * SELECT sobre la tabla (* son todas, en su orden).
-     *
-     * @return list<array>
-     */
-    private function devolver(string $tabla, array $columnas, ?string $alias): array
-    {
-        $meta = $this->meta($tabla);
-        $mapa = $this->mapaColumnas($tabla, $meta, $alias);
-        $out  = [];
-        foreach ($this->devueltas as $fila) {
-            $r = [];
-            foreach ($columnas as $c) {
-                if ($c['star']) {
-                    foreach ($meta['columns'] as $col) {
-                        $r[$col['name']] = $fila[$col['name']] ?? null;
-                    }
-                    continue;
-                }
-                $r[$c['alias'] ?? Select::etiqueta($c['expr'])] = Evaluator::evaluar(Evaluator::resolver($c['expr'], $mapa), ['fila' => $fila]);
-            }
-            $out[] = $r;
-        }
-        return $out;
     }
 
     // ==================================================================
     // Validación de filas
     // ==================================================================
 
-    /** Aplica autoincremento, convierte tipos y comprueba NOT NULL. */
-    protected function prepararFila(string $tabla, array $meta, array $fila, bool $esInsert): array
+    /**
+     * Aplica autoincremento, convierte tipos y comprueba NOT NULL.
+     *
+     * @param bool $comprobar sin él, ni NOT NULL ni CHECK: los mira después (OR IGNORE, ver WriterInsercion::insertar())
+     */
+    protected function prepararFila(string $tabla, array $meta, array $fila, bool $esInsert, bool $comprobar = true): array
     {
         // Una clave primaria de una sola columna entera, sin AUTOINCREMENT, se
         // numera sola como en SQLite (2.9): sin valor, la mayor que hay + 1.
@@ -741,7 +525,7 @@ class Writer
         [$auto, $rowid] = $this->deMeta[$meta['table']]['auto'] ??= (static function (array $meta): array {
             $auto = Catalog::columnaAutoincremento($meta);
             $pk   = Catalog::clavePrimaria($meta);
-            return [$auto, $auto === null && count($pk) === 1 ? $pk[0] : null];
+            return [$auto, $auto === null && \count($pk) === 1 ? $pk[0] : null];
         })($meta);
 
         foreach ($meta['columns'] as $c) {
@@ -749,22 +533,22 @@ class Writer
             $valor  = $fila[$nombre] ?? null;
 
             if ($valor === null && $esInsert && $auto !== null && $nombre === $auto) {
-                $valor = $this->siguienteAutoincremento($tabla);
+                $valor = WriterInsercion::siguienteAutoincremento($this, $tabla);
             }
             $esRowid = $esInsert && $nombre === $rowid && $c['type'] === 'INTEGER';
             if ($valor === null && $esRowid) {
-                $valor = $this->siguienteRowid($tabla, $meta, $nombre);
+                $valor = WriterInsercion::siguienteRowid($this, $tabla, $meta, $nombre);
             }
             if ($valor !== null) {
                 $valor = Types::cast($valor, $c);
                 if ($auto !== null && $nombre === $auto && $esInsert) {
-                    $this->ajustarAutoincremento($tabla, (int)$valor);
+                    WriterInsercion::ajustarAutoincremento($this, $tabla, (int)$valor);
                 }
-                if ($esRowid && isset($this->rowid[$tabla]) && is_int($valor) && $valor >= $this->rowid[$tabla]) {
+                if ($esRowid && isset($this->rowid[$tabla]) && \is_int($valor) && $valor >= $this->rowid[$tabla]) {
                     $this->rowid[$tabla] = $valor + 1;
                 }
             }
-            if ($valor === null && $c['notnull']) {
+            if ($valor === null && $c['notnull'] && $comprobar) {
                 throw JsonSqlDbError::constraint("La columna '$tabla.$nombre' no admite NULL");
             }
             $fila[$nombre] = $valor;
@@ -776,7 +560,7 @@ class Writer
             $limpia[$c['name']] = $fila[$c['name']];
         }
         // CHECK (2.9): falla si da falso; NULL pasa, como en SQLite y MySQL
-        foreach ($meta['checks'] ?? [] as $i => $ck) {
+        foreach ($comprobar ? $meta['checks'] ?? [] : [] as $i => $ck) {
             $expr = $this->checks[$tabla][$i] ??= Evaluator::resolver(
                 Parser::analizar('SELECT (' . $ck['sql'] . ')')['cols'][0]['expr'], $this->mapaColumnas($tabla, $meta));
             if (Valor::verdadero(Evaluator::evaluar($expr, ['fila' => $limpia])) === false) {
@@ -788,61 +572,27 @@ class Writer
     }
 
     /**
-     * El contador de autoincremento no ensucia la estructura: se lleva aparte
-     * y al volcar va a rev.json (ver StorageEscritura::ponerAutoincremento()).
+     * Una fila que se quita ($nueva null) o se cambia en la sentencia (2.10).
+     * Si tenía la mayor clave primaria entera sin AUTOINCREMENT, la siguiente
+     * se vuelve a calcular con las que quedan, y si pasa a tener una mayor, la
+     * siguiente sale de ella, como en SQLite (antes se seguía contando desde
+     * la que ya no estaba); solo si la sentencia ha dado ya alguna. Y si era
+     * una hija que se mira al acabar la sentencia, ya no cuenta. Quien la llama
+     * mira antes si hay algo de eso: se cambian muchas filas, y casi nunca
      */
-    private function siguienteAutoincremento(string $tabla): int
+    protected function filaCambia(string $tabla, array $vieja, ?array $nueva): void
     {
-        $n = $this->autoinc[$tabla] ?? (int)$this->meta($tabla)['autoincrement']['next'];
-        $this->autoinc[$tabla] = $n + 1;
-        return $n;
-    }
-
-    /**
-     * La siguiente de una clave primaria entera sin AUTOINCREMENT: la mayor
-     * que hay —por su índice, que la da sin leer la tabla; si no se puede,
-     * recorriéndola—, con lo que esta sentencia lleva añadido, + 1. Como en
-     * SQLite, puede volver a dar la de una fila borrada que era la mayor: para
-     * no repetir nunca, AUTOINCREMENT.
-     */
-    private function siguienteRowid(string $tabla, array $meta, string $col): int
-    {
-        if (!isset($this->rowid[$tabla])) {
-            $mayor = 0;
-            $hay   = static function ($v) use (&$mayor): void {
-                if (is_int($v) && $v > $mayor) {
-                    $mayor = $v;
-                }
-            };
-            if (isset($this->datos[$tabla])) {
-                foreach ($this->datos[$tabla] as $f) {
-                    $hay($f[$col] ?? null);
-                }
-            } else {
-                $st  = $this->cat->storage();
-                $def = $this->indiceDe($tabla, $meta, [$col]);
-                $top = $def === null ? null : StorageLectura::filasPorOrden($st, $tabla, $def, true, 1);
-                foreach ($top ?? $st->filas($tabla) as $f) {
-                    $hay($f[$col] ?? null);
-                }
-                foreach ($this->anexo[$tabla] ?? [] as $f) {
-                    $hay($f[$col] ?? null);
-                }
+        if (isset($this->rowid[$tabla])) {
+            $col = $this->deMeta[$this->meta($tabla)['table']]['auto'][1];
+            $v   = $nueva[$col] ?? null;
+            if (\is_int($v) && $v >= $this->rowid[$tabla]) {
+                $this->rowid[$tabla] = $v + 1;
+            } elseif (($vieja[$col] ?? null) === $this->rowid[$tabla] - 1 && $v !== $vieja[$col]) {
+                unset($this->rowid[$tabla]);
             }
-            $this->rowid[$tabla] = $mayor + 1;
         }
-        return $this->rowid[$tabla]++;
-    }
-
-    private function ajustarAutoincremento(string $tabla, int $valor): void
-    {
-        $meta = $this->meta($tabla);
-        if ($meta['autoincrement'] === null) {
-            return;
-        }
-        $n = $this->autoinc[$tabla] ?? (int)$meta['autoincrement']['next'];
-        if ($valor >= $n) {
-            $this->autoinc[$tabla] = $valor + 1;
+        if (isset($this->foraneasPendientes[$tabla])) {
+            WriterForaneas::hijaQuitada($this, $tabla, $vieja, $nueva);
         }
     }
 
@@ -851,7 +601,8 @@ class Writer
      * en memoria, que no tenga triggers —que podrían consultarla—, que no se
      * referencie a sí misma, y que cada conjunto único tenga índice en disco
      * para comprobar la unicidad contra él. Con $aunqueCambiada, aunque la
-     * sentencia ya tenga cambios suyos sin escribir (ver hijasSinCargar()).
+     * sentencia ya tenga cambios suyos sin escribir (ver
+     * WriterForaneas::hijasSinCargar()).
      */
     protected function sinLeer(string $tabla, array $meta, bool $aunqueCambiada = false): bool
     {
@@ -970,17 +721,6 @@ class Writer
         return JsonSqlDbError::constraint("Valor duplicado en $etiqueta de '$tabla' (" . implode(', ', $uq['columns']) . ')');
     }
 
-    private function anadirAIndices(array $meta, array $fila, array &$indices): void
-    {
-        foreach ($this->unicos($meta) as $uq) {
-            $clave = self::claveDe($fila, $uq['columns'], $uq['plegar']);
-            if ($clave !== null) {
-                $indices[$uq['name']]['nuevas'][$clave] = true;
-                unset($indices[$uq['name']]['quitadas'][$clave]);
-            }
-        }
-    }
-
     /**
      * El valor por defecto de una columna: el fijo, o el que se calcula ahora
      * (CURRENT_TIMESTAMP, (expresión)). La expresión se analiza una vez.
@@ -1003,11 +743,13 @@ class Writer
      * clave que usan los índices de disco, para poder comprobar contra ellos.
      *
      * @param array<int, ?string> $plegar la colación de cada columna (2.9: ver Catalog::plegarDe())
+     * @param list<string>        $afin   la afinidad con la que se comparan (2.10): la de las
+     *                                    columnas del padre en una clave foránea (ver afinDelPadre())
      */
-    protected static function claveDe(array $fila, array $cols, array $plegar = []): ?string
+    protected static function claveDe(array $fila, array $cols, array $plegar = [], array $afin = []): ?string
     {
-        if ($plegar !== []) {
-            return Indexes::claveFila($fila, $cols, $plegar);
+        if ($plegar !== [] || $afin !== []) {
+            return Indexes::claveFila($fila, $cols, $plegar, $afin);
         }
         $valores = [];
         foreach ($cols as $c) {
@@ -1020,10 +762,28 @@ class Writer
     private array $plegarFk = [];
 
     /** La colación de las columnas del padre de una clave foránea, que es con la que se compara (2.9); una vez por sentencia */
-    private function plegarDelPadre(array $fk): array
+    protected function plegarDelPadre(array $fk): array
     {
         return $this->plegarFk[strtolower((string)$fk['table']) . "\0" . implode("\0", $fk['references'])]
             ??= Catalog::plegarDe($this->meta($fk['table']), $fk['references']);
+    }
+
+    /** @var array<string, list<string>> la afinidad de las columnas a las que apunta cada clave foránea (2.10) */
+    private array $afinFk = [];
+
+    /**
+     * La afinidad de las columnas del padre de una clave foránea (2.10): un
+     * valor de la hija se compara con ella, como en SQLite ('7' en la hija es
+     * el 7 de un padre INTEGER). Vacía si es la misma que la de la hija, que
+     * es lo corriente: entonces las claves de las dos ya son comparables.
+     */
+    protected function afinDelPadre(array $fk, array $metaHija): array
+    {
+        $id = strtolower((string)$metaHija['table'] . "\0" . implode("\0", $fk['columns']) . "\0" . $fk['table'] . "\0" . implode("\0", $fk['references']));
+        return $this->afinFk[$id] ??= (function () use ($fk, $metaHija): array {
+            $padre = Catalog::afinidadesDe($this->meta($fk['table']), $fk['references']);
+            return $padre === Catalog::afinidadesDe($metaHija, $fk['columns']) ? [] : $padre;
+        })();
     }
 
     /**
@@ -1055,27 +815,31 @@ class Writer
     // ==================================================================
 
     /**
+     * @var array<string, array<string, array>> lo que una clave foránea deja
+     * por mirar al acabar la sentencia (2.10, ver WriterForaneas::apuntar())
+     */
+    protected array $foraneasPendientes = [];
+
+    /**
      * Lado hijo: el valor insertado o actualizado debe existir en la tabla
-     * padre. Con $fks, solo esas claves foráneas de la tabla (ver cambiarHijas()).
+     * padre. Con $fks, solo esas claves foráneas de la tabla (ver
+     * WriterForaneas::cambiarHijas()).
+     * Si no está, se mira otra vez al acabar la sentencia, como en SQLite: el
+     * padre puede llegar después en la misma sentencia (2.10: era un error al
+     * momento, y una fila que apuntaba a otra de detrás del mismo INSERT no entraba)
      */
     protected function comprobarForaneas(string $tabla, array $meta, array $fila, ?array $fks = null): void
     {
         foreach ($fks ?? $meta['foreign_keys'] as $fk) {
-            // Con la colación de las columnas del padre, como en SQLite (2.9)
+            // Con la colación de las columnas del padre, como en SQLite (2.9), y su afinidad (2.10)
             $plegar = $this->plegarDelPadre($fk);
-            $clave  = self::claveDe($fila, $fk['columns'], $plegar);
+            $afin   = $this->afinDelPadre($fk, $meta);
+            $clave  = self::claveDe($fila, $fk['columns'], $plegar, $afin);
             if ($clave === null) {
                 continue;                       // con NULL no se comprueba
             }
             if (!WriterForaneas::padreTiene($this, $fk['table'], $fk['references'], $clave, $plegar)) {
-                $valores = [];
-                foreach ($fk['columns'] as $c) {
-                    $valores[] = Valor::aTexto($fila[$c]);
-                }
-                throw JsonSqlDbError::constraint(
-                    "'$tabla." . implode(', ', $fk['columns']) . "' = (" . implode(', ', $valores) .
-                    ") no existe en '{$fk['table']}' (clave foránea '{$fk['name']}')"
-                );
+                WriterForaneas::sinPadre($this, $tabla, $fk, $fila, $clave, $plegar, $afin);
             }
         }
     }
@@ -1083,7 +847,7 @@ class Writer
     /**
      * Lado padre: aplica ON DELETE / ON UPDATE a las filas hijas, con la fila
      * padre ya escrita o ya borrada, como SQLite (2.9; salvo la que quita un
-     * OR REPLACE, ver insertar()).
+     * OR REPLACE, ver WriterInsercion::insertar()).
      * $nueva a null significa que la fila padre se está borrando.
      */
     protected function propagarHijos(string $tabla, array $meta, array $vieja, ?array $nueva): void
@@ -1104,17 +868,24 @@ class Writer
             $accion   = $nueva === null ? $fk['on_delete'] : $fk['on_update'];
             $metaHija = $this->meta($hija);
             // Con un índice sobre la clave foránea de la hija, sus filas se
-            // leen por él y la tabla hija no se carga (ver hijasSinCargar())
-            $sinCargar = WriterForaneas::hijasSinCargar($this, $hija, $metaHija, $fk['columns'], $claveVieja, $plegar);
-            $hijas     = $sinCargar ?? WriterForaneas::hijasDe($this, $hija, $fk['columns'], $claveVieja, $plegar);
+            // leen por él y la tabla hija no se carga (ver WriterForaneas::hijasSinCargar())
+            // Con la afinidad del padre, si la de la hija es otra (2.10, ver afinDelPadre())
+            $afin      = $this->afinDelPadre($fk, $metaHija);
+            $sinCargar = $afin !== [] ? null : WriterForaneas::hijasSinCargar($this, $hija, $metaHija, $fk['columns'], $claveVieja, $plegar);
+            $hijas     = $sinCargar ?? WriterForaneas::hijasDe($this, $hija, $fk['columns'], $claveVieja, $plegar, $afin);
             if ($hijas === []) {
                 continue;
             }
 
-            if ($accion === 'NO ACTION' || $accion === 'RESTRICT') {
-                throw JsonSqlDbError::constraint(
-                    "'$hija' tiene " . count($hijas) . " fila(s) que dependen de esta (clave foránea '{$fk['name']}')"
-                );
+            if ($accion === 'RESTRICT') {
+                throw WriterForaneas::conHijas($hija, $fk, \count($hijas));
+            }
+            if ($accion === 'NO ACTION') {
+                // Al acabar la sentencia, como en SQLite (2.10: al momento, y
+                // un INSERT OR REPLACE de un padre con hijas, o borrar una
+                // tabla que se apunta a sí misma, daban error)
+                WriterForaneas::apuntar($this, $hija, $fk, $claveVieja, $plegar, $afin, \count($hijas), null);
+                continue;
             }
 
             if ($accion === 'CASCADE' && $nueva === null) {
@@ -1131,7 +902,7 @@ class Writer
     protected function clavesHacia(string $tabla): array
     {
         $out = [];
-        foreach ($this->cat->tablas() as $hija) {
+        foreach ($this->cat->tablasEsquema() as $hija) {
             foreach ($this->meta($hija)['foreign_keys'] as $fk) {
                 if (strcasecmp($fk['table'], $tabla) === 0) {
                     $out[] = [$hija, $fk];
@@ -1231,9 +1002,9 @@ class Writer
      */
     protected function conjuntos(array $mapa): callable
     {
-        return function (array $sel, int $sid, array $filaExterna = [], string|bool|null $colacion = null) use ($mapa): array {
-            // Dos IN con la misma subconsulta pueden comparar con distinta colación (2.9)
-            $deEste = md5(serialize($sel)) . "\0" . var_export($colacion, true);
+        return function (array $sel, int $sid, array $filaExterna = [], string|bool|null $colacion = null, ?string $afinidad = null) use ($mapa): array {
+            // Dos IN con la misma subconsulta pueden comparar con distinta colación (2.9) y afinidad (2.10)
+            $deEste = md5(serialize($sel)) . "\0" . var_export($colacion, true) . "\0" . $afinidad;
             if (isset($this->conjuntosFijos[$deEste])) {
                 return $this->conjuntosFijos[$deEste];
             }
@@ -1246,7 +1017,7 @@ class Writer
             } finally {
                 Evaluator::$correlacionada = $marca;
             }
-            $c = IndexesBusqueda::conjuntoDeIn($valores, $colacion, $select->colacionExterna);
+            $c = IndexesBusqueda::conjuntoDeIn($valores, $colacion, $select->colacionExterna, $afinidad, $select->afinidadExterna);
             if (!$mira) {
                 $this->conjuntosFijos[$deEste] = $c;
             }

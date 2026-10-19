@@ -7,7 +7,8 @@ declare(strict_types=1);
  * Se mide lo que ocupa una muestra de filas y se calcula cuántas caben a la
  * vez con la memoria que queda libre (memory_limit menos lo ya usado). Si el
  * resultado entero cabe, se pide de una vez; si no, por lotes de ese tamaño
- * (LIMIT … OFFSET …), y en memoria solo hay un lote.
+ * (LIMIT … OFFSET …, o según la clave primaria, ver tabla()), y en memoria
+ * solo hay un lote.
  *
  * https://miguelenred.es/jsonsqldb
  */
@@ -69,6 +70,75 @@ final class Lotes
             unset($muestra);
         }
         return self::porLotes($base, $sql, $params);
+    }
+
+    /**
+     * Las filas de una tabla para exportarla, con el filtro del panel ($donde)
+     * y su orden ($orden, '' sin él). Ordenada por su clave primaria, con la
+     * conexión por API (ver porClave()), por lotes según esa clave (2.10):
+     * cada uno sigue al anterior por su última clave (WHERE id > ? ORDER BY id
+     * LIMIT n), sin ordenar en cada lote todo lo que va detrás, y un INSERT o
+     * un DELETE entre dos lotes no repite ni salta filas. Por posición, un
+     * ORDER BY id de 300.000 filas en lotes de 5.000 tardaba 44,6 s, y así
+     * 2,0. Lo demás, por posición (ver filas()): sin ordenar es más rápido que
+     * por clave (se salta las partes enteras), y el panel avisa de que un
+     * cambio a la vez puede repetir o saltar filas.
+     *
+     * @return iterable<int,array<string,mixed>>
+     */
+    public static function tabla(string $base, string $tabla, string $donde, array $params, string $orden, bool $desc, bool $porClave): iterable
+    {
+        if ($porClave && !Api::directa()) {
+            return self::siguiendoClave($base, $tabla, $orden, $donde, $params, $desc);
+        }
+        return self::filas($base, 'SELECT * FROM ' . cita($tabla) . $donde
+            . ($orden === '' ? '' : ' ORDER BY ' . cita($orden) . ($desc ? ' DESC' : ' ASC')), $params);
+    }
+
+    /**
+     * ¿Se exporta por lotes según la clave (ver tabla())? Si se ordena por la
+     * clave primaria, de una sola columna y numérica: en una de texto, el
+     * ORDER BY sigue la colación y el > compara byte a byte, y se saltaban y
+     * repetían filas.
+     *
+     * @param list<array> $columnas las de SHOW SCHEMA
+     */
+    public static function porClave(array $columnas, string $orden): bool
+    {
+        $pk = array_values(array_filter($columnas, static fn(array $c): bool => (int)$c['pk'] === 1));
+        return count($pk) === 1 && $pk[0]['columna'] === $orden && in_array($pk[0]['tipo'], ['INTEGER', 'DOUBLE', 'DECIMAL'], true);
+    }
+
+    /**
+     * Los lotes de tabla(): el primero de MUESTRA filas para medir, y los
+     * demás del tamaño que cabe, cada uno detrás de la última clave del anterior.
+     *
+     * @return Generator<int,array<string,mixed>>
+     */
+    private static function siguiendoClave(string $base, string $tabla, string $clave, string $donde, array $params, bool $desc): Generator
+    {
+        $orden  = ' ORDER BY ' . cita($clave) . ($desc ? ' DESC' : '');
+        // El filtro, entre paréntesis: sus OR no pueden quedar fuera del AND
+        $tras   = ' WHERE ' . ($donde === '' ? '' : '(' . (string)preg_replace('/^\s*WHERE\s+/i', '', $donde) . ') AND ')
+                . cita($clave) . ($desc ? ' < ?' : ' > ?');
+        $lote   = self::MUESTRA;
+        $ultima = null;
+        do {
+            $filas = Api::sql($base, 'SELECT * FROM ' . cita($tabla) . ($ultima === null ? $donde : $tras) . $orden . " LIMIT $lote",
+                              $ultima === null ? $params : [...$params, $ultima]);
+            $n = count($filas);
+            $pedidas = $lote;
+            if ($ultima === null) {
+                $lote = self::filasPorLote(self::ocupa($filas), $n);
+            }
+            if ($n > 0) {
+                $ultima = $filas[$n - 1][$clave];
+            }
+            foreach ($filas as $f) {
+                yield $f;
+            }
+            unset($filas);
+        } while ($n === $pedidas);
     }
 
     /**

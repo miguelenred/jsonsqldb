@@ -77,7 +77,7 @@ $bd->consultar('CREATE TABLE notas (id INTEGER PRIMARY KEY, cid INTEGER, texto V
 // Semilla fija: dos ejecuciones comparan los mismos datos
 mt_srand(20260831);
 $ciudades = ['Madrid', 'Barcelona', 'Valencia', 'Sevilla', 'Elche',
-             'Rojales', 'Torrevieja', 'Alicante', 'Murcia', 'Bilbao'];
+             'Zaragoza', 'Malaga', 'Alicante', 'Murcia', 'Bilbao'];
 
 $lote = [];
 for ($i = 1; $i <= $filas; $i++) {

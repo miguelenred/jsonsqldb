@@ -36,7 +36,7 @@ final class WriterTriggers extends Writer
     protected static function ejecutarCuerpo(Writer $w, array $trg, array $cuerpo, array $meta, ?array $new, ?array $old): ?array
     {
         foreach ($cuerpo as $paso) {
-            if (is_array($paso)) {
+            if (\is_array($paso)) {
                 $hecho = false;
                 foreach ($paso['si'] as [$cond, $sentencias]) {
                     if (self::cumpleCondicion($w, $cond, $new, $old)) {
@@ -54,7 +54,7 @@ final class WriterTriggers extends Writer
                 if ($trg['timing'] !== 'BEFORE' || $trg['event'] === 'DELETE' || $new === null) {
                     throw JsonSqlDbError::syntax("SET NEW solo vale en un trigger BEFORE INSERT o BEFORE UPDATE ('{$trg['name']}')");
                 }
-                $set = $w->astCache[$paso] ??= ParserEscritura::analizarSetNew($paso);
+                $set = $w->astCache[$paso] ??= ParserEscrituraAvanzada::analizarSetNew($paso);
                 // De izquierda a derecha, y cada una ve lo que dejaron las
                 // anteriores: como el SET de MySQL y las asignaciones de PostgreSQL
                 foreach ($set['asig'] as [$col, $expr]) {
@@ -72,10 +72,19 @@ final class WriterTriggers extends Writer
                 continue;
             }
             $ast = self::sustituir($w, self::analizar($w, $paso), $new, $old);
-            if ($ast['k'] === 'select' || $ast['k'] === 'union') {
-                $w->seleccionar($ast);
-            } else {
-                self::ejecutarSinVolcar($w, $ast, $trg['name']);
+            // Cada sentencia del trigger calcula sus subconsultas otra vez:
+            // las de la anterior, o de otra vez que saltó, ya no valen (2.10:
+            // valían para toda la sentencia de fuera); las de esta, al acabar
+            $fijas = [$w->subsFijas, $w->conjuntosFijos];
+            $w->subsFijas = $w->conjuntosFijos = [];
+            try {
+                if ($ast['k'] === 'select' || $ast['k'] === 'union') {
+                    $w->seleccionar($ast);
+                } else {
+                    self::ejecutarSinVolcar($w, $ast, $trg['name']);
+                }
+            } finally {
+                [$w->subsFijas, $w->conjuntosFijos] = $fijas;
             }
         }
         return $new;
@@ -86,8 +95,11 @@ final class WriterTriggers extends Writer
         // Lo que un upsert de fuera sabe de las claves de esa tabla puede
         // dejar de valer: se vuelve a armar de ella (2.9, ver $unicas)
         unset($w->unicas[$ast['tabla'] ?? '']);
+        // Un RETURNING de un trigger de una versión anterior no devuelve nada:
+        // sus filas se mezclaban con las de la sentencia de fuera (2.10)
+        $ast['returning'] = null;
         switch ($ast['k']) {
-            case 'insert': $w->insertar($ast);   return;
+            case 'insert': WriterInsercion::insertar($w, $ast); return;
             case 'update': WriterCambios::actualizar($w, $ast); return;
             case 'delete': WriterCambios::borrar($w, $ast);     return;
         }
@@ -104,14 +116,14 @@ final class WriterTriggers extends Writer
                 if ($fila === null) {
                     throw JsonSqlDbError::syntax("$cual no está disponible en este trigger");
                 }
-                if (!array_key_exists($n['nombre'], $fila)) {
+                if (!\array_key_exists($n['nombre'], $fila)) {
                     throw JsonSqlDbError::schema("$cual.{$n['nombre']} no es una columna de la tabla");
                 }
                 return ['k' => 'lit', 'v' => $fila[$n['nombre']]];
             }
         }
         foreach ($n as $clave => $valor) {
-            if (is_array($valor)) {
+            if (\is_array($valor)) {
                 $n[$clave] = self::sustituir($w, $valor, $new, $old);
             }
         }
@@ -120,7 +132,7 @@ final class WriterTriggers extends Writer
 
     private static function analizar(Writer $w, string $sql): array
     {
-        return $w->astCache[$sql] ??= Parser::analizar($sql);
+        return $w->astCache[$sql] ??= Parser::analizar($sql, [], $w->cat->nombres());
     }
 
     /** Analiza una expresión suelta (la condición WHEN de un trigger). */

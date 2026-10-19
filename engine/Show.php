@@ -46,9 +46,12 @@ final class Show
             $meta = $this->cat->meta($t);
             $out[] = [
                 'tabla'    => $t,
-                'columnas' => count($meta['columns']),
+                'columnas' => \count($meta['columns']),
                 'filas'    => StorageLectura::contarFilas($this->cat->storage(), $t),
                 'creada'   => $meta['created_at'] ?? null,
+                // El siguiente valor de su AUTOINCREMENT, o null (2.10): lo que
+                // un volcado necesita para que la copia no repita un id
+                'autoincremento' => isset($meta['autoincrement']['next']) ? (int)$meta['autoincrement']['next'] : null,
             ];
         }
         return $out;
@@ -89,7 +92,7 @@ final class Show
                 : ($c['type'] === 'TEXT' ? 'VARCHAR' : $c['type']) . '(' . $c['length'] . ($c['scale'] !== null ? ', ' . $c['scale'] : '') . ')'));
             $d = $q($c['name']) . ' ' . $tipo . (empty($c['unsigned']) ? '' : ' UNSIGNED')
                 . (isset($c['collate']) ? ' COLLATE ' . $c['collate'] : '');
-            if (count($pk) === 1 && $c['pk']) {
+            if (\count($pk) === 1 && $c['pk']) {
                 $d .= ' PRIMARY KEY' . ($auto === $c['name'] ? ' AUTOINCREMENT' : '');
             } elseif ($c['notnull']) {
                 $d .= ' NOT NULL';
@@ -102,11 +105,14 @@ final class Show
                 $d .= ' DEFAULT ' . (preg_match('/^CURRENT_(TIMESTAMP|DATE|TIME)$/i', $e) ? $e : "($e)");
             } elseif ($c['default'] !== null) {
                 $v  = $c['default'];
-                $d .= ' DEFAULT ' . (is_string($v) ? "'" . str_replace("'", "''", $v) . "'" : (is_bool($v) ? (int)$v : Valor::aTexto($v)));
+                // Un decimal, con todas sus cifras (2.10; antes 14: DEFAULT 0.30000000000000004 salía 0.3),
+                // y un infinito como se escribe (9e999; INF no se puede leer)
+                $d .= ' DEFAULT ' . (\is_string($v) ? "'" . str_replace("'", "''", $v) . "'"
+                    : (\is_bool($v) ? (int)$v : (\is_float($v) ? (is_finite($v) ? var_export($v, true) : ($v > 0 ? '9e999' : '-9e999')) : Valor::aTexto($v))));
             }
             $partes[] = $d;
         }
-        if (count($pk) > 1) {
+        if (\count($pk) > 1) {
             $partes[] = 'PRIMARY KEY (' . $lista($pk) . ')';
         }
         foreach ($meta['unique'] as $u) {

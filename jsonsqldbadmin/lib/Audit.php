@@ -12,6 +12,12 @@ final class Audit
     public static function registrar(string $accion, string $detalle = '', ?string $base = null): void
     {
         try {
+            // El primer evento de cada día quita los de los días que ya no se
+            // conservan (2.10: uno de cada cien al azar, y en un día flojo los
+            // viejos podían seguir semanas)
+            if (!is_file(Store::ruta(self::fichero(date('Y-m-d'))))) {
+                self::purgar();
+            }
             Store::anadirLinea(self::fichero(date('Y-m-d')), [
                 'ts'      => date('Y-m-d H:i:s'),
                 'usuario' => (string)(Auth::usuario()['usuario'] ?? '-'),
@@ -20,18 +26,22 @@ final class Audit
                 'accion'  => $accion,
                 'detalle' => $detalle,
             ]);
-            if (mt_rand(1, 100) === 1) {
-                self::purgar();
-            }
         } catch (Throwable) {
             // La auditoría nunca puede tumbar la operación del usuario.
         }
     }
 
-    /** Eventos de un día, del más reciente al más antiguo. */
-    public static function dia(string $fecha): array
+    /**
+     * Los eventos de un día que contienen $busca (en minúsculas), del más
+     * reciente al más antiguo, $n a partir del $desde, y si hay más antiguos
+     * (ver Store::ultimasLineas()).
+     *
+     * @return array{0: list<array>, 1: bool}
+     */
+    public static function dia(string $fecha, int $n, string $busca = '', int $desde = 0): array
     {
-        return array_reverse(Store::leerLineas(self::fichero($fecha)));
+        return Store::ultimasLineas(self::fichero($fecha), $n, $busca === '' ? null
+            : static fn(array $e): bool => str_contains(minus(implode(' ', array_map('strval', $e))), $busca), $desde);
     }
 
     /** Días con auditoría, de más reciente a más antiguo. */

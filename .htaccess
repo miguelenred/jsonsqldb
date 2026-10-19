@@ -39,7 +39,3 @@ DirectoryIndex index.php
 # --- Sin firma del servidor en las páginas de error ---
 ServerSignature Off
 
-# --- No listar ni ejecutar nada raro subido a data/ ---
-<IfModule mod_php.c>
-    php_flag engine on
-</IfModule>

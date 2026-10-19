@@ -1,6 +1,6 @@
 # On-disk format (reference)
 
-The exact shape of every file the engine keeps, as written by 2.9, for anyone
+The exact shape of every file the engine keeps, as written by 2.10, for anyone
 who reads them with another tool, writes a backup script or checks them by
 eye. Why each file is the way it is, and what it costs, is explained in
 [01-core.md](01-core.md#1-layout-on-disk) (layout), [§6](01-core.md#6-durability-atomic-files-and-the-journal)
@@ -26,13 +26,13 @@ One folder per database inside the data root (`JSONSQLDB_DATA_PATH`):
 | `<t>.json`, `<t>.part2.json`, `<t>.part3.json`, … | the rows, part 1, 2, 3… | an error that names it, if `rev.json` counts that part (2.9; before, the table ended there) |
 | `<t>.idx.<i>.json`, `<t>.idx.<i>.part2.json`, … | index `<i>`, one piece per part | rebuilt on the next write; until then that index is not used |
 | `.htaccess`, `web.config` | deny web access, written when the database is created | nothing, unless the folder is reachable from the web |
-| `.lock`, `.<t>.lock`, `.turno`, `.<t>.turno` | empty files for `flock()` | created again |
+| `.lock`, `.<t>.lock`, `.turno`, `.<t>.turno` | files for `flock()`, empty; while a write to table `<t>` is under way, `.<t>.lock` holds one line that says so, `escribiendo: pid 1234 desde 2026-10-13 15:04:05`, removed when it ends (2.10, §1.1) | created again |
 | `.tx/` | the journal of a write in progress (§8) | normal |
 | `.lote/` | the originals kept by a transaction in progress (§8) | normal |
 | `.reparados/` | originals of repaired files and rows set aside (§9) | normal |
-| `.orden/` | temporary files of what does not fit in memory in a query (an `ORDER BY`, a `JOIN`, a `GROUP BY`, a subquery…), only while it runs | normal |
-| `.cache/` | cache: not part of the format, it changes between versions | regenerated; safe to delete at any time |
-| `*.<pid>.tmp` | a file being written; a process killed at the wrong moment can leave one | swept by the next write to its table |
+| `.orden/` | temporary files of what does not fit in memory in a query (an `ORDER BY`, a `JOIN`, a `GROUP BY`, a subquery…), only while it runs (§1.1) | normal |
+| `.cache/` | cache: not part of the format, it changes between versions (§1.1) | regenerated; safe to delete at any time |
+| `*.<pid>.tmp` | a file being written; a process killed at the wrong moment can leave one | swept by a later write to its table (§1.1) |
 
 **Names.** A database: `[A-Za-z0-9_-]{1,64}`. A table, view, index or trigger:
 `[A-Za-z_][A-Za-z0-9_]{0,63}`; tables and views share one namespace. A column:
@@ -46,6 +46,33 @@ indexes.
 valid name (a column with spaces or signs, or too long), it is `auto_` plus the
 MD5 of the lower-case column names joined by `,`. Two keys whose index would get
 the same name are refused (2.9).
+
+### 1.1. Control files, cache and temporary files
+
+All of it is text a person can read, like the rest of the folder, except the
+lengths in `.orden/`:
+
+- **The line in `.<t>.lock`** (2.10). A write to the table puts it there
+  before touching any file and empties the file when it ends, if the line is
+  still its own. A write that finds a line left there knows that the process
+  that wrote it died half-way, unless that process is still alive (or, when
+  that cannot be asked, the line is less than a minute old), and then removes
+  the temporary files of dead processes. The `flock()` that serializes the
+  writers is the same as before; the line only says who is writing.
+- **`*.<pid>.tmp`**: the name carries the process that writes it. Besides the
+  case above, a write removes those of its table whose process no longer
+  exists once every 32 revisions; an operation that takes the whole database
+  (DDL, a transaction) removes them all.
+- **`.cache/`**: each entry is a file with the PHP `serialize()` of its value.
+  Those with a fixed name, which are written over in place instead of being
+  replaced (2.10: replacing a file costs the disk far more), start with a line
+  `jsonsqldb-cache <length> <crc32> <crc32c>` with the length of what follows
+  and two checksums of it, so that one caught half-written is never read: it
+  only counts as a miss.
+- **`.orden/`**: each file is a run of values, each with its length in four
+  bytes in front and its PHP `serialize()`; they live only while the query
+  that needs them runs, and one a killed process left is removed by a later
+  query after an hour.
 
 ---
 
@@ -61,9 +88,14 @@ the same name are refused (2.9).
   manifests are indented with 4 spaces; data parts have the layout of §4;
   index pieces are one line.
 - Every JSON file ends with a line break.
-- **A file is never changed in place.** The engine writes `<file>.<pid>.tmp`,
-  forces it to disk and renames it over the old one; when a write changes more
-  than one file, a journal makes them change together (§8).
+- **A file of the database is not changed in place.** The engine writes
+  `<file>.<pid>.tmp`, forces it to disk and renames it over the old one; when
+  a write changes more than one file, a journal makes them change together
+  (§8). The exceptions: the line in a `.lock` and the cache entries with a
+  fixed name (§1.1), which are not data; and, inside a transaction (2.10), a
+  file the transaction has already replaced once, whose original is kept in
+  `.lote/` (§8): the next statements write it in its place, and committing
+  forces it to disk.
 
 ---
 
@@ -74,11 +106,20 @@ the same name are refused (2.9).
     "database": "mydb",
     "engine": "jsonSQLDB",
     "version": 1,
-    "created_at": "2026-10-08 13:47:12"
+    "created_at": "2026-10-08 13:47:12",
+    "esquema": 4
 }
 ```
 
-`version` is always `1` and is not read.
+`version` is always `1` and is not read. `esquema` (2.10) counts the tables
+created, dropped or renamed: the statement that does it rewrites this file,
+and puts it in place after its other files and deletions, so that whoever
+reads the new number finds the tables as they are.
+A write that needs the list of tables (to see which ones point to the one it
+changes) keeps it with the size, date and inode of this file and this number,
+and only lists the folder again when they change, when a table on the list is
+gone, or once every 32 writes of the table, for a table copied in by hand or
+made by an earlier version. Missing, it counts as `0`.
 
 ```json
 {
@@ -133,7 +174,7 @@ another across the parts.
 | Type (and its aliases) | Stored as |
 |---|---|
 | `INTEGER` (`INT`, `BIGINT`, `BOOLEAN`, `BIT`, `YEAR`…) | JSON integer; `true`/`false` are stored as `1`/`0` |
-| `DOUBLE` (`REAL`, `FLOAT`…) | JSON number with a fraction or exponent (`2.0`) |
+| `DOUBLE` (`REAL`, `FLOAT`…) | JSON number with a fraction or exponent (`2.0`), with the shortest digits that give the same number back (`0.30000000000000004`, `0.1`), whatever `serialize_precision` says (2.10) |
 | `DECIMAL` (`NUMERIC`, `MONEY`…) | JSON number rounded to the column's `scale` (`3.0`, `2.25`) |
 | `TEXT` (`VARCHAR`, `CHAR`, `JSON`, `BLOB`, `UUID`…) | JSON string; a `JSON` column keeps its text (`"{\"a\":1}"`) |
 | `DATETIME` (`DATE`, `TIMESTAMP`) | string `yyyy-MM-dd`, `yyyy-MM-dd HH:mm`, `yyyy-MM-dd HH:mm:ss` or `yyyy-MM-dd HH:mm:ss.fff`, with the precision it was given; a `T` separator is written as a space |
@@ -211,9 +252,10 @@ the table only the lists that are not empty.
     "rows": 10,
     "creada": 1952441877,
     "parts": [2, 3, 2, 2],
-    "indexes": {"auto_id": [2, 3, 2, 2]},
-    "rangos": {"auto_id": [[1, 3], [4, 6], [7, 9], [10, 10]]},
+    "indexes": {"auto_id": [2, 3, 2, 2], "ix_nombre": [2, 3, 2, 2]},
+    "rangos": {"auto_id": [[1, 3], [4, 6], [7, 9], [10, 10]], "ix_nombre": [null, null, null, null]},
     "huecos": [0, 1, 0, 0],
+    "textos": {"ix_nombre": 3},
     "gen": 1
 }
 ```
@@ -228,6 +270,7 @@ the table only the lists that are not empty.
 | `indexes` | 2.6 | for each index, the revision at which each piece was last written (2.5 wrote one number per index) |
 | `rangos` | 2.7 | for each index and piece: `[min, max]` of the first indexed value when every key of the piece has a number there; `[]` for a piece with no keys; `null` when some key has a text there |
 | `huecos` | 2.9 | holes of deleted rows in each part; only there when some part has any |
+| `textos` | 2.10 | for each index with a `TEXT` or a decimal (`REAL`, `DOUBLE`, `DECIMAL`) column, the revision of the table at which its pieces were last written with the keys of 2.10 (§7): a text, also one that is a number, as a text key, and a whole decimal up to 2^63 as an integer. An index whose number is missing, is above `rev`, or is below the revision of one of its pieces (a piece rewritten by an earlier version) has keys of an earlier version: it is not used, and the engine rebuilds it once the query is over (logged as an automatic `VACUUM`) or on the next write to the table |
 | `autoinc` | 2.7 | next `AUTOINCREMENT` value |
 | `gen` | 2.9 | only after a transaction that touched the table was undone, or after the engine rebuilt a `rev.json` it could not read: it changes every cache key of the table |
 
@@ -254,15 +297,25 @@ on one line, and `keys` always last:
 - **Key.** Each indexed value, in the order of `columns`, as a type letter, its
   length in bytes, `:` and the value, all joined: `n` for a number (`n1:5`,
   `n4:2.25`; an integral decimal is written as an integer, so `5` and `5.0` are
-  one key) and `t` for a text (`t4:Hola`). A text that is a number is a
-  number, and `true`/`false` are `1`/`0`. A value of a `NOCASE` or `RTRIM`
-  column is folded first (`t3:ana` for `Ana` in a `NOCASE` column).
+  one key, up to 2^63: 2.10, until 2.9 up to 9·10^18, and `9.1e18` was
+  `n7:9.1E+18`) and `t` for a text (`t4:Hola`). A text is a text key also when it
+  is a number (`t3:007`, 2.10; until 2.9 it was the key of that number, so
+  `'7'`, `'007'` and `7` shared one), and `true`/`false` are `1`/`0`. What is
+  looked up goes with the affinity of the column, as in SQLite: `7` in a
+  `TEXT` column is `t1:7`, `'7'` in an `INTEGER` one `n1:7`. A value of a
+  `NOCASE` or `RTRIM` column is folded first (`t3:ana` for `Ana` in a
+  `NOCASE` column).
 - `filtro` (2.9): Bloom filter of the keys the piece covers, in base64; `""`
-  if there are none. With *n* covered keys it has *m* = max(64, ⌈10 *n* / 32⌉
-  × 32) bits, packed as 32-bit little-endian words (bit *b* is bit *b* & 7 of
-  byte *b* >> 3). Each key sets 7 bits: (*h1* + *i* × *h2*) mod *m* for *i* =
-  0…6, with *h1* = `crc32(key)` and *h2* = `crc32(reverse(key)) | 1`, unsigned
-  32-bit.
+  if there are none. It is the one value in these files that a person cannot
+  read: a field of bits, written as text. With *n* covered keys it has *m* =
+  max(64, ⌈10 *n* / 32⌉ × 32) bits when the piece is written whole; a piece
+  that only gains keys (2.10) keeps its filter and sets the bits of the new
+  ones while it has 10 bits per key, and otherwise gets a new one with room
+  for a quarter more keys (*n* + ⌊*n* / 4⌋ in that formula). To look a key up,
+  *m* is the length of the filter in bits. They are packed as 32-bit
+  little-endian words (bit *b* is bit *b* & 7 of byte *b* >> 3). Each key sets
+  7 bits: (*h1* + *i* × *h2*) mod *m* for *i* = 0…6, with *h1* = `crc32(key)`
+  and *h2* = `crc32(reverse(key)) | 1`, unsigned 32-bit.
 - `cubre` (2.9): what the filter covers, right after it: `"texto"`, only the
   keys whose first value is a text; `"todo"`, the numeric keys too. Numbers
   are covered when the piece's numeric range spans at least 8 times its part
@@ -310,7 +363,7 @@ twice is the same as once); a missing temporary listed in `regenerables` (an
 index piece) is skipped. A manifest with `estado` instead of `tipo` is the
 undo journal of 2.4 and earlier, and `.tx/<scope>/manifiesto.json` that of 2.5
 and 2.6: both are still applied. A statement inside a transaction writes none
-(2.9.1): `.lote/`, below, already undoes it.
+(2.10): `.lote/`, below, already undoes it.
 
 **`.lote/`** (2.9): while a transaction runs, the original of every file it
 replaces or deletes, under the same name (a hard link, or a copy forced to disk
@@ -328,7 +381,13 @@ be called `manifiesto`, and its saved copy would have the same name):
 If the manifest is there when the database is opened, the transaction is
 undone: each file in `guardados` goes back to its place, each one in `nuevos`
 is deleted, and each table touched gets a new `gen`. A `.lote/` without a
-manifest was committed and is only deleted.
+manifest was committed and is only deleted. Once a statement has put a file
+in place (its rename succeeded), the file under that name is no longer the
+original, so from the next statement on the transaction writes it in its place
+instead of renaming a temporary over it (2.10, on PHP 8.1 and later, up to
+1 MB per statement, never `_database.json`). A file whose rename failed is
+still the original, linked from `.lote/`, and is replaced as always. Whatever
+a file written in place holds if the process dies, the original comes back.
 
 ---
 
@@ -373,5 +432,8 @@ next one will get: numbers are never reused.
 - **Copying a database**: copy its whole folder while nothing writes to it;
   `.cache/` can be left out. A copy taken in the middle of a write can hold
   half of it. The panel's ZIP backup and SQL dump do this for you.
+- **Going back from 2.10 to 2.9**: delete first the index files of every index
+  with a `TEXT` column, whose keys 2.9 reads with its own rule; see [Going back
+  to an earlier version](01-core.md#going-back-to-an-earlier-version).
 - **Going back to a version before 2.9**: run `VACUUM` first, which removes the
   holes; see [Going back to an earlier version](01-core.md#going-back-to-an-earlier-version).

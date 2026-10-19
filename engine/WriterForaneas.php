@@ -19,6 +19,100 @@ final class WriterForaneas extends Writer
     }
 
     /**
+     * Una clave foránea que no se cumple a mitad de sentencia se mira otra vez
+     * al acabarla, como en SQLite (2.10): la de una fila hija sin padre
+     * ($error, el mensaje si sigue sin él) y la NO ACTION de un padre que se
+     * va con $hijas filas que lo apuntan. Mientras ninguna fila de la tabla
+     * hija con esa clave salga ni cambie de clave (ver hijaQuitada()), las de
+     * entonces siguen ahí y no hay que buscarlas; si alguna lo hace, se buscan
+     * al acabar. Por clave foránea: dos de una tabla pueden llamarse igual
+     */
+    public static function apuntar(Writer $w, string $hija, array $fk, string $clave, array $plegar, array $afin, ?int $hijas, ?string $error, bool $buscar = false): void
+    {
+        $p = &$w->foraneasPendientes[$hija][$fk['table'] . "\0" . implode("\0", $fk['references']) . "\0" . implode("\0", $fk['columns'])];
+        $p ??= ['fk' => $fk, 'plegar' => $plegar, 'afin' => $afin, 'claves' => []];
+        $p['claves'][$clave] ??= ['hijas' => $hijas, 'error' => $error, 'buscar' => $buscar];
+        if ($buscar) {
+            $p['claves'][$clave]['buscar'] = true;
+        }
+    }
+
+    /**
+     * Una fila hija sin su padre (ver Writer::comprobarForaneas()): se mira
+     * otra vez al acabar la sentencia, con el error que se dará si sigue sin
+     * él (2.10: el mensaje, aquí, para que Writer no lo compile)
+     */
+    public static function sinPadre(Writer $w, string $tabla, array $fk, array $fila, string $clave, array $plegar, array $afin): void
+    {
+        $valores = [];
+        foreach ($fk['columns'] as $c) {
+            $valores[] = Valor::aTexto($fila[$c]);
+        }
+        self::apuntar($w, $tabla, $fk, $clave, $plegar, $afin, null, "'$tabla." . implode(', ', $fk['columns'])
+            . "' = (" . implode(', ', $valores) . ") no existe en '{$fk['table']}' (clave foránea '{$fk['name']}')");
+    }
+
+    /**
+     * La fila que quita un OR REPLACE, después de sus cascadas, que van antes
+     * (ver WriterInsercion::insertar()): lo que estas o sus triggers hayan
+     * hecho apuntar a ella se busca al acabar la sentencia (2.10: pasaba la
+     * comprobación con la fila aún ahí y quedaba huérfano, desde antes de la
+     * 2.9).
+     */
+    public static function padreQuitado(Writer $w, string $tabla, array $meta, array $fila): void
+    {
+        foreach ($w->deMeta[$meta['table']]['hijas'] ??= $w->clavesHacia($tabla) as [$hija, $fk]) {
+            $plegar = $w->plegarDelPadre($fk);
+            $clave  = self::claveDe($fila, $fk['references'], $plegar);
+            if ($clave !== null) {
+                self::apuntar($w, $hija, $fk, $clave, $plegar, $w->afinDelPadre($fk, $w->meta($hija)), 0, null, true);
+            }
+        }
+    }
+
+    /** Una fila de $tabla sale o cambia de clave: las hijas con la que tenía se buscarán al acabar */
+    public static function hijaQuitada(Writer $w, string $tabla, array $vieja, ?array $nueva): void
+    {
+        foreach ($w->foraneasPendientes[$tabla] as $id => $p) {
+            $clave = $vieja === [] ? null : self::claveDe($vieja, $p['fk']['columns'], $p['plegar'], $p['afin']);
+            if ($clave !== null && isset($p['claves'][$clave])
+                && ($nueva === null || self::claveDe($nueva, $p['fk']['columns'], $p['plegar'], $p['afin']) !== $clave)) {
+                $w->foraneasPendientes[$tabla][$id]['claves'][$clave]['buscar'] = true;
+            }
+        }
+    }
+
+    /** Al acabar la sentencia: error si queda alguna hija apuntando a un padre que no está */
+    public static function alAcabar(Writer $w): void
+    {
+        foreach ($w->foraneasPendientes as $hija => $porClave) {
+            $hija = (string)$hija;
+            foreach ($porClave as $p) {
+                foreach ($p['claves'] as $clave => $c) {
+                    $clave = (string)$clave;
+                    if (self::padreTiene($w, $p['fk']['table'], $p['fk']['references'], $clave, $p['plegar'])) {
+                        continue;
+                    }
+                    if ($c['buscar']) {
+                        $sinCargar = $p['afin'] !== [] ? null : self::hijasSinCargar($w, $hija, $w->meta($hija), $p['fk']['columns'], $clave, $p['plegar']);
+                        $hijas     = $sinCargar ?? self::hijasDe($w, $hija, $p['fk']['columns'], $clave, $p['plegar'], $p['afin']);
+                        if ($hijas === []) {
+                            continue;
+                        }
+                        $c['hijas'] = $c['hijas'] === null ? null : \count($hijas);
+                    }
+                    throw $c['error'] !== null ? JsonSqlDbError::constraint($c['error']) : self::conHijas($hija, $p['fk'], (int)$c['hijas']);
+                }
+            }
+        }
+    }
+
+    public static function conHijas(string $hija, array $fk, int $n): JsonSqlDbError
+    {
+        return JsonSqlDbError::constraint("'$hija' tiene $n fila(s) que dependen de esta (clave foránea '{$fk['name']}')");
+    }
+
+    /**
      * ¿Existe esta clave en una tabla padre? Contra su índice de disco si lo
      * hay; si no, sus claves se recogen una vez recorriéndola. Si la sentencia
      * ya la ha cambiado, por el mapa de hijasDe(), que se mantiene al escribir:
@@ -31,7 +125,10 @@ final class WriterForaneas extends Writer
     {
         $id = $tabla . '|' . implode("\0", $cols);
         if (!isset($w->idxPadre[$id])) {
-            $def = $w->indiceDe($tabla, $w->meta($tabla), $cols);
+            // Sin cargarla, por su índice también si la sentencia ya la ha
+            // cambiado: lo cambiado se mira abajo (2.10: se cargaba entera, y
+            // con una tabla grande se acababa la memoria)
+            $def = $w->indiceDe($tabla, $w->meta($tabla), $cols, !isset($w->datos[$tabla]));
             if ($def !== null) {
                 $w->idxPadre[$id] = $def;
             } elseif (isset($w->sucioDatos[$tabla])) {
@@ -62,7 +159,7 @@ final class WriterForaneas extends Writer
         $posiciones = StorageEscritura::posicionesDeClave($st, $tabla, $idx, $clave);
         if ($posiciones === null) {
             unset($w->idxPadre[$id]);         // el índice ya no sirve: con la tabla
-            return self::padreTiene($w, $tabla, $cols, $clave, $plegar);
+            return self::hijasDe($w, $tabla, $cols, $clave, $plegar) !== [];
         }
         foreach ($posiciones as $p) {
             if (!isset($w->borradas[$tabla][$p])
@@ -70,7 +167,12 @@ final class WriterForaneas extends Writer
                 return true;
             }
         }
-        foreach (array_merge($w->cambios[$tabla] ?? [], $w->anexo[$tabla] ?? []) as $f) {
+        // Las que han tomado la clave en la sentencia, por un mapa que se
+        // mantiene al escribir (2.10: se recorrían todas en cada pregunta)
+        if (isset($w->cambios[$tabla]) && self::cambiadasCon($w, $tabla, $cols, $clave, $plegar) !== []) {
+            return true;
+        }
+        foreach ($w->anexo[$tabla] ?? [] as $f) {
             if (self::claveDe($f, $cols, $plegar) === $clave) {
                 return true;
             }
@@ -80,24 +182,24 @@ final class WriterForaneas extends Writer
 
     /**
      * Lado hijo de una clave foránea: las filas de $hija cuyas columnas $cols
-     * valen $clave. El mapa clave → posiciones se arma una vez y se va
+     * valen $clave (con la afinidad del padre, $afin, si es otra: 2.10). El mapa clave → posiciones se arma una vez y se va
      * manteniendo al escribir, así que borrar o cambiar N padres ya no recorre
      * la tabla hija N veces (era cuadrático: 1.000 padres con 25.000 hijos,
      * 11 s). Una posición que se ha vaciado o cuya clave ha cambiado se salta.
      *
      * @return array<int,array> posición → fila, en orden de posición
      */
-    public static function hijasDe(Writer $w, string $hija, array $cols, string $clave, array $plegar): array
+    public static function hijasDe(Writer $w, string $hija, array $cols, string $clave, array $plegar, array $afin = []): array
     {
         $w->filas($hija);                      // cargada: si se acaba de leer, sin mapas viejos
-        $id = $hija . '|' . implode("\0", $cols) . '|' . implode(',', $plegar);
+        $id = $hija . '|' . implode("\0", $cols) . '|' . implode(',', $plegar) . '|' . implode(',', $afin);
         // Con un solo padre (borrar o cambiar una fila), recorrer la tabla una
         // vez cuesta lo mismo que armar el mapa y no ocupa memoria: el mapa se
         // arma a partir del segundo padre de la sentencia
         if (!isset($w->idxHijo[$id]) && ($w->pedidasHijo[$id] = ($w->pedidasHijo[$id] ?? 0) + 1) === 1) {
             $out = [];
             foreach ($w->datos[$hija] as $pos => $f) {
-                if (self::claveDe($f, $cols, $plegar) === $clave) {
+                if (self::claveDe($f, $cols, $plegar, $afin) === $clave) {
                     $out[$pos] = $f;
                 }
             }
@@ -106,17 +208,17 @@ final class WriterForaneas extends Writer
         if (!isset($w->idxHijo[$id])) {
             $mapa = [];
             foreach ($w->filas($hija) as $pos => $f) {
-                $k = self::claveDe($f, $cols, $plegar);
+                $k = self::claveDe($f, $cols, $plegar, $afin);
                 if ($k !== null) {
                     $mapa[$k][$pos] = true;
                 }
             }
-            $w->idxHijo[$id] = ['cols' => $cols, 'plegar' => $plegar, 'mapa' => $mapa];
+            $w->idxHijo[$id] = ['cols' => $cols, 'plegar' => $plegar, 'afin' => $afin, 'mapa' => $mapa];
         }
         $out = [];
         foreach (array_keys($w->idxHijo[$id]['mapa'][$clave] ?? []) as $pos) {
             $f = $w->datos[$hija][$pos] ?? null;
-            if ($f !== null && self::claveDe($f, $cols, $plegar) === $clave) {
+            if ($f !== null && self::claveDe($f, $cols, $plegar, $afin) === $clave) {
                 $out[$pos] = $f;
             }
         }
@@ -143,8 +245,8 @@ final class WriterForaneas extends Writer
         // Aunque esta sentencia ya haya cambiado o borrado hijas sin cargarla
         // (2.9: entonces se cargaba entera, y cien padres con ocho mil hijas no
         // cabían en 24 MB): el índice del disco da las que tenían la clave, y
-        // cada una se mira como está ahora. Las que la toman en esta sentencia
-        // no se le pueden pedir: la clave de otro padre que ya no la tiene
+        // cada una se mira como está ahora; las que la han tomado en esta
+        // sentencia, aparte (ver cambiadasCon())
         $def = $w->indiceDe($hija, $metaHija, $cols, true);
         // Su índice tiene que plegar como el padre (2.9): si no, sus claves no son estas
         if ($def === null || ($def['plegar'] ?? []) !== $plegar) {
@@ -162,6 +264,45 @@ final class WriterForaneas extends Writer
                 $out[$pos] = $fila;
             }
         }
+        if (isset($w->cambios[$hija])) {
+            $out += self::cambiadasCon($w, $hija, $cols, $clave, $plegar);
+            ksort($out);
+        }
+        return $out;
+    }
+
+    /**
+     * Las filas que la sentencia ha cambiado sin cargar la tabla y que tienen
+     * ahora esa clave, de una hija o de un padre: el índice del disco no las
+     * conoce (2.10: no se veían, y una cascada que daba la clave a una hija la
+     * dejaba luego sin padre). Por un mapa de clave a posiciones, armado la
+     * primera vez y puesto al día solo con las que han cambiado desde entonces.
+     *
+     * @return array<int, array> posición => fila
+     */
+    private static function cambiadasCon(Writer $w, string $tabla, array $cols, string $clave, array $plegar): array
+    {
+        $id    = implode("\0", $cols) . "\0" . implode("\0", $plegar);
+        $nuevo = !isset($w->idxCambios[$tabla][$id]);
+        if ($nuevo) {
+            $w->idxCambios[$tabla][$id] = ['cols' => $cols, 'plegar' => $plegar, 'mapa' => []];
+        }
+        foreach ($w->idxCambios[$tabla] as $otro => $i) {
+            foreach (array_keys($otro === $id && $nuevo ? $w->cambios[$tabla] : $w->cambiosSinMirar[$tabla] ?? []) as $pos) {
+                $k = self::claveDe($w->cambios[$tabla][$pos] ?? [], $i['cols'], $i['plegar']);
+                if ($k !== null) {
+                    $w->idxCambios[$tabla][$otro]['mapa'][$k][$pos] = true;
+                }
+            }
+        }
+        unset($w->cambiosSinMirar[$tabla]);
+        $out = [];
+        foreach (array_keys($w->idxCambios[$tabla][$id]['mapa'][$clave] ?? []) as $pos) {
+            $fila = $w->cambios[$tabla][$pos] ?? null;
+            if ($fila !== null && !isset($w->borradas[$tabla][$pos]) && self::claveDe($fila, $cols, $plegar) === $clave) {
+                $out[$pos] = $fila;
+            }
+        }
         return $out;
     }
 
@@ -175,7 +316,8 @@ final class WriterForaneas extends Writer
     {
         $meta = $w->meta($tabla);
         foreach ($hijas as $pos => $fila) {
-            $w->ponerEn($tabla, $pos, null);
+            $w->ponerEn($tabla, $pos, null, $fila);
+            self::avisarSentencia($w, $tabla, $meta, $fila, null);
             $w->propagarHijos($tabla, $meta, $fila, null);
         }
     }
@@ -195,6 +337,7 @@ final class WriterForaneas extends Writer
                 continue;
             }
             $w->quitarFilaEn($tabla, (int)$pos0);
+            self::avisarSentencia($w, $tabla, $meta, $fila, null);
             $w->propagarHijos($tabla, $meta, $fila, null);
 
             $w->lanzarTriggers($tabla, 'AFTER', 'DELETE', null, $fila);
@@ -214,8 +357,10 @@ final class WriterForaneas extends Writer
      *
      * Solo se miran las claves únicas y foráneas con alguna de las columnas
      * que cambian, que en las demás todo sigue igual (todas, si un trigger
-     * BEFORE ha tocado la fila); y la propia clave foránea, solo con SET
-     * DEFAULT: con CASCADE apunta a la fila padre, ya escrita, y con SET NULL
+     * BEFORE ha tocado la fila); y la propia clave foránea con SET DEFAULT, y
+     * con CASCADE si la hija tiene triggers o hijas: apunta a la fila padre,
+     * ya escrita, pero lo que hagan por una hija anterior la puede haber
+     * borrado (2.10: quedaba huérfana, desde antes de la 2.9). Con SET NULL,
      * a ninguna.
      *
      * @param array<int, array> $hijas posición => fila
@@ -228,16 +373,17 @@ final class WriterForaneas extends Writer
                 $unicos[] = $uq;
             }
         }
-        $foraneas = [];
-        foreach ($metaHija['foreign_keys'] as $otra) {
-            if (array_intersect($otra['columns'], $fk['columns']) !== [] && ($otra !== $fk || $accion === 'SET DEFAULT')) {
-                $foraneas[] = $otra;
-            }
-        }
         // Lo que no tiene que hacer, se sabe una vez: así una cascada sobre una
         // hija sin triggers ni hijas cuesta lo mismo que antes por fila
         $triggers = $metaHija['triggers'] !== [];
         $nietas   = ($w->deMeta[$metaHija['table']]['hijas'] ??= $w->clavesHacia($hija)) !== [];
+        $foraneas = [];
+        foreach ($metaHija['foreign_keys'] as $otra) {
+            if (array_intersect($otra['columns'], $fk['columns']) !== []
+                && ($otra !== $fk || $accion === 'SET DEFAULT' || ($accion === 'CASCADE' && ($triggers || $nietas)))) {
+                $foraneas[] = $otra;
+            }
+        }
         foreach ($hijas as $pos => $vieja) {
             // Sin triggers ni hijas suyas, nada la ha podido tocar desde que se leyó
             if (($triggers || $nietas) && ($vieja = WriterCambios::filaActual($w, $hija, $pos, $vieja)) === null) {
@@ -271,7 +417,8 @@ final class WriterForaneas extends Writer
             if ($todas || $foraneas !== []) {
                 $w->comprobarForaneas($hija, $metaHija, $f, $todas ? null : $foraneas);
             }
-            $w->ponerEn($hija, $pos, $f);
+            $w->ponerEn($hija, $pos, $f, $vieja);
+            self::avisarSentencia($w, $hija, $metaHija, $vieja, $f);
             if ($unicos !== [] && !isset($w->datos[$hija])) {
                 foreach ($unicos as $uq) {
                     $clave = self::claveDe($f, $uq['columns'], $uq['plegar']);
@@ -286,6 +433,19 @@ final class WriterForaneas extends Writer
             if ($triggers) {
                 $w->lanzarTriggers($hija, 'AFTER', 'UPDATE', $f, $vieja);
             }
+        }
+    }
+
+    /**
+     * Lo que una cascada cambia o borra en la tabla que escribe la sentencia
+     * (una clave foránea hacia sí misma), también en las claves únicas que
+     * lleva la sentencia (2.10, ver Writer::$indicesVivos).
+     */
+    private static function avisarSentencia(Writer $w, string $tabla, array $meta, array $vieja, ?array $nueva): void
+    {
+        if (isset($w->indicesVivos[$tabla])) {
+            $nueva === null ? WriterCambios::quitarDeIndices($w, $meta, $vieja, $w->indicesVivos[$tabla])
+                : $w->cambiarEnIndices($meta, $vieja, $nueva, $w->indicesVivos[$tabla]);
         }
     }
 

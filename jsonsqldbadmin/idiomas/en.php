@@ -197,8 +197,8 @@ return [
         => 'Read-only users sign with it, and the engine rejects any write from them. It must be able to see every database.',
     'Con las dos, el motor aplica los permisos de cada usuario del panel: uno de solo lectura no puede escribir aunque el panel se equivocara.'
         => 'With both, the engine enforces each panel user\'s permissions: a read-only one cannot write even if the panel made a mistake.',
-    'Con permiso de lectura solo se pueden lanzar SELECT y SHOW.'
-        => 'With read permission only SELECT and SHOW can be run.',
+    'Con permiso de lectura solo se pueden lanzar consultas: SELECT, WITH, SHOW, EXPLAIN, CHECK y DESCRIBE.'
+        => 'With read permission only queries can be run: SELECT, WITH, SHOW, EXPLAIN, CHECK and DESCRIBE.',
     'Condición'
         => 'Condition',
     'Condición (opcional)'
@@ -343,8 +343,8 @@ return [
         => 'The file is not a valid ZIP or it is damaged.',
     'El motor no responde: {error}'
         => 'The engine is not responding: {error}',
-    'El orden importa: un índice sobre (a, b) sirve para buscar por a y b, o solo por a si b es NOT NULL (una fila con NULL en una columna del índice no está en él), pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, y con una columna numérica MIN, MAX y ORDER BY … LIMIT; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.'
-        => 'Order matters: an index on (a, b) helps to search by a and b, or by a alone if b is NOT NULL (a row with NULL in a column of the index is not in it), but not by b alone. It speeds up equalities and IN, ranges (<, >, BETWEEN) and COUNT(*) on its first column, and on a numeric column MIN, MAX and ORDER BY … LIMIT; not LIKE, IS NULL or an OR. And it makes every write to the table a little slower.',
+    'El orden importa: un índice sobre (a, b) sirve para buscar por a y b, o solo por a (del todo si b es NOT NULL; si no, en las partes de la tabla sin filas con b NULL, que no están en el índice), pero no para buscar solo por b. Acelera las igualdades y los IN, los rangos (<, >, BETWEEN) y COUNT(*) sobre su primera columna, ORDER BY … LIMIT (en una de texto, sin COLLATE propio) y, con una columna numérica, MIN y MAX; no LIKE, ni IS NULL, ni un OR. Y hace algo más lenta cada escritura de la tabla.'
+        => 'Order matters: an index on (a, b) helps to search by a and b, or by a alone (fully if b is NOT NULL; otherwise in the parts of the table without rows whose b is NULL, which are not in the index), but not by b alone. It speeds up equalities and IN, ranges (<, >, BETWEEN) and COUNT(*) on its first column, ORDER BY … LIMIT (on a text column, one without a COLLATE of its own) and, on a numeric column, MIN and MAX; not LIKE, IS NULL or an OR. And it makes every write to the table a little slower.',
     'El panel carga el motor y le habla sin HTTP'
         => 'The panel loads the engine and talks to it without HTTP',
     'El panel carga el motor y le habla sin HTTP. Para cuando el panel y los datos están en el mismo servidor.'
@@ -397,10 +397,10 @@ return [
         => 'This column is the primary key and autoincrement.',
     'Esta columna es clave primaria.'
         => 'This column is the primary key.',
-    'Esta tabla no tiene clave primaria, así que no se pueden editar ni borrar filas sueltas desde el panel. Usa la pestaña SQL.'
-        => 'This table has no primary key, so single rows cannot be edited or deleted from the panel. Use the SQL tab.',
-    'Esta tabla no tiene clave primaria: no se puede identificar la fila.'
-        => 'This table has no primary key: the row cannot be identified.',
+    'Esta tabla no tiene clave primaria: cada fila se edita o se borra por todos sus valores. Si hay dos filas iguales, el cambio se hace en una de ellas.'
+        => 'This table has no primary key: each row is edited or deleted by all its values. If two rows are identical, the change is made to one of them.',
+    'No se puede identificar la fila.'
+        => 'The row cannot be identified.',
     'Este panel solo admite conexiones HTTPS y esta petición ha llegado por HTTP.
 
 En un servidor de verdad: pon un certificado (Let\'s Encrypt es gratis).
@@ -975,6 +975,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'databases',
     'cURL disponible'
         => 'cURL available',
+    'comprobando…'
+        => 'checking…',
     'conexión directa'
         => 'direct connection',
     'conexión directa al motor'
@@ -1025,10 +1027,16 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'cannot be checked: the engine is in a different folder from the panel',
     'no se puede comprobar: la API ({api}) no está en la carpeta api/ de la instalación'
         => 'cannot be checked: the API ({api}) is not in the installation\'s api/ folder',
+    'no se puede comprobar: no se encuentra la carpeta de datos o la del panel'
+        => 'cannot be checked: the data folder or the panel folder cannot be found',
+    'no está en la web del panel'
+        => 'not in the panel\'s website',
     'obligatorio'
         => 'required',
     'protegida ({url} responde {codigo})'
         => 'protected ({url} answers {codigo})',
+    'se comprobará cuando haya una base'
+        => 'will be checked once there is a database',
     'siempre'
         => 'forever',
     'se comprueba en Configuración, al entrar como administrador. Comprueba a mano que data/web.config no se puede descargar'
@@ -1157,8 +1165,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'Access has no triggers: neither its SQL nor OLEDB can create them. The data macros of an .accdb are made by hand in Access.',
     'SQL Server: sin clave primaria en \'{tabla}\' no se puede saber qué fila de deleted corresponde a cada una de inserted'
         => 'SQL Server: without a primary key in \'{tabla}\' there is no way to tell which row of deleted belongs to each row of inserted',
-    'Un INSERT con OR IGNORE, OR REPLACE u ON CONFLICT, o un UPDATE o DELETE con alias, otras tablas, ORDER BY o LIMIT, o cualquiera con RETURNING, no se traduce dentro de un trigger: hay que escribirlo a mano'
-        => 'An INSERT with OR IGNORE, OR REPLACE or ON CONFLICT, an UPDATE or DELETE with an alias, other tables, ORDER BY or LIMIT, or any of them with RETURNING, is not translated inside a trigger: it has to be written by hand',
+    'Un INSERT con OR IGNORE, OR REPLACE u ON CONFLICT, un UPDATE con OR IGNORE u OR REPLACE, un UPDATE o DELETE con alias, otras tablas, ORDER BY o LIMIT, o cualquiera con RETURNING, no se traduce dentro de un trigger: hay que escribirlo a mano'
+        => 'An INSERT with OR IGNORE, OR REPLACE or ON CONFLICT, an UPDATE with OR IGNORE or OR REPLACE, an UPDATE or DELETE with an alias, other tables, ORDER BY or LIMIT, or any of them with RETURNING, is not translated inside a trigger: it has to be written by hand',
     'SQL Server corta la recursión a los 100 niveles: si hacen falta más, OPTION (MAXRECURSION 0) en la consulta que use la vista'
         => 'SQL Server stops recursion at 100 levels: if more are needed, OPTION (MAXRECURSION 0) in the query that uses the view',
     'Access no tiene WITH: una consulta del WITH con lista de columnas o que se nombra a sí misma no se puede escribir'
@@ -1213,6 +1221,10 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'STRFTIME code with no translation: {c}',
     '{que} \'{n}\' sin importar: {motivo}'
         => '{que} \'{n}\' not imported: {motivo}',
+    'el final (vistas)'
+        => 'the end (views)',
+    "Vista '{n}' sin importar: usa la tabla '{t}', que no está en la base (en Access puede ser una tabla vinculada)"
+        => "View '{n}' not imported: it uses the table '{t}', which is not in the database (in Access it may be a linked table)",
     'el final (triggers)'
         => 'the end (triggers)',
     'Funciones y procedimientos almacenados saltados: aquí no existen'
@@ -1698,8 +1710,8 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
     'Admite varias líneas y comentarios <code>--</code> y <code>/* */</code>. Varias sentencias separadas por <code>;</code> se ejecutan en una transacción: todas o ninguna.'
         => 'Several lines and <code>--</code> and <code>/* */</code> comments are allowed. Several statements separated by <code>;</code> run in a transaction: all or none.',
     // 2.9: ficheros JSON en la pantalla de integridad
-    'Ficheros JSON estropeados y claves foráneas que apuntan a filas que no existen, en {1}'
-        => 'Damaged JSON files and foreign keys that point to rows that do not exist, in {1}',
+    'Ficheros JSON estropeados, índices que no cuadran con sus filas y claves foráneas que apuntan a filas que no existen, en {1}'
+        => 'Damaged JSON files, indexes that do not match their rows and foreign keys that point to rows that do not exist, in {1}',
     'Ficheros JSON'
         => 'JSON files',
     '{1} <strong>Todo correcto.</strong> Todos los ficheros de las tablas se leen bien.'
@@ -1722,8 +1734,23 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => '{1} Repair the files',
     'Claves foráneas'
         => 'Foreign keys',
-    '<strong>Qué comprueba:</strong> que cada fichero JSON de las tablas se pueda leer, y que toda fila con una clave foránea apunte a una fila que existe en su tabla destino (las filas con <code>NULL</code> en esas columnas no cuentan, igual que en la comprobación normal del motor). <strong>Lee del disco.</strong> <br> Desde SQL: <code>CHECK TABLES</code> y <code>REPAIR TABLES</code> para los ficheros, <code>CHECK KEYS</code> y <code>REPAIR KEYS</code> para las claves, con <code>FROM tabla</code> opcional para limitarlo a una tabla.'
-        => '<strong>What it checks:</strong> that every JSON file of the tables can be read, and that every row with a foreign key points to a row that exists in its target table (rows with <code>NULL</code> in those columns do not count, as in the engine\'s normal check). <strong>It reads from disk.</strong> <br> From SQL: <code>CHECK TABLES</code> and <code>REPAIR TABLES</code> for the files, <code>CHECK KEYS</code> and <code>REPAIR KEYS</code> for the keys, with an optional <code>FROM table</code> to limit it to one table.',
+    '<strong>Qué comprueba:</strong> que cada fichero JSON de las tablas se pueda leer, que cada índice cuadre con las filas de su tabla, y que toda fila con una clave foránea apunte a una fila que existe en su tabla destino (las filas con <code>NULL</code> en esas columnas no cuentan, igual que en la comprobación normal del motor). <strong>Lee del disco.</strong> <br> Desde SQL: <code>CHECK TABLES</code> y <code>REPAIR TABLES</code> para los ficheros, <code>CHECK INDEXES</code> y <code>REPAIR INDEXES</code> para los índices, <code>CHECK KEYS</code> y <code>REPAIR KEYS</code> para las claves, con <code>FROM tabla</code> opcional para limitarlo a una tabla.'
+        => '<strong>What it checks:</strong> that every JSON file of the tables can be read, that every index matches the rows of its table, and that every row with a foreign key points to a row that exists in its target table (rows with <code>NULL</code> in those columns do not count, as in the engine\'s normal check). <strong>It reads from disk.</strong> <br> From SQL: <code>CHECK TABLES</code> and <code>REPAIR TABLES</code> for the files, <code>CHECK INDEXES</code> and <code>REPAIR INDEXES</code> for the indexes, <code>CHECK KEYS</code> and <code>REPAIR KEYS</code> for the keys, with an optional <code>FROM table</code> to limit it to one table.',
+    // 2.10: índices en la pantalla de integridad
+    'Índice'
+        => 'Index',
+    '{1} <strong>Todo correcto.</strong> Cada índice cuadra con las filas de su tabla.'
+        => '{1} <strong>All correct.</strong> Every index matches the rows of its table.',
+    '{1} <strong>{2} problema(s) en los índices.</strong> Casi siempre es un fichero de índice editado a mano, o los datos de una tabla copiados sin sus índices. Mientras no se rehaga, buscar por ese índice puede dar filas de menos.'
+        => '{1} <strong>{2} problem(s) in the indexes.</strong> It is almost always an index file edited by hand, or the data of a table copied without its indexes. Until it is rebuilt, a lookup through that index can return fewer rows.',
+    'Rehacer los índices'
+        => 'Rebuild the indexes',
+    'Se rehacen desde las filas los índices de cada tabla con algún problema. Las filas no se tocan.'
+        => 'The indexes of every table with a problem are rebuilt from its rows. The rows are not touched.',
+    '¿Rehacer los índices con problemas?'
+        => 'Rebuild the indexes with problems?',
+    '{1} Rehacer los índices'
+        => '{1} Rebuild the indexes',
     'Filas apartadas'
         => 'Rows set aside',
     'Estas filas no se podían arreglar sin adivinar y han salido de su tabla. Siguen tal cual en la copia del fichero original, en la carpeta <code>.reparados</code> de la base. Para recuperarlas, corrígelas y vuelve a meterlas con un <code>INSERT</code>.'
@@ -1769,4 +1796,32 @@ On your machine, for testing: set ADMIN_EXIGIR_HTTPS to false in jsonsqldbadmin/
         => 'COLLATE {nombre} removed from the columns: here there are only NOCASE, RTRIM and binary',
     'Columnas que no distinguen mayúsculas (…_ci, citext) importadas con COLLATE NOCASE: aquí iguala mayúsculas y minúsculas solo de la A a la Z, sin acentos'
         => 'Case-insensitive columns (…_ci, citext) imported with COLLATE NOCASE: here only A to Z match regardless of case, and accents still count',
+
+    // 2.10: contadores de los volcados, exportar por partes, auditoría por páginas y copias sin programación
+    '<strong>Sin el contador del autonumérico.</strong> Va en una línea detrás de las filas de su tabla (<code>-- El siguiente valor del autonumérico de [tabla] era n…</code>), porque Access no deja fijarlo con SQL; al importar el fichero aquí no se recupera (2.10).'
+        => '<strong>No AutoNumber counter.</strong> It goes in a line after the rows of its table (<code>-- The next AutoNumber value of [table] was n…</code>), because Access does not let you set it with SQL; importing the file here does not bring it back (2.10).',
+    'El siguiente valor del autonumérico de {tabla} era {n}: Access no deja fijarlo con SQL.'
+        => 'The next AutoNumber value of {tabla} was {n}: Access does not let you set it with SQL.',
+    'SELECT … INTO saltado: crea una tabla a partir de otra, y aquí no se traduce; créala con CREATE TABLE … AS SELECT'
+        => 'SELECT … INTO skipped: it creates a table from another one and is not translated here; create it with CREATE TABLE … AS SELECT',
+    'Por la API, una tabla grande se exporta por partes, y salvo ordenada por su clave primaria numérica, cada parte se pide por su posición: si alguien la cambia mientras se descarga, pueden faltar o repetirse filas. Para una copia exacta, el ZIP de la base.'
+        => 'Through the API, a large table is exported in parts, and unless it is sorted by its numeric primary key, each part is requested by its position: if someone changes the table during the download, rows may be missing or repeated. For an exact copy, use the database ZIP.',
+    'Eventos del {1} al {2}, del más reciente al más antiguo · se conservan {3}'
+        => 'Events {1} to {2}, newest first · kept for {3}',
+    'Más recientes'
+        => 'Newer',
+    'Anteriores'
+        => 'Older',
+    'Programación quitada. Sus {n} copia(s) se quedan y ya no se borran solas: están en la lista, para borrarlas si no las quieres.'
+        => 'Schedule removed. Its {n} backup(s) stay and are no longer deleted automatically: they are in the list, so you can delete them if you do not want them.',
+    '{n} copia(s) borradas.'
+        => '{n} backup(s) deleted.',
+    '{n} copia(s) sin una programación de su formato: no se borran solas.'
+        => '{n} backup(s) without a schedule for their format: they are not deleted automatically.',
+    '¿Borrar las {n} copia(s) que no se borran solas?'
+        => 'Delete the {n} backup(s) that are not deleted automatically?',
+    'Borrarlas'
+        => 'Delete them',
+    'no se borra sola'
+        => 'not deleted automatically',
 ];
