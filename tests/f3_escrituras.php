@@ -953,6 +953,9 @@ function comoSqlite(string $raiz, array $sentencias, array $tablas): bool|string
 }
 foreach (['sin índice en las claves foráneas' => [], 'con índice (las hijas se leen sin cargar su tabla)' => ['CREATE INDEX ix_g_hk ON g (hk)', 'CREATE INDEX ix_h2_pid ON h2 (pid)']] as $variante => $indices) {
     chk("ON UPDATE CASCADE llega a las nietas cuando cambia la clave de la hija a la que apuntan, y la cascada, SET NULL y SET DEFAULT lanzan los triggers UPDATE de las hijas, como en SQLite (2.9), $variante", function () use ($raiz, $indices) {
+        if (!class_exists('SQLite3')) {
+            return null;                        // sin SQLite no hay con qué comparar
+        }
         // h.k es la clave de h a la que apunta g, y cambia con la cascada desde p
         $ddl = ['CREATE TABLE p (id INTEGER PRIMARY KEY, n TEXT)',
                 'CREATE TABLE h (id INTEGER PRIMARY KEY, k INTEGER UNIQUE REFERENCES p (id) ON UPDATE CASCADE ON DELETE SET NULL)',
@@ -999,6 +1002,9 @@ foreach (['sin índice en las claves foráneas' => [], 'con índice (las hijas s
     });
 }
 chk('una fila nueva que apunta a una fila padre que la sentencia ya ha borrado es un error: el trigger de una hija borrada en cascada ya no la ve, como en SQLite (2.9)', function () use ($raiz) {
+    if (!class_exists('SQLite3')) {
+        return null;                            // sin SQLite no hay con qué comparar
+    }
     $a = comoSqlite($raiz, [
         'CREATE TABLE p (id INTEGER PRIMARY KEY)',
         'CREATE TABLE h (id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER REFERENCES p (id) ON DELETE CASCADE)',
@@ -1020,6 +1026,9 @@ chk('una fila nueva que apunta a una fila padre que la sentencia ya ha borrado e
     return $a === true && $b === true ?: json_encode([$a, $b], JSON_UNESCAPED_UNICODE);
 });
 chk('un upsert no pierde lo que sabe de sus claves cuando su tabla se carga a mitad de sentencia, ni por lo que escriben en ella o en otras los triggers que lanzan sus cascadas, ni por una cascada que borra filas de su propia tabla (2.9: un error de PHP, un «Valor duplicado» de más o una clave repetida)', function () use ($raiz) {
+    if (!class_exists('SQLite3')) {
+        return null;                            // sin SQLite no hay con qué comparar
+    }
     $base = ['CREATE TABLE p (id INTEGER PRIMARY KEY, nombre TEXT)',
              'CREATE TABLE h (id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER REFERENCES p (id) ON DELETE CASCADE)',
              'CREATE TABLE cnt (n INTEGER)',

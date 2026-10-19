@@ -1312,7 +1312,9 @@ distance and operations whose result is not a number (see *Fixed*).
   with the table's shared lock, cannot leave its line in the `.lock` there,
   so it sweeps the temporaries as before 2.10 and loads `StorageBarrido`,
   which its budget leaves out (67,503 pieces; 2.9.0, 68,882). That one only
-  showed on GitHub: under Wine a shared lock lets its holder write.
+  showed on GitHub: under Wine a shared lock lets its holder write. And three
+  checks of `f3` that compare cascades and upserts with SQLite are skipped
+  where PHP has no SQLite3, as the Windows job does, instead of failing.
 - Each new check was seen failing with its change undone. The `fsync` of the
   panel's files cannot be seen failing without cutting the power, and has no
   check of its own.
