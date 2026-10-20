@@ -1314,7 +1314,11 @@ distance and operations whose result is not a number (see *Fixed*).
   which its budget leaves out (67,503 pieces; 2.9.0, 68,882). That one only
   showed on GitHub: under Wine a shared lock lets its holder write. And three
   checks of `f3` that compare cascades and upserts with SQLite are skipped
-  where PHP has no SQLite3, as the Windows job does, instead of failing.
+  where PHP has no SQLite3, as the Windows job does, instead of failing; and
+  the check of `f9` that the next write sweeps the temporaries of a dead
+  process makes them two minutes old where the engine cannot ask whether a
+  process lives (no `/proc` and no `posix`, as on Windows), since there it
+  takes them as dead after a minute.
 - Each new check was seen failing with its change undone. The `fsync` of the
   panel's files cannot be seen failing without cutting the power, and has no
   check of its own.

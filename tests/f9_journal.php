@@ -232,19 +232,26 @@ echo "\n== La escritura murió antes del manifiesto ==\n";
 
 chk('sin manifiesto no se toca nada, sea cual sea el estado de los temporales', function () use ($raiz) {
     $dir = "$raiz/j";
+    // Sin /proc ni posix (en Windows) el motor no puede preguntar si un proceso
+    // vive, y da por muertos su línea y sus temporales pasado un minuto (ver
+    // StorageBarrido::temporalesMuertos()): allí son de hace dos
+    $hace = @is_dir('/proc/self') || function_exists('posix_kill') ? 0 : 120;
     // El manifiesto se escribe el último, cuando todos los temporales están en
     // el disco. Si no está, los datos no se han tocado: los temporales sobran.
     foreach (['ninguno', 'algunos', 'rotos'] as $caso) {
         $original = preparar($raiz);
         @mkdir("$dir/.tx/_base", 0775, true);
         // Como los deja un proceso muerto a mitad (2.10): con su línea en el .lock de la tabla
-        file_put_contents("$dir/.t.lock", 'escribiendo: pid 999999 desde ' . date('Y-m-d H:i:s') . "\n");
+        file_put_contents("$dir/.t.lock", 'escribiendo: pid 999999 desde ' . date('Y-m-d H:i:s', time() - $hace) . "\n");
         if ($caso === 'algunos') {
             file_put_contents("$dir/t.json.999999.tmp", '{"table":"t","rows":[]}');
             file_put_contents("$dir/t.rev.json.999999.tmp", '{"rev":99}');
         } elseif ($caso === 'rotos') {
             file_put_contents("$dir/t.json.999999.tmp", '{"table":"t","rows":[{"id":1,');
             file_put_contents("$dir/.tx/_base/manifiesto.json.999999.tmp", 'a medias');
+        }
+        foreach ((array)glob("$dir/*.tmp") as $f) {
+            touch((string)$f, time() - $hace);
         }
 
         $bd = new Database('j', $raiz);
